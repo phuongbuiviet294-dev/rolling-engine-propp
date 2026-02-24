@@ -8,7 +8,7 @@ from datetime import datetime
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwv6y8wKXsypF3yiZ6gNEWOcqe5wOGWDQWJQNhl1tWrEsLqqtOMcSFBWS-97hwLKED6/exec"
 LOCK_ROUNDS = 18
 
-# ================= DAILY RESET ================= #
+# ================= INIT STATE ================= #
 
 today = datetime.now().strftime("%Y-%m-%d")
 
@@ -20,9 +20,12 @@ if "data" not in st.session_state:
 
 if "lock_window" not in st.session_state:
     st.session_state.lock_window = None
+
+if "lock_remaining" not in st.session_state:
     st.session_state.lock_remaining = 0
 
-# Auto reset theo ngày
+# ================= AUTO RESET THEO NGÀY ================= #
+
 if st.session_state.engine_date != today:
     st.session_state.data = []
     st.session_state.lock_window = None
@@ -34,12 +37,12 @@ if st.session_state.engine_date != today:
             WEBHOOK_URL,
             data=json.dumps({"action": "reset"}),
             headers={"Content-Type": "application/json"},
-            timeout=5,
+            timeout=5
         )
     except:
         pass
 
-# ================= CORE ================= #
+# ================= CORE LOGIC ================= #
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -90,9 +93,11 @@ def scan_best(data):
 
 st.title("🚀 Rolling Engine FINAL STABLE")
 
-input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
+with st.form("engine_form"):
+    input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
+    submitted = st.form_submit_button("RUN")
 
-if st.button("RUN") and input_str:
+if submitted and input_str:
 
     numbers = [int(x.strip()) for x in input_str.split(",") if x.strip().isdigit()]
 
@@ -104,7 +109,9 @@ if st.button("RUN") and input_str:
 
         # ----- LOCK MODE -----
         if st.session_state.lock_window:
+
             w = st.session_state.lock_window
+
             if len(st.session_state.data) >= w:
                 predicted = st.session_state.data[-w]["group"]
                 hit = 1 if predicted == group else 0
@@ -148,7 +155,7 @@ if st.button("RUN") and input_str:
                 WEBHOOK_URL,
                 data=json.dumps(payload),
                 headers={"Content-Type": "application/json"},
-                timeout=5,
+                timeout=5
             )
         except:
             pass
@@ -163,9 +170,10 @@ st.metric("Tổng vòng", len(st.session_state.data))
 st.metric("Active Window", st.session_state.lock_window)
 st.metric("Lock Remaining", st.session_state.lock_remaining)
 
-# ================= RESET BUTTON ================= #
+# ================= RESET ================= #
 
 if st.button("RESET ENGINE + CLEAR SHEET"):
+
     st.session_state.data = []
     st.session_state.lock_window = None
     st.session_state.lock_remaining = 0
@@ -175,7 +183,7 @@ if st.button("RESET ENGINE + CLEAR SHEET"):
             WEBHOOK_URL,
             data=json.dumps({"action": "reset"}),
             headers={"Content-Type": "application/json"},
-            timeout=5,
+            timeout=5
         )
     except:
         pass
