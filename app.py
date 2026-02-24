@@ -2,14 +2,14 @@ import streamlit as st
 import requests
 import json
 from datetime import datetime
-import pandas as pd
 
 # ================= CONFIG ================= #
 
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxjblHz-kQ_4Bzb-VtO-Ux7_siTTA2-cQ-DGK8apuSxHz3_mDskP0OReynSunKJOmKL/exec"
-WEIGHT_BASE = 1
+
 LOCK_ROUNDS = 18
 MIN_WINRATE = 60
+WEIGHT_BASE = 1
 
 # ================= DAILY RESET ================= #
 
@@ -30,7 +30,6 @@ if st.session_state.engine_date != today:
     st.session_state.lock_window = None
     st.session_state.lock_remaining = 0
     st.session_state.engine_date = today
-    st.success("🔄 Reset do sang ngày mới")
 
 # ================= CORE FUNCTIONS ================= #
 
@@ -109,66 +108,84 @@ def scan_best_window(data):
                 best_w = w
 
     confidence = min(100, best_score * 5)
-    return best_w, best_score, confidence
+    return best_w, confidence
 
 # ================= UI ================= #
 
-st.title("🚀 Rolling Engine PRO++++ (Layer 1)")
-st.caption("Conservative Mode | Volatility Filter | Break Penalty | Trade Signal")
+st.title("🚀 Rolling Engine PRO++++")
+st.caption("Conservative | Lock18 | Vol Filter | Break Penalty | Trade Signal")
 
-col1, col2 = st.columns([3,1])
+input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
 
-with col1:
-    input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
+if st.button("RUN") and input_str:
 
-with col2:
-    if st.button("RUN") and input_str:
+    numbers = [int(x.strip()) for x in input_str.split(",") if x.strip().isdigit()]
 
-        numbers = [int(x.strip()) for x in input_str.split(",") if x.strip().isdigit()]
+    for n in numbers:
 
-        for n in numbers:
+        group = get_group(n)
+        predicted = None
+        hit = None
 
-            group = get_group(n)
-            predicted = None
-            hit = None
+        # -------- LOCK MODE -------- #
 
-            if st.session_state.lock_window:
-                w = st.session_state.lock_window
-                if len(st.session_state.engine_data) >= w:
-                    predicted = st.session_state.engine_data[-w]["group"]
-                    hit = 1 if predicted == group else 0
+        if st.session_state.lock_window:
+            w = st.session_state.lock_window
 
-                st.session_state.lock_remaining -= 1
-                if st.session_state.lock_remaining <= 0:
-                    st.session_state.lock_window = None
+            if len(st.session_state.engine_data) >= w:
+                predicted = st.session_state.engine_data[-w]["group"]
+                hit = 1 if predicted == group else 0
 
-            if not st.session_state.lock_window:
-                best_w, score, confidence = scan_best_window(st.session_state.engine_data)
-                if best_w:
-                    st.session_state.lock_window = best_w
-                    st.session_state.lock_remaining = LOCK_ROUNDS
+            st.session_state.lock_remaining -= 1
 
-            record = {
-                "round": len(st.session_state.engine_data) + 1,
-                "number": n,
-                "group": group,
-                "predicted": predicted,
-                "hit": hit,
-                "window": st.session_state.lock_window
-            }
+            if st.session_state.lock_remaining <= 0:
+                st.session_state.lock_window = None
 
-            st.session_state.engine_data.append(record)
+        # -------- SCAN MODE -------- #
 
-        st.success("Đã xử lý dữ liệu")
+        if not st.session_state.lock_window:
+            best_w, confidence = scan_best_window(st.session_state.engine_data)
+            if best_w:
+                st.session_state.lock_window = best_w
+                st.session_state.lock_remaining = LOCK_ROUNDS
+
+        record = {
+            "round": len(st.session_state.engine_data) + 1,
+            "number": n,
+            "group": group,
+            "predicted": predicted,
+            "hit": hit,
+            "window": st.session_state.lock_window
+        }
+
+        st.session_state.engine_data.append(record)
+
+        # -------- SEND TO GOOGLE SHEET -------- #
+
+        payload = {
+            "round": record["round"],
+            "number": record["number"],
+            "group": record["group"],
+            "predicted": record["predicted"],
+            "hit": record["hit"],
+            "window": record["window"],
+            "state": "LOCK" if st.session_state.lock_window else "SCAN"
+        }
+
+        try:
+            requests.post(WEBHOOK_URL, data=json.dumps(payload), timeout=3)
+        except:
+            pass
+
+    st.success("Đã xử lý và lưu Google Sheet")
 
 # ================= DASHBOARD ================= #
 
 st.divider()
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Tổng vòng", len(st.session_state.engine_data))
-c2.metric("Active Window", st.session_state.lock_window)
-c3.metric("Lock Remaining", st.session_state.lock_remaining)
+st.metric("Tổng vòng", len(st.session_state.engine_data))
+st.metric("Active Window", st.session_state.lock_window)
+st.metric("Lock Remaining", st.session_state.lock_remaining)
 
 vol = volatility_26(st.session_state.engine_data)
 wr = winrate_26(st.session_state.engine_data)
@@ -177,4 +194,10 @@ st.metric("Volatility 26", round(vol*100,2))
 st.metric("Winrate 26", round(wr,2))
 
 if st.session_state.lock_window and wr >= MIN_WINRATE:
-    st.success("🚨 TRADE SIGNAL ACTIVE")
+    st.success("🚨 TRADE SIGNAL ACTIVE (>=60%)")
+
+if st.button("RESET NOW"):
+    st.session_state.engine_data = []
+    st.session_state.lock_window = None
+    st.session_state.lock_remaining = 0
+    st.success("Engine reset (Sheet giữ nguyên)")
