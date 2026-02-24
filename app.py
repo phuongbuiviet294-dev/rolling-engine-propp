@@ -9,7 +9,7 @@ from datetime import datetime
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwv6y8wKXsypF3yiZ6gNEWOcqe5wOGWDQWJQNhl1tWrEsLqqtOMcSFBWS-97hwLKED6/exec"
 LOCK_ROUNDS = 18
 
-# ================= INIT STATE ================= #
+# ================= INIT ================= #
 
 today = datetime.now().strftime("%Y-%m-%d")
 
@@ -43,7 +43,7 @@ if st.session_state.engine_date != today:
     except:
         pass
 
-# ================= CORE FUNCTIONS ================= #
+# ================= CORE ================= #
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -82,14 +82,6 @@ def volatility_26(data):
     )
     return changes / 25
 
-def break_penalty(data):
-    if len(data) < 4:
-        return 0
-    last4 = [d["hit"] for d in data[-4:]]
-    if last4 == [1,0,1,0] or last4 == [0,1,0,1]:
-        return 2
-    return 0
-
 def winrate_26(data):
     if len(data) < 26:
         return 0
@@ -97,7 +89,7 @@ def winrate_26(data):
     hits = [d["hit"] for d in recent if d["hit"] is not None]
     if not hits:
         return 0
-    return sum(hits)/len(hits)*100
+    return sum(hits) / len(hits) * 100
 
 def score_window(data, w):
     h = hits_26(data, w)
@@ -106,17 +98,14 @@ def score_window(data, w):
     if h < 5:
         return 0
 
-    base = (h * 1.2) + (s * 2) + (winrate_26(data)/10)
-    base -= break_penalty(data)
+    score = (h * 1.2) + (s * 2) + (winrate_26(data)/10)
 
-    vol = volatility_26(data)
-    if vol > 0.65:
-        base *= 0.8
+    if volatility_26(data) > 0.65:
+        score *= 0.8
 
-    return base
+    return score
 
 def scan_best(data):
-
     best_score = 0
     best_w = None
 
@@ -132,7 +121,7 @@ def scan_best(data):
 
 # ================= UI ================= #
 
-st.title("🚀 Rolling Engine PRO+++ COMPLETE")
+st.title("🚀 Rolling Engine PRO++++")
 
 with st.form("engine_form"):
     input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
@@ -159,22 +148,9 @@ if submitted and input_str:
 
             st.session_state.lock_remaining -= 1
 
+            # Hết lock → scan lại ngay
             if st.session_state.lock_remaining <= 0:
-
-                old_w = st.session_state.lock_window
                 st.session_state.lock_window = None
-
-                # RELock ưu tiên window cũ
-                if score_window(st.session_state.data, old_w) > 6:
-                    st.session_state.lock_window = old_w
-                    st.session_state.lock_remaining = LOCK_ROUNDS
-
-                # Nếu không relock được → scan mới
-                if not st.session_state.lock_window:
-                    best_w, conf = scan_best(st.session_state.data)
-                    if best_w:
-                        st.session_state.lock_window = best_w
-                        st.session_state.lock_remaining = LOCK_ROUNDS
 
         # ===== SCAN MODE =====
         if not st.session_state.lock_window:
@@ -194,7 +170,6 @@ if submitted and input_str:
 
         st.session_state.data.append(record)
 
-        # ===== SEND TO GOOGLE SHEET =====
         payload = {
             "round": record["round"],
             "number": record["number"],
@@ -226,45 +201,51 @@ st.metric("Active Window", st.session_state.lock_window)
 st.metric("Lock Remaining", st.session_state.lock_remaining)
 st.metric("Winrate 26", round(winrate_26(st.session_state.data),2))
 
-# ================= SCAN TABLE ================= #
+# ===== NEXT PREDICTION =====
 
-st.subheader("📊 Window Scan 6–19")
+next_prediction = None
 
-rows = []
-for w in range(6,20):
-    rows.append({
-        "Window": w,
-        "Hits_26": hits_26(st.session_state.data, w),
-        "Streak": streak(st.session_state.data, w),
-        "Score": round(score_window(st.session_state.data, w),2)
-    })
+if st.session_state.lock_window and len(st.session_state.data) >= st.session_state.lock_window:
+    next_prediction = st.session_state.data[-st.session_state.lock_window]["group"]
 
-scan_df = pd.DataFrame(rows).sort_values("Score", ascending=False)
+if next_prediction:
+    st.markdown(
+        f"""
+        <div style='padding:15px;
+                    background-color:#1f4e79;
+                    color:white;
+                    border-radius:10px;
+                    text-align:center;
+                    font-size:28px;
+                    font-weight:bold'>
+            🎯 NEXT PREDICTED GROUP: {next_prediction}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-st.dataframe(
-    scan_df.style.apply(
-        lambda row: [
-            "background-color: green" if row["Window"] == st.session_state.lock_window else ""
-            for _ in row
-        ],
-        axis=1
-    ),
-    use_container_width=True
-)
-
-# ================= PERFORMANCE ================= #
-
-st.subheader("📈 Performance")
+# ================= HISTORY ================= #
 
 if st.session_state.data:
 
     df = pd.DataFrame(st.session_state.data)
-    df["Hit_Fill"] = df["hit"].fillna(0)
-    df["Cumulative_Hits"] = df["Hit_Fill"].cumsum()
-    df["Rolling_Winrate"] = df["Hit_Fill"].rolling(26).mean().fillna(0)*100
 
-    st.line_chart(df.set_index("round")[["Cumulative_Hits"]])
-    st.line_chart(df.set_index("round")[["Rolling_Winrate"]])
+    def highlight_row(row):
+        style = [""] * len(row)
+
+        if row.name == df.index[-1]:
+            style = ["background-color: #2e7d32; color:white"] * len(row)
+
+        if row["hit"] == 1:
+            style[df.columns.get_loc("hit")] = "background-color: green; color:white"
+
+        return style
+
+    st.subheader("History")
+    st.dataframe(
+        df.style.apply(highlight_row, axis=1),
+        use_container_width=True
+    )
 
 # ================= RESET ================= #
 
