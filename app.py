@@ -1,198 +1,70 @@
 import streamlit as st
-import pandas as pd
+import requests
+import json
+from datetime import datetime
+
+WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxjblHz-kQ_4Bzb-VtO-Ux7_siTTA2-cQ-DGK8apuSxHz3_mDskP0OReynSunKJOmKL/exec"
+
+WINDOW = 26
 
 st.set_page_config(page_title="Rolling Engine PRO++", layout="wide")
 
-# ================= ENGINE ================= #
+st.title("🚀 Rolling Engine PRO++")
+st.write("Window Lock Strategy – 20 Rounds Fixed")
 
-class RollingEngine:
-    def __init__(self):
-        self.history = []
-        self.state = "WAIT_26"
-        self.lock_window = None
-        self.lock_remaining = 0
-        self.current_streak = 0
-        self.last_confidence = 0
+# --- Input chuỗi ---
+input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
 
-    def get_group(self, n):
-        if n <= 3: return 1
-        if n <= 6: return 2
-        if n <= 9: return 3
-        return 4
+if st.button("RUN") and input_str:
 
-    def hits_26(self, window):
-        if len(self.history) < 26:
-            return 0
+    numbers = [int(x.strip()) for x in input_str.split(",") if x.strip().isdigit()]
 
-        data = self.history[-26:]
-        hits = 0
+    results = []
+    groups = []
 
-        for i in range(window, len(data)):
-            if data[i]["Group"] == data[i-window]["Group"]:
-                hits += 1
+    def get_group(n):
+        if 1 <= n <= 3:
+            return 1
+        elif 4 <= n <= 6:
+            return 2
+        elif 7 <= n <= 9:
+            return 3
+        elif 10 <= n <= 12:
+            return 4
+        return None
 
-        return hits
-
-    def calc_streak(self, window):
-        if len(self.history) < window:
-            return 0
-
-        streak = 0
-        i = len(self.history) - 1
-
-        while i - window >= 0:
-            if self.history[i]["Group"] == self.history[i-window]["Group"]:
-                streak += 1
-                i -= 1
-            else:
-                break
-
-        return streak
-
-    def scan_best_window(self):
-        best_score = 0
-        best_window = None
-
-        for w in range(6, 20):
-            h = self.hits_26(w)
-            if h < 6:
-                continue
-
-            s = self.calc_streak(w)
-            if s >= 3:
-                score = s + h
-                if score > best_score:
-                    best_score = score
-                    best_window = w
-
-        self.last_confidence = best_score
-        return best_window
-
-    def add(self, number):
-        group = self.get_group(number)
-        round_no = len(self.history) + 1
+    for i, n in enumerate(numbers):
+        group = get_group(n)
+        groups.append(group)
 
         predicted = None
         hit = None
 
-        # Prediction logic
-        if self.lock_window and len(self.history) >= self.lock_window:
-            predicted = self.history[-self.lock_window]["Group"]
-            hit = 1 if group == predicted else 0
+        if i >= WINDOW:
+            predicted = groups[i - WINDOW]
+            hit = 1 if predicted == group else 0
 
-            if hit == 1:
-                self.current_streak += 1
-            else:
-                self.current_streak = 0
+        results.append({
+            "round": i + 1,
+            "number": n,
+            "group": group,
+            "predicted": predicted,
+            "hit": hit
+        })
 
-        record = {
-            "Round": round_no,
-            "Number": number,
-            "Group": group,
-            "Predicted": predicted,
-            "Hit": hit,
-            "Window_Streak": self.current_streak,
-            "State": self.state,
-            "Active_Window": self.lock_window,
-            "Lock_Remaining": self.lock_remaining
+        # Gửi sang Google Sheet
+        payload = {
+            "round": i + 1,
+            "number": n,
+            "group": group,
+            "predicted": predicted,
+            "hit": hit,
+            "window": WINDOW,
+            "state": "RUN"
         }
 
-        self.history.append(record)
+        requests.post(WEBHOOK_URL, data=json.dumps(payload))
 
-        # -------- STATE MACHINE -------- #
+    st.success("Đã lưu dữ liệu vào Google Sheet")
 
-        if len(self.history) >= 26:
-
-            if self.state == "WAIT_26":
-                best = self.scan_best_window()
-                if best:
-                    self.lock_window = best
-                    self.lock_remaining = 20
-                    self.state = "NEW_LOCK"
-
-            elif self.state == "NEW_LOCK":
-                self.state = "LOCKED"
-
-            elif self.state == "LOCKED":
-                self.lock_remaining -= 1
-                if self.lock_remaining <= 0:
-                    self.state = "WAIT_26"
-                    self.lock_window = None
-                    self.current_streak = 0
-                    self.last_confidence = 0
-
-        return record
-
-
-# ================= UI ================= #
-
-st.title("🚀 Rolling Engine PRO++")
-st.caption("Full Analytics + Highlight Reference")
-
-if "engine" not in st.session_state:
-    st.session_state.engine = RollingEngine()
-
-engine = st.session_state.engine
-
-col1, col2 = st.columns([3,1])
-
-with col1:
-    number = st.number_input("Nhập số (1-12)", 1, 12)
-
-with col2:
-    if st.button("ADD"):
-        engine.add(number)
-
-if st.button("RESET"):
-    st.session_state.engine = RollingEngine()
-    st.experimental_rerun()
-
-st.divider()
-
-# -------- STATUS -------- #
-
-st.subheader("📊 Engine Status")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Rounds", len(engine.history))
-c2.metric("State", engine.state)
-c3.metric("Active Window", engine.lock_window)
-c4.metric("Lock Remaining", engine.lock_remaining)
-
-# -------- NEXT PREDICTION -------- #
-
-st.subheader("🎯 Next Prediction")
-
-next_pred = None
-ref_round = None
-
-if engine.lock_window and len(engine.history) >= engine.lock_window:
-    ref_index = len(engine.history) - engine.lock_window
-    ref_round = engine.history[ref_index]["Round"]
-    next_pred = engine.history[ref_index]["Group"]
-
-colA, colB, colC = st.columns(3)
-colA.metric("Next Predicted Group", next_pred)
-colB.metric("Reference Round (i-window)", ref_round)
-colC.metric("Confidence Score", engine.last_confidence)
-
-st.divider()
-
-# -------- HISTORY -------- #
-
-st.subheader("📜 History")
-
-if engine.history:
-    df = pd.DataFrame(engine.history)
-
-    # Highlight reference row
-    def highlight_row(row):
-        if ref_round and row["Round"] == ref_round:
-            return ['background-color: #1f77b4; color: white'] * len(row)
-        return [''] * len(row)
-
-    styled_df = df.style.apply(highlight_row, axis=1)
-
-    st.dataframe(styled_df, use_container_width=True)
-else:
-    st.write("Chưa có dữ liệu.")
+    st.dataframe(results)
