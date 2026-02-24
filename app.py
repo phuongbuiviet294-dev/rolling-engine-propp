@@ -3,6 +3,8 @@ import pandas as pd
 
 st.set_page_config(page_title="Rolling Engine PRO++", layout="wide")
 
+# ================= ENGINE ================= #
+
 class RollingEngine:
     def __init__(self):
         self.history = []
@@ -10,6 +12,7 @@ class RollingEngine:
         self.lock_window = None
         self.lock_remaining = 0
         self.current_streak = 0
+        self.last_confidence = 0
 
     def get_group(self, n):
         if n <= 3: return 1
@@ -62,6 +65,7 @@ class RollingEngine:
                     best_score = score
                     best_window = w
 
+        self.last_confidence = best_score
         return best_window
 
     def add(self, number):
@@ -71,7 +75,7 @@ class RollingEngine:
         predicted = None
         hit = None
 
-        # -------- PREDICTION -------- #
+        # Prediction logic
         if self.lock_window and len(self.history) >= self.lock_window:
             predicted = self.history[-self.lock_window]["Group"]
             hit = 1 if group == predicted else 0
@@ -115,14 +119,15 @@ class RollingEngine:
                     self.state = "WAIT_26"
                     self.lock_window = None
                     self.current_streak = 0
+                    self.last_confidence = 0
 
         return record
 
 
-# ---------------- UI ---------------- #
+# ================= UI ================= #
 
 st.title("🚀 Rolling Engine PRO++")
-st.caption("Predicted = Group at i-window | Lock 20 | Scan 1-1-1 + Hits>=6")
+st.caption("Full Analytics + Highlight Reference")
 
 if "engine" not in st.session_state:
     st.session_state.engine = RollingEngine()
@@ -144,6 +149,8 @@ if st.button("RESET"):
 
 st.divider()
 
+# -------- STATUS -------- #
+
 st.subheader("📊 Engine Status")
 
 c1, c2, c3, c4 = st.columns(4)
@@ -152,12 +159,40 @@ c2.metric("State", engine.state)
 c3.metric("Active Window", engine.lock_window)
 c4.metric("Lock Remaining", engine.lock_remaining)
 
+# -------- NEXT PREDICTION -------- #
+
+st.subheader("🎯 Next Prediction")
+
+next_pred = None
+ref_round = None
+
+if engine.lock_window and len(engine.history) >= engine.lock_window:
+    ref_index = len(engine.history) - engine.lock_window
+    ref_round = engine.history[ref_index]["Round"]
+    next_pred = engine.history[ref_index]["Group"]
+
+colA, colB, colC = st.columns(3)
+colA.metric("Next Predicted Group", next_pred)
+colB.metric("Reference Round (i-window)", ref_round)
+colC.metric("Confidence Score", engine.last_confidence)
+
 st.divider()
+
+# -------- HISTORY -------- #
 
 st.subheader("📜 History")
 
 if engine.history:
     df = pd.DataFrame(engine.history)
-    st.dataframe(df, use_container_width=True)
+
+    # Highlight reference row
+    def highlight_row(row):
+        if ref_round and row["Round"] == ref_round:
+            return ['background-color: #1f77b4; color: white'] * len(row)
+        return [''] * len(row)
+
+    styled_df = df.style.apply(highlight_row, axis=1)
+
+    st.dataframe(styled_df, use_container_width=True)
 else:
     st.write("Chưa có dữ liệu.")
