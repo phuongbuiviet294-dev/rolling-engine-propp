@@ -1,49 +1,15 @@
 import streamlit as st
-import requests
-import json
 import pandas as pd
-from datetime import datetime
+import time
 
 # ================= CONFIG ================= #
 
-WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwOhy_gVKMRTL3JLWHLxYOniaSM7KgDYtoijiH5dC5xoxqcwYYhfwt_xihDT37cV7QA/exec"
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+
 LOCK_ROUNDS = 18
+AUTO_REFRESH_SECONDS = 5
 
-# ================= INIT ================= #
-
-today = datetime.now().strftime("%Y-%m-%d")
-
-if "engine_date" not in st.session_state:
-    st.session_state.engine_date = today
-
-if "data" not in st.session_state:
-    st.session_state.data = []
-
-if "lock_window" not in st.session_state:
-    st.session_state.lock_window = None
-
-if "lock_remaining" not in st.session_state:
-    st.session_state.lock_remaining = 0
-
-# ================= DAILY RESET ================= #
-
-if st.session_state.engine_date != today:
-    st.session_state.data = []
-    st.session_state.lock_window = None
-    st.session_state.lock_remaining = 0
-    st.session_state.engine_date = today
-
-    try:
-        requests.post(
-            WEBHOOK_URL,
-            data=json.dumps({"action": "reset"}),
-            headers={"Content-Type": "application/json"},
-            timeout=5
-        )
-    except:
-        pass
-
-# ================= CORE ================= #
+# ================= FUNCTIONS ================= #
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -72,16 +38,6 @@ def streak(data, w):
             break
     return s
 
-def volatility_26(data):
-    if len(data) < 26:
-        return 0
-    recent = data[-26:]
-    changes = sum(
-        1 for i in range(1, len(recent))
-        if recent[i]["group"] != recent[i-1]["group"]
-    )
-    return changes / 25
-
 def winrate_26(data):
     if len(data) < 26:
         return 0
@@ -89,182 +45,130 @@ def winrate_26(data):
     hits = [d["hit"] for d in recent if d["hit"] is not None]
     if not hits:
         return 0
-    return sum(hits) / len(hits) * 100
+    return sum(hits)/len(hits)*100
 
 def score_window(data, w):
     h = hits_26(data, w)
     s = streak(data, w)
-
     if h < 5:
         return 0
-
-    score = (h * 1.2) + (s * 2) + (winrate_26(data)/10)
-
-    if volatility_26(data) > 0.65:
-        score *= 0.8
-
-    return score
+    return (h * 1.2) + (s * 2) + (winrate_26(data)/10)
 
 def scan_best(data):
     best_score = 0
     best_w = None
-
     for w in range(6,20):
         sc = score_window(data, w)
         if sc > best_score:
             best_score = sc
             best_w = w
+    return best_w
 
-    confidence = min(100, best_score * 4)
+# ================= LOAD DATA ================= #
 
-    return best_w, confidence
+@st.cache_data(ttl=AUTO_REFRESH_SECONDS)
+def load_data():
+    return pd.read_csv(GOOGLE_SHEET_CSV)
 
-# ================= UI ================= #
+try:
+    df_raw = load_data()
+except:
+    st.error("Không đọc được Google Sheet. Kiểm tra quyền chia sẻ.")
+    st.stop()
 
-st.title("🚀 Rolling Engine PRO++++")
+if df_raw.empty:
+    st.warning("Sheet chưa có dữ liệu.")
+    st.stop()
 
-with st.form("engine_form"):
-    input_str = st.text_input("Nhập chuỗi số (vd: 1,4,8,7,2):")
-    submitted = st.form_submit_button("RUN")
+# ================= ENGINE PROCESS ================= #
 
-if submitted and input_str:
+engine_data = []
+lock_window = None
+lock_remaining = 0
 
-    numbers = [int(x.strip()) for x in input_str.split(",") if x.strip().isdigit()]
+for index, row in df_raw.iterrows():
 
-    for n in numbers:
+    n = int(row["number"])
+    group = get_group(n)
 
-        group = get_group(n)
-        predicted = None
-        hit = None
+    predicted = None
+    hit = None
 
-        # ===== LOCK MODE =====
-        if st.session_state.lock_window:
+    if lock_window:
 
-            w = st.session_state.lock_window
+        if len(engine_data) >= lock_window:
+            predicted = engine_data[-lock_window]["group"]
+            hit = 1 if predicted == group else 0
 
-            if len(st.session_state.data) >= w:
-                predicted = st.session_state.data[-w]["group"]
-                hit = 1 if predicted == group else 0
+        lock_remaining -= 1
 
-            st.session_state.lock_remaining -= 1
+        if lock_remaining <= 0:
+            lock_window = None
 
-            if st.session_state.lock_remaining <= 0:
-                st.session_state.lock_window = None
+    if not lock_window:
+        best_w = scan_best(engine_data)
+        if best_w:
+            lock_window = best_w
+            lock_remaining = LOCK_ROUNDS
 
-        # ===== SCAN MODE =====
-        if not st.session_state.lock_window:
-            best_w, conf = scan_best(st.session_state.data)
-            if best_w:
-                st.session_state.lock_window = best_w
-                st.session_state.lock_remaining = LOCK_ROUNDS
-
-        # ===== NEXT GROUP =====
-        next_group = None
-        if st.session_state.lock_window and len(st.session_state.data) >= st.session_state.lock_window:
-            next_group = st.session_state.data[-st.session_state.lock_window]["group"]
-
-        record = {
-            "round": len(st.session_state.data) + 1,
-            "number": n,
-            "group": group,
-            "predicted": predicted,
-            "hit": hit,
-            "window": st.session_state.lock_window,
-            "next_group": next_group
-        }
-
-        st.session_state.data.append(record)
-
-        payload = {
-            "round": record["round"],
-            "number": record["number"],
-            "group": record["group"],
-            "predicted": record["predicted"],
-            "hit": record["hit"],
-            "window": record["window"],
-            "state": "LOCK" if st.session_state.lock_window else "SCAN",
-            "next_group": next_group
-        }
-
-        try:
-            requests.post(
-                WEBHOOK_URL,
-                data=json.dumps(payload),
-                headers={"Content-Type": "application/json"},
-                timeout=5
-            )
-        except:
-            pass
-
-    st.success("Đã xử lý và gửi Google Sheet")
+    engine_data.append({
+        "round": index+1,
+        "number": n,
+        "group": group,
+        "predicted": predicted,
+        "hit": hit,
+        "window": lock_window
+    })
 
 # ================= DASHBOARD ================= #
 
-st.divider()
+st.title("🚀 Rolling Engine LIVE MODE")
 
-st.metric("Tổng vòng", len(st.session_state.data))
-st.metric("Active Window", st.session_state.lock_window)
-st.metric("Lock Remaining", st.session_state.lock_remaining)
-st.metric("Winrate 26", round(winrate_26(st.session_state.data),2))
+st.metric("Tổng vòng", len(engine_data))
+st.metric("Active Window", lock_window)
+st.metric("Lock Remaining", lock_remaining)
+st.metric("Winrate 26", round(winrate_26(engine_data),2))
 
-# NEXT PREDICT DISPLAY
-if st.session_state.data and st.session_state.lock_window:
-    last = st.session_state.data[-1]
-    if last["next_group"]:
-        st.markdown(
-            f"""
-            <div style='padding:15px;
-                        background-color:#1f4e79;
-                        color:white;
-                        border-radius:10px;
-                        text-align:center;
-                        font-size:28px;
-                        font-weight:bold'>
-                🎯 NEXT PREDICTED GROUP: {last["next_group"]}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+# ================= NEXT GROUP ================= #
+
+next_group = None
+
+if lock_window and len(engine_data) >= lock_window:
+    next_group = engine_data[-lock_window]["group"]
+
+if next_group:
+    st.markdown(
+        f"""
+        <div style='padding:15px;
+                    background-color:#1f4e79;
+                    color:white;
+                    border-radius:10px;
+                    text-align:center;
+                    font-size:28px;
+                    font-weight:bold'>
+            🎯 NEXT PREDICTED GROUP: {next_group}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 # ================= HISTORY ================= #
 
-if st.session_state.data:
+df_engine = pd.DataFrame(engine_data)
 
-    df = pd.DataFrame(st.session_state.data)
+def highlight_row(row):
+    style = [""] * len(row)
+    if row.name == df_engine.index[-1]:
+        style = ["background-color:#2e7d32;color:white"] * len(row)
+    if row["hit"] == 1:
+        style[df_engine.columns.get_loc("hit")] = "background-color:green;color:white"
+    return style
 
-    def highlight_row(row):
-        style = [""] * len(row)
+st.subheader("History")
 
-        if row.name == df.index[-1]:
-            style = ["background-color: #2e7d32; color:white"] * len(row)
+st.dataframe(
+    df_engine.style.apply(highlight_row, axis=1),
+    use_container_width=True
+)
 
-        if row["hit"] == 1:
-            style[df.columns.get_loc("hit")] = "background-color: green; color:white"
-
-        return style
-
-    st.subheader("History")
-    st.dataframe(
-        df.style.apply(highlight_row, axis=1),
-        use_container_width=True
-    )
-
-# ================= RESET ================= #
-
-if st.button("RESET ENGINE + CLEAR SHEET"):
-
-    st.session_state.data = []
-    st.session_state.lock_window = None
-    st.session_state.lock_remaining = 0
-
-    try:
-        requests.post(
-            WEBHOOK_URL,
-            data=json.dumps({"action": "reset"}),
-            headers={"Content-Type": "application/json"},
-            timeout=5
-        )
-    except:
-        pass
-
-    st.success("Đã reset engine và Google Sheet")
+st.caption(f"Auto refresh mỗi {AUTO_REFRESH_SECONDS} giây")
