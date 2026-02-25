@@ -26,11 +26,42 @@ def hits_26(data, w):
         if recent[i]["group"] == recent[i-w]["group"]
     )
 
+def streak(data, w):
+    s = 0
+    i = len(data) - 1
+    while i - w >= 0:
+        if data[i]["group"] == data[i-w]["group"]:
+            s += 1
+            i -= 1
+        else:
+            break
+    return s
+
+def volatility_26(data):
+    if len(data) < 26:
+        return 0
+    recent = data[-26:]
+    changes = sum(
+        1 for i in range(1, 26)
+        if recent[i]["group"] != recent[i-1]["group"]
+    )
+    return round(changes / 25 * 100, 2)
+
+def winrate_26(data):
+    if len(data) < 26:
+        return 0
+    recent = data[-26:]
+    hits = [d["hit"] for d in recent if d["hit"] is not None]
+    if not hits:
+        return 0
+    return round(sum(hits)/len(hits)*100,2)
+
 def score_window(data, w):
     h = hits_26(data, w)
+    s = streak(data, w)
     if h < 5:
         return 0
-    return h * 1.2
+    return (h * 1.2) + (s * 2)
 
 def scan_best(data):
     best_score = 0
@@ -124,14 +155,21 @@ for i, n in enumerate(numbers):
 
 # ================= UI ================= #
 
-st.title("🚀 Rolling Engine PRO++ RESET ĐỘNG")
+st.title("🚀 Rolling Engine PRO++ LIVE")
 
 st.metric("Tổng vòng", len(engine_data))
 st.metric("Active Window", lock_window)
 st.metric("Lock Remaining", lock_remaining)
+st.metric("Winrate 26", winrate_26(engine_data))
+st.metric("Volatility 26", volatility_26(engine_data))
 
+# -------- NEXT GROUP -------- #
+
+next_group = None
 if lock_window and len(engine_data) >= lock_window:
     next_group = engine_data[-lock_window]["group"]
+
+if next_group:
     st.markdown(
         f"""
         <div style='padding:15px;
@@ -147,8 +185,35 @@ if lock_window and len(engine_data) >= lock_window:
         unsafe_allow_html=True
     )
 
-df_engine = pd.DataFrame(engine_data)
-st.subheader("History")
-st.dataframe(df_engine, use_container_width=True)
+# -------- HISTORY (Newest First) -------- #
 
-st.caption("Auto refresh mỗi 5 giây | Reset động bật")
+df_engine = pd.DataFrame(engine_data)
+df_display = df_engine.iloc[::-1].reset_index(drop=True)
+
+def highlight(row):
+    style = [""] * len(row)
+
+    # dòng mới nhất
+    if row.name == 0:
+        style = ["background-color:#2e7d32;color:white"] * len(row)
+
+    if row["hit"] == 1:
+        style[df_display.columns.get_loc("hit")] = "background-color:green;color:white"
+
+    if row["hit"] == 0:
+        style[df_display.columns.get_loc("hit")] = "background-color:red;color:white"
+
+    if row["state"] == "LOCK_START":
+        style[df_display.columns.get_loc("state")] = "background-color:orange;color:black"
+
+    return style
+
+st.subheader("History (Newest First)")
+
+st.dataframe(
+    df_display.style.apply(highlight, axis=1),
+    use_container_width=True,
+    height=500
+)
+
+st.caption(f"Auto refresh mỗi {AUTO_REFRESH} giây | Reset động bật")
