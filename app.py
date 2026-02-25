@@ -6,7 +6,7 @@ from datetime import datetime
 
 # ================= CONFIG ================= #
 
-WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwv6y8wKXsypF3yiZ6gNEWOcqe5wOGWDQWJQNhl1tWrEsLqqtOMcSFBWS-97hwLKED6/exec"
+WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwOhy_gVKMRTL3JLWHLxYOniaSM7KgDYtoijiH5dC5xoxqcwYYhfwt_xihDT37cV7QA/exec"
 LOCK_ROUNDS = 18
 
 # ================= INIT ================= #
@@ -148,7 +148,6 @@ if submitted and input_str:
 
             st.session_state.lock_remaining -= 1
 
-            # Hết lock → scan lại ngay
             if st.session_state.lock_remaining <= 0:
                 st.session_state.lock_window = None
 
@@ -159,13 +158,19 @@ if submitted and input_str:
                 st.session_state.lock_window = best_w
                 st.session_state.lock_remaining = LOCK_ROUNDS
 
+        # ===== NEXT GROUP =====
+        next_group = None
+        if st.session_state.lock_window and len(st.session_state.data) >= st.session_state.lock_window:
+            next_group = st.session_state.data[-st.session_state.lock_window]["group"]
+
         record = {
             "round": len(st.session_state.data) + 1,
             "number": n,
             "group": group,
             "predicted": predicted,
             "hit": hit,
-            "window": st.session_state.lock_window
+            "window": st.session_state.lock_window,
+            "next_group": next_group
         }
 
         st.session_state.data.append(record)
@@ -177,7 +182,8 @@ if submitted and input_str:
             "predicted": record["predicted"],
             "hit": record["hit"],
             "window": record["window"],
-            "state": "LOCK" if st.session_state.lock_window else "SCAN"
+            "state": "LOCK" if st.session_state.lock_window else "SCAN",
+            "next_group": next_group
         }
 
         try:
@@ -201,28 +207,24 @@ st.metric("Active Window", st.session_state.lock_window)
 st.metric("Lock Remaining", st.session_state.lock_remaining)
 st.metric("Winrate 26", round(winrate_26(st.session_state.data),2))
 
-# ===== NEXT PREDICTION =====
-
-next_prediction = None
-
-if st.session_state.lock_window and len(st.session_state.data) >= st.session_state.lock_window:
-    next_prediction = st.session_state.data[-st.session_state.lock_window]["group"]
-
-if next_prediction:
-    st.markdown(
-        f"""
-        <div style='padding:15px;
-                    background-color:#1f4e79;
-                    color:white;
-                    border-radius:10px;
-                    text-align:center;
-                    font-size:28px;
-                    font-weight:bold'>
-            🎯 NEXT PREDICTED GROUP: {next_prediction}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+# NEXT PREDICT DISPLAY
+if st.session_state.data and st.session_state.lock_window:
+    last = st.session_state.data[-1]
+    if last["next_group"]:
+        st.markdown(
+            f"""
+            <div style='padding:15px;
+                        background-color:#1f4e79;
+                        color:white;
+                        border-radius:10px;
+                        text-align:center;
+                        font-size:28px;
+                        font-weight:bold'>
+                🎯 NEXT PREDICTED GROUP: {last["next_group"]}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 # ================= HISTORY ================= #
 
