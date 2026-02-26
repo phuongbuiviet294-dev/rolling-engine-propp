@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import math
 
 # ================= CONFIG ================= #
 
@@ -8,7 +9,21 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 LOCK_ROUNDS = 18
 AUTO_REFRESH = 5
 
-# ================= CORE ================= #
+# ================= RISK MODE ================= #
+
+risk_mode = st.sidebar.selectbox(
+    "Risk Mode",
+    ["Conservative", "Balanced", "Aggressive"]
+)
+
+if risk_mode == "Conservative":
+    MIN_HITS = 6
+elif risk_mode == "Balanced":
+    MIN_HITS = 5
+else:
+    MIN_HITS = 4
+
+# ================= CORE FUNCTIONS ================= #
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -39,51 +54,58 @@ def streak(data, w):
 
 def volatility_26(data):
     if len(data) < 26:
-        return 0
+        return 50
     recent = data[-26:]
     changes = sum(
-        1 for i in range(1, 26)
+        1 for i in range(1,26)
         if recent[i]["group"] != recent[i-1]["group"]
     )
-    return round(changes / 25 * 100, 2)
+    return changes/25
 
-def winrate_26(data):
-    if len(data) < 26:
+def momentum_bonus(data, w):
+    if len(data) < w + 5:
         return 0
-    recent = data[-26:]
-    hits = [d["hit"] for d in recent if d["hit"] is not None]
-    if not hits:
-        return 0
-    return round(sum(hits)/len(hits)*100,2)
+    count = 0
+    for i in range(len(data)-5, len(data)):
+        if data[i]["group"] == data[i-w]["group"]:
+            count += 1
+    return 5 if count >= 3 else 0
 
 def score_window(data, w):
     h = hits_26(data, w)
     s = streak(data, w)
-    if h < 5:
-        return 0
-    return (h * 1.2) + (s * 2)
 
-def scan_best(data):
-    best_score = 0
-    best_w = None
+    if h < MIN_HITS:
+        return 0
+
+    score = (h * 1.5) + (s * 3)
+    score += momentum_bonus(data, w)
+
+    vol = volatility_26(data)
+
+    if vol > 0.65:
+        score *= 0.8
+    elif vol < 0.4:
+        score *= 1.1
+
+    return score
+
+def scan_windows(data):
+    results = []
     for w in range(6,20):
         sc = score_window(data, w)
-        if sc > best_score:
-            best_score = sc
-            best_w = w
-    return best_w
+        if sc > 0:
+            results.append((w, sc))
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results[:3]
 
-# ================= LOAD ================= #
+# ================= LOAD DATA ================= #
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load_data():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
-try:
-    df_raw = load_data()
-except:
-    st.error("Không đọc được Google Sheet.")
-    st.stop()
+df_raw = load_data()
 
 if df_raw.empty:
     st.warning("Sheet chưa có dữ liệu.")
@@ -91,31 +113,12 @@ if df_raw.empty:
 
 numbers = df_raw["number"].dropna().astype(int).tolist()
 
-# ================= RESET ĐỘNG ================= #
-
-if "prev_first" not in st.session_state:
-    st.session_state.prev_first = None
-    st.session_state.prev_len = 0
-
-reset_flag = False
-
-if len(numbers) < st.session_state.prev_len:
-    reset_flag = True
-
-if numbers and st.session_state.prev_first != numbers[0]:
-    reset_flag = True
-
-if reset_flag:
-    st.session_state.prev_first = numbers[0] if numbers else None
-    st.session_state.prev_len = len(numbers)
-else:
-    st.session_state.prev_len = len(numbers)
-
 # ================= ENGINE ================= #
 
 engine_data = []
 lock_window = None
 lock_remaining = 0
+miss_streak = 0
 
 for i, n in enumerate(numbers):
 
@@ -125,21 +128,49 @@ for i, n in enumerate(numbers):
     state = "SCAN"
 
     if lock_window:
+
         state = "LOCK"
 
         if len(engine_data) >= lock_window:
             predicted = engine_data[-lock_window]["group"]
             hit = 1 if predicted == group else 0
 
+            if hit == 0:
+                miss_streak += 1
+            else:
+                miss_streak = 0
+
         lock_remaining -= 1
+
+        if miss_streak >= 3:
+            lock_window = None
+            miss_streak = 0
 
         if lock_remaining <= 0:
             lock_window = None
 
-    if not lock_window and len(engine_data) >= 26:
-        best_w = scan_best(engine_data)
-        if best_w:
-            lock_window = best_w
+    if not lock_window and len(engine_data) >= 20:
+
+        top_windows = scan_windows(engine_data)
+
+        if top_windows:
+
+            votes = {}
+            total_score = 0
+
+            for w, sc in top_windows:
+                total_score += sc
+                if len(engine_data) >= w:
+                    g = engine_data[-w]["group"]
+                    votes[g] = votes.get(g,0) + sc
+
+            best_group = max(votes, key=votes.get)
+
+            for w, sc in top_windows:
+                if len(engine_data) >= w and engine_data[-w]["group"] == best_group:
+                    lock_window = w
+                    break
+
             lock_remaining = LOCK_ROUNDS
             state = "LOCK_START"
 
@@ -153,18 +184,26 @@ for i, n in enumerate(numbers):
         "state": state
     })
 
-# ================= UI ================= #
+# ================= DASHBOARD ================= #
 
-st.title("🚀 Rolling Engine PRO++ LIVE")
+st.title("🚀 PRO+++++ AI Trading Engine")
 
-st.metric("Tổng vòng", len(engine_data))
+st.metric("Total Rounds", len(engine_data))
 st.metric("Active Window", lock_window)
 st.metric("Lock Remaining", lock_remaining)
-st.metric("Winrate 26", winrate_26(engine_data))
-st.metric("Volatility 26", volatility_26(engine_data))
+st.metric("Miss Streak", miss_streak)
 
-# -------- NEXT GROUP -------- #
+# CONFIDENCE + EV
+if len(engine_data) >= 26:
+    top_windows = scan_windows(engine_data)
+    if top_windows:
+        total = sum(sc for w, sc in top_windows)
+        confidence = round((top_windows[0][1] / total) * 100, 2)
+        ev = round((confidence/100)*1 - (1-confidence/100), 3)
+        st.metric("Confidence %", confidence)
+        st.metric("Expected Value", ev)
 
+# NEXT GROUP
 next_group = None
 if lock_window and len(engine_data) >= lock_window:
     next_group = engine_data[-lock_window]["group"]
@@ -179,41 +218,17 @@ if next_group:
                     text-align:center;
                     font-size:28px;
                     font-weight:bold'>
-            🎯 NEXT PREDICTED GROUP: {next_group}
+            🎯 NEXT GROUP: {next_group}
         </div>
         """,
         unsafe_allow_html=True
     )
 
-# -------- HISTORY (Newest First) -------- #
-
+# HISTORY
 df_engine = pd.DataFrame(engine_data)
 df_display = df_engine.iloc[::-1].reset_index(drop=True)
 
-def highlight(row):
-    style = [""] * len(row)
-
-    # dòng mới nhất
-    if row.name == 0:
-        style = ["background-color:#2e7d32;color:white"] * len(row)
-
-    if row["hit"] == 1:
-        style[df_display.columns.get_loc("hit")] = "background-color:green;color:white"
-
-    if row["hit"] == 0:
-        style[df_display.columns.get_loc("hit")] = "background-color:red;color:white"
-
-    if row["state"] == "LOCK_START":
-        style[df_display.columns.get_loc("state")] = "background-color:orange;color:black"
-
-    return style
-
 st.subheader("History (Newest First)")
+st.dataframe(df_display, use_container_width=True)
 
-st.dataframe(
-    df_display.style.apply(highlight, axis=1),
-    use_container_width=True,
-    height=500
-)
-
-st.caption(f"Auto refresh mỗi {AUTO_REFRESH} giây | Reset động bật")
+st.caption("PRO+++++ AI Mode | Bayesian Confidence | Multi-window Voting | Stop Protection")
