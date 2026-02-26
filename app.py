@@ -4,7 +4,7 @@ import numpy as np
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-LOCK_BASE = 15
+LOCK_BASE = 12
 AUTO_REFRESH = 5
 
 st.set_page_config(layout="wide")
@@ -44,7 +44,7 @@ def volatility(data):
 
 # ---------------- REBOUND ---------------- #
 
-rebound_memory = {"total":0,"win":0}
+rebound_memory={"total":0,"win":0}
 
 def rebound_winrate():
     if rebound_memory["total"]==0:
@@ -53,13 +53,13 @@ def rebound_winrate():
 
 def count_rebound_patterns(data,w):
 
-    if len(data)<26: return 0
+    if len(data)<15: return 0
 
     vol=volatility(data)
-    if vol<0.30 or vol>0.65:
+    if vol<0.30 or vol>0.62:
         return 0
 
-    recent=data[-26:]
+    recent=data[-15:]
     seq=[]
 
     for i in range(len(recent)):
@@ -71,20 +71,13 @@ def count_rebound_patterns(data,w):
     count=0
 
     for i in range(len(seq)-6):
-
         if seq[i]==1 and seq[i+1]==1:
-
             for rest in range(2,5):
-
                 if i+2+rest+1 < len(seq):
-
                     zeros=seq[i+2:i+2+rest]
-
                     if all(z==0 for z in zeros):
-
                         if seq[i+2+rest]==1 and seq[i+3+rest]==1:
                             count+=1
-
     return count
 
 # ---------------- SCORE ---------------- #
@@ -101,35 +94,35 @@ def score(data,w):
 
     base=(h*1.4)+(s*3)
 
-    # Trend mode
-    if h>=6 and s>=2 and vol<0.65:
+    # Trend Mode
+    if h>=6 and s>=2 and vol<0.62:
         return base
 
-    # Rebound learning phase
+    # Rebound Learning
     if (
         reb_count>=2 and
         h>=5 and
-        0.30<=vol<=0.65 and
+        0.30<=vol<=0.62 and
         reb_total<10
     ):
-        return base*1.2
+        return base*1.15
 
-    # Rebound confirmed phase
+    # Rebound Confirmed
     if (
         reb_count>=2 and
         h>=5 and
-        0.30<=vol<=0.65 and
+        0.30<=vol<=0.62 and
         reb_total>=10 and
         reb_wr>0.55
     ):
-        return base*1.3
+        return base*1.25
 
     return 0
 
 def scan(data):
 
     vol=volatility(data)
-    if vol>0.70:
+    if vol>0.62:
         return []
 
     res=[]
@@ -139,6 +132,12 @@ def scan(data):
             res.append((w,sc))
 
     res.sort(key=lambda x:x[1],reverse=True)
+
+    # Spread filter
+    if len(res)>1:
+        if res[0][1]-res[1][1] < 3:
+            return []
+
     return res[:3]
 
 # ---------------- LOAD ---------------- #
@@ -206,25 +205,24 @@ for i,n in enumerate(numbers):
             vol=volatility(engine)
 
             # Trend Lock
-            if ev>0 and confidence>=60 and vol<0.65:
+            if ev>0 and confidence>=60 and vol<0.62:
 
                 lock_window=best_w
-                lock_remaining=int(LOCK_BASE+confidence/10)
+                lock_remaining=int(LOCK_BASE+confidence/12)
                 state="LOCK_START"
 
             # Rebound Lock
             elif (
                 reb_count>=2 and
                 confidence>=50 and
-                0.30<=vol<=0.65 and
+                0.30<=vol<=0.62 and
                 (
                     reb_total<10 or
                     (reb_total>=10 and reb_wr>0.55)
                 )
             ):
-
                 lock_window=best_w
-                lock_remaining=12
+                lock_remaining=10
                 state="REBOUND_CONFIRMED"
 
     engine.append({
@@ -237,7 +235,6 @@ for i,n in enumerate(numbers):
         "state":state
     })
 
-    # update rebound memory
     if hit is not None and state=="REBOUND_CONFIRMED":
         rebound_memory["total"]+=1
         if hit==1:
@@ -245,7 +242,7 @@ for i,n in enumerate(numbers):
 
 # ---------------- DASHBOARD ---------------- #
 
-st.title("FINAL TREND + REBOUND ENGINE")
+st.title("FINAL OPTIMIZED ENGINE")
 
 st.metric("Total Rounds",len(engine))
 st.metric("Active Window",lock_window)
