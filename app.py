@@ -3,6 +3,7 @@ import pandas as pd
 import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+LOCK_ROUNDS = 18
 AUTO_REFRESH = 5
 
 st.set_page_config(layout="wide")
@@ -50,7 +51,7 @@ def scan(data):
         if sc > 0:
             res.append((w, sc))
     res.sort(key=lambda x: x[1], reverse=True)
-    return res
+    return res[:3]
 
 # ================= LOAD ================= #
 
@@ -65,8 +66,10 @@ if df.empty:
 numbers = df["number"].dropna().astype(int).tolist()
 
 engine = []
+lock_window = None
+lock_remaining = 0
 miss_streak = 0
-pause_counter = 0
+confidence_value = None
 
 # ================= ENGINE LOOP ================= #
 
@@ -75,83 +78,108 @@ for i, n in enumerate(numbers):
     g = get_group(n)
     predicted = None
     hit = None
-    best_window = None
-    confidence_value = None
     state = "SCAN"
 
-    # ===== PAUSE MODE =====
-    if pause_counter > 0:
-        pause_counter -= 1
-        state = "PAUSE"
+    # ===== LOCK MODE =====
+    if lock_window is not None:
 
-    # ===== SCAN & TRADE =====
-    elif len(engine) >= 26:
+        state = "LOCK"
+
+        if len(engine) >= lock_window:
+            predicted = engine[-lock_window]["group"]
+            hit = 1 if predicted == g else 0
+
+            if hit == 0:
+                miss_streak += 1
+            else:
+                miss_streak = 0
+
+        lock_remaining -= 1
+
+        # Thoát lock nếu thua 3 lần liên tiếp
+        if miss_streak >= 3:
+            lock_window = None
+
+        # Hoặc hết số vòng lock
+        if lock_remaining <= 0:
+            lock_window = None
+
+    # ===== SCAN MODE =====
+    if lock_window is None and len(engine) >= 26:
 
         top = scan(engine)
 
         if top:
-            total_score = sum(sc for w, sc in top[:3])
+            total_score = sum(sc for w, sc in top)
             confidence_value = round((top[0][1] / total_score) * 100, 2)
 
-            if confidence_value >= 55:
+            p = confidence_value / 100
+            ev = (p * 1) - (1 - p)
 
-                best_window = top[0][0]
+            if ev > 0 and confidence_value >= 50:
 
-                if len(engine) >= best_window:
-                    predicted = engine[-best_window]["group"]
-                    hit = 1 if predicted == g else 0
-                    state = "TRADE"
+                votes = {}
 
-                    if hit == 0:
-                        miss_streak += 1
-                    else:
-                        miss_streak = 0
+                for w, sc in top:
+                    if len(engine) >= w:
+                        gr = engine[-w]["group"]
+                        votes[gr] = votes.get(gr, 0) + sc
 
-                    # ===== RESET CONDITION =====
-                    if miss_streak >= 3:
-                        pause_counter = 3
-                        miss_streak = 0
+                best_group = max(votes, key=votes.get)
 
+                # chọn window phù hợp với best_group
+                for w, sc in top:
+                    if len(engine) >= w and engine[-w]["group"] == best_group:
+                        lock_window = w
+                        break
+
+                lock_remaining = LOCK_ROUNDS
+                miss_streak = 0
+                state = "LOCK_START"
+
+    # ===== SAVE STATE =====
     engine.append({
         "round": i + 1,
         "number": n,
         "group": g,
         "predicted": predicted,
         "hit": hit,
-        "window": best_window,
+        "window": lock_window,
         "confidence_%": confidence_value,
         "state": state
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 CONTINUOUS PRO ENGINE")
+st.title("🚀 PRO++++ CLEAN ENGINE")
 
 col1, col2, col3, col4 = st.columns(4)
 
 col1.metric("Total Rounds", len(engine))
-col2.metric("Miss Streak", miss_streak)
-col3.metric("Pause Counter", pause_counter)
-col4.metric("Last State", engine[-1]["state"])
+col2.metric("Active Window", lock_window)
+col3.metric("Lock Remaining", lock_remaining)
+col4.metric("Miss Streak", miss_streak)
 
-# ===== METRICS =====
+# ===== QUANT METRICS =====
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
+if len(engine) >= 26:
+    top = scan(engine)
+    if top:
+        total_score = sum(sc for w, sc in top)
+        confidence = round((top[0][1] / total_score) * 100, 2)
+        p = confidence / 100
+        ev = round((p * 1) - (1 - p), 3)
+        kelly = round(max(0, p - (1 - p)) * 100, 2)
 
-if len(hits) > 0:
-    wr = sum(hits) / len(hits)
-    ev = wr*25 - (1-wr)*10
-
-    st.metric("Winrate", round(wr*100,2))
-    st.metric("EV per Trade", round(ev,2))
+        st.metric("Confidence %", confidence)
+        st.metric("Expected Value", ev)
+        st.metric("Kelly % Capital", kelly)
 
 # ===== NEXT GROUP =====
 
 next_group = None
-if len(engine) >= 1:
-    latest_window = engine[-1]["window"]
-    if latest_window and len(engine) >= latest_window:
-        next_group = engine[-latest_window]["group"]
+if lock_window is not None and len(engine) >= lock_window:
+    next_group = engine[-lock_window]["group"]
 
 if next_group:
     st.markdown(f"""
@@ -172,4 +200,4 @@ st.subheader("History")
 df_engine = pd.DataFrame(engine)
 st.dataframe(df_engine.iloc[::-1], use_container_width=True)
 
-st.caption("CONTINUOUS PRO | No Lock | Auto Reset on 0-0-0 | Adaptive Window")
+st.caption("PRO++++ CLEAN MODE | LOCK 18 | EV Filter | Stable Logic")
