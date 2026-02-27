@@ -60,7 +60,6 @@ def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
 df = load()
-
 if df.empty:
     st.stop()
 
@@ -82,7 +81,8 @@ for i, n in enumerate(numbers):
     state = "SCAN"
 
     # ===== LOCK MODE =====
-    if lock_window:
+    if lock_window is not None:
+
         state = "LOCK"
 
         if len(engine) >= lock_window:
@@ -96,20 +96,22 @@ for i, n in enumerate(numbers):
 
         lock_remaining -= 1
 
+        # Thoát lock nếu thua 3 lần liên tiếp
         if miss_streak >= 3:
             lock_window = None
 
+        # Hoặc hết số vòng lock
         if lock_remaining <= 0:
             lock_window = None
 
     # ===== SCAN MODE =====
-    if not lock_window and len(engine) >= 20:
+    if lock_window is None and len(engine) >= 26:
 
         top = scan(engine)
 
         if top:
-            total = sum(sc for w, sc in top)
-            confidence_value = round((top[0][1] / total) * 100, 2)
+            total_score = sum(sc for w, sc in top)
+            confidence_value = round((top[0][1] / total_score) * 100, 2)
 
             p = confidence_value / 100
             ev = (p * 1) - (1 - p)
@@ -123,10 +125,11 @@ for i, n in enumerate(numbers):
                         gr = engine[-w]["group"]
                         votes[gr] = votes.get(gr, 0) + sc
 
-                best = max(votes, key=votes.get)
+                best_group = max(votes, key=votes.get)
 
+                # chọn window phù hợp với best_group
                 for w, sc in top:
-                    if len(engine) >= w and engine[-w]["group"] == best:
+                    if len(engine) >= w and engine[-w]["group"] == best_group:
                         lock_window = w
                         break
 
@@ -134,7 +137,7 @@ for i, n in enumerate(numbers):
                 miss_streak = 0
                 state = "LOCK_START"
 
-    # ===== SAVE ENGINE STATE =====
+    # ===== SAVE STATE =====
     engine.append({
         "round": i + 1,
         "number": n,
@@ -148,7 +151,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO+++++ QUANT ENGINE")
+st.title("🚀 PRO++++ CLEAN ENGINE")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -160,13 +163,10 @@ col4.metric("Miss Streak", miss_streak)
 # ===== QUANT METRICS =====
 
 if len(engine) >= 26:
-
     top = scan(engine)
-
     if top:
-        total = sum(sc for w, sc in top)
-        confidence = round((top[0][1] / total) * 100, 2)
-
+        total_score = sum(sc for w, sc in top)
+        confidence = round((top[0][1] / total_score) * 100, 2)
         p = confidence / 100
         ev = round((p * 1) - (1 - p), 3)
         kelly = round(max(0, p - (1 - p)) * 100, 2)
@@ -175,20 +175,13 @@ if len(engine) >= 26:
         st.metric("Expected Value", ev)
         st.metric("Kelly % Capital", kelly)
 
-        if confidence >= 70:
-            st.success("🔵 HIGH CONVICTION")
-        elif confidence >= 60:
-            st.success("🟢 STRONG SIGNAL")
-        elif confidence >= 50:
-            st.warning("🟡 MEDIUM")
-        else:
-            st.error("🔴 WEAK / NO TRADE")
-
 # ===== NEXT GROUP =====
 
-if lock_window and len(engine) >= lock_window:
+next_group = None
+if lock_window is not None and len(engine) >= lock_window:
     next_group = engine[-lock_window]["group"]
 
+if next_group:
     st.markdown(f"""
     <div style='padding:15px;
                 background:#1f4e79;
@@ -203,9 +196,8 @@ if lock_window and len(engine) >= lock_window:
 
 # ===== HISTORY =====
 
-df_engine = pd.DataFrame(engine)
-
 st.subheader("History")
+df_engine = pd.DataFrame(engine)
 st.dataframe(df_engine.iloc[::-1], use_container_width=True)
 
-st.caption("PRO+++++ QUANT MODE | EV Filter | Kelly Sizing | Confidence Stored")
+st.caption("PRO++++ CLEAN MODE | LOCK 18 | EV Filter | Stable Logic")
