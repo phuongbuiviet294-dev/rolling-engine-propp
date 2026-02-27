@@ -3,7 +3,7 @@ import pandas as pd
 import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-LOCK_ROUNDS = 18
+LOCK_ROUNDS = 12   # 🔥 GIẢM TỪ 18 → 12
 AUTO_REFRESH = 5
 
 st.set_page_config(layout="wide")
@@ -46,7 +46,7 @@ def score_window(data, w):
 
 def scan(data):
     res = []
-    for w in range(6, 20):
+    for w in range(8, 20):   # scan 8–19
         sc = score_window(data, w)
         if sc > 0:
             res.append((w, sc))
@@ -96,11 +96,9 @@ for i, n in enumerate(numbers):
 
         lock_remaining -= 1
 
-        # Thoát lock nếu thua 3 lần liên tiếp
         if miss_streak >= 3:
             lock_window = None
 
-        # Hoặc hết số vòng lock
         if lock_remaining <= 0:
             lock_window = None
 
@@ -127,7 +125,6 @@ for i, n in enumerate(numbers):
 
                 best_group = max(votes, key=votes.get)
 
-                # chọn window phù hợp với best_group
                 for w, sc in top:
                     if len(engine) >= w and engine[-w]["group"] == best_group:
                         lock_window = w
@@ -137,7 +134,6 @@ for i, n in enumerate(numbers):
                 miss_streak = 0
                 state = "LOCK_START"
 
-    # ===== SAVE STATE =====
     engine.append({
         "round": i + 1,
         "number": n,
@@ -151,7 +147,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO++++ CLEAN ENGINE")
+st.title("🚀 PRO++++ CLEAN ENGINE (LOCK 12)")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -159,8 +155,6 @@ col1.metric("Total Rounds", len(engine))
 col2.metric("Active Window", lock_window)
 col3.metric("Lock Remaining", lock_remaining)
 col4.metric("Miss Streak", miss_streak)
-
-# ===== QUANT METRICS =====
 
 if len(engine) >= 26:
     top = scan(engine)
@@ -175,8 +169,7 @@ if len(engine) >= 26:
         st.metric("Expected Value", ev)
         st.metric("Kelly % Capital", kelly)
 
-# ===== NEXT GROUP =====
-
+# NEXT GROUP
 next_group = None
 if lock_window is not None and len(engine) >= lock_window:
     next_group = engine[-lock_window]["group"]
@@ -194,10 +187,9 @@ if next_group:
     </div>
     """, unsafe_allow_html=True)
 
-# ===== HISTORY =====
-
+# HISTORY
 st.subheader("History")
 df_engine = pd.DataFrame(engine)
 st.dataframe(df_engine.iloc[::-1], use_container_width=True)
 
-st.caption("PRO++++ CLEAN MODE | LOCK 18 | EV Filter | Stable Logic")
+st.caption("PRO++++ CLEAN MODE | LOCK 12 | SCAN 8–19 | Faster Adaptive")
