@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
@@ -50,13 +49,22 @@ def hits_26(data, w):
         if recent[i]["group"] == recent[i-w]["group"]
     )
 
+def adaptive_z(total):
+    if total < 30:
+        return 1.28     # ~80%
+    elif total < 60:
+        return 1.44     # ~85%
+    else:
+        return 1.64     # ~90%
+
 def bayesian_lcb(wins, total):
     if total == 0:
-        return 0
+        return 0, 0, 0
     p = (wins + 1) / (total + 2)
     se = math.sqrt(p * (1 - p) / total)
-    lcb = p - 1.96 * se
-    return p, lcb
+    z = adaptive_z(total)
+    lcb = p - z * se
+    return p, lcb, z
 
 # ================= WALK FORWARD ================= #
 
@@ -69,6 +77,7 @@ for i, n in enumerate(numbers):
     selected_window = None
     p_selected = None
     lcb_selected = None
+    z_used = None
 
     if len(engine) >= 40:
 
@@ -91,16 +100,17 @@ for i, n in enumerate(numbers):
                             wins += 1
 
                 if total >= 20:
-                    p_adj, lcb = bayesian_lcb(wins, total)
+                    p_adj, lcb, z = bayesian_lcb(wins, total)
 
-                    if lcb > 0.26:
-                        candidates.append((w, p_adj, lcb))
+                    if lcb > 0.255:
+                        candidates.append((w, p_adj, lcb, z))
 
             if candidates:
-                candidates.sort(key=lambda x: x[2], reverse=True)  # sort by LCB
+                candidates.sort(key=lambda x: x[2], reverse=True)
                 selected_window = candidates[0][0]
                 p_selected = round(candidates[0][1]*100,2)
                 lcb_selected = round(candidates[0][2]*100,2)
+                z_used = candidates[0][3]
 
                 if len(engine) >= selected_window:
                     predicted = engine[-selected_window]["group"]
@@ -126,12 +136,13 @@ for i, n in enumerate(numbers):
         "window": selected_window,
         "p_adj_%": p_selected,
         "LCB_%": lcb_selected,
+        "Z_used": z_used,
         "state": state
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO ADAPTIVE CI ENGINE")
+st.title("🚀 PRO ADAPTIVE DYNAMIC CI ENGINE")
 
 col1,col2,col3,col4 = st.columns(4)
 
@@ -150,4 +161,4 @@ if len(condition_hits) > 0:
 st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("PRO ADAPTIVE CI | Bayesian LCB | Regime Filter | Meta Protection | Walk Forward")
+st.caption("PRO ADAPTIVE DYNAMIC CI | Bayesian LCB | Adaptive Z | Regime Filter | Meta Protection")
