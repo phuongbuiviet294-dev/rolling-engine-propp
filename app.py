@@ -3,8 +3,7 @@ import pandas as pd
 import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-
-LOCK_ROUNDS = 18
+LOCK_ROUNDS = 15   # 🔥 Giảm từ 18 → 15
 AUTO_REFRESH = 5
 
 st.set_page_config(layout="wide")
@@ -22,8 +21,10 @@ def hits_26(data, w):
     if len(data) < 26:
         return 0
     recent = data[-26:]
-    return sum(1 for i in range(w,26)
-               if recent[i]["group"] == recent[i-w]["group"])
+    return sum(
+        1 for i in range(w,26)
+        if recent[i]["group"] == recent[i-w]["group"]
+    )
 
 def streak(data, w):
     s = 0
@@ -45,7 +46,7 @@ def score_window(data, w):
 
 def scan(data):
     res = []
-    for w in range(6,20):
+    for w in range(8,20):   # 🔥 Chạy từ 8–19
         sc = score_window(data,w)
         if sc>0:
             res.append((w,sc))
@@ -70,6 +71,8 @@ lock_window=None
 lock_remaining=0
 miss_streak=0
 
+# ================= ENGINE LOOP ================= #
+
 for i,n in enumerate(numbers):
 
     g=get_group(n)
@@ -77,6 +80,7 @@ for i,n in enumerate(numbers):
     hit=None
     state="SCAN"
 
+    # ===== LOCK MODE =====
     if lock_window:
 
         state="LOCK"
@@ -98,20 +102,22 @@ for i,n in enumerate(numbers):
         if lock_remaining<=0:
             lock_window=None
 
-    if not lock_window and len(engine)>=20:
+    # ===== SCAN MODE =====
+    if not lock_window and len(engine)>=26:
 
         top=scan(engine)
 
         if top:
-
             total=sum(sc for w,sc in top)
             confidence=(top[0][1]/total)*100
+
             p=confidence/100
             ev=(p*1)-(1-p)
 
             if ev>0 and confidence>=50:
 
                 votes={}
+
                 for w,sc in top:
                     if len(engine)>=w:
                         gr=engine[-w]["group"]
@@ -125,6 +131,7 @@ for i,n in enumerate(numbers):
                         break
 
                 lock_remaining=LOCK_ROUNDS
+                miss_streak=0
                 state="LOCK_START"
 
     engine.append({
@@ -139,7 +146,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO+++++ QUANT ENGINE")
+st.title("🚀 PRO++++ QUANT ENGINE (8–19 | LOCK 15)")
 
 st.metric("Total Rounds",len(engine))
 st.metric("Active Window",lock_window)
@@ -148,11 +155,8 @@ st.metric("Miss Streak",miss_streak)
 
 # QUANT METRICS
 if len(engine)>=26:
-
     top=scan(engine)
-
     if top:
-
         total=sum(sc for w,sc in top)
         confidence=round((top[0][1]/total)*100,2)
         p=confidence/100
@@ -175,7 +179,6 @@ if len(engine)>=26:
 # NEXT GROUP
 if lock_window and len(engine)>=lock_window:
     next_group=engine[-lock_window]["group"]
-
     st.markdown(f"""
     <div style='padding:15px;
                 background:#1f4e79;
@@ -188,9 +191,9 @@ if lock_window and len(engine)>=lock_window:
     </div>
     """,unsafe_allow_html=True)
 
-# HISTORY newest first
+# HISTORY
 df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO+++++ QUANT MODE | EV Filter | Kelly Sizing | Confidence Gate")
+st.caption("PRO++++ QUANT MODE | SCAN 8–19 | LOCK 15 | Stable Adaptive")
