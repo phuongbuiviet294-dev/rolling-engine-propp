@@ -3,7 +3,7 @@ import pandas as pd
 import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-LOCK_ROUNDS = 15   # 🔥 Giảm từ 18 → 15
+LOCK_ROUNDS = 18   # 🔥 Lock 18 vòng
 AUTO_REFRESH = 5
 
 st.set_page_config(layout="wide")
@@ -46,7 +46,7 @@ def score_window(data, w):
 
 def scan(data):
     res = []
-    for w in range(8,20):   # 🔥 Chạy từ 8–19
+    for w in range(8,20):   # 🔥 Window 8–19
         sc = score_window(data,w)
         if sc>0:
             res.append((w,sc))
@@ -60,7 +60,6 @@ def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
 df = load()
-
 if df.empty:
     st.stop()
 
@@ -81,7 +80,7 @@ for i,n in enumerate(numbers):
     state="SCAN"
 
     # ===== LOCK MODE =====
-    if lock_window:
+    if lock_window is not None:
 
         state="LOCK"
 
@@ -103,7 +102,7 @@ for i,n in enumerate(numbers):
             lock_window=None
 
     # ===== SCAN MODE =====
-    if not lock_window and len(engine)>=26:
+    if lock_window is None and len(engine)>=26:
 
         top=scan(engine)
 
@@ -146,14 +145,16 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO++++ QUANT ENGINE (8–19 | LOCK 15)")
+st.title("🚀 PRO++++ ENGINE (LOCK 18 | SCAN 8–19)")
 
-st.metric("Total Rounds",len(engine))
-st.metric("Active Window",lock_window)
-st.metric("Lock Remaining",lock_remaining)
-st.metric("Miss Streak",miss_streak)
+col1,col2,col3,col4 = st.columns(4)
 
-# QUANT METRICS
+col1.metric("Total Rounds",len(engine))
+col2.metric("Active Window",lock_window)
+col3.metric("Lock Remaining",lock_remaining)
+col4.metric("Miss Streak",miss_streak)
+
+# ===== QUANT METRICS =====
 if len(engine)>=26:
     top=scan(engine)
     if top:
@@ -176,7 +177,7 @@ if len(engine)>=26:
         else:
             st.error("🔴 WEAK / NO TRADE")
 
-# NEXT GROUP
+# ===== NEXT GROUP =====
 if lock_window and len(engine)>=lock_window:
     next_group=engine[-lock_window]["group"]
     st.markdown(f"""
@@ -191,9 +192,9 @@ if lock_window and len(engine)>=lock_window:
     </div>
     """,unsafe_allow_html=True)
 
-# HISTORY
+# ===== HISTORY =====
 df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO++++ QUANT MODE | SCAN 8–19 | LOCK 15 | Stable Adaptive")
+st.caption("PRO++++ MODE | LOCK 18 | WINDOW 8–19 | Stable Adaptive")
