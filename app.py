@@ -43,7 +43,7 @@ def score_window(data, w):
 
 def scan(data):
     res = []
-    for w in range(8,20):  # 🔥 8–19
+    for w in range(8,20):   # 🔥 8–19
         sc = score_window(data,w)
         if sc>0:
             res.append((w,sc))
@@ -81,7 +81,7 @@ for i,n in enumerate(numbers):
     if lock_window is not None:
 
         state="LOCK"
-        window_display = lock_window
+        window_display=lock_window
 
         if len(engine)>=lock_window:
             predicted=engine[-lock_window]["group"]
@@ -108,39 +108,39 @@ for i,n in enumerate(numbers):
             p=confidence/100
             ev=(p*1)-(1-p)
 
-            best_window = top[0][0]
-            window_display = best_window
+            # ===== VOTE LOGIC =====
+            votes={}
+            for w,sc in top:
+                if len(engine)>=w:
+                    gr=engine[-w]["group"]
+                    votes[gr]=votes.get(gr,0)+sc
 
-            # 🔥 Preview prediction luôn
-            if len(engine)>=best_window:
-                predicted=engine[-best_window]["group"]
+            best_group=max(votes,key=votes.get)
+
+            selected_window=None
+            for w,sc in top:
+                if len(engine)>=w and engine[-w]["group"]==best_group:
+                    selected_window=w
+                    break
+
+            # ===== PREVIEW (SYNCED) =====
+            if selected_window and len(engine)>=selected_window:
+                predicted=engine[-selected_window]["group"]
                 hit=1 if predicted==g else 0
                 state="SCAN_PREVIEW"
+                window_display=selected_window
 
-            # 🔥 Điều kiện lock
+            # ===== LOCK CONDITION =====
             if ev>0 and confidence>=50:
-
-                votes={}
-                for w,sc in top:
-                    if len(engine)>=w:
-                        gr=engine[-w]["group"]
-                        votes[gr]=votes.get(gr,0)+sc
-
-                best_group=max(votes,key=votes.get)
-
-                for w,sc in top:
-                    if len(engine)>=w and engine[-w]["group"]==best_group:
-                        lock_window=w
-                        break
-
+                lock_window=selected_window
                 lock_remaining=LOCK_ROUNDS
                 miss_streak=0
                 state="LOCK_START"
+                window_display=lock_window
 
                 if len(engine)>=lock_window:
                     predicted=engine[-lock_window]["group"]
                     hit=1 if predicted==g else 0
-                    window_display=lock_window
 
     engine.append({
         "round":i+1,
@@ -154,7 +154,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO++++ CLEAN FIXED")
+st.title("🚀 PRO++++ FINAL SYNC ENGINE")
 
 col1,col2,col3,col4 = st.columns(4)
 
@@ -167,7 +167,7 @@ col4.metric("Miss Streak",miss_streak)
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 if hits:
     wr=sum(hits)/len(hits)
-    st.metric("Winrate",round(wr*100,2))
+    st.metric("Winrate %",round(wr*100,2))
 
 # ===== NEXT GROUP =====
 if lock_window and len(engine)>=lock_window:
@@ -189,4 +189,4 @@ df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO++++ CLEAN FIXED | LOCK 18 | SCAN 8–19 | FULL HIT SAFE")
+st.caption("PRO++++ FINAL SYNC | LOCK 18 | SCAN 8–19 | PERFECT PREVIEW ALIGNMENT")
