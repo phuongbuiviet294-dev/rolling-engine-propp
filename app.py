@@ -36,6 +36,8 @@ last_trade_round = -999
 
 next_signal = None
 next_window = None
+next_wr = None
+next_ev = None
 
 # ================= ENGINE LOOP ================= #
 
@@ -45,10 +47,19 @@ for i, n in enumerate(numbers):
     predicted = None
     hit = None
     state = "SCAN"
+    window_used = None
+    rolling_wr = None
+    ev_value = None
+    reason = None
 
-    # ===== EXECUTE TRADE (nếu có signal từ vòng trước) =====
+    # ===== EXECUTE TRADE =====
     if next_signal is not None:
+
         predicted = next_signal
+        window_used = next_window
+        rolling_wr = next_wr
+        ev_value = next_ev
+
         hit = 1 if predicted == g else 0
 
         if hit == 1:
@@ -57,12 +68,15 @@ for i, n in enumerate(numbers):
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
+        reason = "Signal executed"
         last_trade_round = i
 
         next_signal = None
         next_window = None
+        next_wr = None
+        next_ev = None
 
-    # ===== GENERATE SIGNAL CHO VÒNG SAU =====
+    # ===== GENERATE SIGNAL =====
     if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
@@ -89,28 +103,32 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        # ===== ENTRY CONDITION =====
-        if (
-            best_window is not None
-            and best_wr > 0.29
-            and best_ev >= 0
-        ):
+        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
+
             next_signal = engine[-best_window]["group"]
             next_window = best_window
+            next_wr = round(best_wr * 100, 2)
+            next_ev = round(best_ev, 3)
+
             state = "SIGNAL"
+            reason = f"Window {best_window} | WR {next_wr}% | EV {next_ev}"
 
     engine.append({
-        "round": i + 1,
+        "round": i+1,
         "number": n,
         "group": g,
         "predicted": predicted,
         "hit": hit,
-        "state": state
+        "window": window_used,
+        "rolling_wr_%": rolling_wr,
+        "ev": ev_value,
+        "state": state,
+        "reason": reason
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 CLEAN ONE-SHOT ENGINE")
+st.title("🎯 CLEAN ENGINE – FULL VISIBILITY")
 
 col1, col2, col3 = st.columns(3)
 
@@ -118,13 +136,14 @@ col1.metric("Total Rounds", len(engine))
 col2.metric("Total Profit", round(total_profit, 2))
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
+
 if hits:
     wr = np.mean(hits)
     col3.metric("Winrate %", round(wr * 100, 2))
 else:
     col3.metric("Winrate %", 0)
 
-# ===== NEXT GROUP DISPLAY =====
+# ===== NEXT GROUP =====
 
 if next_signal is not None:
     st.markdown(f"""
@@ -135,7 +154,10 @@ if next_signal is not None:
                 text-align:center;
                 font-size:24px;
                 font-weight:bold'>
-        🎯 NEXT GROUP: {next_signal} (window {next_window})
+        🎯 NEXT GROUP: {next_signal}
+        <br>Window: {next_window}
+        <br>WR: {next_wr}%
+        <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
 else:
@@ -143,7 +165,7 @@ else:
 
 # ===== HISTORY =====
 
-st.subheader("History")
+st.subheader("History (Full Logic)")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("ONE SHOT MODE | TRADE AFTER SIGNAL | WINDOW 9 & 14 | EV FILTER")
+st.caption("ONE SHOT | WINDOW 9 & 14 | EV FILTER | FULL TRACE")
