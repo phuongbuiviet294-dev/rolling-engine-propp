@@ -42,6 +42,11 @@ next_wr = None
 next_ev = None
 signal_created_at = None
 
+preview_signal = None
+preview_window = None
+preview_wr = None
+preview_ev = None
+
 for i, n in enumerate(numbers):
 
     g = get_group(n)
@@ -50,20 +55,11 @@ for i, n in enumerate(numbers):
     hit = None
     state = "SCAN"
     window_used = None
-    rolling_wr = None
-    ev_value = None
-    executed_from_round = None
-    reason = None
 
-    # ===== EXECUTE TRADE (vòng sau khi có signal) =====
+    # ===== EXECUTE TRADE =====
     if next_signal is not None:
 
         predicted = next_signal
-        window_used = next_window
-        rolling_wr = next_wr
-        ev_value = next_ev
-        executed_from_round = signal_created_at
-
         hit = 1 if predicted == g else 0
 
         if hit == 1:
@@ -72,19 +68,16 @@ for i, n in enumerate(numbers):
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
-        reason = f"Executed signal created at round {signal_created_at}"
-
         last_trade_round = i
 
-        # reset signal
         next_signal = None
         next_window = None
         next_wr = None
         next_ev = None
         signal_created_at = None
 
-    # ===== GENERATE SIGNAL =====
-    if len(engine) >= 40 and i - last_trade_round > 4:
+    # ===== SIGNAL + PREVIEW =====
+    if len(engine) >= 40:
 
         best_window = None
         best_ev = -999
@@ -110,16 +103,26 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
+        # ===== PREVIEW (luôn hiển thị nếu có edge nhẹ) =====
+        if best_window is not None:
+            preview_signal = engine[-best_window]["group"]
+            preview_window = best_window
+            preview_wr = round(best_wr * 100, 2)
+            preview_ev = round(best_ev, 3)
 
+        # ===== SIGNAL THỰC SỰ (WR > 30%) =====
+        if (
+            best_window is not None
+            and best_wr > 0.30
+            and best_ev >= 0
+            and i - last_trade_round > 4
+        ):
             next_signal = engine[-best_window]["group"]
             next_window = best_window
             next_wr = round(best_wr * 100, 2)
             next_ev = round(best_ev, 3)
             signal_created_at = i + 1
-
             state = "SIGNAL"
-            reason = f"Signal created (window {best_window}, WR {next_wr}%, EV {next_ev})"
 
     engine.append({
         "round": i + 1,
@@ -127,18 +130,12 @@ for i, n in enumerate(numbers):
         "group": g,
         "predicted": predicted,
         "hit": hit,
-        "window": window_used,
-        "rolling_wr_%": rolling_wr,
-        "ev": ev_value,
-        "state": state,
-        "signal_created_at": signal_created_at,
-        "executed_from_round": executed_from_round,
-        "reason": reason
+        "state": state
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
+st.title("🎯 BALANCED MODE (WR > 30% + PREVIEW)")
 
 col1, col2, col3 = st.columns(3)
 
@@ -153,7 +150,7 @@ if hits:
 else:
     col3.metric("Winrate %", 0)
 
-# ===== NEXT GROUP DISPLAY =====
+# ===== SIGNAL DISPLAY =====
 
 if next_signal is not None:
     st.markdown(f"""
@@ -164,19 +161,34 @@ if next_signal is not None:
                 text-align:center;
                 font-size:24px;
                 font-weight:bold'>
-        🎯 NEXT GROUP: {next_signal}
-        <br>Signal created at round: {signal_created_at}
+        🎯 NEXT GROUP (VALID SIGNAL): {next_signal}
         <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
+
+elif preview_signal is not None:
+    st.markdown(f"""
+    <div style='padding:15px;
+                background:#444;
+                color:white;
+                border-radius:10px;
+                text-align:center;
+                font-size:22px;'>
+        🔍 PREVIEW SIGNAL: {preview_signal}
+        <br>Window: {preview_window}
+        <br>WR: {preview_wr}%
+        <br>EV: {preview_ev}
+    </div>
+    """, unsafe_allow_html=True)
+
 else:
-    st.info("No valid signal yet")
+    st.info("No signal available")
 
 # ===== HISTORY =====
 
-st.subheader("History (Full Timing Trace)")
+st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("ONE SHOT MODE | WINDOW 9 & 14 | EV FILTER | SIGNAL → TRADE TIMING CLEAR")
+st.caption("BALANCED MODE | WR > 30% | PREVIEW ENABLED | ONE-SHOT")
