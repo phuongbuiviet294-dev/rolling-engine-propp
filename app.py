@@ -5,13 +5,13 @@ import numpy as np
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 AUTO_REFRESH = 5
-ALLOWED_WINDOWS = [9,14]
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
+WINDOWS = [9, 14]
 
 st.set_page_config(layout="wide")
 
-# ================= CORE ================= #
+# ===== CORE =====
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -19,15 +19,6 @@ def get_group(n):
     if 7 <= n <= 9: return 3
     if 10 <= n <= 12: return 4
     return None
-
-def recent_winrate(engine, w, lookback=50):
-    df = pd.DataFrame(engine)
-    df_w = df[(df["window"]==w) & (df["hit"].notna())]
-    if len(df_w)==0:
-        return 0
-    return df_w.tail(lookback)["hit"].mean()
-
-# ================= LOAD ================= #
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
@@ -39,158 +30,103 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-engine=[]
-total_profit=0
-equity_curve=[0]
-last_trade_round=-999
+engine = []
+total_profit = 0
+last_trade_round = -999
 
-# ================= ENGINE LOOP ================= #
+# ===== ENGINE LOOP =====
 
-for i,n in enumerate(numbers):
+for i, n in enumerate(numbers):
 
-    g=get_group(n)
-    predicted=None
-    hit=None
-    state="SCAN"
-    window_display=None
+    g = get_group(n)
+    predicted = None
+    hit = None
+    state = "SCAN"
 
-    if len(engine)>=26:
+    if len(engine) >= 40:
 
-        best_window=None
-        best_ev=-999
+        best_window = None
+        best_ev = -999
+        best_wr = 0
 
-        for w in ALLOWED_WINDOWS:
-            wr=recent_winrate(engine,w)
-            ev=wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
-            if ev>best_ev:
-                best_ev=ev
-                best_window=w
+        for w in WINDOWS:
 
-        if best_window and best_ev>0:
+            recent_hits = []
 
-            # Chỉ trade nếu chưa trade ở vòng trước
-            if i-last_trade_round>1:
+            for j in range(len(engine)-30, len(engine)):
+                if j >= w:
+                    if engine[j]["group"] == engine[j-w]["group"]:
+                        recent_hits.append(1)
+                    else:
+                        recent_hits.append(0)
 
-                predicted=engine[-best_window]["group"]
-                hit=1 if predicted==g else 0
-                window_display=best_window
+            if len(recent_hits) >= 20:
+                wr = np.mean(recent_hits)
+                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
-                if hit==1:
-                    total_profit+=WIN_PROFIT
-                else:
-                    total_profit-=LOSE_LOSS
+                if ev > best_ev:
+                    best_ev = ev
+                    best_window = w
+                    best_wr = wr
 
-                equity_curve.append(total_profit)
-                last_trade_round=i
-                state="ONE_SHOT"
+        # ===== ENTRY CONDITION =====
+        if (
+            best_window is not None
+            and best_wr > 0.29
+            and best_ev >= 0
+            and i - last_trade_round > 4
+        ):
+
+            predicted = engine[-best_window]["group"]
+            hit = 1 if predicted == g else 0
+
+            if hit == 1:
+                total_profit += WIN_PROFIT
+            else:
+                total_profit -= LOSE_LOSS
+
+            last_trade_round = i
+            state = "TRADE"
 
     engine.append({
-        "round":i+1,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "window":window_display,
-        "state":state
+        "round": i+1,
+        "number": n,
+        "group": g,
+        "predicted": predicted,
+        "hit": hit,
+        "state": state
     })
 
-# ================= DASHBOARD ================= #
+# ===== DASHBOARD =====
 
-st.title("🎯 ONE-SHOT PRO ENGINE")
+st.title("🎯 CLEAN BALANCED ENGINE")
 
-col1,col2,col3,col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 
-col1.metric("Total Rounds",len(engine))
-col2.metric("Total Profit",round(total_profit,2))
+col1.metric("Total Rounds", len(engine))
+col2.metric("Total Profit", round(total_profit,2))
 
-hits=[x["hit"] for x in engine if x["hit"] is not None]
+hits = [x["hit"] for x in engine if x["hit"] is not None]
 
 if hits:
-    wr=sum(hits)/len(hits)
-    col3.metric("Winrate %",round(wr*100,2))
+    wr = np.mean(hits)
+    col3.metric("Winrate %", round(wr*100,2))
 
-    p=wr
-    kelly=p-(1-p)/WIN_PROFIT
-    col4.metric("Kelly %",round(max(0,kelly)*100,2))
-
-# Max DD
-if len(equity_curve)>1:
-    peak=np.maximum.accumulate(equity_curve)
-    dd=peak-equity_curve
-    st.metric("Max Drawdown",round(max(dd),2))
-
-# NEXT GROUP (Preview only)
-if len(engine)>=1 and engine[-1]["window"]:
-    next_group=engine[-1]["predicted"]
+# ===== NEXT SIGNAL =====
+if engine[-1]["predicted"] is not None:
     st.markdown(f"""
     <div style='padding:15px;
                 background:#1f4e79;
                 color:white;
                 border-radius:10px;
                 text-align:center;
-                font-size:26px;
+                font-size:24px;
                 font-weight:bold'>
-        🎯 NEXT GROUP: {next_group}
+        🎯 NEXT GROUP: {engine[-1]["predicted"]}
     </div>
-    """,unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 st.subheader("History")
-st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
+st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("ONE SHOT MODE | TRADE ONCE PER SIGNAL | NO LOCK | PURE EV FILTER")
-
-
-# ================= EDGE ANALYSIS =================
-
-st.header("🔬 EDGE ANALYSIS")
-
-df_engine = pd.DataFrame(engine)
-df_hits = df_engine[df_engine["hit"].notna()].copy()
-
-if len(df_hits) > 30:
-
-    # Base winrate
-    base_wr = df_hits["hit"].mean()
-    base_ev = base_wr*WIN_PROFIT - (1-base_wr)*LOSE_LOSS
-
-    st.metric("Overall Winrate %", round(base_wr*100,2))
-    st.metric("Overall EV", round(base_ev,4))
-
-    # Rolling winrate
-    roll_wr = df_hits["hit"].rolling(50).mean()
-    max_roll = roll_wr.max()
-    min_roll = roll_wr.min()
-
-    st.metric("Max Rolling WR (50)", round(max_roll*100,2))
-    st.metric("Min Rolling WR (50)", round(min_roll*100,2))
-
-    # Bootstrap CI
-    samples = 2000
-    wr_samples = []
-    arr = df_hits["hit"].values
-
-    for _ in range(samples):
-        sample = np.random.choice(arr, size=len(arr), replace=True)
-        wr_samples.append(sample.mean())
-
-    ci_low = np.percentile(wr_samples, 2.5)
-    ci_high = np.percentile(wr_samples, 97.5)
-
-    st.metric("Bootstrap CI Low %", round(ci_low*100,2))
-    st.metric("Bootstrap CI High %", round(ci_high*100,2))
-
-    # Compare vs random 25%
-    random_wr = 0.25
-    advantage = base_wr - random_wr
-    st.metric("Edge vs Random 25%", round(advantage*100,2))
-
-    # Decision
-    if ci_low > 0.2857:
-        st.success("✅ STATISTICAL EDGE CONFIRMED")
-    elif base_wr > 0.2857:
-        st.warning("⚠ Weak edge - not statistically stable")
-    else:
-        st.error("❌ NO EDGE - RANDOM BEHAVIOR")
-
-else:
-    st.info("Not enough trades to analyze edge")
+st.caption("CLEAN BALANCED MODE | WINDOW 9-14 | ONE SHOT | NO LOCK | SIMPLE LOGIC")
