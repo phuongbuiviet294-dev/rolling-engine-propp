@@ -1,9 +1,15 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-LOCK_ROUNDS = 18
+
+BASE_LOCK = 18
 AUTO_REFRESH = 5
+ALLOWED_WINDOWS = [9, 14]
+
+WIN_PROFIT = 2.5
+LOSE_LOSS = 1
 
 st.set_page_config(layout="wide")
 
@@ -16,39 +22,30 @@ def get_group(n):
     if 10 <= n <= 12: return 4
     return None
 
-def hits_26(data, w):
-    if len(data) < 26:
+def recent_winrate(engine, w, lookback=50):
+    df = pd.DataFrame(engine)
+    df_w = df[(df["window"]==w) & (df["hit"].notna())]
+    if len(df_w) == 0:
         return 0
-    recent = data[-26:]
-    return sum(1 for i in range(w,26)
-               if recent[i]["group"] == recent[i-w]["group"])
+    return df_w.tail(lookback)["hit"].mean()
 
-def streak(data, w):
-    s = 0
-    i = len(data) - 1
-    while i - w >= 0:
-        if data[i]["group"] == data[i-w]["group"]:
-            s += 1
-            i -= 1
-        else:
-            break
-    return s
-
-def score_window(data, w):
-    h = hits_26(data, w)
-    if h < 5:
-        return 0
-    s = streak(data, w)
-    return (h*1.5) + (s*3)
-
-def scan(data):
-    res = []
-    for w in range(8,20):   # 🔥 8–19
-        sc = score_window(data,w)
-        if sc>0:
-            res.append((w,sc))
-    res.sort(key=lambda x:x[1], reverse=True)
-    return res[:3]
+def adaptive_lock(engine, base=BASE_LOCK):
+    df = pd.DataFrame(engine)
+    df_hits = df[df["hit"].notna()].tail(20)
+    if len(df_hits) < 10:
+        return base
+    
+    p = df_hits["hit"].mean()
+    vol = (p*(1-p))**0.5
+    
+    if vol > 0.49:
+        return 6
+    elif vol > 0.47:
+        return 10
+    elif vol > 0.45:
+        return 15
+    else:
+        return base
 
 # ================= LOAD ================= #
 
@@ -66,6 +63,8 @@ engine=[]
 lock_window=None
 lock_remaining=0
 miss_streak=0
+total_profit=0
+equity_curve=[0]
 
 # ================= ENGINE LOOP ================= #
 
@@ -77,7 +76,7 @@ for i,n in enumerate(numbers):
     state="SCAN"
     window_display=None
 
-    # ================= LOCK MODE =================
+    # ===== LOCK MODE =====
     if lock_window is not None:
 
         state="LOCK"
@@ -87,60 +86,43 @@ for i,n in enumerate(numbers):
             predicted=engine[-lock_window]["group"]
             hit=1 if predicted==g else 0
 
-            if hit==0:
-                miss_streak+=1
-            else:
+            if hit==1:
+                total_profit += WIN_PROFIT
                 miss_streak=0
+            else:
+                total_profit -= LOSE_LOSS
+                miss_streak+=1
+
+            equity_curve.append(total_profit)
 
         lock_remaining-=1
 
         if miss_streak>=3 or lock_remaining<=0:
             lock_window=None
 
-    # ================= SCAN MODE =================
+    # ===== SCAN MODE =====
     if lock_window is None and len(engine)>=26:
 
-        top=scan(engine)
+        best_window=None
+        best_ev=-999
 
-        if top:
-            total=sum(sc for w,sc in top)
-            confidence=(top[0][1]/total)*100
-            p=confidence/100
-            ev=(p*1)-(1-p)
+        for w in ALLOWED_WINDOWS:
+            wr=recent_winrate(engine,w)
+            ev=wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+            if ev>best_ev:
+                best_ev=ev
+                best_window=w
 
-            # ===== VOTE LOGIC =====
-            votes={}
-            for w,sc in top:
-                if len(engine)>=w:
-                    gr=engine[-w]["group"]
-                    votes[gr]=votes.get(gr,0)+sc
+        if best_window and best_ev>0:
 
-            best_group=max(votes,key=votes.get)
+            predicted=engine[-best_window]["group"]
+            hit=1 if predicted==g else 0
 
-            selected_window=None
-            for w,sc in top:
-                if len(engine)>=w and engine[-w]["group"]==best_group:
-                    selected_window=w
-                    break
-
-            # ===== PREVIEW (SYNCED) =====
-            if selected_window and len(engine)>=selected_window:
-                predicted=engine[-selected_window]["group"]
-                hit=1 if predicted==g else 0
-                state="SCAN_PREVIEW"
-                window_display=selected_window
-
-            # ===== LOCK CONDITION =====
-            if ev>0 and confidence>=50:
-                lock_window=selected_window
-                lock_remaining=LOCK_ROUNDS
-                miss_streak=0
-                state="LOCK_START"
-                window_display=lock_window
-
-                if len(engine)>=lock_window:
-                    predicted=engine[-lock_window]["group"]
-                    hit=1 if predicted==g else 0
+            state="LOCK_START"
+            lock_window=best_window
+            lock_remaining=adaptive_lock(engine)
+            miss_streak=0
+            window_display=lock_window
 
     engine.append({
         "round":i+1,
@@ -154,20 +136,40 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO++++ FINAL SYNC ENGINE")
+st.title("🚀 PRO EV ADAPTIVE + VOL LOCK")
 
 col1,col2,col3,col4 = st.columns(4)
 
 col1.metric("Total Rounds",len(engine))
 col2.metric("Active Window",lock_window)
 col3.metric("Lock Remaining",lock_remaining)
-col4.metric("Miss Streak",miss_streak)
+col4.metric("Total Profit",round(total_profit,2))
 
 # ===== WINRATE =====
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 if hits:
     wr=sum(hits)/len(hits)
     st.metric("Winrate %",round(wr*100,2))
+
+    # Kelly (half)
+    p=wr
+    kelly=p - (1-p)/WIN_PROFIT
+    kelly=max(0,kelly)*0.5
+    st.metric("Kelly % (Half)",round(kelly*100,2))
+
+# ===== VOLATILITY =====
+df_hits=pd.DataFrame(engine)
+df_hits=df_hits[df_hits["hit"].notna()].tail(20)
+if len(df_hits)>5:
+    p=df_hits["hit"].mean()
+    vol=(p*(1-p))**0.5
+    st.metric("Recent Volatility",round(vol,4))
+
+# ===== MAX DRAWDOWN =====
+if len(equity_curve)>1:
+    peak=np.maximum.accumulate(equity_curve)
+    dd=peak - equity_curve
+    st.metric("Max Drawdown",round(max(dd),2))
 
 # ===== NEXT GROUP =====
 if lock_window and len(engine)>=lock_window:
@@ -189,4 +191,4 @@ df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO++++ FINAL SYNC | LOCK 18 | SCAN 8–19 | PERFECT PREVIEW ALIGNMENT")
+st.caption("PRO EV ADAPTIVE | WINDOW 9 & 14 | VOL LOCK | PROFIT SIM | KELLY CONTROL")
