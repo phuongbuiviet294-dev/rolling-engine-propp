@@ -54,7 +54,6 @@ for i, n in enumerate(numbers):
     predicted = None
     hit = None
     state = "SCAN"
-    window_used = None
 
     # ===== EXECUTE TRADE =====
     if next_signal is not None:
@@ -76,7 +75,7 @@ for i, n in enumerate(numbers):
         next_ev = None
         signal_created_at = None
 
-    # ===== SIGNAL + PREVIEW =====
+    # ===== SCAN WINDOWS =====
     if len(engine) >= 40:
 
         best_window = None
@@ -103,18 +102,17 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        # ===== PREVIEW (luôn hiển thị nếu có edge nhẹ) =====
         if best_window is not None:
             preview_signal = engine[-best_window]["group"]
             preview_window = best_window
             preview_wr = round(best_wr * 100, 2)
             preview_ev = round(best_ev, 3)
 
-        # ===== SIGNAL THỰC SỰ (WR > 30%) =====
+        # ===== STRONG SIGNAL (WR ≥ 32%) =====
         if (
             best_window is not None
-            and best_wr > 0.30
-            and best_ev >= 0
+            and best_wr >= 0.32
+            and best_ev > 0
             and i - last_trade_round > 4
         ):
             next_signal = engine[-best_window]["group"]
@@ -135,7 +133,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 BALANCED MODE (WR > 30% + PREVIEW)")
+st.title("🎯 STRONG EDGE MODE (WR ≥ 32%)")
 
 col1, col2, col3 = st.columns(3)
 
@@ -143,7 +141,6 @@ col1.metric("Total Rounds", len(engine))
 col2.metric("Total Profit", round(total_profit, 2))
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
-
 if hits:
     wr = np.mean(hits)
     col3.metric("Winrate %", round(wr * 100, 2))
@@ -153,22 +150,24 @@ else:
 # ===== SIGNAL DISPLAY =====
 
 if next_signal is not None:
+
     st.markdown(f"""
-    <div style='padding:15px;
-                background:#1f4e79;
+    <div style='padding:20px;
+                background:#b30000;
                 color:white;
-                border-radius:10px;
+                border-radius:12px;
                 text-align:center;
-                font-size:24px;
+                font-size:26px;
                 font-weight:bold'>
-        🎯 NEXT GROUP (VALID SIGNAL): {next_signal}
+        🚨 STRONG NEXT GROUP: {next_signal}
         <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
 
-elif preview_signal is not None:
+elif preview_signal is not None and preview_wr >= 31:
+
     st.markdown(f"""
     <div style='padding:15px;
                 background:#444;
@@ -176,7 +175,7 @@ elif preview_signal is not None:
                 border-radius:10px;
                 text-align:center;
                 font-size:22px;'>
-        🔍 PREVIEW SIGNAL: {preview_signal}
+        🔎 PREVIEW (Almost Ready): {preview_signal}
         <br>Window: {preview_window}
         <br>WR: {preview_wr}%
         <br>EV: {preview_ev}
@@ -184,11 +183,11 @@ elif preview_signal is not None:
     """, unsafe_allow_html=True)
 
 else:
-    st.info("No signal available")
+    st.info("No strong signal now")
 
 # ===== HISTORY =====
 
 st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("BALANCED MODE | WR > 30% | PREVIEW ENABLED | ONE-SHOT")
+st.caption("WR ≥ 32% | High Edge Only | Highlight Strong Entry")
