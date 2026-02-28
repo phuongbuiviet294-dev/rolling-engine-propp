@@ -138,3 +138,59 @@ st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
 
 st.caption("ONE SHOT MODE | TRADE ONCE PER SIGNAL | NO LOCK | PURE EV FILTER")
+
+
+# ================= EDGE ANALYSIS =================
+
+st.header("🔬 EDGE ANALYSIS")
+
+df_engine = pd.DataFrame(engine)
+df_hits = df_engine[df_engine["hit"].notna()].copy()
+
+if len(df_hits) > 30:
+
+    # Base winrate
+    base_wr = df_hits["hit"].mean()
+    base_ev = base_wr*WIN_PROFIT - (1-base_wr)*LOSE_LOSS
+
+    st.metric("Overall Winrate %", round(base_wr*100,2))
+    st.metric("Overall EV", round(base_ev,4))
+
+    # Rolling winrate
+    roll_wr = df_hits["hit"].rolling(50).mean()
+    max_roll = roll_wr.max()
+    min_roll = roll_wr.min()
+
+    st.metric("Max Rolling WR (50)", round(max_roll*100,2))
+    st.metric("Min Rolling WR (50)", round(min_roll*100,2))
+
+    # Bootstrap CI
+    samples = 2000
+    wr_samples = []
+    arr = df_hits["hit"].values
+
+    for _ in range(samples):
+        sample = np.random.choice(arr, size=len(arr), replace=True)
+        wr_samples.append(sample.mean())
+
+    ci_low = np.percentile(wr_samples, 2.5)
+    ci_high = np.percentile(wr_samples, 97.5)
+
+    st.metric("Bootstrap CI Low %", round(ci_low*100,2))
+    st.metric("Bootstrap CI High %", round(ci_high*100,2))
+
+    # Compare vs random 25%
+    random_wr = 0.25
+    advantage = base_wr - random_wr
+    st.metric("Edge vs Random 25%", round(advantage*100,2))
+
+    # Decision
+    if ci_low > 0.2857:
+        st.success("✅ STATISTICAL EDGE CONFIRMED")
+    elif base_wr > 0.2857:
+        st.warning("⚠ Weak edge - not statistically stable")
+    else:
+        st.error("❌ NO EDGE - RANDOM BEHAVIOR")
+
+else:
+    st.info("Not enough trades to analyze edge")
