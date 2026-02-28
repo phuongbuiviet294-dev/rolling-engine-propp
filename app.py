@@ -30,6 +30,8 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
+# ================= ENGINE ================= #
+
 engine = []
 total_profit = 0
 last_trade_round = -999
@@ -38,27 +40,29 @@ next_signal = None
 next_window = None
 next_wr = None
 next_ev = None
-
-# ================= ENGINE LOOP ================= #
+signal_created_at = None
 
 for i, n in enumerate(numbers):
 
     g = get_group(n)
+
     predicted = None
     hit = None
     state = "SCAN"
     window_used = None
     rolling_wr = None
     ev_value = None
+    executed_from_round = None
     reason = None
 
-    # ===== EXECUTE TRADE =====
+    # ===== EXECUTE TRADE (vòng sau khi có signal) =====
     if next_signal is not None:
 
         predicted = next_signal
         window_used = next_window
         rolling_wr = next_wr
         ev_value = next_ev
+        executed_from_round = signal_created_at
 
         hit = 1 if predicted == g else 0
 
@@ -68,13 +72,16 @@ for i, n in enumerate(numbers):
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
-        reason = "Signal executed"
+        reason = f"Executed signal created at round {signal_created_at}"
+
         last_trade_round = i
 
+        # reset signal
         next_signal = None
         next_window = None
         next_wr = None
         next_ev = None
+        signal_created_at = None
 
     # ===== GENERATE SIGNAL =====
     if len(engine) >= 40 and i - last_trade_round > 4:
@@ -109,12 +116,13 @@ for i, n in enumerate(numbers):
             next_window = best_window
             next_wr = round(best_wr * 100, 2)
             next_ev = round(best_ev, 3)
+            signal_created_at = i + 1
 
             state = "SIGNAL"
-            reason = f"Window {best_window} | WR {next_wr}% | EV {next_ev}"
+            reason = f"Signal created (window {best_window}, WR {next_wr}%, EV {next_ev})"
 
     engine.append({
-        "round": i+1,
+        "round": i + 1,
         "number": n,
         "group": g,
         "predicted": predicted,
@@ -123,12 +131,14 @@ for i, n in enumerate(numbers):
         "rolling_wr_%": rolling_wr,
         "ev": ev_value,
         "state": state,
+        "signal_created_at": signal_created_at,
+        "executed_from_round": executed_from_round,
         "reason": reason
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 CLEAN ENGINE – FULL VISIBILITY")
+st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -143,7 +153,7 @@ if hits:
 else:
     col3.metric("Winrate %", 0)
 
-# ===== NEXT GROUP =====
+# ===== NEXT GROUP DISPLAY =====
 
 if next_signal is not None:
     st.markdown(f"""
@@ -155,6 +165,7 @@ if next_signal is not None:
                 font-size:24px;
                 font-weight:bold'>
         🎯 NEXT GROUP: {next_signal}
+        <br>Signal created at round: {signal_created_at}
         <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
@@ -165,7 +176,7 @@ else:
 
 # ===== HISTORY =====
 
-st.subheader("History (Full Logic)")
+st.subheader("History (Full Timing Trace)")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("ONE SHOT | WINDOW 9 & 14 | EV FILTER | FULL TRACE")
+st.caption("ONE SHOT MODE | WINDOW 9 & 14 | EV FILTER | SIGNAL → TRADE TIMING CLEAR")
