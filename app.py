@@ -29,15 +29,16 @@ def recent_winrate(engine, w, lookback=50):
         return 0
     return df_w.tail(lookback)["hit"].mean()
 
-def adaptive_lock(engine, base=BASE_LOCK):
+def adaptive_lock(engine):
     df = pd.DataFrame(engine)
     df_hits = df[df["hit"].notna()].tail(20)
+
     if len(df_hits) < 10:
-        return base
-    
+        return BASE_LOCK
+
     p = df_hits["hit"].mean()
     vol = (p*(1-p))**0.5
-    
+
     if vol > 0.49:
         return 6
     elif vol > 0.47:
@@ -45,7 +46,7 @@ def adaptive_lock(engine, base=BASE_LOCK):
     elif vol > 0.45:
         return 15
     else:
-        return base
+        return BASE_LOCK
 
 # ================= LOAD ================= #
 
@@ -99,45 +100,40 @@ for i,n in enumerate(numbers):
 
         if miss_streak>=3 or lock_remaining<=0:
             lock_window=None
+            lock_remaining=0
+            miss_streak=0
 
     # ===== SCAN MODE =====
     if lock_window is None and len(engine)>=26:
 
-        total_trades=len([x for x in engine if x["hit"] is not None])
+        best_window=None
+        best_ev=-999
 
-        # ---------- BOOTSTRAP ----------
-        if total_trades < 20:
-            best_window = ALLOWED_WINDOWS[0]
+        for w in ALLOWED_WINDOWS:
+            wr=recent_winrate(engine,w)
+            ev=wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+            if ev>best_ev:
+                best_ev=ev
+                best_window=w
 
-            predicted = engine[-best_window]["group"]
-            hit = 1 if predicted == g else 0
+        if best_window:
 
-            state="LOCK_START_BOOTSTRAP"
-            lock_window=best_window
-            lock_remaining=adaptive_lock(engine)
-            miss_streak=0
-            window_display=lock_window
+            predicted=engine[-best_window]["group"]
+            hit=1 if predicted==g else 0
 
-        # ---------- EV ADAPTIVE ----------
-        else:
-            best_window=None
-            best_ev=-999
-
-            for w in ALLOWED_WINDOWS:
-                wr=recent_winrate(engine,w)
-                ev=wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
-                if ev>best_ev:
-                    best_ev=ev
-                    best_window=w
-
-            if best_window and best_ev>0:
-
-                predicted=engine[-best_window]["group"]
-                hit=1 if predicted==g else 0
-
-                state="LOCK_START"
+            # ===== MODE 1: EV POSITIVE =====
+            if best_ev>0:
+                state="LOCK_START_EV"
                 lock_window=best_window
                 lock_remaining=adaptive_lock(engine)
+                miss_streak=0
+                window_display=lock_window
+
+            # ===== MODE 2: FALLBACK SHORT LOCK =====
+            else:
+                state="LOCK_START_SHORT"
+                lock_window=best_window
+                lock_remaining=6
                 miss_streak=0
                 window_display=lock_window
 
@@ -153,7 +149,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO EV ADAPTIVE + VOL LOCK (BOOTSTRAP FIX)")
+st.title("🚀 FINAL STABLE DUAL MODE ENGINE")
 
 col1,col2,col3,col4 = st.columns(4)
 
@@ -168,7 +164,6 @@ if hits:
     wr=sum(hits)/len(hits)
     st.metric("Winrate %",round(wr*100,2))
 
-    # Kelly (half)
     p=wr
     kelly=p - (1-p)/WIN_PROFIT
     kelly=max(0,kelly)*0.5
@@ -208,4 +203,4 @@ df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO EV ADAPTIVE | VOL LOCK | BOOTSTRAP FIX | PROFIT SIM | KELLY")
+st.caption("FINAL STABLE DUAL MODE | EV + SHORT LOCK | VOL ADAPTIVE | PROFIT TRACK")
