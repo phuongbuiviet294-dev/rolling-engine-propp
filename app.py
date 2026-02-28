@@ -55,7 +55,7 @@ for i, n in enumerate(numbers):
     executed_from_round = None
     reason = None
 
-    # ===== EXECUTE TRADE (vòng sau khi có signal) =====
+    # ===== EXECUTE TRADE =====
     if next_signal is not None:
 
         predicted = next_signal
@@ -72,19 +72,18 @@ for i, n in enumerate(numbers):
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
-        reason = f"Executed signal created at round {signal_created_at}"
+        reason = f"Aggressive execution from round {signal_created_at}"
 
         last_trade_round = i
 
-        # reset signal
         next_signal = None
         next_window = None
         next_wr = None
         next_ev = None
         signal_created_at = None
 
-    # ===== GENERATE SIGNAL =====
-    if len(engine) >= 40 and i - last_trade_round > 4:
+    # ===== GENERATE SIGNAL (AGGRESSIVE) =====
+    if len(engine) >= 35 and i - last_trade_round > 2:
 
         best_window = None
         best_ev = -999
@@ -94,14 +93,14 @@ for i, n in enumerate(numbers):
 
             recent_hits = []
 
-            for j in range(len(engine) - 30, len(engine)):
+            for j in range(len(engine) - 25, len(engine)):
                 if j >= w:
                     if engine[j]["group"] == engine[j - w]["group"]:
                         recent_hits.append(1)
                     else:
                         recent_hits.append(0)
 
-            if len(recent_hits) >= 20:
+            if len(recent_hits) >= 15:
                 wr = np.mean(recent_hits)
                 ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
@@ -110,7 +109,8 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
+        # Aggressive threshold
+        if best_window is not None and best_wr > 0.26 and best_ev > -0.05:
 
             next_signal = engine[-best_window]["group"]
             next_window = best_window
@@ -119,7 +119,7 @@ for i, n in enumerate(numbers):
             signal_created_at = i + 1
 
             state = "SIGNAL"
-            reason = f"Signal created (window {best_window}, WR {next_wr}%, EV {next_ev})"
+            reason = f"Aggressive signal (window {best_window}, WR {next_wr}%, EV {next_ev})"
 
     engine.append({
         "round": i + 1,
@@ -138,7 +138,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
+st.title("🔥 AGGRESSIVE ONE-SHOT ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -153,12 +153,12 @@ if hits:
 else:
     col3.metric("Winrate %", 0)
 
-# ===== NEXT GROUP DISPLAY =====
+# ===== NEXT GROUP =====
 
 if next_signal is not None:
     st.markdown(f"""
     <div style='padding:15px;
-                background:#1f4e79;
+                background:#8b0000;
                 color:white;
                 border-radius:10px;
                 text-align:center;
@@ -172,11 +172,11 @@ if next_signal is not None:
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("No valid signal yet")
+    st.info("No aggressive signal right now")
 
 # ===== HISTORY =====
 
-st.subheader("History (Full Timing Trace)")
+st.subheader("History (Aggressive Mode)")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("ONE SHOT MODE | WINDOW 9 & 14 | EV FILTER | SIGNAL → TRADE TIMING CLEAR")
+st.caption("AGGRESSIVE MODE | WR > 26% | Short Cooldown | Higher Frequency")
