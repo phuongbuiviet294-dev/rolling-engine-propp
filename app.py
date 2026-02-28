@@ -3,7 +3,6 @@ import pandas as pd
 import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-
 LOCK_ROUNDS = 18
 AUTO_REFRESH = 5
 
@@ -22,8 +21,10 @@ def hits_26(data, w):
     if len(data) < 26:
         return 0
     recent = data[-26:]
-    return sum(1 for i in range(w,26)
-               if recent[i]["group"] == recent[i-w]["group"])
+    return sum(
+        1 for i in range(w,26)
+        if recent[i]["group"] == recent[i-w]["group"]
+    )
 
 def streak(data, w):
     s = 0
@@ -45,7 +46,7 @@ def score_window(data, w):
 
 def scan(data):
     res = []
-    for w in range(6,20):
+    for w in range(8,20):
         sc = score_window(data,w)
         if sc>0:
             res.append((w,sc))
@@ -59,7 +60,6 @@ def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
 df = load()
-
 if df.empty:
     st.stop()
 
@@ -70,6 +70,8 @@ lock_window=None
 lock_remaining=0
 miss_streak=0
 
+# ================= ENGINE LOOP ================= #
+
 for i,n in enumerate(numbers):
 
     g=get_group(n)
@@ -77,7 +79,8 @@ for i,n in enumerate(numbers):
     hit=None
     state="SCAN"
 
-    if lock_window:
+    # ================= LOCK MODE =================
+    if lock_window is not None:
 
         state="LOCK"
 
@@ -98,20 +101,30 @@ for i,n in enumerate(numbers):
         if lock_remaining<=0:
             lock_window=None
 
-    if not lock_window and len(engine)>=20:
+    # ================= SCAN MODE =================
+    if lock_window is None and len(engine)>=26:
 
         top=scan(engine)
 
         if top:
-
             total=sum(sc for w,sc in top)
             confidence=(top[0][1]/total)*100
             p=confidence/100
             ev=(p*1)-(1-p)
 
+            # 🔥 HIỂN THỊ PREDICT TRONG SCAN (DEBUG)
+            best_window = top[0][0]
+
+            if len(engine)>=best_window:
+                predicted=engine[-best_window]["group"]
+                hit=1 if predicted==g else 0
+                state="SCAN_PREVIEW"
+
+            # 🔥 CHỈ LOCK KHI ĐỦ ĐIỀU KIỆN
             if ev>0 and confidence>=50:
 
                 votes={}
+
                 for w,sc in top:
                     if len(engine)>=w:
                         gr=engine[-w]["group"]
@@ -125,7 +138,13 @@ for i,n in enumerate(numbers):
                         break
 
                 lock_remaining=LOCK_ROUNDS
+                miss_streak=0
                 state="LOCK_START"
+
+                # 🔥 TÍNH HIT NGAY KHI LOCK_START
+                if len(engine)>=lock_window:
+                    predicted=engine[-lock_window]["group"]
+                    hit=1 if predicted==g else 0
 
     engine.append({
         "round":i+1,
@@ -139,43 +158,24 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO+++++ QUANT ENGINE")
+st.title("🚀 PRO++++ CLEAN ENGINE (FULL HIT DISPLAY)")
 
-st.metric("Total Rounds",len(engine))
-st.metric("Active Window",lock_window)
-st.metric("Lock Remaining",lock_remaining)
-st.metric("Miss Streak",miss_streak)
+col1,col2,col3,col4 = st.columns(4)
 
-# QUANT METRICS
-if len(engine)>=26:
+col1.metric("Total Rounds",len(engine))
+col2.metric("Active Window",lock_window)
+col3.metric("Lock Remaining",lock_remaining)
+col4.metric("Miss Streak",miss_streak)
 
-    top=scan(engine)
+# ===== METRICS =====
+hits=[x["hit"] for x in engine if x["hit"] is not None]
+if len(hits)>0:
+    wr=sum(hits)/len(hits)
+    st.metric("Winrate",round(wr*100,2))
 
-    if top:
-
-        total=sum(sc for w,sc in top)
-        confidence=round((top[0][1]/total)*100,2)
-        p=confidence/100
-        ev=round((p*1)-(1-p),3)
-        kelly=round(max(0,p-(1-p))*100,2)
-
-        st.metric("Confidence %",confidence)
-        st.metric("Expected Value",ev)
-        st.metric("Kelly % Capital",kelly)
-
-        if confidence>=70:
-            st.success("🔵 HIGH CONVICTION")
-        elif confidence>=60:
-            st.success("🟢 STRONG SIGNAL")
-        elif confidence>=50:
-            st.warning("🟡 MEDIUM")
-        else:
-            st.error("🔴 WEAK / NO TRADE")
-
-# NEXT GROUP
+# ===== NEXT GROUP =====
 if lock_window and len(engine)>=lock_window:
     next_group=engine[-lock_window]["group"]
-
     st.markdown(f"""
     <div style='padding:15px;
                 background:#1f4e79;
@@ -188,9 +188,9 @@ if lock_window and len(engine)>=lock_window:
     </div>
     """,unsafe_allow_html=True)
 
-# HISTORY newest first
+# ===== HISTORY =====
 df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO+++++ QUANT MODE | EV Filter | Kelly Sizing | Confidence Gate")
+st.caption("PRO++++ CLEAN | LOCK 18 | SCAN 8–19 | FULL HIT VISIBILITY")
