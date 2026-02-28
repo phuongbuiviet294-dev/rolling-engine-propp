@@ -103,26 +103,43 @@ for i,n in enumerate(numbers):
     # ===== SCAN MODE =====
     if lock_window is None and len(engine)>=26:
 
-        best_window=None
-        best_ev=-999
+        total_trades=len([x for x in engine if x["hit"] is not None])
 
-        for w in ALLOWED_WINDOWS:
-            wr=recent_winrate(engine,w)
-            ev=wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
-            if ev>best_ev:
-                best_ev=ev
-                best_window=w
+        # ---------- BOOTSTRAP ----------
+        if total_trades < 20:
+            best_window = ALLOWED_WINDOWS[0]
 
-        if best_window and best_ev>0:
+            predicted = engine[-best_window]["group"]
+            hit = 1 if predicted == g else 0
 
-            predicted=engine[-best_window]["group"]
-            hit=1 if predicted==g else 0
-
-            state="LOCK_START"
+            state="LOCK_START_BOOTSTRAP"
             lock_window=best_window
             lock_remaining=adaptive_lock(engine)
             miss_streak=0
             window_display=lock_window
+
+        # ---------- EV ADAPTIVE ----------
+        else:
+            best_window=None
+            best_ev=-999
+
+            for w in ALLOWED_WINDOWS:
+                wr=recent_winrate(engine,w)
+                ev=wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+                if ev>best_ev:
+                    best_ev=ev
+                    best_window=w
+
+            if best_window and best_ev>0:
+
+                predicted=engine[-best_window]["group"]
+                hit=1 if predicted==g else 0
+
+                state="LOCK_START"
+                lock_window=best_window
+                lock_remaining=adaptive_lock(engine)
+                miss_streak=0
+                window_display=lock_window
 
     engine.append({
         "round":i+1,
@@ -136,7 +153,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO EV ADAPTIVE + VOL LOCK")
+st.title("🚀 PRO EV ADAPTIVE + VOL LOCK (BOOTSTRAP FIX)")
 
 col1,col2,col3,col4 = st.columns(4)
 
@@ -191,4 +208,4 @@ df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO EV ADAPTIVE | WINDOW 9 & 14 | VOL LOCK | PROFIT SIM | KELLY CONTROL")
+st.caption("PRO EV ADAPTIVE | VOL LOCK | BOOTSTRAP FIX | PROFIT SIM | KELLY")
