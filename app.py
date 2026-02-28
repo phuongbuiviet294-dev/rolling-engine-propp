@@ -11,7 +11,7 @@ WINDOWS = [9, 14]
 
 st.set_page_config(layout="wide")
 
-# ===== CORE =====
+# ================= CORE ================= #
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -34,7 +34,10 @@ engine = []
 total_profit = 0
 last_trade_round = -999
 
-# ===== ENGINE LOOP =====
+next_signal = None
+next_window = None
+
+# ================= ENGINE LOOP ================= #
 
 for i, n in enumerate(numbers):
 
@@ -43,7 +46,24 @@ for i, n in enumerate(numbers):
     hit = None
     state = "SCAN"
 
-    if len(engine) >= 40:
+    # ===== EXECUTE TRADE (nếu có signal từ vòng trước) =====
+    if next_signal is not None:
+        predicted = next_signal
+        hit = 1 if predicted == g else 0
+
+        if hit == 1:
+            total_profit += WIN_PROFIT
+        else:
+            total_profit -= LOSE_LOSS
+
+        state = "TRADE"
+        last_trade_round = i
+
+        next_signal = None
+        next_window = None
+
+    # ===== GENERATE SIGNAL CHO VÒNG SAU =====
+    if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
@@ -53,9 +73,9 @@ for i, n in enumerate(numbers):
 
             recent_hits = []
 
-            for j in range(len(engine)-30, len(engine)):
+            for j in range(len(engine) - 30, len(engine)):
                 if j >= w:
-                    if engine[j]["group"] == engine[j-w]["group"]:
+                    if engine[j]["group"] == engine[j - w]["group"]:
                         recent_hits.append(1)
                     else:
                         recent_hits.append(0)
@@ -74,22 +94,13 @@ for i, n in enumerate(numbers):
             best_window is not None
             and best_wr > 0.29
             and best_ev >= 0
-            and i - last_trade_round > 4
         ):
-
-            predicted = engine[-best_window]["group"]
-            hit = 1 if predicted == g else 0
-
-            if hit == 1:
-                total_profit += WIN_PROFIT
-            else:
-                total_profit -= LOSE_LOSS
-
-            last_trade_round = i
-            state = "TRADE"
+            next_signal = engine[-best_window]["group"]
+            next_window = best_window
+            state = "SIGNAL"
 
     engine.append({
-        "round": i+1,
+        "round": i + 1,
         "number": n,
         "group": g,
         "predicted": predicted,
@@ -97,23 +108,25 @@ for i, n in enumerate(numbers):
         "state": state
     })
 
-# ===== DASHBOARD =====
+# ================= DASHBOARD ================= #
 
-st.title("🎯 CLEAN BALANCED ENGINE")
+st.title("🎯 CLEAN ONE-SHOT ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
 col1.metric("Total Rounds", len(engine))
-col2.metric("Total Profit", round(total_profit,2))
+col2.metric("Total Profit", round(total_profit, 2))
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
-
 if hits:
     wr = np.mean(hits)
-    col3.metric("Winrate %", round(wr*100,2))
+    col3.metric("Winrate %", round(wr * 100, 2))
+else:
+    col3.metric("Winrate %", 0)
 
-# ===== NEXT SIGNAL =====
-if engine[-1]["predicted"] is not None:
+# ===== NEXT GROUP DISPLAY =====
+
+if next_signal is not None:
     st.markdown(f"""
     <div style='padding:15px;
                 background:#1f4e79;
@@ -122,11 +135,15 @@ if engine[-1]["predicted"] is not None:
                 text-align:center;
                 font-size:24px;
                 font-weight:bold'>
-        🎯 NEXT GROUP: {engine[-1]["predicted"]}
+        🎯 NEXT GROUP: {next_signal} (window {next_window})
     </div>
     """, unsafe_allow_html=True)
+else:
+    st.info("No valid signal yet")
+
+# ===== HISTORY =====
 
 st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("CLEAN BALANCED MODE | WINDOW 9-14 | ONE SHOT | NO LOCK | SIMPLE LOGIC")
+st.caption("ONE SHOT MODE | TRADE AFTER SIGNAL | WINDOW 9 & 14 | EV FILTER")
