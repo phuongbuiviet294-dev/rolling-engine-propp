@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import math
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 LOCK_ROUNDS = 18
@@ -21,10 +20,8 @@ def hits_26(data, w):
     if len(data) < 26:
         return 0
     recent = data[-26:]
-    return sum(
-        1 for i in range(w,26)
-        if recent[i]["group"] == recent[i-w]["group"]
-    )
+    return sum(1 for i in range(w,26)
+               if recent[i]["group"] == recent[i-w]["group"])
 
 def streak(data, w):
     s = 0
@@ -46,7 +43,7 @@ def score_window(data, w):
 
 def scan(data):
     res = []
-    for w in range(8,20):
+    for w in range(8,20):  # 🔥 8–19
         sc = score_window(data,w)
         if sc>0:
             res.append((w,sc))
@@ -78,11 +75,13 @@ for i,n in enumerate(numbers):
     predicted=None
     hit=None
     state="SCAN"
+    window_display=None
 
     # ================= LOCK MODE =================
     if lock_window is not None:
 
         state="LOCK"
+        window_display = lock_window
 
         if len(engine)>=lock_window:
             predicted=engine[-lock_window]["group"]
@@ -95,10 +94,7 @@ for i,n in enumerate(numbers):
 
         lock_remaining-=1
 
-        if miss_streak>=3:
-            lock_window=None
-
-        if lock_remaining<=0:
+        if miss_streak>=3 or lock_remaining<=0:
             lock_window=None
 
     # ================= SCAN MODE =================
@@ -112,28 +108,28 @@ for i,n in enumerate(numbers):
             p=confidence/100
             ev=(p*1)-(1-p)
 
-            # 🔥 HIỂN THỊ PREDICT TRONG SCAN (DEBUG)
             best_window = top[0][0]
+            window_display = best_window
 
+            # 🔥 Preview prediction luôn
             if len(engine)>=best_window:
                 predicted=engine[-best_window]["group"]
                 hit=1 if predicted==g else 0
                 state="SCAN_PREVIEW"
 
-            # 🔥 CHỈ LOCK KHI ĐỦ ĐIỀU KIỆN
+            # 🔥 Điều kiện lock
             if ev>0 and confidence>=50:
 
                 votes={}
-
                 for w,sc in top:
                     if len(engine)>=w:
                         gr=engine[-w]["group"]
                         votes[gr]=votes.get(gr,0)+sc
 
-                best=max(votes,key=votes.get)
+                best_group=max(votes,key=votes.get)
 
                 for w,sc in top:
-                    if len(engine)>=w and engine[-w]["group"]==best:
+                    if len(engine)>=w and engine[-w]["group"]==best_group:
                         lock_window=w
                         break
 
@@ -141,10 +137,10 @@ for i,n in enumerate(numbers):
                 miss_streak=0
                 state="LOCK_START"
 
-                # 🔥 TÍNH HIT NGAY KHI LOCK_START
                 if len(engine)>=lock_window:
                     predicted=engine[-lock_window]["group"]
                     hit=1 if predicted==g else 0
+                    window_display=lock_window
 
     engine.append({
         "round":i+1,
@@ -152,13 +148,13 @@ for i,n in enumerate(numbers):
         "group":g,
         "predicted":predicted,
         "hit":hit,
-        "window":lock_window,
+        "window":window_display,
         "state":state
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PRO++++ CLEAN ENGINE (FULL HIT DISPLAY)")
+st.title("🚀 PRO++++ CLEAN FIXED")
 
 col1,col2,col3,col4 = st.columns(4)
 
@@ -167,9 +163,9 @@ col2.metric("Active Window",lock_window)
 col3.metric("Lock Remaining",lock_remaining)
 col4.metric("Miss Streak",miss_streak)
 
-# ===== METRICS =====
+# ===== WINRATE =====
 hits=[x["hit"] for x in engine if x["hit"] is not None]
-if len(hits)>0:
+if hits:
     wr=sum(hits)/len(hits)
     st.metric("Winrate",round(wr*100,2))
 
@@ -193,4 +189,4 @@ df_engine=pd.DataFrame(engine)
 st.subheader("History")
 st.dataframe(df_engine.iloc[::-1],use_container_width=True)
 
-st.caption("PRO++++ CLEAN | LOCK 18 | SCAN 8–19 | FULL HIT VISIBILITY")
+st.caption("PRO++++ CLEAN FIXED | LOCK 18 | SCAN 8–19 | FULL HIT SAFE")
