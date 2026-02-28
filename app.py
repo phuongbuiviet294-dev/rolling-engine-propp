@@ -7,7 +7,9 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 14]
+WINDOWS = range(8, 19)  # dynamic windows
+COOLDOWN = 2            # aggressive cooldown
+EV_THRESHOLD = 0.1
 
 st.set_page_config(layout="wide")
 
@@ -38,18 +40,12 @@ last_trade_round = -999
 
 next_signal = None
 next_window = None
-next_wr = None
 next_ev = None
-
-preview_signal = None
-preview_window = None
-preview_wr = None
-preview_ev = None
+next_wr = None
 
 for i, n in enumerate(numbers):
 
     g = get_group(n)
-
     predicted = None
     hit = None
     state = "SCAN"
@@ -70,8 +66,8 @@ for i, n in enumerate(numbers):
 
         next_signal = None
         next_window = None
-        next_wr = None
         next_ev = None
+        next_wr = None
 
     # ===== SCAN WINDOWS =====
     if len(engine) >= 40:
@@ -99,22 +95,16 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        if best_window is not None:
-            preview_signal = engine[-best_window]["group"]
-            preview_window = best_window
-            preview_wr = round(best_wr * 100, 2)
-            preview_ev = round(best_ev, 3)
-
-        # ===== EV FILTER ONLY =====
+        # ===== AGGRESSIVE ENTRY =====
         if (
             best_window is not None
-            and best_ev >= 0.1
-            and i - last_trade_round > 4
+            and best_ev >= EV_THRESHOLD
+            and i - last_trade_round > COOLDOWN
         ):
             next_signal = engine[-best_window]["group"]
             next_window = best_window
-            next_wr = round(best_wr * 100, 2)
             next_ev = round(best_ev, 3)
+            next_wr = round(best_wr * 100, 2)
             state = "SIGNAL"
 
     engine.append({
@@ -128,7 +118,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 PURE EV MODE (EV ≥ 0.1)")
+st.title("🔥 FULL AGGRESSIVE EV ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -142,45 +132,29 @@ if hits:
 else:
     col3.metric("Winrate %", 0)
 
-# ===== SIGNAL DISPLAY =====
+# ===== NEXT GROUP DISPLAY =====
 
 if next_signal is not None:
     st.markdown(f"""
     <div style='padding:20px;
-                background:#007acc;
+                background:#cc0000;
                 color:white;
                 border-radius:12px;
                 text-align:center;
-                font-size:26px;
+                font-size:28px;
                 font-weight:bold'>
-        🎯 NEXT GROUP: {next_signal}
+        🚨 NEXT GROUP: {next_signal}
         <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
-
-elif preview_signal is not None:
-    st.markdown(f"""
-    <div style='padding:15px;
-                background:#444;
-                color:white;
-                border-radius:10px;
-                text-align:center;
-                font-size:20px;'>
-        🔎 PREVIEW: {preview_signal}
-        <br>Window: {preview_window}
-        <br>WR: {preview_wr}%
-        <br>EV: {preview_ev}
-    </div>
-    """, unsafe_allow_html=True)
-
 else:
-    st.info("No edge detected")
+    st.info("No aggressive edge right now")
 
 # ===== HISTORY =====
 
 st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("EV FILTER ONLY | WINDOW 9 & 14 | ONE-SHOT")
+st.caption("Dynamic Window 8–18 | Cooldown 2 | EV ≥ 0.1 | High Frequency Mode")
