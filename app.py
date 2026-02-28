@@ -7,10 +7,12 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOW = 14
-ROLLING_SAMPLE = 40
+
+WINDOWS = range(8, 19)
+ROLLING_SAMPLE = 35
+WR_THRESHOLD = 0.35
+EV_THRESHOLD = 0.15
 COOLDOWN = 2
-EV_THRESHOLD = 0.12
 
 st.set_page_config(layout="wide")
 
@@ -34,9 +36,11 @@ numbers = df["number"].dropna().astype(int).tolist()
 engine = []
 total_profit = 0
 last_trade_round = -999
+
 next_signal = None
-next_ev = None
+next_window = None
 next_wr = None
+next_ev = None
 
 for i, n in enumerate(numbers):
 
@@ -58,28 +62,48 @@ for i, n in enumerate(numbers):
 
         state = "TRADE"
         last_trade_round = i
+
         next_signal = None
-        next_ev = None
+        next_window = None
         next_wr = None
+        next_ev = None
 
-    # ===== SCAN WINDOW 14 =====
-    if len(engine) >= WINDOW + ROLLING_SAMPLE:
+    # ===== REGIME SCAN =====
+    if len(engine) >= max(WINDOWS) + ROLLING_SAMPLE:
 
-        recent_hits = []
+        best_window = None
+        best_wr = 0
+        best_ev = -999
 
-        for j in range(len(engine) - ROLLING_SAMPLE, len(engine)):
-            if engine[j]["group"] == engine[j - WINDOW]["group"]:
-                recent_hits.append(1)
-            else:
-                recent_hits.append(0)
+        for w in WINDOWS:
 
-        wr = np.mean(recent_hits)
-        ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+            hits = []
 
-        if ev >= EV_THRESHOLD and i - last_trade_round > COOLDOWN:
-            next_signal = engine[-WINDOW]["group"]
-            next_ev = round(ev, 3)
-            next_wr = round(wr * 100, 2)
+            for j in range(len(engine) - ROLLING_SAMPLE, len(engine)):
+                if engine[j]["group"] == engine[j - w]["group"]:
+                    hits.append(1)
+                else:
+                    hits.append(0)
+
+            wr = np.mean(hits)
+            ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+
+            if wr > best_wr:
+                best_wr = wr
+                best_ev = ev
+                best_window = w
+
+        # ===== STRONG REGIME ENTRY =====
+        if (
+            best_window is not None
+            and best_wr >= WR_THRESHOLD
+            and best_ev >= EV_THRESHOLD
+            and i - last_trade_round > COOLDOWN
+        ):
+            next_signal = engine[-best_window]["group"]
+            next_window = best_window
+            next_wr = round(best_wr * 100, 2)
+            next_ev = round(best_ev, 3)
             state = "SIGNAL"
 
     engine.append({
@@ -93,16 +117,16 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 WINDOW 14 OPTIMIZED (Rolling 40)")
+st.title("🔥 REGIME DETECTION ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
 col1.metric("Total Rounds", len(engine))
 col2.metric("Total Profit", round(total_profit, 2))
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
-if hits:
-    wr_total = np.mean(hits)
+hits_total = [x["hit"] for x in engine if x["hit"] is not None]
+if hits_total:
+    wr_total = np.mean(hits_total)
     col3.metric("Winrate %", round(wr_total * 100, 2))
 else:
     col3.metric("Winrate %", 0)
@@ -111,24 +135,24 @@ else:
 
 if next_signal is not None:
     st.markdown(f"""
-    <div style='padding:20px;
+    <div style='padding:25px;
                 background:#cc0000;
                 color:white;
-                border-radius:12px;
+                border-radius:14px;
                 text-align:center;
-                font-size:26px;
+                font-size:28px;
                 font-weight:bold'>
-        🚨 NEXT GROUP: {next_signal}
+        🚨 STRONG REGIME DETECTED
+        <br>NEXT GROUP: {next_signal}
+        <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("No valid edge right now")
-
-# ===== HISTORY =====
+    st.info("No strong regime right now")
 
 st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("Window 14 | Rolling 40 | EV ≥ 0.12 | Cooldown 2")
+st.caption("Dynamic Window 8–18 | WR ≥ 35% | EV ≥ 0.15 | Regime Only Mode")
