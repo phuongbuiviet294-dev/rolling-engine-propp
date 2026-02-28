@@ -40,7 +40,6 @@ next_signal = None
 next_window = None
 next_wr = None
 next_ev = None
-signal_created_at = None
 
 preview_signal = None
 preview_window = None
@@ -73,7 +72,6 @@ for i, n in enumerate(numbers):
         next_window = None
         next_wr = None
         next_ev = None
-        signal_created_at = None
 
     # ===== SCAN WINDOWS =====
     if len(engine) >= 40:
@@ -88,10 +86,9 @@ for i, n in enumerate(numbers):
 
             for j in range(len(engine) - 30, len(engine)):
                 if j >= w:
-                    if engine[j]["group"] == engine[j - w]["group"]:
-                        recent_hits.append(1)
-                    else:
-                        recent_hits.append(0)
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
+                    )
 
             if len(recent_hits) >= 20:
                 wr = np.mean(recent_hits)
@@ -108,18 +105,16 @@ for i, n in enumerate(numbers):
             preview_wr = round(best_wr * 100, 2)
             preview_ev = round(best_ev, 3)
 
-        # ===== STRONG SIGNAL (WR ≥ 32%) =====
+        # ===== EV FILTER ONLY =====
         if (
             best_window is not None
-            and best_wr >= 0.32
-            and best_ev > 0
+            and best_ev >= 0.1
             and i - last_trade_round > 4
         ):
             next_signal = engine[-best_window]["group"]
             next_window = best_window
             next_wr = round(best_wr * 100, 2)
             next_ev = round(best_ev, 3)
-            signal_created_at = i + 1
             state = "SIGNAL"
 
     engine.append({
@@ -133,7 +128,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 STRONG EDGE MODE (WR ≥ 32%)")
+st.title("🚀 PURE EV MODE (EV ≥ 0.1)")
 
 col1, col2, col3 = st.columns(3)
 
@@ -150,32 +145,30 @@ else:
 # ===== SIGNAL DISPLAY =====
 
 if next_signal is not None:
-
     st.markdown(f"""
     <div style='padding:20px;
-                background:#b30000;
+                background:#007acc;
                 color:white;
                 border-radius:12px;
                 text-align:center;
                 font-size:26px;
                 font-weight:bold'>
-        🚨 STRONG NEXT GROUP: {next_signal}
+        🎯 NEXT GROUP: {next_signal}
         <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
 
-elif preview_signal is not None and preview_wr >= 31:
-
+elif preview_signal is not None:
     st.markdown(f"""
     <div style='padding:15px;
                 background:#444;
                 color:white;
                 border-radius:10px;
                 text-align:center;
-                font-size:22px;'>
-        🔎 PREVIEW (Almost Ready): {preview_signal}
+                font-size:20px;'>
+        🔎 PREVIEW: {preview_signal}
         <br>Window: {preview_window}
         <br>WR: {preview_wr}%
         <br>EV: {preview_ev}
@@ -183,11 +176,11 @@ elif preview_signal is not None and preview_wr >= 31:
     """, unsafe_allow_html=True)
 
 else:
-    st.info("No strong signal now")
+    st.info("No edge detected")
 
 # ===== HISTORY =====
 
 st.subheader("History")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("WR ≥ 32% | High Edge Only | Highlight Strong Entry")
+st.caption("EV FILTER ONLY | WINDOW 9 & 14 | ONE-SHOT")
