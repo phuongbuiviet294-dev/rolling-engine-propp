@@ -7,14 +7,11 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-
-WINDOWS = range(8, 19)
-ROLLING_SAMPLE = 35
-WR_THRESHOLD = 0.35
-EV_THRESHOLD = 0.15
-COOLDOWN = 2
+WINDOWS = [9, 14]
 
 st.set_page_config(layout="wide")
+
+# ================= CORE ================= #
 
 def get_group(n):
     if 1 <= n <= 3: return 1
@@ -33,6 +30,8 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
+# ================= ENGINE ================= #
+
 engine = []
 total_profit = 0
 last_trade_round = -999
@@ -41,18 +40,30 @@ next_signal = None
 next_window = None
 next_wr = None
 next_ev = None
+signal_created_at = None
 
 for i, n in enumerate(numbers):
 
     g = get_group(n)
+
     predicted = None
     hit = None
     state = "SCAN"
+    window_used = None
+    rolling_wr = None
+    ev_value = None
+    executed_from_round = None
+    reason = None
 
-    # ===== EXECUTE TRADE =====
+    # ===== EXECUTE TRADE (vòng sau khi có signal) =====
     if next_signal is not None:
 
         predicted = next_signal
+        window_used = next_window
+        rolling_wr = next_wr
+        ev_value = next_ev
+        executed_from_round = signal_created_at
+
         hit = 1 if predicted == g else 0
 
         if hit == 1:
@@ -61,50 +72,54 @@ for i, n in enumerate(numbers):
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
+        reason = f"Executed signal created at round {signal_created_at}"
+
         last_trade_round = i
 
+        # reset signal
         next_signal = None
         next_window = None
         next_wr = None
         next_ev = None
+        signal_created_at = None
 
-    # ===== REGIME SCAN =====
-    if len(engine) >= max(WINDOWS) + ROLLING_SAMPLE:
+    # ===== GENERATE SIGNAL =====
+    if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
-        best_wr = 0
         best_ev = -999
+        best_wr = 0
 
         for w in WINDOWS:
 
-            hits = []
+            recent_hits = []
 
-            for j in range(len(engine) - ROLLING_SAMPLE, len(engine)):
-                if engine[j]["group"] == engine[j - w]["group"]:
-                    hits.append(1)
-                else:
-                    hits.append(0)
+            for j in range(len(engine) - 30, len(engine)):
+                if j >= w:
+                    if engine[j]["group"] == engine[j - w]["group"]:
+                        recent_hits.append(1)
+                    else:
+                        recent_hits.append(0)
 
-            wr = np.mean(hits)
-            ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+            if len(recent_hits) >= 20:
+                wr = np.mean(recent_hits)
+                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
-            if wr > best_wr:
-                best_wr = wr
-                best_ev = ev
-                best_window = w
+                if ev > best_ev:
+                    best_ev = ev
+                    best_window = w
+                    best_wr = wr
 
-        # ===== STRONG REGIME ENTRY =====
-        if (
-            best_window is not None
-            and best_wr >= WR_THRESHOLD
-            and best_ev >= EV_THRESHOLD
-            and i - last_trade_round > COOLDOWN
-        ):
+        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
+
             next_signal = engine[-best_window]["group"]
             next_window = best_window
             next_wr = round(best_wr * 100, 2)
             next_ev = round(best_ev, 3)
+            signal_created_at = i + 1
+
             state = "SIGNAL"
+            reason = f"Signal created (window {best_window}, WR {next_wr}%, EV {next_ev})"
 
     engine.append({
         "round": i + 1,
@@ -112,47 +127,56 @@ for i, n in enumerate(numbers):
         "group": g,
         "predicted": predicted,
         "hit": hit,
-        "state": state
+        "window": window_used,
+        "rolling_wr_%": rolling_wr,
+        "ev": ev_value,
+        "state": state,
+        "signal_created_at": signal_created_at,
+        "executed_from_round": executed_from_round,
+        "reason": reason
     })
 
 # ================= DASHBOARD ================= #
 
-st.title("🔥 REGIME DETECTION ENGINE")
+st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
 col1.metric("Total Rounds", len(engine))
 col2.metric("Total Profit", round(total_profit, 2))
 
-hits_total = [x["hit"] for x in engine if x["hit"] is not None]
-if hits_total:
-    wr_total = np.mean(hits_total)
-    col3.metric("Winrate %", round(wr_total * 100, 2))
+hits = [x["hit"] for x in engine if x["hit"] is not None]
+
+if hits:
+    wr = np.mean(hits)
+    col3.metric("Winrate %", round(wr * 100, 2))
 else:
     col3.metric("Winrate %", 0)
 
-# ===== SIGNAL DISPLAY =====
+# ===== NEXT GROUP DISPLAY =====
 
 if next_signal is not None:
     st.markdown(f"""
-    <div style='padding:25px;
-                background:#cc0000;
+    <div style='padding:15px;
+                background:#1f4e79;
                 color:white;
-                border-radius:14px;
+                border-radius:10px;
                 text-align:center;
-                font-size:28px;
+                font-size:24px;
                 font-weight:bold'>
-        🚨 STRONG REGIME DETECTED
-        <br>NEXT GROUP: {next_signal}
+        🎯 NEXT GROUP: {next_signal}
+        <br>Signal created at round: {signal_created_at}
         <br>Window: {next_window}
         <br>WR: {next_wr}%
         <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("No strong regime right now")
+    st.info("No valid signal yet")
 
-st.subheader("History")
+# ===== HISTORY =====
+
+st.subheader("History (Full Timing Trace)")
 st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
 
-st.caption("Dynamic Window 8–18 | WR ≥ 35% | EV ≥ 0.15 | Regime Only Mode")
+st.caption("ONE SHOT MODE | WINDOW 9 & 14 | EV FILTER | SIGNAL → TRADE TIMING CLEAR")
