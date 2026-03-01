@@ -30,22 +30,6 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= DASHBOARD ================= #
-
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
-
-# ================= RESET BUTTON ================= #
-
-col_reset_left, col_reset_right = st.columns([8,1])
-
-with col_reset_right:
-    if st.button("🔄 RESET ALL", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.cache_data.clear()
-        st.success("Engine fully reset.")
-        st.rerun()
-
 # ================= ENGINE ================= #
 
 engine = []
@@ -73,6 +57,7 @@ for i, n in enumerate(numbers):
     window_used = None
     rolling_wr = None
     ev_value = None
+    executed_from_round = None
     reason = None
 
     # ===== EXECUTE TRADE =====
@@ -82,6 +67,7 @@ for i, n in enumerate(numbers):
         window_used = next_window
         rolling_wr = next_wr
         ev_value = next_ev
+        executed_from_round = signal_created_at
 
         hit = 1 if predicted == g else 0
 
@@ -94,6 +80,7 @@ for i, n in enumerate(numbers):
         reason = f"Executed signal from round {signal_created_at}"
 
         last_trade_round = i
+
         next_signal = None
 
     # ===== GENERATE SIGNAL =====
@@ -122,20 +109,22 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        # Preview
+        # ==== Preview (WR > 28) ====
         if best_window is not None and best_wr > 0.28:
             preview_signal = engine[-best_window]["group"]
             preview_window = best_window
             preview_wr = round(best_wr * 100, 2)
             preview_ev = round(best_ev, 3)
 
-        # Confirm trade
+        # ==== Confirm trade (WR > 29 & EV >= 0) ====
         if best_window is not None and best_wr > 0.29 and best_ev >= 0:
+
             next_signal = engine[-best_window]["group"]
             next_window = best_window
             next_wr = round(best_wr * 100, 2)
             next_ev = round(best_ev, 3)
             signal_created_at = i + 1
+
             state = "SIGNAL"
             reason = f"Signal created (window {best_window})"
 
@@ -152,7 +141,9 @@ for i, n in enumerate(numbers):
         "reason": reason
     })
 
-# ================= METRICS ================= #
+# ================= DASHBOARD ================= #
+
+st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -211,4 +202,4 @@ st.subheader("History")
 hist_df = pd.DataFrame(engine).iloc[::-1]
 st.dataframe(hist_df, use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | EV FILTER | STABLE + RESET SAFE")
+st.caption("WINDOW 9 & 14 | EV FILTER | SIMPLE & STABLE")
