@@ -8,6 +8,7 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 WINDOWS = [9, 14]
+COOLDOWN = 8   # ✅ tăng vòng chờ từ 4 → 8
 
 st.set_page_config(layout="wide")
 
@@ -80,11 +81,10 @@ for i, n in enumerate(numbers):
         reason = f"Executed signal from round {signal_created_at}"
 
         last_trade_round = i
-
         next_signal = None
 
     # ===== GENERATE SIGNAL =====
-    if len(engine) >= 40 and i - last_trade_round > 4:
+    if len(engine) >= 40 and i - last_trade_round > COOLDOWN:
 
         best_window = None
         best_ev = -999
@@ -143,7 +143,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
+st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE (Cooldown 8)")
 
 col1, col2, col3 = st.columns(3)
 
@@ -202,4 +202,4 @@ st.subheader("History")
 hist_df = pd.DataFrame(engine).iloc[::-1]
 st.dataframe(hist_df, use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | EV FILTER | SIMPLE & STABLE")
+st.caption("WINDOW 9 & 14 | EV FILTER | COOLDOWN = 8 | SIMPLE & STABLE")
