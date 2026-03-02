@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-GOOGLE_SHEET_CSV = "YOUR_LINK_HERE"
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
