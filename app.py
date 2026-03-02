@@ -11,6 +11,8 @@ WINDOWS = [9, 14]
 
 st.set_page_config(layout="wide")
 
+# ================= CORE ================= #
+
 def get_group(n):
     if 1 <= n <= 3: return 1
     if 4 <= n <= 6: return 2
@@ -27,142 +29,179 @@ if df.empty:
     st.stop()
 
 numbers = df["number"].dropna().astype(int).tolist()
-groups = [get_group(n) for n in numbers]
+
+# ================= ENGINE ================= #
 
 engine = []
 total_profit = 0
 last_trade_round = -999
-next_signal = None
-current_mode = "STABILITY"
 
-for i, g in enumerate(groups):
+next_signal = None
+next_window = None
+next_wr = None
+next_ev = None
+signal_created_at = None
+
+preview_signal = None
+preview_window = None
+preview_wr = None
+preview_ev = None
+
+for i, n in enumerate(numbers):
+
+    g = get_group(n)
 
     predicted = None
     hit = None
     state = "SCAN"
+    window_used = None
+    rolling_wr = None
+    ev_value = None
+    executed_from_round = None
+    reason = None
 
-    # ===== EXECUTE =====
+    # ===== EXECUTE TRADE =====
     if next_signal is not None:
+
         predicted = next_signal
+        window_used = next_window
+        rolling_wr = next_wr
+        ev_value = next_ev
+        executed_from_round = signal_created_at
+
         hit = 1 if predicted == g else 0
 
-        if hit:
+        if hit == 1:
             total_profit += WIN_PROFIT
         else:
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
+        reason = f"Executed signal from round {signal_created_at}"
+
         last_trade_round = i
         next_signal = None
 
-    # ===== REGIME ANALYSIS =====
-    if len(engine) >= 150:
+    # ===== GENERATE SIGNAL =====
+    if len(engine) >= 40 and i - last_trade_round > 8:
 
-        # ----- SHORT / LONG WR -----
-        short_hits = []
-        long_hits = []
+        window_stats = []
 
-        for j in range(len(engine)-30, len(engine)):
-            for w in WINDOWS:
+        for w in WINDOWS:
+
+            recent_hits = []
+
+            for j in range(len(engine) - 30, len(engine)):
                 if j >= w:
-                    short_hits.append(
-                        1 if engine[j]["group"] == engine[j-w]["group"] else 0
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
                     )
 
-        for j in range(len(engine)-120, len(engine)):
-            for w in WINDOWS:
-                if j >= w:
-                    long_hits.append(
-                        1 if engine[j]["group"] == engine[j-w]["group"] else 0
-                    )
+            if len(recent_hits) >= 20:
+                wr = np.mean(recent_hits)
+                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+                window_stats.append((w, wr, ev))
 
-        if short_hits and long_hits:
+        if len(window_stats) == 2:
 
-            short_wr = np.mean(short_hits)
-            long_wr = np.mean(long_hits)
-            deviation = short_wr - long_wr
+            window_stats.sort(key=lambda x: x[1], reverse=True)
 
-            # ----- ENTROPY FILTER -----
-            recent_groups = [x["group"] for x in engine[-40:]]
-            freq = pd.Series(recent_groups).value_counts(normalize=True)
-            max_freq = freq.max()
+            best_window, best_wr, best_ev = window_stats[0]
+            second_wr = window_stats[1][1]
 
-            # ----- MODE SWITCH -----
-            if short_wr >= 0.42:
-                current_mode = "AGGRESSIVE"
-                wr_threshold = 0.30
-                cooldown = 6
-            elif deviation >= 0.04:
-                current_mode = "PROFIT"
-                wr_threshold = 0.30
-                cooldown = 10
-            else:
-                current_mode = "STABILITY"
-                wr_threshold = 0.31
-                cooldown = 12
+            # ==== Preview (WR >= 29%) ====
+            if best_wr >= 0.29:
+                preview_signal = engine[-best_window]["group"]
+                preview_window = best_window
+                preview_wr = round(best_wr * 100, 2)
+                preview_ev = round(best_ev, 3)
 
-            # ----- SIGNAL -----
-            if i - last_trade_round > cooldown and max_freq >= 0.32:
+            # ==== Confirm trade (Dominant window + WR >=30 + EV >=0) ====
+            if (best_wr - second_wr) >= 0.04 \
+               and best_wr >= 0.30 \
+               and best_ev >= 0:
 
-                window_stats = []
+                next_signal = engine[-best_window]["group"]
+                next_window = best_window
+                next_wr = round(best_wr * 100, 2)
+                next_ev = round(best_ev, 3)
+                signal_created_at = i + 1
 
-                for w in WINDOWS:
-                    hits = []
-                    for j in range(len(engine)-40, len(engine)):
-                        if j >= w:
-                            hits.append(
-                                1 if engine[j]["group"] == engine[j-w]["group"] else 0
-                            )
-                    if len(hits) >= 25:
-                        wr = np.mean(hits)
-                        ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
-                        window_stats.append((w, wr, ev))
-
-                if len(window_stats) == 2:
-
-                    window_stats.sort(key=lambda x: x[1], reverse=True)
-
-                    best_w, best_wr, best_ev = window_stats[0]
-                    second_wr = window_stats[1][1]
-
-                    # Dominant window filter
-                    if (best_wr - second_wr) >= 0.05 \
-                       and best_wr >= wr_threshold \
-                       and best_ev >= 0:
-
-                        next_signal = engine[-best_w]["group"]
-                        state = "SIGNAL"
+                state = "SIGNAL"
+                reason = f"Signal created (window {best_window})"
 
     engine.append({
-        "round": i+1,
+        "round": i + 1,
+        "number": n,
         "group": g,
+        "predicted": predicted,
+        "hit": hit,
+        "window": window_used,
+        "rolling_wr_%": rolling_wr,
+        "ev": ev_value,
         "state": state,
-        "mode": current_mode
+        "reason": reason
     })
 
-# ===== DASHBOARD =====
+# ================= DASHBOARD ================= #
 
-st.title("🔥 ADVANCED REGIME HYBRID ENGINE")
+st.title("🎯 OPTIMIZED ONE-SHOT ENGINE")
 
-col1, col2 = st.columns(2)
-col1.metric("Total Profit", round(total_profit,2))
-col2.metric("Current Mode", current_mode)
+col1, col2, col3 = st.columns(3)
 
-if next_signal:
+col1.metric("Total Rounds", len(engine))
+col2.metric("Total Profit", round(total_profit, 2))
+
+hits = [x["hit"] for x in engine if x["hit"] is not None]
+
+if hits:
+    wr = np.mean(hits)
+    col3.metric("Winrate %", round(wr * 100, 2))
+else:
+    col3.metric("Winrate %", 0)
+
+# ================= PREVIEW ================= #
+
+if preview_signal is not None:
+    st.markdown(f"""
+    <div style='padding:15px;
+                background:#444;
+                color:white;
+                border-radius:10px;
+                text-align:center;
+                font-size:20px'>
+        🔎 PREVIEW SIGNAL: {preview_signal}
+        <br>Window: {preview_window}
+        <br>WR: {preview_wr}%
+        <br>EV: {preview_ev}
+    </div>
+    """, unsafe_allow_html=True)
+
+# ================= NEXT GROUP ================= #
+
+if next_signal is not None:
     st.markdown(f"""
     <div style='padding:20px;
                 background:#c62828;
                 color:white;
                 border-radius:12px;
                 text-align:center;
-                font-size:26px;
+                font-size:28px;
                 font-weight:bold'>
-        🚨 NEXT GROUP: {next_signal}
-        <br>MODE: {current_mode}
+        🚨 READY TO BET 🚨
+        <br>🎯 NEXT GROUP: {next_signal}
+        <br>Window: {next_window}
+        <br>WR: {next_wr}%
+        <br>EV: {next_ev}
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("No strong regime detected")
+    st.info("No valid signal yet")
+
+# ================= HISTORY ================= #
 
 st.subheader("History")
-st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
+hist_df = pd.DataFrame(engine).iloc[::-1]
+st.dataframe(hist_df, use_container_width=True)
+
+st.caption("WINDOW 9 & 14 | Dominant Filter | Cooldown 8 | Stable Mode")
