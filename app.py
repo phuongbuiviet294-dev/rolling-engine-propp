@@ -7,7 +7,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 14]
+WINDOWS = [8,9,10, 14,15,17]
 
 st.set_page_config(layout="wide")
 
@@ -117,7 +117,7 @@ for i, n in enumerate(numbers):
             preview_ev = round(best_ev, 3)
 
         # ==== Confirm trade (WR > 29 & EV >= 0) ====
-        if best_window is not None and best_wr > 0.29 and best_ev >= 0.06:
+        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
 
             next_signal = engine[-best_window]["group"]
             next_window = best_window
