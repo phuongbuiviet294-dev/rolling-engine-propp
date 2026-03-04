@@ -9,8 +9,10 @@ WIN_PROFIT=2.5
 LOSE_LOSS=1
 
 WINDOWS=[9,14]
-LOOKBACK=60
+LOOKBACK=80
 COOLDOWN=3
+
+REGIME_STOP=10
 
 st.set_page_config(layout="wide")
 
@@ -43,6 +45,8 @@ next_wr=None
 next_ev=None
 
 retry_mode=False
+miss_streak=0
+pause_until=-1
 
 preview_signal=None
 preview_window=None
@@ -63,7 +67,7 @@ for i,n in enumerate(numbers):
     reason=None
 
 
-# EXECUTE
+# ===== EXECUTE =====
 
     if next_signal is not None:
 
@@ -79,10 +83,12 @@ for i,n in enumerate(numbers):
             total_profit+=WIN_PROFIT
             next_signal=None
             retry_mode=False
+            miss_streak=0
 
         else:
 
             total_profit-=LOSE_LOSS
+            miss_streak+=1
 
             if retry_mode==False:
                 retry_mode=True
@@ -93,10 +99,20 @@ for i,n in enumerate(numbers):
         state="TRADE"
         last_trade_round=i
 
+        if miss_streak>=2:
 
-# SCAN
+            pause_until=i+REGIME_STOP
+            miss_streak=0
 
-    if len(engine)>=LOOKBACK and i-last_trade_round>COOLDOWN and next_signal is None:
+
+# ===== SCAN =====
+
+    if (
+        len(engine)>=LOOKBACK
+        and i-last_trade_round>COOLDOWN
+        and next_signal is None
+        and i>pause_until
+    ):
 
         best_window=None
         best_ev=-999
@@ -114,7 +130,7 @@ for i,n in enumerate(numbers):
                         1 if engine[j]["group"]==engine[j-w]["group"] else 0
                     )
 
-            if len(hits)>=30:
+            if len(hits)>=40:
 
                 wr=np.mean(hits)
 
@@ -127,9 +143,9 @@ for i,n in enumerate(numbers):
                     best_wr=wr
 
 
-# PREVIEW
+# ===== PREVIEW =====
 
-        if best_window and best_wr>0.29:
+        if best_window and best_wr>0.30:
 
             preview_signal=engine[-best_window]["group"]
             preview_window=best_window
@@ -137,9 +153,9 @@ for i,n in enumerate(numbers):
             preview_ev=round(best_ev,3)
 
 
-# CONFIRM
+# ===== CONFIRM =====
 
-        if best_window and best_wr>0.30 and best_ev>0:
+        if best_window and best_wr>0.31 and best_ev>0:
 
             next_signal=engine[-best_window]["group"]
             next_window=best_window
@@ -147,7 +163,7 @@ for i,n in enumerate(numbers):
             next_ev=round(best_ev,3)
 
             state="SIGNAL"
-            reason=f"Window {best_window} signal"
+            reason=f"Window {best_window}"
 
 
     engine.append({
@@ -166,7 +182,7 @@ for i,n in enumerate(numbers):
     })
 
 
-st.title("⚡ HYBRID QUANT ENGINE")
+st.title("🛡 QUANT SHIELD ENGINE")
 
 c1,c2,c3=st.columns(3)
 
