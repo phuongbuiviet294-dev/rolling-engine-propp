@@ -7,11 +7,10 @@ from collections import Counter
 GOOGLE_SHEET_CSV="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 AUTO_REFRESH=5
-
 WIN_PROFIT=2.5
 LOSE_LOSS=1
 
-WINDOW_RANGE=range(4,25)
+WINDOW_RANGE=range(4,31)
 
 st.set_page_config(layout="wide")
 
@@ -37,6 +36,8 @@ df=load()
 
 numbers=df["number"].dropna().astype(int).tolist()
 
+groups=[get_group(x) for x in numbers]
+
 engine=[]
 
 total_profit=0
@@ -60,7 +61,7 @@ retry_mode=False
 
 for i,n in enumerate(numbers):
 
-    g=get_group(n)
+    g=groups[i]
 
     predicted=None
     hit=None
@@ -96,9 +97,10 @@ for i,n in enumerate(numbers):
         state="TRADE"
         last_trade_round=i
 
-# ===== WINDOW SEARCH =====
 
-    if len(engine)>=40 and next_signal is None:
+# ===== AI WINDOW SCAN =====
+
+    if len(engine)>=60 and next_signal is None:
 
         best_score=-999
         best_window=None
@@ -109,16 +111,16 @@ for i,n in enumerate(numbers):
 
             hits=[]
 
-            for j in range(len(numbers)-25,len(numbers)):
+            for j in range(i-50,i):
 
                 if j>=w:
 
-                    if get_group(numbers[j])==get_group(numbers[j-w]):
+                    if groups[j]==groups[j-w]:
                         hits.append(1)
                     else:
                         hits.append(0)
 
-            if len(hits)<15:
+            if len(hits)<25:
                 continue
 
             wr=np.mean(hits)
@@ -136,39 +138,82 @@ for i,n in enumerate(numbers):
                 best_wr=wr
                 best_ev=ev
 
-# ===== DOMINANT GROUP =====
 
-        recent_groups=[get_group(x) for x in numbers[-20:]]
+# ===== MARKOV TRANSITION =====
 
-        freq=Counter(recent_groups)
+        transition=np.zeros((4,4))
 
-        dominant=max(freq,key=freq.get)
+        for j in range(i-40,i-1):
+
+            a=groups[j]-1
+            b=groups[j+1]-1
+
+            transition[a][b]+=1
+
+        for r in range(4):
+
+            s=sum(transition[r])
+
+            if s>0:
+                transition[r]/=s
+
+
+        current=groups[i-1]-1
+
+        markov_pred=np.argmax(transition[current])+1
+
+
+# ===== HOT GROUP =====
+
+        recent=groups[i-20:i]
+
+        freq=Counter(recent)
+
+        hot_group=max(freq,key=freq.get)
+
+
+# ===== COMBINE SIGNAL =====
+
+        window_pred=groups[i-best_window] if best_window else None
+
+        votes=[window_pred,markov_pred,hot_group]
+
+        vote_count=Counter(votes)
+
+        signal_group=vote_count.most_common(1)[0][0]
+
 
 # ===== PREVIEW =====
 
         if best_window and best_wr>0.30:
 
-            preview_signal=get_group(numbers[-best_window])
+            preview_signal=signal_group
             preview_window=best_window
             preview_wr=round(best_wr*100,2)
             preview_ev=round(best_ev,3)
+
+
+# ===== REGIME STRENGTH =====
+
+        regime_strength=best_wr
+
 
 # ===== COOLDOWN =====
 
         cooldown=4
 
-        if best_wr>=0.36:
+        if regime_strength>=0.42:
             cooldown=2
-        elif best_wr>=0.33:
+
+        elif regime_strength>=0.36:
             cooldown=3
+
 
 # ===== CONFIRM SIGNAL =====
 
-        if best_window and best_wr>0.32 and best_ev>0:
+        if best_window and best_wr>0.33 and best_ev>0:
 
-            signal_group=get_group(numbers[-best_window])
-
-            if signal_group==dominant and i-last_trade_round>cooldown:
+            if i-last_trade_round>cooldown:
 
                 next_signal=signal_group
                 next_window=best_window
@@ -179,7 +224,8 @@ for i,n in enumerate(numbers):
 
                 state="SIGNAL"
 
-# ===== SAVE ENGINE =====
+
+# ===== SAVE HISTORY =====
 
     engine.append({
 
@@ -193,9 +239,10 @@ for i,n in enumerate(numbers):
 
     })
 
+
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL ENGINE (STABLE)")
+st.title("⚡ QUANT AI ENGINE V3")
 
 col1,col2,col3=st.columns(3)
 
@@ -209,6 +256,7 @@ if hits:
     wr=np.mean(hits)
 
     col3.metric("Winrate %",round(wr*100,2))
+
 
 # ===== PREVIEW =====
 
@@ -228,6 +276,7 @@ EV: {preview_ev}
 </div>
 """,unsafe_allow_html=True)
 
+
 # ===== NEXT GROUP =====
 
 if next_signal:
@@ -235,7 +284,7 @@ if next_signal:
     st.markdown(f"""
 <div style='padding:20px;background:#c62828;color:white;border-radius:12px;text-align:center;font-size:28px;font-weight:bold'>
 
-🚨 READY TO BET 🚨
+🚨 READY TO BET
 
 NEXT GROUP: {next_signal}
 
@@ -252,6 +301,7 @@ else:
 
     st.info("No valid signal yet")
 
+
 # ===== HISTORY =====
 
 st.subheader("History")
@@ -260,4 +310,4 @@ hist_df=pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df,use_container_width=True)
 
-st.caption("FINAL ENGINE | WINDOW AUTO SEARCH | SIGNAL DELAY FIXED")
+st.caption("QUANT AI ENGINE V3 | WINDOW + MARKOV + HOT GROUP")
