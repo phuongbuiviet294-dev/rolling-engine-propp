@@ -5,13 +5,11 @@ import numpy as np
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 AUTO_REFRESH = 5
+
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOW_RANGE = range(5,31)
-
-WINDOW_LOCK_ROUNDS = 60
-RESCAN_THRESHOLD = 0.28
+CONF_THRESHOLD = 0.45
 
 st.set_page_config(layout="wide")
 
@@ -43,49 +41,7 @@ engine = []
 
 total_profit = 0
 
-locked_window = None
-lock_start_round = 0
-
-hits_history = []
-
 next_signal = None
-
-# ================= WINDOW SCAN ================= #
-
-def find_best_window(i):
-
-    best_w = None
-    best_ev = -999
-    best_wr = 0
-
-    for w in WINDOW_RANGE:
-
-        hits = []
-
-        for j in range(i-80, i):
-
-            if j >= w:
-
-                if groups[j] == groups[j-w]:
-                    hits.append(1)
-                else:
-                    hits.append(0)
-
-        if len(hits) < 30:
-            continue
-
-        wr = np.mean(hits)
-
-        ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
-
-        if ev > best_ev:
-
-            best_ev = ev
-            best_wr = wr
-            best_w = w
-
-    return best_w, best_wr, best_ev
-
 
 # ================= ENGINE ================= #
 
@@ -97,22 +53,49 @@ for i,n in enumerate(numbers):
     hit = None
     state = "SCAN"
 
-# ===== RESCAN WINDOW =====
+# ===== BUILD TRANSITION MATRIX =====
 
-    if locked_window is None and i > 100:
+    if i > 40:
 
-        w,wr,ev = find_best_window(i)
+        matrix = np.zeros((4,4))
 
-        if w is not None:
+        for j in range(i-40,i-1):
 
-            locked_window = w
-            lock_start_round = i
+            a = groups[j]-1
+            b = groups[j+1]-1
+
+            matrix[a][b] += 1
+
+        for r in range(4):
+
+            s = sum(matrix[r])
+
+            if s > 0:
+                matrix[r] /= s
+
+# ===== PREDICT NEXT =====
+
+        last = groups[i-1]-1
+
+        probs = matrix[last]
+
+        best = np.argmax(probs)
+
+        confidence = probs[best]
+
+        if confidence > CONF_THRESHOLD:
+
+            next_signal = best + 1
+
+        else:
+
+            next_signal = None
 
 # ===== TRADE =====
 
-    if locked_window and i > locked_window:
+    if next_signal is not None:
 
-        predicted = groups[i-locked_window]
+        predicted = next_signal
 
         hit = 1 if predicted == g else 0
 
@@ -124,33 +107,7 @@ for i,n in enumerate(numbers):
 
             total_profit -= LOSE_LOSS
 
-        hits_history.append(hit)
-
         state = "TRADE"
-
-# ===== PERFORMANCE CHECK =====
-
-    if locked_window and len(hits_history) > 40:
-
-        wr = np.mean(hits_history[-40:])
-
-        if wr < RESCAN_THRESHOLD:
-
-            locked_window = None
-            hits_history = []
-
-# ===== WINDOW TIMEOUT =====
-
-    if locked_window and (i - lock_start_round) > WINDOW_LOCK_ROUNDS:
-
-        locked_window = None
-        hits_history = []
-
-# ===== NEXT SIGNAL =====
-
-    if locked_window and i > locked_window:
-
-        next_signal = groups[i-locked_window]
 
 # ===== SAVE HISTORY =====
 
@@ -161,15 +118,13 @@ for i,n in enumerate(numbers):
         "group": g,
         "predicted": predicted,
         "hit": hit,
-        "window": locked_window,
         "state": state
 
     })
 
-
 # ================= DASHBOARD ================= #
 
-st.title("⚡ ADAPTIVE CYCLE ENGINE")
+st.title("🔥 BURST PATTERN ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
@@ -184,7 +139,6 @@ if hits:
 
     col3.metric("Winrate %", round(wr*100,2))
 
-
 # ===== NEXT GROUP =====
 
 if next_signal:
@@ -196,15 +150,12 @@ if next_signal:
 
 GROUP: {next_signal}
 
-WINDOW: {locked_window}
-
 </div>
 """,unsafe_allow_html=True)
 
 else:
 
-    st.info("Scanning window...")
-
+    st.info("No strong pattern detected")
 
 # ===== HISTORY =====
 
@@ -212,6 +163,6 @@ st.subheader("History")
 
 hist_df = pd.DataFrame(engine).iloc[::-1]
 
-st.dataframe(hist_df,use_container_width=True)
+st.dataframe(hist_df, use_container_width=True)
 
-st.caption("ADAPTIVE CYCLE ENGINE | WINDOW LOCK MODE")
+st.caption("BURST PATTERN ENGINE | MARKOV SPIKE DETECTOR")
