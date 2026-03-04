@@ -2,27 +2,29 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-GOOGLE_SHEET_CSV="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-AUTO_REFRESH=5
-WIN_PROFIT=2.5
-LOSE_LOSS=1
+AUTO_REFRESH = 5
+WIN_PROFIT = 2.5
+LOSE_LOSS = 1
 
-WINDOWS=[9,14]
-LOOKBACK=80
-COOLDOWN=3
+WINDOWS = [9,14,21]
+LOOKBACK = 120
+COOLDOWN = 8
 
-REGIME_STOP=10
+WR_MIN = 0.40
+EV_MIN = 0.40
+
+REGIME_STOP = 15
 
 st.set_page_config(layout="wide")
 
 def get_group(n):
 
-    if 1<=n<=3:return 1
-    if 4<=n<=6:return 2
-    if 7<=n<=9:return 3
-    if 10<=n<=12:return 4
-
+    if 1 <= n <= 3: return 1
+    if 4 <= n <= 6: return 2
+    if 7 <= n <= 9: return 3
+    if 10 <= n <= 12: return 4
     return None
 
 
@@ -30,9 +32,9 @@ def get_group(n):
 def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
-df=load()
+df = load()
 
-numbers=df["number"].dropna().astype(int).tolist()
+numbers = df["number"].dropna().astype(int).tolist()
 
 engine=[]
 
@@ -44,9 +46,8 @@ next_window=None
 next_wr=None
 next_ev=None
 
-retry_mode=False
-miss_streak=0
 pause_until=-1
+miss_streak=0
 
 preview_signal=None
 preview_window=None
@@ -67,7 +68,7 @@ for i,n in enumerate(numbers):
     reason=None
 
 
-# ===== EXECUTE =====
+# ===== EXECUTE TRADE =====
 
     if next_signal is not None:
 
@@ -76,25 +77,18 @@ for i,n in enumerate(numbers):
         rolling_wr=next_wr
         ev_value=next_ev
 
-        hit=1 if predicted==g else 0
+        hit = 1 if predicted==g else 0
 
         if hit==1:
 
-            total_profit+=WIN_PROFIT
+            total_profit += WIN_PROFIT
             next_signal=None
-            retry_mode=False
             miss_streak=0
 
         else:
 
-            total_profit-=LOSE_LOSS
+            total_profit -= LOSE_LOSS
             miss_streak+=1
-
-            if retry_mode==False:
-                retry_mode=True
-            else:
-                next_signal=None
-                retry_mode=False
 
         state="TRADE"
         last_trade_round=i
@@ -114,8 +108,9 @@ for i,n in enumerate(numbers):
         and i>pause_until
     ):
 
-        best_window=None
         best_ev=-999
+        best_signal=None
+        best_window=None
         best_wr=0
 
         for w in WINDOWS:
@@ -130,7 +125,7 @@ for i,n in enumerate(numbers):
                         1 if engine[j]["group"]==engine[j-w]["group"] else 0
                     )
 
-            if len(hits)>=40:
+            if len(hits)>=60:
 
                 wr=np.mean(hits)
 
@@ -141,29 +136,63 @@ for i,n in enumerate(numbers):
                     best_ev=ev
                     best_window=w
                     best_wr=wr
+                    best_signal=engine[-w]["group"]
+
+
+# ===== MARKOV BOOST =====
+
+        if len(engine)>=50:
+
+            transitions=np.zeros((5,5))
+
+            for j in range(len(engine)-50,len(engine)-1):
+
+                a=engine[j]["group"]
+                b=engine[j+1]["group"]
+
+                if a and b:
+
+                    transitions[a][b]+=1
+
+            last_g=engine[-1]["group"]
+
+            if last_g:
+
+                probs=transitions[last_g]/np.sum(transitions[last_g])
+
+                markov_signal=np.argmax(probs)
+
+                markov_prob=np.max(probs)
+
+                if markov_prob>best_wr:
+
+                    best_signal=markov_signal
+                    best_wr=markov_prob
+                    best_window="Markov"
+                    best_ev=best_wr*WIN_PROFIT-(1-best_wr)*LOSE_LOSS
 
 
 # ===== PREVIEW =====
 
-        if best_window and best_wr>0.30:
+        if best_signal and best_wr>0.35:
 
-            preview_signal=engine[-best_window]["group"]
+            preview_signal=best_signal
             preview_window=best_window
             preview_wr=round(best_wr*100,2)
             preview_ev=round(best_ev,3)
 
 
-# ===== CONFIRM =====
+# ===== CONFIRM TRADE =====
 
-        if best_window and best_wr>0.31 and best_ev>0:
+        if best_signal and best_wr>WR_MIN and best_ev>EV_MIN:
 
-            next_signal=engine[-best_window]["group"]
+            next_signal=best_signal
             next_window=best_window
             next_wr=round(best_wr*100,2)
             next_ev=round(best_ev,3)
 
             state="SIGNAL"
-            reason=f"Window {best_window}"
+            reason=f"Signal from {best_window}"
 
 
     engine.append({
@@ -182,7 +211,7 @@ for i,n in enumerate(numbers):
     })
 
 
-st.title("🛡 QUANT SHIELD ENGINE")
+st.title("⚡ QUANT AI ENGINE V5")
 
 c1,c2,c3=st.columns(3)
 
