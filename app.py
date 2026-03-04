@@ -8,8 +8,8 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = list(range(7,21))
-
+WINDOWS = [9,14]
+LOOKBACK = 60
 COOLDOWN = 4
 
 st.set_page_config(layout="wide")
@@ -34,9 +34,7 @@ def get_group(n):
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
-
     return pd.read_csv(GOOGLE_SHEET_CSV)
-
 
 df = load()
 
@@ -59,12 +57,12 @@ next_window = None
 next_wr = None
 next_ev = None
 
-signal_created_at = None
-
 preview_signal = None
 preview_window = None
 preview_wr = None
 preview_ev = None
+
+signal_created_at = None
 
 retry_mode = False
 
@@ -115,7 +113,7 @@ for i,n in enumerate(numbers):
 
 # ================= SCAN =================
 
-    if len(engine) >= 50 and i - last_trade_round > COOLDOWN and next_signal is None:
+    if len(engine) >= LOOKBACK and i - last_trade_round > COOLDOWN and next_signal is None:
 
         best_window = None
         best_ev = -999
@@ -125,7 +123,7 @@ for i,n in enumerate(numbers):
 
             hits = []
 
-            for j in range(len(engine)-40,len(engine)):
+            for j in range(len(engine)-LOOKBACK,len(engine)):
 
                 if j >= w:
 
@@ -134,7 +132,7 @@ for i,n in enumerate(numbers):
                     else:
                         hits.append(0)
 
-            if len(hits) >= 20:
+            if len(hits) >= 30:
 
                 wr = np.mean(hits)
 
@@ -159,7 +157,7 @@ for i,n in enumerate(numbers):
 
 # ================= CONFIRM =================
 
-        if best_window is not None and best_wr > 0.32 and best_ev > 0:
+        if best_window is not None and best_wr > 0.31 and best_ev > 0:
 
             next_signal = engine[-best_window]["group"]
             next_window = best_window
@@ -190,7 +188,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD =================
 
-st.title("⚡ QUANT PRO ENGINE")
+st.title("🎯 FINAL STABLE ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
