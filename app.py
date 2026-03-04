@@ -10,6 +10,9 @@ LOSE_LOSS = 1
 
 WINDOW_RANGE = range(5,31)
 
+WINDOW_LOCK_ROUNDS = 60
+RESCAN_THRESHOLD = 0.28
+
 st.set_page_config(layout="wide")
 
 # ================= CORE ================= #
@@ -26,6 +29,7 @@ def get_group(n):
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
+
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
 
@@ -38,21 +42,50 @@ groups = [get_group(x) for x in numbers]
 engine = []
 
 total_profit = 0
-last_trade_round = -999
+
+locked_window = None
+lock_start_round = 0
+
+hits_history = []
 
 next_signal = None
-next_window = None
-next_wr = None
-next_ev = None
 
-preview_signal = None
-preview_window = None
-preview_wr = None
-preview_ev = None
+# ================= WINDOW SCAN ================= #
 
-signal_created_round = None
+def find_best_window(i):
 
-retry_mode = False
+    best_w = None
+    best_ev = -999
+    best_wr = 0
+
+    for w in WINDOW_RANGE:
+
+        hits = []
+
+        for j in range(i-80, i):
+
+            if j >= w:
+
+                if groups[j] == groups[j-w]:
+                    hits.append(1)
+                else:
+                    hits.append(0)
+
+        if len(hits) < 30:
+            continue
+
+        wr = np.mean(hits)
+
+        ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+
+        if ev > best_ev:
+
+            best_ev = ev
+            best_wr = wr
+            best_w = w
+
+    return best_w, best_wr, best_ev
+
 
 # ================= ENGINE ================= #
 
@@ -64,103 +97,60 @@ for i,n in enumerate(numbers):
     hit = None
     state = "SCAN"
 
-# ===== EXECUTE TRADE =====
+# ===== RESCAN WINDOW =====
 
-    if next_signal is not None and signal_created_round < i:
+    if locked_window is None and i > 100:
 
-        predicted = next_signal
+        w,wr,ev = find_best_window(i)
+
+        if w is not None:
+
+            locked_window = w
+            lock_start_round = i
+
+# ===== TRADE =====
+
+    if locked_window and i > locked_window:
+
+        predicted = groups[i-locked_window]
 
         hit = 1 if predicted == g else 0
 
         if hit:
 
             total_profit += WIN_PROFIT
-            retry_mode = False
-            next_signal = None
 
         else:
 
             total_profit -= LOSE_LOSS
 
-            if retry_mode == False:
-
-                retry_mode = True
-
-            else:
-
-                next_signal = None
-                retry_mode = False
+        hits_history.append(hit)
 
         state = "TRADE"
-        last_trade_round = i
 
-# ===== WINDOW SCAN =====
+# ===== PERFORMANCE CHECK =====
 
-    if len(engine) >= 50 and next_signal is None:
+    if locked_window and len(hits_history) > 40:
 
-        best_window = None
-        best_wr = 0
-        best_ev = -999
+        wr = np.mean(hits_history[-40:])
 
-        for w in WINDOW_RANGE:
+        if wr < RESCAN_THRESHOLD:
 
-            hits = []
+            locked_window = None
+            hits_history = []
 
-            for j in range(i-40, i):
+# ===== WINDOW TIMEOUT =====
 
-                if j >= w:
+    if locked_window and (i - lock_start_round) > WINDOW_LOCK_ROUNDS:
 
-                    if groups[j] == groups[j-w]:
-                        hits.append(1)
-                    else:
-                        hits.append(0)
+        locked_window = None
+        hits_history = []
 
-            if len(hits) < 20:
-                continue
+# ===== NEXT SIGNAL =====
 
-            wr = np.mean(hits)
+    if locked_window and i > locked_window:
 
-            ev = wr * WIN_PROFIT - (1-wr) * LOSE_LOSS
-
-            if ev > best_ev:
-
-                best_ev = ev
-                best_wr = wr
-                best_window = w
-
-# ===== PREVIEW =====
-
-        if best_window and best_wr > 0.28:
-
-            preview_signal = groups[i-best_window]
-            preview_window = best_window
-            preview_wr = round(best_wr*100,2)
-            preview_ev = round(best_ev,3)
-
-# ===== COOLDOWN =====
-
-        cooldown = 4
-
-        if best_wr > 0.40:
-            cooldown = 2
-
-        elif best_wr > 0.35:
-            cooldown = 3
-
-# ===== CONFIRM SIGNAL =====
-
-        if best_window and best_wr > 0.30 and best_ev > 0:
-
-            if i - last_trade_round > cooldown:
-
-                next_signal = groups[i-best_window]
-                next_window = best_window
-                next_wr = round(best_wr*100,2)
-                next_ev = round(best_ev,3)
-
-                signal_created_round = i
-
-                state = "SIGNAL"
+        next_signal = groups[i-locked_window]
 
 # ===== SAVE HISTORY =====
 
@@ -171,7 +161,7 @@ for i,n in enumerate(numbers):
         "group": g,
         "predicted": predicted,
         "hit": hit,
-        "window": next_window,
+        "window": locked_window,
         "state": state
 
     })
@@ -179,7 +169,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("⚡ CYCLE QUANT ENGINE")
+st.title("⚡ ADAPTIVE CYCLE ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
@@ -194,23 +184,6 @@ if hits:
 
     col3.metric("Winrate %", round(wr*100,2))
 
-# ===== PREVIEW =====
-
-if preview_signal:
-
-    st.markdown(f"""
-<div style='padding:15px;background:#444;color:white;border-radius:10px;text-align:center;font-size:20px'>
-
-🔎 PREVIEW SIGNAL: {preview_signal}
-
-Window: {preview_window}
-
-WR: {preview_wr} %
-
-EV: {preview_ev}
-
-</div>
-""",unsafe_allow_html=True)
 
 # ===== NEXT GROUP =====
 
@@ -219,22 +192,19 @@ if next_signal:
     st.markdown(f"""
 <div style='padding:20px;background:#c62828;color:white;border-radius:12px;text-align:center;font-size:28px;font-weight:bold'>
 
-🚨 READY TO BET
+🚨 NEXT GROUP TO BET
 
-NEXT GROUP: {next_signal}
+GROUP: {next_signal}
 
-Window: {next_window}
-
-WR: {next_wr} %
-
-EV: {next_ev}
+WINDOW: {locked_window}
 
 </div>
 """,unsafe_allow_html=True)
 
 else:
 
-    st.info("No valid signal yet")
+    st.info("Scanning window...")
+
 
 # ===== HISTORY =====
 
@@ -242,6 +212,6 @@ st.subheader("History")
 
 hist_df = pd.DataFrame(engine).iloc[::-1]
 
-st.dataframe(hist_df, use_container_width=True)
+st.dataframe(hist_df,use_container_width=True)
 
-st.caption("CYCLE QUANT ENGINE | AUTO WINDOW SCAN")
+st.caption("ADAPTIVE CYCLE ENGINE | WINDOW LOCK MODE")
