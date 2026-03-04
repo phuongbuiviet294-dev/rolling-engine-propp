@@ -117,7 +117,7 @@ for i, n in enumerate(numbers):
             preview_ev = round(best_ev, 3)
 
         # ==== Confirm trade (WR > 29 & EV >= 0) ====
-        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
+        if best_window is not None and best_wr > 0.29 and best_ev >= 0.06:
 
             next_signal = engine[-best_window]["group"]
             next_window = best_window
