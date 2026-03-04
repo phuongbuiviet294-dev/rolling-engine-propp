@@ -8,7 +8,7 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = [9, 14]
+WINDOWS = list(range(7,21))
 
 st.set_page_config(layout="wide")
 
@@ -38,7 +38,7 @@ engine = []
 
 total_profit = 0
 last_trade_round = -999
-last_trade_ev = -999   # <-- EV benchmark
+last_trade_ev = -999
 
 next_signal = None
 next_window = None
@@ -64,7 +64,7 @@ for i, n in enumerate(numbers):
     ev_value = None
     reason = None
 
-    # ===== EXECUTE TRADE =====
+    # ================= EXECUTE TRADE ================= #
 
     if next_signal is not None:
 
@@ -75,7 +75,7 @@ for i, n in enumerate(numbers):
 
         hit = 1 if predicted == g else 0
 
-        if hit == 1:
+        if hit:
             total_profit += WIN_PROFIT
         else:
             total_profit -= LOSE_LOSS
@@ -84,13 +84,13 @@ for i, n in enumerate(numbers):
         reason = f"Executed signal from round {signal_created_at}"
 
         last_trade_round = i
-        last_trade_ev = next_ev   # <-- update benchmark
+        last_trade_ev = next_ev
 
         next_signal = None
 
-    # ===== GENERATE SIGNAL =====
+    # ================= SCAN WINDOWS ================= #
 
-    if len(engine) >= 40 and i - last_trade_round > 4:
+    if len(engine) >= 50 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
@@ -100,56 +100,57 @@ for i, n in enumerate(numbers):
 
             hits = []
 
-            for j in range(len(engine) - 30, len(engine)):
+            for j in range(len(engine) - 40, len(engine)):
 
                 if j >= w:
 
-                    hits.append(
-                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
-                    )
+                    if engine[j]["group"] == engine[j-w]["group"]:
+                        hits.append(1)
+                    else:
+                        hits.append(0)
 
             if len(hits) >= 20:
 
                 wr = np.mean(hits)
-                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+                ev = wr * WIN_PROFIT - (1-wr) * LOSE_LOSS
 
                 if ev > best_ev:
 
                     best_ev = ev
-                    best_window = w
                     best_wr = wr
+                    best_window = w
 
-        # ==== PREVIEW ====
+        # ================= PREVIEW ================= #
 
         if best_window is not None and best_wr > 0.28:
 
             preview_signal = engine[-best_window]["group"]
             preview_window = best_window
-            preview_wr = round(best_wr * 100, 2)
-            preview_ev = round(best_ev, 3)
+            preview_wr = round(best_wr*100,2)
+            preview_ev = round(best_ev,3)
 
-        # ==== CONFIRM TRADE ====
+        # ================= TRADE CONDITION ================= #
 
         if (
             best_window is not None
-            and best_wr > 0.29
+            and best_wr > 0.30
             and best_ev >= 0
-            and best_ev > last_trade_ev   # <-- EV must beat previous trade
+            and best_ev > last_trade_ev
         ):
 
             next_signal = engine[-best_window]["group"]
 
             next_window = best_window
-            next_wr = round(best_wr * 100, 2)
-            next_ev = round(best_ev, 3)
+            next_wr = round(best_wr*100,2)
+            next_ev = round(best_ev,3)
 
-            signal_created_at = i + 1
+            signal_created_at = i+1
 
             state = "SIGNAL"
             reason = f"Signal created (window {best_window})"
 
     engine.append({
-        "round": i + 1,
+        "round": i+1,
         "number": n,
         "group": g,
         "predicted": predicted,
@@ -163,20 +164,20 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE (EV BENCHMARK)")
+st.title("🎯 QUANT WINDOW SCAN ENGINE")
 
-col1, col2, col3 = st.columns(3)
+col1,col2,col3 = st.columns(3)
 
-col1.metric("Total Rounds", len(engine))
-col2.metric("Total Profit", round(total_profit, 2))
+col1.metric("Total Rounds",len(engine))
+col2.metric("Total Profit",round(total_profit,2))
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
+hits=[x["hit"] for x in engine if x["hit"] is not None]
 
 if hits:
-    wr = np.mean(hits)
-    col3.metric("Winrate %", round(wr * 100, 2))
+    wr=np.mean(hits)
+    col3.metric("Winrate %",round(wr*100,2))
 else:
-    col3.metric("Winrate %", 0)
+    col3.metric("Winrate %",0)
 
 # ================= PREVIEW ================= #
 
@@ -199,9 +200,9 @@ if preview_signal is not None:
         <br>EV: {preview_ev}
 
     </div>
-    """, unsafe_allow_html=True)
+    """,unsafe_allow_html=True)
 
-# ================= NEXT GROUP ================= #
+# ================= READY SIGNAL ================= #
 
 if next_signal is not None:
 
@@ -225,7 +226,7 @@ if next_signal is not None:
         <br>EV: {next_ev}
 
     </div>
-    """, unsafe_allow_html=True)
+    """,unsafe_allow_html=True)
 
 else:
     st.info("No valid signal yet")
@@ -234,8 +235,8 @@ else:
 
 st.subheader("History")
 
-hist_df = pd.DataFrame(engine).iloc[::-1]
+hist_df=pd.DataFrame(engine).iloc[::-1]
 
-st.dataframe(hist_df, use_container_width=True)
+st.dataframe(hist_df,use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | EV BENCHMARK FILTER")
+st.caption("WINDOW SCAN 7-20 | EV BENCHMARK | ADAPTIVE ENGINE")
