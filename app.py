@@ -2,24 +2,24 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+GOOGLE_SHEET_CSV="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-AUTO_REFRESH = 5
-WIN_PROFIT = 2.5
-LOSE_LOSS = 1
+AUTO_REFRESH=5
+WIN_PROFIT=2.5
+LOSE_LOSS=1
 
-WINDOWS = [9,14]
-LOOKBACK = 60
-COOLDOWN = 4
+WINDOWS=[9,14]
+LOOKBACK=60
+COOLDOWN=3
 
 st.set_page_config(layout="wide")
 
 def get_group(n):
 
-    if 1 <= n <= 3: return 1
-    if 4 <= n <= 6: return 2
-    if 7 <= n <= 9: return 3
-    if 10 <= n <= 12: return 4
+    if 1<=n<=3:return 1
+    if 4<=n<=6:return 2
+    if 7<=n<=9:return 3
+    if 10<=n<=12:return 4
 
     return None
 
@@ -28,18 +28,21 @@ def get_group(n):
 def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
-df = load()
+df=load()
 
-numbers = df["number"].dropna().astype(int).tolist()
+numbers=df["number"].dropna().astype(int).tolist()
 
-engine = []
+engine=[]
 
-total_profit = 0
-last_trade_round = -999
+total_profit=0
+last_trade_round=-999
 
-next_signal = None
-next_window = None
-retry_mode = False
+next_signal=None
+next_window=None
+next_wr=None
+next_ev=None
+
+retry_mode=False
 
 preview_signal=None
 preview_window=None
@@ -55,8 +58,9 @@ for i,n in enumerate(numbers):
     hit=None
     state="SCAN"
     window_used=None
-    wr_val=None
-    ev_val=None
+    rolling_wr=None
+    ev_value=None
+    reason=None
 
 
 # EXECUTE
@@ -64,6 +68,9 @@ for i,n in enumerate(numbers):
     if next_signal is not None:
 
         predicted=next_signal
+        window_used=next_window
+        rolling_wr=next_wr
+        ev_value=next_ev
 
         hit=1 if predicted==g else 0
 
@@ -84,7 +91,6 @@ for i,n in enumerate(numbers):
                 retry_mode=False
 
         state="TRADE"
-
         last_trade_round=i
 
 
@@ -93,8 +99,8 @@ for i,n in enumerate(numbers):
     if len(engine)>=LOOKBACK and i-last_trade_round>COOLDOWN and next_signal is None:
 
         best_window=None
-        best_wr=0
         best_ev=-999
+        best_wr=0
 
         for w in WINDOWS:
 
@@ -108,7 +114,7 @@ for i,n in enumerate(numbers):
                         1 if engine[j]["group"]==engine[j-w]["group"] else 0
                     )
 
-            if len(hits)>30:
+            if len(hits)>=30:
 
                 wr=np.mean(hits)
 
@@ -121,24 +127,9 @@ for i,n in enumerate(numbers):
                     best_wr=wr
 
 
-# DOMINANCE FILTER
-
-        groups=[x["group"] for x in engine[-25:]]
-
-        if groups:
-
-            counts=pd.Series(groups).value_counts(normalize=True)
-
-            dominance=counts.max()
-
-        else:
-
-            dominance=0
-
-
 # PREVIEW
 
-        if best_window and best_wr>0.32:
+        if best_window and best_wr>0.29:
 
             preview_signal=engine[-best_window]["group"]
             preview_window=best_window
@@ -146,12 +137,17 @@ for i,n in enumerate(numbers):
             preview_ev=round(best_ev,3)
 
 
-# CONFIRM TRADE
+# CONFIRM
 
-        if best_window and best_wr>0.34 and best_ev>0 and dominance>0.35:
+        if best_window and best_wr>0.30 and best_ev>0:
 
             next_signal=engine[-best_window]["group"]
             next_window=best_window
+            next_wr=round(best_wr*100,2)
+            next_ev=round(best_ev,3)
+
+            state="SIGNAL"
+            reason=f"Window {best_window} signal"
 
 
     engine.append({
@@ -161,12 +157,16 @@ for i,n in enumerate(numbers):
         "group":g,
         "predicted":predicted,
         "hit":hit,
-        "state":state
+        "window":window_used,
+        "wr":rolling_wr,
+        "ev":ev_value,
+        "state":state,
+        "reason":reason
 
     })
 
 
-st.title("⚡ REGIME QUANT ENGINE")
+st.title("⚡ HYBRID QUANT ENGINE")
 
 c1,c2,c3=st.columns(3)
 
@@ -184,22 +184,29 @@ if hits:
 if preview_signal:
 
     st.markdown(f"""
-    ### 🔎 PREVIEW
+### 🔎 PREVIEW
 
-    Group: {preview_signal}
+Group: {preview_signal}
 
-    Window: {preview_window}
+Window: {preview_window}
 
-    WR: {preview_wr}%
+WR: {preview_wr}%
 
-    EV: {preview_ev}
-    """)
+EV: {preview_ev}
+""")
 
 
 if next_signal:
 
     st.markdown(f"""
-    # 🚨 NEXT GROUP TO BET
+# 🚨 NEXT GROUP
 
-    ## GROUP {next_signal}
-    """)
+## {next_signal}
+""")
+
+
+st.subheader("History")
+
+hist=pd.DataFrame(engine).iloc[::-1]
+
+st.dataframe(hist,use_container_width=True)
