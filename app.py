@@ -11,10 +11,7 @@ LOSE_LOSS = 1
 
 WINDOWS = [9,14]
 
-CYCLE = 200
-
 st.set_page_config(layout="wide")
-
 
 # ================= GROUP ================= #
 
@@ -105,30 +102,23 @@ for i, n in enumerate(numbers):
     if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
-        best_ev = -999
+        best_score = -999
         best_wr = 0
-
-        # ===== cycle start =====
-
-        start_idx = max(0, len(engine) - CYCLE)
-
-        cycle_data = engine[start_idx:]
-
+        best_ev = 0
 
         for w in WINDOWS:
 
             recent_hits = []
 
-            for j in range(len(cycle_data)):
+            start = max(w, len(engine)-30)
 
-                idx = start_idx + j
+            for j in range(start, len(engine)):
 
-                if idx >= w:
+                if j >= w:
 
-                    if engine[idx]["group"] == engine[idx-w]["group"]:
-                        recent_hits.append(1)
-                    else:
-                        recent_hits.append(0)
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j-w]["group"] else 0
+                    )
 
             if len(recent_hits) >= 20:
 
@@ -136,11 +126,19 @@ for i, n in enumerate(numbers):
 
                 ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
 
-                if ev > best_ev:
+                score = ev
 
-                    best_ev = ev
+                # ===== LAG 9 BOOST =====
+
+                if w == 9:
+                    score += 0.05
+
+                if score > best_score:
+
+                    best_score = score
                     best_window = w
                     best_wr = wr
+                    best_ev = ev
 
 
         # ===== PREVIEW =====
@@ -153,13 +151,15 @@ for i, n in enumerate(numbers):
             preview_ev = round(best_ev,3)
 
 
-        # ===== CONFIRM =====
+        # ===== CONFIRM TRADE =====
 
         if best_window is not None:
 
-            if best_wr > 0.30 and best_ev >= 0:
+            if best_wr > 0.31 and best_ev >= 0:
 
                 signal = engine[-best_window]["group"]
+
+                # timing filter
 
                 if engine[-1]["group"] != signal:
 
@@ -189,7 +189,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("♻️ CYCLE ADAPTIVE ENGINE")
+st.title("🏆 LAG-9 MASTER ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -272,3 +272,5 @@ st.subheader("History")
 hist_df = pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df, use_container_width=True)
+
+st.caption("WINDOW 9 BIAS | FALLBACK 14")
