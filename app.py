@@ -136,7 +136,7 @@ for i,n in enumerate(numbers):
 
         # ===== PREVIEW =====
 
-        if best_window is not None and best_wr > 0.28:
+        if best_window is not None and best_wr > 0.27:
 
             preview_signal = groups[i-best_window]
             preview_window = best_window
@@ -148,13 +148,11 @@ for i,n in enumerate(numbers):
 
         if best_window is not None:
 
-            if best_wr > 0.29 and best_ev > -0.01:
+            if best_wr > 0.27:
 
                 g1 = groups[i-best_window]
 
-                # timing filter
-
-                if groups[i-1] != g1:
+                if groups[i-1] != g1 or best_wr > 0.32:
 
                     next_signal = g1
                     next_window = best_window
@@ -185,7 +183,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD =================
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE (FIXED)")
+st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
