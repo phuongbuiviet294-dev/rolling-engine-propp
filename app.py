@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+# ================= CONFIG ================= #
+
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 AUTO_REFRESH = 10
@@ -9,10 +11,10 @@ AUTO_REFRESH = 10
 WIN_PROFIT = 1.5
 LOSE_LOSS = 1
 
-WINDOWS = [4,6,8,10,12,15,18,19]
+WINDOWS = [6,7,8,9,10,11,12,14]
 
 COOLDOWN = 4
-PROB_THRESHOLD = 0.52
+PROB_THRESHOLD = 0.55
 
 st.set_page_config(layout="wide")
 
@@ -38,10 +40,10 @@ def get_group(n):
 def load():
 
     try:
-        return pd.read_csv(GOOGLE_SHEET_CSV)
+        df = pd.read_csv(GOOGLE_SHEET_CSV)
+        return df
     except:
         return pd.DataFrame()
-
 
 df = load()
 
@@ -72,7 +74,7 @@ for i,n in enumerate(numbers):
     state = "SCAN"
 
 
-    # ===== EXECUTE TRADE =====
+    # ===== EXECUTE TRADE ===== #
 
     if next_groups is not None:
 
@@ -95,49 +97,44 @@ for i,n in enumerate(numbers):
         next_groups = None
 
 
-    # ===== SIGNAL GENERATION =====
+    # ===== SIGNAL GENERATION ===== #
 
     if len(engine) > 60 and i - last_trade_round > COOLDOWN:
 
-        recent_groups = [x["group"] for x in engine[-20:]]
+        probs = {1:0,2:0,3:0,4:0}
 
-        # volatility filter
-        if len(set(recent_groups)) >= 3:
+        for w in WINDOWS:
 
-            probs = {1:0,2:0,3:0,4:0}
+            if len(engine) > w:
 
-            for w in WINDOWS:
+                grp = engine[-w]["group"]
 
-                if len(engine) > w:
+                weight = 1/w
 
-                    grp = engine[-w]["group"]
-
-                    weight = 1/np.sqrt(w)
-
-                    probs[grp] += weight
+                probs[grp] += weight
 
 
-            total = sum(probs.values())
+        total = sum(probs.values())
 
-            if total > 0:
+        if total > 0:
 
-                for k in probs:
+            for k in probs:
 
-                    probs[k] /= total
+                probs[k] = probs[k] / total
 
 
-                sorted_groups = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+            sorted_groups = sorted(probs.items(), key=lambda x: x[1], reverse=True)
 
-                g1,p1 = sorted_groups[0]
-                g2,p2 = sorted_groups[1]
+            g1,p1 = sorted_groups[0]
+            g2,p2 = sorted_groups[1]
 
-                combined_prob = p1 + p2
+            combined_prob = p1 + p2
 
-                if combined_prob > PROB_THRESHOLD:
+            if combined_prob > PROB_THRESHOLD:
 
-                    next_groups = [g1,g2]
+                next_groups = [g1,g2]
 
-                    state = "SIGNAL"
+                state = "SIGNAL"
 
 
     engine.append({
@@ -154,7 +151,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 OPTIMIZED TOP-2 ENGINE")
+st.title("🚀 SMART TOP-2 QUANT ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
@@ -189,7 +186,7 @@ if next_groups:
 
         🎯 NEXT GROUP TO BET
 
-        <br><br>{next_groups}
+        <br><br> {next_groups}
 
     </div>
     """, unsafe_allow_html=True)
