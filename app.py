@@ -33,7 +33,6 @@ numbers = df["number"].dropna().astype(int).tolist()
 # ================= ENGINE ================= #
 
 engine = []
-
 total_profit = 0
 last_trade_round = -999
 
@@ -47,8 +46,6 @@ preview_signal = None
 preview_window = None
 preview_wr = None
 preview_ev = None
-
-retry_mode = False
 
 for i, n in enumerate(numbers):
 
@@ -75,28 +72,19 @@ for i, n in enumerate(numbers):
         hit = 1 if predicted == g else 0
 
         if hit == 1:
-
             total_profit += WIN_PROFIT
-            next_signal = None
-            retry_mode = False
-
         else:
-
             total_profit -= LOSE_LOSS
-
-            if retry_mode == False:
-                retry_mode = True
-            else:
-                next_signal = None
-                retry_mode = False
 
         state = "TRADE"
         reason = f"Executed signal from round {signal_created_at}"
 
         last_trade_round = i
 
+        next_signal = None
+
     # ===== GENERATE SIGNAL =====
-    if len(engine) >= 40 and i - last_trade_round > 4 and next_signal is None:
+    if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
@@ -107,16 +95,12 @@ for i, n in enumerate(numbers):
             recent_hits = []
 
             for j in range(len(engine) - 30, len(engine)):
-
                 if j >= w:
-
-                    if engine[j]["group"] == engine[j - w]["group"]:
-                        recent_hits.append(1)
-                    else:
-                        recent_hits.append(0)
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
+                    )
 
             if len(recent_hits) >= 20:
-
                 wr = np.mean(recent_hits)
                 ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
@@ -125,17 +109,14 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        # ===== PREVIEW =====
-
+        # ==== Preview (WR > 28) ====
         if best_window is not None and best_wr > 0.28:
-
             preview_signal = engine[-best_window]["group"]
             preview_window = best_window
             preview_wr = round(best_wr * 100, 2)
             preview_ev = round(best_ev, 3)
 
-        # ===== CONFIRM SIGNAL =====
-
+        # ==== Confirm trade (WR > 29 & EV >= 0) ====
         if best_window is not None and best_wr > 0.29 and best_ev >= 0:
 
             next_signal = engine[-best_window]["group"]
@@ -148,7 +129,6 @@ for i, n in enumerate(numbers):
             reason = f"Signal created (window {best_window})"
 
     engine.append({
-
         "round": i + 1,
         "number": n,
         "group": g,
@@ -159,7 +139,6 @@ for i, n in enumerate(numbers):
         "ev": ev_value,
         "state": state,
         "reason": reason
-
     })
 
 # ================= DASHBOARD ================= #
@@ -182,7 +161,6 @@ else:
 # ================= PREVIEW ================= #
 
 if preview_signal is not None:
-
     st.markdown(f"""
     <div style='padding:15px;
                 background:#444;
@@ -190,22 +168,16 @@ if preview_signal is not None:
                 border-radius:10px;
                 text-align:center;
                 font-size:20px'>
-
         🔎 PREVIEW SIGNAL: {preview_signal}
-
         <br>Window: {preview_window}
-
         <br>WR: {preview_wr}%
-
         <br>EV: {preview_ev}
-
     </div>
     """, unsafe_allow_html=True)
 
 # ================= NEXT GROUP ================= #
 
 if next_signal is not None:
-
     st.markdown(f"""
     <div style='padding:20px;
                 background:#c62828;
@@ -214,30 +186,20 @@ if next_signal is not None:
                 text-align:center;
                 font-size:28px;
                 font-weight:bold'>
-
         🚨 READY TO BET 🚨
-
         <br>🎯 NEXT GROUP: {next_signal}
-
         <br>Window: {next_window}
-
         <br>WR: {next_wr}%
-
         <br>EV: {next_ev}
-
     </div>
     """, unsafe_allow_html=True)
-
 else:
-
     st.info("No valid signal yet")
 
 # ================= HISTORY ================= #
 
 st.subheader("History")
-
 hist_df = pd.DataFrame(engine).iloc[::-1]
-
 st.dataframe(hist_df, use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | EV FILTER | RETRY 1 ROUND | COOLDOWN 4")
+st.caption("WINDOW 9 & 14 | EV FILTER | SIMPLE & STABLE")
