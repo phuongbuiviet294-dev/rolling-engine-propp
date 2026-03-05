@@ -9,7 +9,7 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = [8,9,10,11,12,14]
+WINDOWS = [9,14]
 
 st.set_page_config(layout="wide")
 
@@ -26,7 +26,6 @@ def get_group(n):
         return 3
     if 10 <= n <= 12:
         return 4
-
     return None
 
 
@@ -57,6 +56,8 @@ next_window = None
 next_wr = None
 next_ev = None
 
+signal_created_at = None
+
 preview_signal = None
 preview_window = None
 preview_wr = None
@@ -81,19 +82,20 @@ for i, n in enumerate(numbers):
     if next_signal is not None:
 
         predicted = next_signal
-
         window_used = next_window
         rolling_wr = next_wr
         ev_value = next_ev
 
         hit = 1 if predicted == g else 0
 
-        if hit:
+        if hit == 1:
             total_profit += WIN_PROFIT
         else:
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
+
+        reason = f"Executed signal from round {signal_created_at}"
 
         last_trade_round = i
 
@@ -126,25 +128,9 @@ for i, n in enumerate(numbers):
 
                 wr = np.mean(recent_hits)
 
-                ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+                ev = wr * WIN_PROFIT - (1-wr)*LOSE_LOSS
 
-                # ===== DOMINANCE CHECK =====
-
-                dominance_hits = []
-
-                for k in range(5):
-
-                    idx = len(engine)-1-k
-
-                    if idx >= w:
-
-                        dominance_hits.append(
-                            1 if engine[idx]["group"] == engine[idx-w]["group"] else 0
-                        )
-
-                dominance = sum(dominance_hits)
-
-                if ev > best_ev and dominance >= 3:
+                if ev > best_ev:
 
                     best_ev = ev
                     best_window = w
@@ -167,19 +153,22 @@ for i, n in enumerate(numbers):
 
             if best_wr > 0.29 and best_ev > -0.01:
 
-                signal = engine[-best_window]["group"]
+                g1 = engine[-best_window]["group"]
 
                 # timing filter
+                if engine[-1]["group"] != g1:
 
-                if engine[-1]["group"] != signal:
-
-                    next_signal = signal
+                    next_signal = g1
 
                     next_window = best_window
                     next_wr = round(best_wr*100,2)
                     next_ev = round(best_ev,3)
 
+                    signal_created_at = i + 1
+
                     state = "SIGNAL"
+
+                    reason = f"Window {best_window}"
 
 
     engine.append({
@@ -192,14 +181,16 @@ for i, n in enumerate(numbers):
         "window": window_used,
         "rolling_wr_%": rolling_wr,
         "ev": ev_value,
-        "state": state
+        "state": state,
+        "reason": reason
 
     })
 
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 ADAPTIVE DOMINANCE ENGINE")
+st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
+
 
 col1, col2, col3 = st.columns(3)
 
@@ -282,3 +273,5 @@ st.subheader("History")
 hist_df = pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df, use_container_width=True)
+
+st.caption("WINDOW 9 & 14 | EV FILTER | TIMING ENTRY")
