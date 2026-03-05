@@ -6,12 +6,13 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 
 AUTO_REFRESH = 5
 
-WINDOWS = [6,7,8,9,10,11,12,14]
+WIN_PROFIT = 1.5
+LOSE_LOSS = 1
+
+WINDOWS = list(range(5,19))
 
 COOLDOWN = 4
-
-P1_THRESHOLD = 0.42
-P2_THRESHOLD = 0.55
+PROB_THRESHOLD = 0.56
 
 st.set_page_config(layout="wide")
 
@@ -20,14 +21,10 @@ st.set_page_config(layout="wide")
 
 def get_group(n):
 
-    if 1 <= n <= 3:
-        return 1
-    if 4 <= n <= 6:
-        return 2
-    if 7 <= n <= 9:
-        return 3
-    if 10 <= n <= 12:
-        return 4
+    if 1 <= n <= 3: return 1
+    if 4 <= n <= 6: return 2
+    if 7 <= n <= 9: return 3
+    if 10 <= n <= 12: return 4
 
     return None
 
@@ -48,11 +45,9 @@ numbers = df["number"].dropna().astype(int).tolist()
 engine = []
 
 total_profit = 0
-
 last_trade_round = -999
 
 next_groups = None
-bet_mode = None
 
 
 for i,n in enumerate(numbers):
@@ -64,7 +59,7 @@ for i,n in enumerate(numbers):
     state = "SCAN"
 
 
-    # ===== EXECUTE TRADE =====
+    # -------- EXECUTE TRADE -------- #
 
     if next_groups is not None:
 
@@ -73,27 +68,20 @@ for i,n in enumerate(numbers):
         if g in predicted:
 
             hit = 1
-
-            if bet_mode == "1G":
-                total_profit += 2.5
-            else:
-                total_profit += 1.5
+            total_profit += WIN_PROFIT
 
         else:
 
             hit = 0
-            total_profit -= 1
-
+            total_profit -= LOSE_LOSS
 
         state = "TRADE"
 
         last_trade_round = i
-
         next_groups = None
-        bet_mode = None
 
 
-    # ===== SIGNAL =====
+    # -------- SIGNAL -------- #
 
     if len(engine) > 60 and i-last_trade_round > COOLDOWN:
 
@@ -118,51 +106,48 @@ for i,n in enumerate(numbers):
                 probs[k] /= total
 
 
-            sorted_groups = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+            sorted_groups = sorted(probs.items(), key=lambda x:x[1], reverse=True)
 
             g1,p1 = sorted_groups[0]
             g2,p2 = sorted_groups[1]
 
-
-            # ---- BET 1 GROUP ---- #
-
-            if p1 >= P1_THRESHOLD:
-
-                next_groups = [g1]
-                bet_mode = "1G"
-                state = "SIGNAL"
+            combined = p1+p2
 
 
-            # ---- BET 2 GROUP ---- #
+            # ---- MOMENTUM FILTER ---- #
 
-            elif (p1+p2) >= P2_THRESHOLD:
+            last_groups = [x["group"] for x in engine[-3:]]
+
+            flip = len(set(last_groups)) == 3
+
+
+            if combined > PROB_THRESHOLD and not flip:
 
                 next_groups = [g1,g2]
-                bet_mode = "2G"
+
                 state = "SIGNAL"
 
 
     engine.append({
 
-        "round": i+1,
-        "number": n,
-        "group": g,
-        "predicted": predicted,
-        "hit": hit,
-        "mode": bet_mode,
-        "state": state
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "state":state
 
     })
 
 
 # ---------------- DASHBOARD ---------------- #
 
-st.title("🧠 HYBRID QUANT ENGINE")
+st.title("🚀 ULTRA TOP-2 QUANT ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
-col1.metric("Total Rounds", len(engine))
-col2.metric("Total Profit", round(total_profit,2))
+col1.metric("Total Rounds",len(engine))
+col2.metric("Total Profit",round(total_profit,2))
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
 
@@ -170,7 +155,7 @@ if hits:
 
     wr = np.mean(hits)
 
-    col3.metric("Winrate %", round(wr*100,2))
+    col3.metric("Winrate %",round(wr*100,2))
 
 else:
 
@@ -195,7 +180,7 @@ if next_groups:
         <br><br>{next_groups}
 
     </div>
-    """, unsafe_allow_html=True)
+    """,unsafe_allow_html=True)
 
 else:
 
