@@ -1,10 +1,8 @@
-
-
-
-
 import streamlit as st
 import pandas as pd
 import numpy as np
+
+# ================= CONFIG ================= #
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -17,26 +15,61 @@ WINDOWS = [9,14]
 
 st.set_page_config(layout="wide")
 
-
 # ================= GROUP ================= #
 
 def get_group(n):
 
     if 1 <= n <= 3:
         return 1
+
     if 4 <= n <= 6:
         return 2
+
     if 7 <= n <= 9:
         return 3
+
     if 10 <= n <= 12:
         return 4
+
     return None
+
+
+# ================= AI PREDICTOR ================= #
+
+def ai_predict(engine, lookback=3):
+
+    if len(engine) < lookback + 10:
+        return None, None
+
+    seq = [x["group"] for x in engine]
+
+    counts = {1:0,2:0,3:0,4:0}
+    total = 0
+
+    for i in range(lookback, len(seq)-1):
+
+        if seq[i-lookback:i] == seq[-lookback:]:
+
+            nxt = seq[i]
+
+            counts[nxt] += 1
+            total += 1
+
+    if total == 0:
+        return None, None
+
+    probs = {k:v/total for k,v in counts.items()}
+
+    best_group = max(probs, key=probs.get)
+
+    return best_group, probs[best_group]
 
 
 # ================= LOAD ================= #
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
+
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
 
@@ -53,6 +86,7 @@ numbers = df["number"].dropna().astype(int).tolist()
 engine = []
 
 total_profit = 0
+
 last_trade_round = -999
 
 next_signal = None
@@ -81,11 +115,12 @@ for i, n in enumerate(numbers):
     reason = None
 
 
-    # ===== EXECUTE TRADE =====
+    # ================= EXECUTE TRADE ================= #
 
     if next_signal is not None:
 
         predicted = next_signal
+
         window_used = next_window
         rolling_wr = next_wr
         ev_value = next_ev
@@ -106,13 +141,14 @@ for i, n in enumerate(numbers):
         next_signal = None
 
 
-    # ===== GENERATE SIGNAL =====
+    # ================= GENERATE SIGNAL ================= #
 
     if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
         best_wr = 0
+
 
         for w in WINDOWS:
 
@@ -132,7 +168,7 @@ for i, n in enumerate(numbers):
 
                 wr = np.mean(recent_hits)
 
-                ev = wr * WIN_PROFIT - (1-wr)*LOSE_LOSS
+                ev = wr * WIN_PROFIT - (1-wr) * LOSE_LOSS
 
                 if ev > best_ev:
 
@@ -141,17 +177,26 @@ for i, n in enumerate(numbers):
                     best_wr = wr
 
 
-        # ===== PREVIEW =====
+        # ================= AI PREDICT ================= #
+
+        ai_group, ai_prob = ai_predict(engine)
+
+
+        # ================= PREVIEW ================= #
 
         if best_window is not None and best_wr > 0.28:
 
             preview_signal = engine[-best_window]["group"]
+
             preview_window = best_window
             preview_wr = round(best_wr*100,2)
             preview_ev = round(best_ev,3)
 
+            if ai_group is not None and ai_prob > 0.35:
+                preview_signal = ai_group
 
-        # ===== CONFIRM TRADE =====
+
+        # ================= CONFIRM SIGNAL ================= #
 
         if best_window is not None:
 
@@ -159,7 +204,9 @@ for i, n in enumerate(numbers):
 
                 g1 = engine[-best_window]["group"]
 
-                # timing filter
+                if ai_group is not None and ai_prob > 0.35:
+                    g1 = ai_group
+
                 if engine[-1]["group"] != g1:
 
                     next_signal = g1
@@ -172,7 +219,7 @@ for i, n in enumerate(numbers):
 
                     state = "SIGNAL"
 
-                    reason = f"Window {best_window}"
+                    reason = f"Window {best_window} + AI"
 
 
     engine.append({
@@ -180,11 +227,14 @@ for i, n in enumerate(numbers):
         "round": i+1,
         "number": n,
         "group": g,
+
         "predicted": predicted,
         "hit": hit,
+
         "window": window_used,
         "rolling_wr_%": rolling_wr,
         "ev": ev_value,
+
         "state": state,
         "reason": reason
 
@@ -193,7 +243,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
+st.title("🎯 AI STREAMLIT BETTING ENGINE")
 
 
 col1, col2, col3 = st.columns(3)
@@ -205,13 +255,9 @@ col2.metric("Total Profit", round(total_profit,2))
 hits = [x["hit"] for x in engine if x["hit"] is not None]
 
 if hits:
-
     wr = np.mean(hits)
-
     col3.metric("Winrate %", round(wr*100,2))
-
 else:
-
     col3.metric("Winrate %",0)
 
 
@@ -220,6 +266,7 @@ else:
 if preview_signal is not None:
 
     st.markdown(f"""
+
     <div style='padding:15px;
                 background:#444;
                 color:white;
@@ -230,12 +277,11 @@ if preview_signal is not None:
         🔎 PREVIEW SIGNAL: {preview_signal}
 
         <br>Window: {preview_window}
-
         <br>WR: {preview_wr}%
-
         <br>EV: {preview_ev}
 
     </div>
+
     """, unsafe_allow_html=True)
 
 
@@ -244,12 +290,13 @@ if preview_signal is not None:
 if next_signal is not None:
 
     st.markdown(f"""
-    <div style='padding:20px;
+
+    <div style='padding:25px;
                 background:#c62828;
                 color:white;
                 border-radius:12px;
                 text-align:center;
-                font-size:28px;
+                font-size:30px;
                 font-weight:bold'>
 
         🚨 READY TO BET 🚨
@@ -257,12 +304,11 @@ if next_signal is not None:
         <br>🎯 NEXT GROUP: {next_signal}
 
         <br>Window: {next_window}
-
         <br>WR: {next_wr}%
-
         <br>EV: {next_ev}
 
     </div>
+
     """, unsafe_allow_html=True)
 
 else:
@@ -278,4 +324,5 @@ hist_df = pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df, use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | EV FILTER | TIMING ENTRY")
+
+st.caption("WINDOW 9 & 14 | AI + EV FILTER | FLAT BET")
