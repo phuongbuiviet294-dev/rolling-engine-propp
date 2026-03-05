@@ -9,12 +9,12 @@ AUTO_REFRESH = 10
 WIN_PROFIT = 3
 LOSE_LOSS = 1
 
+# lag scan range
 LAG_RANGE = range(2,40)
-
-TOP_LAGS = 5
 
 st.set_page_config(layout="wide")
 
+# ================= GROUP ================= #
 
 def get_group(n):
 
@@ -22,15 +22,18 @@ def get_group(n):
     if 4 <= n <= 6: return 2
     if 7 <= n <= 9: return 3
     if 10 <= n <= 12: return 4
+    return None
 
+
+# ================= LOAD ================= #
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
+
     try:
         return pd.read_csv(GOOGLE_SHEET_CSV)
     except:
         return pd.DataFrame()
-
 
 df = load()
 
@@ -39,13 +42,16 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
+
+# ================= ENGINE ================= #
+
 engine=[]
 
 total_profit=0
 
-next_group=None
+best_lag=None
 
-best_lags=[]
+next_group=None
 
 
 for i,n in enumerate(numbers):
@@ -56,6 +62,8 @@ for i,n in enumerate(numbers):
     hit=None
     state="SCAN"
 
+
+    # execute trade
 
     if next_group is not None:
 
@@ -76,9 +84,11 @@ for i,n in enumerate(numbers):
         next_group=None
 
 
-    if len(engine)>120:
+    # find best lag
 
-        lag_scores=[]
+    if len(engine)>80:
+
+        best_wr=0
 
         for lag in LAG_RANGE:
 
@@ -92,29 +102,20 @@ for i,n in enumerate(numbers):
 
                 total+=1
 
-            if total>50:
+            if total>30:
 
                 wr=wins/total
 
-                lag_scores.append((lag,wr))
+                if wr>best_wr:
+
+                    best_wr=wr
+                    best_lag=lag
 
 
-        lag_scores.sort(key=lambda x:x[1],reverse=True)
+        if best_lag is not None and len(engine)>best_lag:
 
-        best_lags=lag_scores[:TOP_LAGS]
-
-        votes={1:0,2:0,3:0,4:0}
-
-        for lag,wr in best_lags:
-
-            grp=engine[-lag]["group"]
-
-            votes[grp]+=wr
-
-
-        next_group=max(votes,key=votes.get)
-
-        state="SIGNAL"
+            next_group=engine[-best_lag]["group"]
+            state="SIGNAL"
 
 
     engine.append({
@@ -125,12 +126,14 @@ for i,n in enumerate(numbers):
         "predicted":predicted,
         "hit":hit,
         "state":state,
-        "lag":best_lags
+        "lag":best_lag
 
     })
 
 
-st.title("🚀 ADAPTIVE QUANT ENGINE")
+# ================= DASHBOARD ================= #
+
+st.title("ADAPTIVE LAG ENGINE")
 
 col1,col2,col3=st.columns(3)
 
@@ -145,6 +148,8 @@ if hits:
 
     col3.metric("Winrate",round(wr*100,2))
 
+
+# ================= NEXT GROUP ================= #
 
 if next_group:
 
@@ -168,6 +173,8 @@ else:
 
     st.info("Scanning...")
 
+
+# ================= HISTORY ================= #
 
 st.subheader("History")
 
