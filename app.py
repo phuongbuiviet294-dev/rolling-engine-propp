@@ -6,12 +6,12 @@ import numpy as np
 
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-AUTO_REFRESH = 5
-
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = [9,14]
+WINDOWS = list(range(6,21))
+
+AUTO_REFRESH = 5
 
 st.set_page_config(layout="wide")
 
@@ -34,209 +34,174 @@ def get_group(n):
     return None
 
 
+# ================= LOAD DATA ================= #
+
+@st.cache_data(ttl=AUTO_REFRESH)
+def load_data():
+
+    df = pd.read_csv(GOOGLE_SHEET_CSV)
+
+    return df
+
+
+df = load_data()
+
+numbers = df["number"].dropna().astype(int).tolist()
+
+
 # ================= AI PREDICTOR ================= #
 
-def ai_predict(engine, lookback=3):
+def ai_predict(groups):
 
-    if len(engine) < lookback + 10:
-        return None, None
+    if len(groups) < 30:
+        return None
 
-    seq = [x["group"] for x in engine]
+    seq = groups[-3:]
 
     counts = {1:0,2:0,3:0,4:0}
-    total = 0
 
-    for i in range(lookback, len(seq)-1):
+    for i in range(len(groups)-3):
 
-        if seq[i-lookback:i] == seq[-lookback:]:
+        if groups[i:i+3] == seq:
 
-            nxt = seq[i]
+            nxt = groups[i+3]
 
-            counts[nxt] += 1
-            total += 1
+            counts[nxt]+=1
+
+    total = sum(counts.values())
 
     if total == 0:
-        return None, None
+        return None
 
     probs = {k:v/total for k,v in counts.items()}
 
-    best_group = max(probs, key=probs.get)
+    best = max(probs,key=probs.get)
 
-    return best_group, probs[best_group]
+    if probs[best] > 0.35:
 
+        return best
 
-# ================= LOAD ================= #
-
-@st.cache_data(ttl=AUTO_REFRESH)
-def load():
-
-    return pd.read_csv(GOOGLE_SHEET_CSV)
-
-
-df = load()
-
-if df.empty:
-    st.stop()
-
-numbers = df["number"].dropna().astype(int).tolist()
+    return None
 
 
 # ================= ENGINE ================= #
 
 engine = []
 
+groups = []
+
 total_profit = 0
 
-last_trade_round = -999
-
 next_signal = None
-next_window = None
-next_wr = None
-next_ev = None
 
-signal_created_at = None
-
-preview_signal = None
-preview_window = None
-preview_wr = None
-preview_ev = None
-
-
-for i, n in enumerate(numbers):
+for i,n in enumerate(numbers):
 
     g = get_group(n)
 
-    predicted = None
-    hit = None
-    state = "SCAN"
-    window_used = None
-    rolling_wr = None
-    ev_value = None
-    reason = None
+    groups.append(g)
 
+    predicted=None
+    hit=None
+    state="SCAN"
+    window_used=None
+    wr=None
+    ev=None
 
-    # ================= EXECUTE TRADE ================= #
+    # ===== EXECUTE TRADE =====
 
     if next_signal is not None:
 
         predicted = next_signal
 
-        window_used = next_window
-        rolling_wr = next_wr
-        ev_value = next_ev
+        hit = 1 if predicted==g else 0
 
-        hit = 1 if predicted == g else 0
+        if hit:
 
-        if hit == 1:
             total_profit += WIN_PROFIT
+
         else:
+
             total_profit -= LOSE_LOSS
 
-        state = "TRADE"
+        state="TRADE"
 
-        reason = f"Executed signal from round {signal_created_at}"
-
-        last_trade_round = i
-
-        next_signal = None
+        next_signal=None
 
 
-    # ================= GENERATE SIGNAL ================= #
+    # ===== WINDOW SCAN =====
 
-    if len(engine) >= 40 and i - last_trade_round > 4:
+    best_window=None
+    best_wr=0
+    best_ev=-999
 
-        best_window = None
-        best_ev = -999
-        best_wr = 0
-
+    if len(groups)>80:
 
         for w in WINDOWS:
 
-            recent_hits = []
+            hits=[]
 
-            start = max(w, len(engine)-30)
+            for j in range(w,len(groups)-1):
 
-            for j in range(start, len(engine)):
+                if groups[j]==groups[j-w]:
 
-                if j >= w:
+                    hits.append(1)
 
-                    recent_hits.append(
-                        1 if engine[j]["group"] == engine[j-w]["group"] else 0
-                    )
+                else:
 
-            if len(recent_hits) >= 20:
+                    hits.append(0)
 
-                wr = np.mean(recent_hits)
+            if len(hits)>30:
 
-                ev = wr * WIN_PROFIT - (1-wr) * LOSE_LOSS
+                wr=np.mean(hits)
 
-                if ev > best_ev:
+                ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
 
-                    best_ev = ev
-                    best_window = w
-                    best_wr = wr
+                if ev>best_ev:
 
-
-        # ================= AI PREDICT ================= #
-
-        ai_group, ai_prob = ai_predict(engine)
+                    best_ev=ev
+                    best_window=w
+                    best_wr=wr
 
 
-        # ================= PREVIEW ================= #
+    # ===== AI =====
 
-        if best_window is not None and best_wr > 0.28:
-
-            preview_signal = engine[-best_window]["group"]
-
-            preview_window = best_window
-            preview_wr = round(best_wr*100,2)
-            preview_ev = round(best_ev,3)
-
-            if ai_group is not None and ai_prob > 0.35:
-                preview_signal = ai_group
+    ai_group = ai_predict(groups)
 
 
-        # ================= CONFIRM SIGNAL ================= #
+    # ===== SIGNAL =====
 
-        if best_window is not None:
+    if best_window is not None:
 
-            if best_wr > 0.29 and best_ev > -0.01:
+        if best_wr>0.34 and best_ev>0:
 
-                g1 = engine[-best_window]["group"]
+            signal = groups[-1]
 
-                if ai_group is not None and ai_prob > 0.35:
-                    g1 = ai_group
+            if ai_group is not None:
 
-                if engine[-1]["group"] != g1:
+                signal = ai_group
 
-                    next_signal = g1
+            next_signal = signal
 
-                    next_window = best_window
-                    next_wr = round(best_wr*100,2)
-                    next_ev = round(best_ev,3)
+            state="SIGNAL"
 
-                    signal_created_at = i + 1
+            window_used = best_window
 
-                    state = "SIGNAL"
+            wr = round(best_wr*100,2)
 
-                    reason = f"Window {best_window} + AI"
+            ev = round(best_ev,3)
 
 
     engine.append({
 
-        "round": i+1,
-        "number": n,
-        "group": g,
-
-        "predicted": predicted,
-        "hit": hit,
-
-        "window": window_used,
-        "rolling_wr_%": rolling_wr,
-        "ev": ev_value,
-
-        "state": state,
-        "reason": reason
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "window":window_used,
+        "wr":wr,
+        "ev":ev,
+        "state":state
 
     })
 
@@ -246,43 +211,21 @@ for i, n in enumerate(numbers):
 st.title("🎯 AI STREAMLIT BETTING ENGINE")
 
 
-col1, col2, col3 = st.columns(3)
+col1,col2,col3 = st.columns(3)
 
-col1.metric("Total Rounds", len(engine))
+col1.metric("Total Rounds",len(engine))
 
-col2.metric("Total Profit", round(total_profit,2))
+col2.metric("Total Profit",round(total_profit,2))
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
+hits=[x["hit"] for x in engine if x["hit"] is not None]
 
 if hits:
-    wr = np.mean(hits)
-    col3.metric("Winrate %", round(wr*100,2))
+
+    col3.metric("Winrate %",round(np.mean(hits)*100,2))
+
 else:
+
     col3.metric("Winrate %",0)
-
-
-# ================= PREVIEW ================= #
-
-if preview_signal is not None:
-
-    st.markdown(f"""
-
-    <div style='padding:15px;
-                background:#444;
-                color:white;
-                border-radius:10px;
-                text-align:center;
-                font-size:20px'>
-
-        🔎 PREVIEW SIGNAL: {preview_signal}
-
-        <br>Window: {preview_window}
-        <br>WR: {preview_wr}%
-        <br>EV: {preview_ev}
-
-    </div>
-
-    """, unsafe_allow_html=True)
 
 
 # ================= NEXT GROUP ================= #
@@ -291,29 +234,28 @@ if next_signal is not None:
 
     st.markdown(f"""
 
-    <div style='padding:25px;
-                background:#c62828;
-                color:white;
-                border-radius:12px;
-                text-align:center;
-                font-size:30px;
-                font-weight:bold'>
+    <div style='
+    padding:30px;
+    background:#b71c1c;
+    color:white;
+    font-size:32px;
+    text-align:center;
+    border-radius:12px;
+    font-weight:bold'>
 
-        🚨 READY TO BET 🚨
+    NEXT GROUP TO BET
 
-        <br>🎯 NEXT GROUP: {next_signal}
+    <br><br>
 
-        <br>Window: {next_window}
-        <br>WR: {next_wr}%
-        <br>EV: {next_ev}
+    🎯 {next_signal}
 
     </div>
 
-    """, unsafe_allow_html=True)
+    """,unsafe_allow_html=True)
 
 else:
 
-    st.info("No valid signal yet")
+    st.info("No signal")
 
 
 # ================= HISTORY ================= #
@@ -322,7 +264,4 @@ st.subheader("History")
 
 hist_df = pd.DataFrame(engine).iloc[::-1]
 
-st.dataframe(hist_df, use_container_width=True)
-
-
-st.caption("WINDOW 9 & 14 | AI + EV FILTER | FLAT BET")
+st.dataframe(hist_df,use_container_width=True)
