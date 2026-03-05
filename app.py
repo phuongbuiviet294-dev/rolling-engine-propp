@@ -9,7 +9,11 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 1.5
 LOSE_LOSS = 1
 
-WINDOWS = [8,9,10,11,12,14]
+WINDOWS = [6,7,8,9,10,11,12,14]
+
+COOLDOWN = 4
+
+PROB_THRESHOLD = 0.55
 
 st.set_page_config(layout="wide")
 
@@ -38,6 +42,9 @@ def load():
 
 df = load()
 
+if df.empty:
+    st.stop()
+
 numbers = df["number"].dropna().astype(int).tolist()
 
 
@@ -46,10 +53,10 @@ numbers = df["number"].dropna().astype(int).tolist()
 engine = []
 
 total_profit = 0
+
 last_trade_round = -999
 
 next_groups = None
-
 preview_groups = None
 
 
@@ -60,7 +67,6 @@ for i,n in enumerate(numbers):
     predicted = None
     hit = None
     state = "SCAN"
-
 
     # ===== EXECUTE TRADE =====
 
@@ -85,9 +91,9 @@ for i,n in enumerate(numbers):
         next_groups = None
 
 
-    # ===== GENERATE SIGNAL =====
+    # ===== SIGNAL =====
 
-    if len(engine) > 50 and i-last_trade_round > 3:
+    if len(engine) > 60 and i-last_trade_round > COOLDOWN:
 
         probs = {1:0,2:0,3:0,4:0}
 
@@ -97,26 +103,34 @@ for i,n in enumerate(numbers):
 
                 grp = engine[-w]["group"]
 
-                probs[grp] += 1
+                weight = 1/w
+
+                probs[grp] += weight
 
 
         total = sum(probs.values())
 
-        for k in probs:
+        if total > 0:
 
-            probs[k] = probs[k]/total
+            for k in probs:
+
+                probs[k] = probs[k]/total
 
 
-        sorted_groups = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+            sorted_groups = sorted(probs.items(), key=lambda x: x[1], reverse=True)
 
-        g1 = sorted_groups[0][0]
-        g2 = sorted_groups[1][0]
+            g1,p1 = sorted_groups[0]
+            g2,p2 = sorted_groups[1]
 
-        preview_groups = [g1,g2]
+            combined_prob = p1 + p2
 
-        next_groups = [g1,g2]
+            preview_groups = [g1,g2]
 
-        state = "SIGNAL"
+            if combined_prob > PROB_THRESHOLD:
+
+                next_groups = [g1,g2]
+
+                state = "SIGNAL"
 
 
     engine.append({
@@ -133,7 +147,7 @@ for i,n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("🚀 TOP-2 PROBABILITY ENGINE")
+st.title("🚀 SMART TOP-2 QUANT ENGINE")
 
 col1,col2,col3 = st.columns(3)
 
@@ -154,23 +168,26 @@ else:
     col3.metric("Winrate %",0)
 
 
-# ================= PREVIEW ================= #
+# ================= NEXT GROUP ================= #
 
 if preview_groups:
 
     st.markdown(f"""
-    <div style='padding:20px;
-                background:#444;
+
+    <div style='padding:25px;
+                background:#c62828;
                 color:white;
-                border-radius:10px;
+                border-radius:12px;
                 text-align:center;
-                font-size:22px'>
+                font-size:28px;
+                font-weight:bold'>
 
-        🔎 PREVIEW GROUPS
+        🎯 NEXT GROUP TO BET
 
-        <br>🎯 BET: {preview_groups}
+        <br><br> {preview_groups}
 
     </div>
+
     """,unsafe_allow_html=True)
 
 
