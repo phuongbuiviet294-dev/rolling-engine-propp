@@ -26,6 +26,7 @@ def get_group(n):
         return 3
     if 10 <= n <= 12:
         return 4
+
     return None
 
 
@@ -56,8 +57,6 @@ next_window = None
 next_wr = None
 next_ev = None
 
-signal_created_at = None
-
 preview_signal = None
 preview_window = None
 preview_wr = None
@@ -82,20 +81,19 @@ for i, n in enumerate(numbers):
     if next_signal is not None:
 
         predicted = next_signal
+
         window_used = next_window
         rolling_wr = next_wr
         ev_value = next_ev
 
         hit = 1 if predicted == g else 0
 
-        if hit == 1:
+        if hit:
             total_profit += WIN_PROFIT
         else:
             total_profit -= LOSE_LOSS
 
         state = "TRADE"
-
-        reason = f"Executed signal from round {signal_created_at}"
 
         last_trade_round = i
 
@@ -128,7 +126,7 @@ for i, n in enumerate(numbers):
 
                 wr = np.mean(recent_hits)
 
-                ev = wr * WIN_PROFIT - (1-wr)*LOSE_LOSS
+                ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
 
                 if ev > best_ev:
 
@@ -147,28 +145,32 @@ for i, n in enumerate(numbers):
             preview_ev = round(best_ev,3)
 
 
+        # ===== EV MOMENTUM =====
+
+        past_evs = [x["ev"] for x in engine[-10:] if x["ev"] is not None]
+
+        avg_ev = np.mean(past_evs) if len(past_evs) > 3 else -1
+
+
         # ===== CONFIRM TRADE =====
 
         if best_window is not None:
 
-            if best_wr > 0.29 and best_ev > -0.01:
+            if best_wr > 0.29 and best_ev > avg_ev:
 
-                g1 = engine[-best_window]["group"]
+                signal = engine[-best_window]["group"]
 
                 # timing filter
-                if engine[-1]["group"] != g1:
 
-                    next_signal = g1
+                if engine[-1]["group"] != signal:
+
+                    next_signal = signal
 
                     next_window = best_window
                     next_wr = round(best_wr*100,2)
                     next_ev = round(best_ev,3)
 
-                    signal_created_at = i + 1
-
                     state = "SIGNAL"
-
-                    reason = f"Window {best_window}"
 
 
     engine.append({
@@ -181,16 +183,14 @@ for i, n in enumerate(numbers):
         "window": window_used,
         "rolling_wr_%": rolling_wr,
         "ev": ev_value,
-        "state": state,
-        "reason": reason
+        "state": state
 
     })
 
 
 # ================= DASHBOARD ================= #
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
-
+st.title("⚡ LAG MOMENTUM ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -274,4 +274,4 @@ hist_df = pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df, use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | EV FILTER | TIMING ENTRY")
+st.caption("WINDOW 9 & 14 | EV MOMENTUM FILTER")
