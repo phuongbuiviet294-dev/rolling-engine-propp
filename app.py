@@ -11,6 +11,8 @@ LOSE_LOSS = 1
 
 WINDOWS = [9,14]
 
+CYCLE = 200
+
 st.set_page_config(layout="wide")
 
 
@@ -35,7 +37,6 @@ def get_group(n):
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
-
 
 df = load()
 
@@ -73,7 +74,6 @@ for i, n in enumerate(numbers):
     window_used = None
     rolling_wr = None
     ev_value = None
-    reason = None
 
 
     # ===== EXECUTE TRADE =====
@@ -108,19 +108,27 @@ for i, n in enumerate(numbers):
         best_ev = -999
         best_wr = 0
 
+        # ===== cycle start =====
+
+        start_idx = max(0, len(engine) - CYCLE)
+
+        cycle_data = engine[start_idx:]
+
+
         for w in WINDOWS:
 
             recent_hits = []
 
-            start = max(w, len(engine)-30)
+            for j in range(len(cycle_data)):
 
-            for j in range(start, len(engine)):
+                idx = start_idx + j
 
-                if j >= w:
+                if idx >= w:
 
-                    recent_hits.append(
-                        1 if engine[j]["group"] == engine[j-w]["group"] else 0
-                    )
+                    if engine[idx]["group"] == engine[idx-w]["group"]:
+                        recent_hits.append(1)
+                    else:
+                        recent_hits.append(0)
 
             if len(recent_hits) >= 20:
 
@@ -145,22 +153,13 @@ for i, n in enumerate(numbers):
             preview_ev = round(best_ev,3)
 
 
-        # ===== EV MOMENTUM =====
-
-        past_evs = [x["ev"] for x in engine[-10:] if x["ev"] is not None]
-
-        avg_ev = np.mean(past_evs) if len(past_evs) > 3 else -1
-
-
-        # ===== CONFIRM TRADE =====
+        # ===== CONFIRM =====
 
         if best_window is not None:
 
-            if best_wr > 0.29 and best_ev > avg_ev:
+            if best_wr > 0.30 and best_ev >= 0:
 
                 signal = engine[-best_window]["group"]
-
-                # timing filter
 
                 if engine[-1]["group"] != signal:
 
@@ -190,7 +189,7 @@ for i, n in enumerate(numbers):
 
 # ================= DASHBOARD ================= #
 
-st.title("⚡ LAG MOMENTUM ENGINE")
+st.title("♻️ CYCLE ADAPTIVE ENGINE")
 
 col1, col2, col3 = st.columns(3)
 
@@ -273,5 +272,3 @@ st.subheader("History")
 hist_df = pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df, use_container_width=True)
-
-st.caption("WINDOW 9 & 14 | EV MOMENTUM FILTER")
