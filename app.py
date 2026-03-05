@@ -29,7 +29,7 @@ def get_group(n):
     return None
 
 
-# ================= LOAD DATA ================= #
+# ================= LOAD ================= #
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
@@ -62,8 +62,6 @@ preview_signal = None
 preview_window = None
 preview_wr = None
 preview_ev = None
-
-prev_best_window = None
 
 
 for i, n in enumerate(numbers):
@@ -104,9 +102,9 @@ for i, n in enumerate(numbers):
         next_signal = None
 
 
-    # ===== SIGNAL SEARCH =====
+    # ===== GENERATE SIGNAL =====
 
-    if len(engine) >= 60 and i - last_trade_round > 4:
+    if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
@@ -116,17 +114,17 @@ for i, n in enumerate(numbers):
 
             recent_hits = []
 
-            start = max(w, len(engine)-40)
+            start = max(w, len(engine)-30)
 
             for j in range(start, len(engine)):
 
                 if j >= w:
 
-                    hit_val = 1 if engine[j]["group"] == engine[j-w]["group"] else 0
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j-w]["group"] else 0
+                    )
 
-                    recent_hits.append(hit_val)
-
-            if len(recent_hits) >= 25:
+            if len(recent_hits) >= 20:
 
                 wr = np.mean(recent_hits)
 
@@ -144,7 +142,6 @@ for i, n in enumerate(numbers):
         if best_window is not None and best_wr > 0.28:
 
             preview_signal = engine[-best_window]["group"]
-
             preview_window = best_window
             preview_wr = round(best_wr*100,2)
             preview_ev = round(best_ev,3)
@@ -154,32 +151,24 @@ for i, n in enumerate(numbers):
 
         if best_window is not None:
 
-            if best_wr > 0.30 and best_ev > 0.02:
+            if best_wr > 0.29 and best_ev > -0.01:
 
-                if prev_best_window == best_window:
+                g1 = engine[-best_window]["group"]
 
-                    g1 = engine[-best_window]["group"]
+                # timing filter
+                if engine[-1]["group"] != g1:
 
-                    if len(engine) >= 2*best_window:
-                        g2 = engine[-2*best_window]["group"]
-                    else:
-                        g2 = g1
+                    next_signal = g1
 
-                    if g1 == g2:
+                    next_window = best_window
+                    next_wr = round(best_wr*100,2)
+                    next_ev = round(best_ev,3)
 
-                        next_signal = g1
+                    signal_created_at = i + 1
 
-                        next_window = best_window
-                        next_wr = round(best_wr*100,2)
-                        next_ev = round(best_ev,3)
+                    state = "SIGNAL"
 
-                        signal_created_at = i + 1
-
-                        state = "SIGNAL"
-
-                        reason = f"Stable window {best_window}"
-
-                prev_best_window = best_window
+                    reason = f"Window {best_window}"
 
 
     engine.append({
@@ -285,4 +274,4 @@ hist_df = pd.DataFrame(engine).iloc[::-1]
 
 st.dataframe(hist_df, use_container_width=True)
 
-st.caption("WINDOW 9 & 14 | STABILITY FILTER | DOUBLE CONFIRM")
+st.caption("WINDOW 9 & 14 | EV FILTER | TIMING ENTRY")
