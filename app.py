@@ -155,7 +155,7 @@ for i, n in enumerate(numbers):
 
         if best_window is not None:
 
-            if best_wr > 0.29 and best_ev > -0.01:
+            if best_wr > 0.28 and best_ev > -0.02:
 
                 g1 = engine[-best_window]["group"]
 
