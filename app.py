@@ -13,7 +13,7 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = [9,14]
+WINDOWS = [9,14,24]
 
 st.set_page_config(layout="wide")
 
@@ -108,7 +108,7 @@ for i, n in enumerate(numbers):
 
     # ===== GENERATE SIGNAL =====
 
-    if len(engine) >= 50 and i - last_trade_round > 4:
+    if len(engine) >= 40 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
