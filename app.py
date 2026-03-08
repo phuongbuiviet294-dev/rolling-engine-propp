@@ -115,7 +115,7 @@ for i, n in enumerate(numbers):
 
             recent_hits = []
 
-            start = max(w, len(engine)-25)
+            start = max(w, len(engine)-26)
 
             for j in range(start, len(engine)):
 
