@@ -108,7 +108,7 @@ for i, n in enumerate(numbers):
 
     # ===== GENERATE SIGNAL =====
 
-    if len(engine) >= 30 and i - last_trade_round > 4:
+    if len(engine) >= 50 and i - last_trade_round > 4:
 
         best_window = None
         best_ev = -999
