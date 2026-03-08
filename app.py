@@ -1,7 +1,4 @@
 
-
-
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -13,7 +10,7 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = [9,14,24]
+WINDOWS = [9,14]
 
 st.set_page_config(layout="wide")
 
@@ -279,6 +276,3 @@ hist_df = pd.DataFrame(engine).iloc[::-1]
 st.dataframe(hist_df, use_container_width=True)
 
 st.caption("WINDOW 9 & 14 | EV FILTER | TIMING ENTRY")
-
-
-
