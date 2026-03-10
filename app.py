@@ -38,13 +38,12 @@ numbers = df["number"].dropna().astype(int).tolist()
 engine = []
 total_profit = 0
 last_trade_round = -999
+loss_streak = 0
 
 next_signal = None
 next_window = None
 next_wr = None
 next_ev = None
-
-loss_streak = 0
 
 for i, n in enumerate(numbers):
     g = get_group(n)
@@ -76,25 +75,24 @@ for i, n in enumerate(numbers):
         last_trade_round = i
         next_signal = None
 
-    # ===== MARKET REGIME =====
-    recent_hits = [x["hit"] for x in engine[-15:] if x["hit"] is not None]
-    wr_live = np.mean(recent_hits) if recent_hits else 0
+    # ===== WINRATE STATS =====
+    hits_all = [x["hit"] for x in engine if x["hit"] is not None]
 
-    if wr_live > 0.34:
-        regime = "HOT"
-    elif wr_live > 0.28:
-        regime = "WARM"
+    wr_live = np.mean(hits_all[-15:]) if len(hits_all) >= 15 else 0
+    wr_mid  = np.mean(hits_all[-60:]) if len(hits_all) >= 60 else wr_live
+
+    # ===== CYCLE DETECT =====
+    if wr_live < wr_mid - 0.05:
+        cycle = "CHAOS"
+    elif wr_live > wr_mid and wr_live < 0.34:
+        cycle = "RECOVERY"
+    elif wr_live >= 0.34:
+        cycle = "HOT"
     else:
-        regime = "COLD"
+        cycle = "COOLDOWN"
 
     # ===== GAP CONTROL =====
-    GAP = BASE_GAP
-    if loss_streak >= 2:
-        GAP += 1
-    if loss_streak >= 4:
-        GAP += 1
-    if loss_streak >= 6:
-        GAP += 2
+    GAP = BASE_GAP + loss_streak
 
     # ===== GENERATE SIGNAL =====
     if len(engine) >= 25 and i - last_trade_round > GAP:
@@ -121,30 +119,26 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        # ===== ENTRY FILTER =====
-        if best_window is not None:
-            wr_ok = best_wr > 0.28
-            ev_ok = best_ev > 0
+        # ===== ENTRY FILTER BY CYCLE =====
+        allow_trade = False
 
-            # Regime filter
-            if regime == "WARM":
-                wr_ok = best_wr > 0.30
-            if regime == "COLD":
-                wr_ok = best_wr > 0.32
-                ev_ok = best_ev > 0.05
+        if cycle == "RECOVERY":
+            allow_trade = best_wr > 0.29 and best_ev > 0
+        elif cycle == "HOT":
+            allow_trade = best_wr > 0.28 and best_ev > -0.02
+        elif cycle == "COOLDOWN":
+            allow_trade = best_wr > 0.32 and best_ev > 0.05
+        else:  # CHAOS
+            allow_trade = False
 
-            # Loss protection
-            if loss_streak >= 4:
-                ev_ok = best_ev > 0.08
-
-            if wr_ok and ev_ok:
-                g1 = engine[-best_window]["group"]
-                if engine[-1]["group"] != g1:
-                    next_signal = g1
-                    next_window = best_window
-                    next_wr = best_wr
-                    next_ev = best_ev
-                    state = "SIGNAL"
+        if best_window and allow_trade:
+            g1 = engine[-best_window]["group"]
+            if engine[-1]["group"] != g1:
+                next_signal = g1
+                next_window = best_window
+                next_wr = best_wr
+                next_ev = best_ev
+                state = "SIGNAL"
 
     engine.append({
         "round": i + 1,
@@ -159,7 +153,7 @@ for i, n in enumerate(numbers):
     })
 
 # ================= DASHBOARD =================
-st.title("⚡🛡 TURBO + RISK AI ENGINE")
+st.title("🔁 CYCLE MODE AI ENGINE")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Rounds", len(engine))
@@ -170,7 +164,7 @@ wr_total = np.mean(hits) if hits else 0
 col3.metric("Winrate %", round(wr_total * 100, 2))
 col4.metric("Loss Streak", loss_streak)
 
-st.caption(f"Adaptive Window {WINDOW_MIN}-{WINDOW_MAX} | Lookback={LOOKBACK} | Regime={regime}")
+st.caption(f"Cycle={cycle} | WR_live={wr_live:.2f} | WR_mid={wr_mid:.2f}")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
@@ -190,7 +184,7 @@ if next_signal is not None:
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("Smart filter active — waiting setup")
+    st.info("Cycle filter active — waiting phase")
 
 # ================= HISTORY =================
 st.subheader("History")
