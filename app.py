@@ -2,17 +2,18 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+# ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 14]
+
+LIVE_RECENT_ROUNDS = 400
+WINDOWS = [6,9,12,15,18]
 
 st.set_page_config(layout="wide")
 
-# ================= CORE ================= #
-
+# ================= GROUP =================
 def get_group(n):
     if 1 <= n <= 3: return 1
     if 4 <= n <= 6: return 2
@@ -20,6 +21,7 @@ def get_group(n):
     if 10 <= n <= 12: return 4
     return None
 
+# ================= LOAD =================
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
     return pd.read_csv(GOOGLE_SHEET_CSV)
@@ -28,182 +30,120 @@ df = load()
 if df.empty:
     st.stop()
 
-numbers = df["number"].dropna().astype(int).tolist()
+numbers_all = df["number"].dropna().astype(int).tolist()
+numbers = numbers_all[-LIVE_RECENT_ROUNDS:]
 
-# ================= ENGINE ================= #
+# ================= HELPERS =================
+def window_engine(engine, LOOKBACK):
+    best=None; best_ev=-999; best_wr=0
+    for w in WINDOWS:
+        hits=[]
+        start=max(w,len(engine)-LOOKBACK)
+        for j in range(start,len(engine)):
+            if j>=w:
+                hits.append(1 if engine[j]["group"]==engine[j-w]["group"] else 0)
+        if len(hits)>=20:
+            wr=np.mean(hits)
+            ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+            if ev>best_ev:
+                best_ev=ev; best=w; best_wr=wr
+    return best,best_wr,best_ev
 
-engine = []
-total_profit = 0
-last_trade_round = -999
+def momentum_engine(engine):
+    if len(engine)<8: return None,0
+    seq=[x["group"] for x in engine[-4:]]
+    if len(set(seq))==1:
+        return seq[-1],0.6
+    return None,0
 
-next_signal = None
-next_window = None
-next_wr = None
-next_ev = None
-signal_created_at = None
+def revert_engine(engine):
+    if len(engine)<10: return None,0
+    last=engine[-1]["group"]
+    counts=[x["group"] for x in engine[-10:]].count(last)
+    if counts>=6:
+        return (last%4)+1,0.55
+    return None,0
 
-preview_signal = None
-preview_window = None
-preview_wr = None
-preview_ev = None
+# ================= ENGINE =================
+engine=[]
+total_profit=0
+last_trade_round=-999
+next_signal=None
+confidence=0
+cooldown_until=-1
 
-for i, n in enumerate(numbers):
+for i,n in enumerate(numbers):
+    g=get_group(n)
+    predicted=None; hit=None; state="SCAN"
 
-    g = get_group(n)
-
-    predicted = None
-    hit = None
-    state = "SCAN"
-    window_used = None
-    rolling_wr = None
-    ev_value = None
-    executed_from_round = None
-    reason = None
-
-    # ===== EXECUTE TRADE =====
+    # ===== EXECUTE =====
     if next_signal is not None:
+        predicted=next_signal
+        hit=1 if predicted==g else 0
+        total_profit+=WIN_PROFIT if hit else -LOSE_LOSS
+        state="TRADE"
+        last_trade_round=i
+        next_signal=None
 
-        predicted = next_signal
-        window_used = next_window
-        rolling_wr = next_wr
-        ev_value = next_ev
-        executed_from_round = signal_created_at
+    allow=True
+    if i<cooldown_until: allow=False
 
-        hit = 1 if predicted == g else 0
+    # ===== REGIME =====
+    recent=[x["group"] for x in engine[-30:]]
+    regime_score=1
+    if len(recent)>=30:
+        changes=sum(a!=b for a,b in zip(recent,recent[1:]))
+        if changes>22:
+            regime_score=0.5
+            allow=False
 
-        if hit == 1:
-            total_profit += WIN_PROFIT
-        else:
-            total_profit -= LOSE_LOSS
+    # ===== ENSEMBLE =====
+    if allow and len(engine)>=40 and i-last_trade_round>4:
+        w,wr,ev=window_engine(engine,30)
+        m_sig,m_conf=momentum_engine(engine)
+        r_sig,r_conf=revert_engine(engine)
 
-        state = "TRADE"
-        reason = f"Executed signal from round {signal_created_at}"
+        votes={}
+        if w:
+            g1=engine[-w]["group"]
+            votes[g1]=votes.get(g1,0)+wr
+        if m_sig:
+            votes[m_sig]=votes.get(m_sig,0)+m_conf
+        if r_sig:
+            votes[r_sig]=votes.get(r_sig,0)+r_conf
 
-        last_trade_round = i
+        if votes:
+            best_group=max(votes,key=votes.get)
+            conf=votes[best_group]*regime_score
 
-        next_signal = None
-
-    # ===== GENERATE SIGNAL =====
-    if len(engine) >= 40 and i - last_trade_round > 4:
-
-        best_window = None
-        best_ev = -999
-        best_wr = 0
-
-        for w in WINDOWS:
-
-            recent_hits = []
-
-            for j in range(len(engine) - 30, len(engine)):
-                if j >= w:
-                    recent_hits.append(
-                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
-                    )
-
-            if len(recent_hits) >= 20:
-                wr = np.mean(recent_hits)
-                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
-
-                if ev > best_ev:
-                    best_ev = ev
-                    best_window = w
-                    best_wr = wr
-
-        # ==== Preview (WR > 28) ====
-        if best_window is not None and best_wr > 0.28:
-            preview_signal = engine[-best_window]["group"]
-            preview_window = best_window
-            preview_wr = round(best_wr * 100, 2)
-            preview_ev = round(best_ev, 3)
-
-        # ==== Confirm trade (WR > 29 & EV >= 0) ====
-        if best_window is not None and best_wr > 0.29 and best_ev >= 0:
-
-            next_signal = engine[-best_window]["group"]
-            next_window = best_window
-            next_wr = round(best_wr * 100, 2)
-            next_ev = round(best_ev, 3)
-            signal_created_at = i + 1
-
-            state = "SIGNAL"
-            reason = f"Signal created (window {best_window})"
+            if conf>0.55 and ev>0:
+                next_signal=best_group
+                confidence=conf
+                state="SIGNAL"
 
     engine.append({
-        "round": i + 1,
-        "number": n,
-        "group": g,
-        "predicted": predicted,
-        "hit": hit,
-        "window": window_used,
-        "rolling_wr_%": rolling_wr,
-        "ev": ev_value,
-        "state": state,
-        "reason": reason
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "state":state
     })
 
-# ================= DASHBOARD ================= #
+# ================= UI =================
+st.title("🧠 LIVE PRO MAX ELITE — ENSEMBLE AI")
 
-st.title("🎯 FINAL CLEAN ONE-SHOT ENGINE")
+c1,c2,c3=st.columns(3)
+c1.metric("Rounds",len(engine))
+c2.metric("Profit",round(total_profit,2))
+hits=[x["hit"] for x in engine if x["hit"] is not None]
+wr=np.mean(hits) if hits else 0
+c3.metric("Winrate %",round(wr*100,2))
 
-col1, col2, col3 = st.columns(3)
-
-col1.metric("Total Rounds", len(engine))
-col2.metric("Total Profit", round(total_profit, 2))
-
-hits = [x["hit"] for x in engine if x["hit"] is not None]
-
-if hits:
-    wr = np.mean(hits)
-    col3.metric("Winrate %", round(wr * 100, 2))
+if next_signal:
+    st.success(f"🎯 NEXT GROUP: {next_signal} | Confidence: {round(confidence*100,1)}%")
 else:
-    col3.metric("Winrate %", 0)
-
-# ================= PREVIEW ================= #
-
-if preview_signal is not None:
-    st.markdown(f"""
-    <div style='padding:15px;
-                background:#444;
-                color:white;
-                border-radius:10px;
-                text-align:center;
-                font-size:20px'>
-        🔎 PREVIEW SIGNAL: {preview_signal}
-        <br>Window: {preview_window}
-        <br>WR: {preview_wr}%
-        <br>EV: {preview_ev}
-    </div>
-    """, unsafe_allow_html=True)
-
-# ================= NEXT GROUP ================= #
-
-if next_signal is not None:
-    st.markdown(f"""
-    <div style='padding:20px;
-                background:#c62828;
-                color:white;
-                border-radius:12px;
-                text-align:center;
-                font-size:28px;
-                font-weight:bold'>
-        🚨 READY TO BET 🚨
-        <br>🎯 NEXT GROUP: {next_signal}
-        <br>Window: {next_window}
-        <br>WR: {next_wr}%
-        <br>EV: {next_ev}
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    st.info("No valid signal yet")
-
-# ================= HISTORY ================= #
+    st.info("No valid signal")
 
 st.subheader("History")
-hist_df = pd.DataFrame(engine).iloc[::-1]
-st.dataframe(hist_df, use_container_width=True)
-
-st.caption("WINDOW 9 & 14 | EV FILTER | SIMPLE & STABLE")
-
-
-
-
+st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
