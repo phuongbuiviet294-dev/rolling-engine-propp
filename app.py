@@ -41,8 +41,6 @@ def run_engine(LOOKBACK, GAP):
     next_wr = None
     next_ev = None
 
-    loss_streak = 0  # 🔹 PROTECT
-
     for i, n in enumerate(numbers):
         g = get_group(n)
         predicted = None
@@ -63,10 +61,8 @@ def run_engine(LOOKBACK, GAP):
 
             if hit == 1:
                 total_profit += WIN_PROFIT
-                loss_streak = 0
             else:
                 total_profit -= LOSE_LOSS
-                loss_streak += 1
 
             state = "TRADE"
             last_trade_round = i
@@ -99,7 +95,7 @@ def run_engine(LOOKBACK, GAP):
                         best_wr = wr
                         best_hits = recent_hits
 
-            # ===== PRO SHIELD FILTERS =====
+            # ===== FILTERS (NO LOSS STREAK) =====
             if best_window is not None:
                 short_wr = np.mean(best_hits[-10:]) if len(best_hits) >= 10 else 0
                 g1 = engine[-best_window]["group"]
@@ -111,9 +107,8 @@ def run_engine(LOOKBACK, GAP):
                 if (
                     best_wr > 0.29
                     and best_ev > 0
-                    and short_wr > 0.35      # 🔹 short-term strength
-                    and loss_streak < 2     # 🔹 anti losing streak
-                    and repeat_ok           # 🔹 anti noise
+                    and short_wr > 0.35   # short-term strength
+                    and repeat_ok        # anti noise
                 ):
                     if engine[-1]["group"] != g1:
                         next_signal = g1
@@ -131,7 +126,6 @@ def run_engine(LOOKBACK, GAP):
             "window": window_used,
             "wr": None if rolling_wr is None else round(rolling_wr*100,2),
             "ev": None if ev_value is None else round(ev_value,3),
-            "loss_streak": loss_streak,
             "state": state
         })
 
@@ -158,7 +152,7 @@ engine = best_engine
 next_signal, next_window, next_wr, next_ev = best_next
 
 # ================= DASHBOARD =================
-st.title("🛡️ PRO SHIELD BETTING ENGINE")
+st.title("⚡ PRO ENGINE (NO LOSS STREAK FILTER)")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total Rounds", len(engine))
