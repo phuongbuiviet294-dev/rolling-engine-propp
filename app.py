@@ -30,7 +30,7 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= AUTO OPTIMIZER =================
+# ================= ENGINE =================
 def run_engine(LOOKBACK, GAP):
     engine = []
     total_profit = 0
@@ -40,7 +40,8 @@ def run_engine(LOOKBACK, GAP):
     next_window = None
     next_wr = None
     next_ev = None
-    signal_created_at = None
+
+    loss_streak = 0  # 🔹 PROTECT
 
     for i, n in enumerate(numbers):
         g = get_group(n)
@@ -57,12 +58,15 @@ def run_engine(LOOKBACK, GAP):
             window_used = next_window
             rolling_wr = next_wr
             ev_value = next_ev
+
             hit = 1 if predicted == g else 0
 
             if hit == 1:
                 total_profit += WIN_PROFIT
+                loss_streak = 0
             else:
                 total_profit -= LOSE_LOSS
+                loss_streak += 1
 
             state = "TRADE"
             last_trade_round = i
@@ -73,6 +77,7 @@ def run_engine(LOOKBACK, GAP):
             best_window = None
             best_ev = -999
             best_wr = 0
+            best_hits = []
 
             for w in WINDOWS:
                 recent_hits = []
@@ -92,19 +97,29 @@ def run_engine(LOOKBACK, GAP):
                         best_ev = ev
                         best_window = w
                         best_wr = wr
+                        best_hits = recent_hits
 
-            # ===== CONFIRM =====
+            # ===== PRO SHIELD FILTERS =====
             if best_window is not None:
-                if best_wr > 0.29 and best_ev > 0:
-                    g1 = engine[-best_window]["group"]
+                short_wr = np.mean(best_hits[-10:]) if len(best_hits) >= 10 else 0
+                g1 = engine[-best_window]["group"]
 
-                    # timing filter
+                # anti repeat filter
+                recent_groups = [engine[-k]["group"] for k in range(1, min(6, len(engine)))]
+                repeat_ok = recent_groups.count(g1) <= 2
+
+                if (
+                    best_wr > 0.29
+                    and best_ev > 0
+                    and short_wr > 0.35      # 🔹 short-term strength
+                    and loss_streak < 2     # 🔹 anti losing streak
+                    and repeat_ok           # 🔹 anti noise
+                ):
                     if engine[-1]["group"] != g1:
                         next_signal = g1
                         next_window = best_window
                         next_wr = best_wr
                         next_ev = best_ev
-                        signal_created_at = i + 1
                         state = "SIGNAL"
 
         engine.append({
@@ -114,14 +129,16 @@ def run_engine(LOOKBACK, GAP):
             "predicted": predicted,
             "hit": hit,
             "window": window_used,
-            "wr": rolling_wr,
-            "ev": ev_value,
+            "wr": None if rolling_wr is None else round(rolling_wr*100,2),
+            "ev": None if ev_value is None else round(ev_value,3),
+            "loss_streak": loss_streak,
             "state": state
         })
 
     return total_profit, engine, next_signal, next_window, next_wr, next_ev
 
-# ================= FIND BEST PARAM =================
+
+# ================= AUTO OPT =================
 best_profit = -999
 best_cfg = None
 best_engine = None
@@ -141,7 +158,7 @@ engine = best_engine
 next_signal, next_window, next_wr, next_ev = best_next
 
 # ================= DASHBOARD =================
-st.title("🚀 AI BETTING ENGINE — PRO AUTO")
+st.title("🛡️ PRO SHIELD BETTING ENGINE")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total Rounds", len(engine))
@@ -151,7 +168,7 @@ hits = [x["hit"] for x in engine if x["hit"] is not None]
 wr = np.mean(hits) if hits else 0
 col3.metric("Winrate %", round(wr * 100, 2))
 
-st.caption(f"Auto-Optimized | Lookback={LOOKBACK} | Gap={GAP}")
+st.caption(f"Optimized | Lookback={LOOKBACK} | Gap={GAP}")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
@@ -177,5 +194,3 @@ else:
 st.subheader("History")
 hist_df = pd.DataFrame(engine).iloc[::-1]
 st.dataframe(hist_df, use_container_width=True)
-
-
