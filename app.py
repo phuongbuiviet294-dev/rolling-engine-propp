@@ -7,7 +7,8 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 14]
+WINDOWS = [9, 15]
+REOPT_BLOCK = 200  # re-optimize every 200 rounds
 
 st.set_page_config(layout="wide")
 
@@ -30,8 +31,8 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= AUTO OPTIMIZER =================
-def run_engine(LOOKBACK, GAP):
+# ================= CORE ENGINE =================
+def simulate(numbers, LOOKBACK, GAP):
     engine = []
     total_profit = 0
     last_trade_round = -999
@@ -40,7 +41,6 @@ def run_engine(LOOKBACK, GAP):
     next_window = None
     next_wr = None
     next_ev = None
-    signal_created_at = None
 
     for i, n in enumerate(numbers):
         g = get_group(n)
@@ -57,12 +57,9 @@ def run_engine(LOOKBACK, GAP):
             window_used = next_window
             rolling_wr = next_wr
             ev_value = next_ev
-            hit = 1 if predicted == g else 0
 
-            if hit == 1:
-                total_profit += WIN_PROFIT
-            else:
-                total_profit -= LOSE_LOSS
+            hit = 1 if predicted == g else 0
+            total_profit += WIN_PROFIT if hit else -LOSE_LOSS
 
             state = "TRADE"
             last_trade_round = i
@@ -98,13 +95,11 @@ def run_engine(LOOKBACK, GAP):
                 if best_wr > 0.29 and best_ev > 0:
                     g1 = engine[-best_window]["group"]
 
-                    # timing filter
                     if engine[-1]["group"] != g1:
                         next_signal = g1
                         next_window = best_window
                         next_wr = best_wr
                         next_ev = best_ev
-                        signal_created_at = i + 1
                         state = "SIGNAL"
 
         engine.append({
@@ -121,37 +116,63 @@ def run_engine(LOOKBACK, GAP):
 
     return total_profit, engine, next_signal, next_window, next_wr, next_ev
 
-# ================= FIND BEST PARAM =================
-best_profit = -999
-best_cfg = None
-best_engine = None
-best_next = None
 
-for LOOKBACK in range(20, 41):
-    for GAP in range(3, 7):
-        profit, eng, ns, nw, nwr, nev = run_engine(LOOKBACK, GAP)
-        if profit > best_profit:
-            best_profit = profit
-            best_cfg = (LOOKBACK, GAP)
-            best_engine = eng
-            best_next = (ns, nw, nwr, nev)
+# ================= WALK-FORWARD OPTIMIZATION =================
+def optimize_block(past_numbers):
+    best_profit = -999
+    best_cfg = (30, 4)
 
-LOOKBACK, GAP = best_cfg
-engine = best_engine
-next_signal, next_window, next_wr, next_ev = best_next
+    for LOOKBACK in range(20, 41):
+        for GAP in range(3, 7):
+            profit, *_ = simulate(past_numbers, LOOKBACK, GAP)
+            if profit > best_profit:
+                best_profit = profit
+                best_cfg = (LOOKBACK, GAP)
+
+    return best_cfg
+
+
+# ================= MAIN WALK-FORWARD =================
+total_profit = 0
+full_engine = []
+next_signal = None
+next_window = None
+next_wr = None
+next_ev = None
+
+start = 0
+current_cfg = (30, 4)
+
+while start < len(numbers):
+    end = min(start + REOPT_BLOCK, len(numbers))
+    block = numbers[start:end]
+
+    # Re-optimize using all past data
+    if start > 0:
+        current_cfg = optimize_block(numbers[:start])
+
+    LOOKBACK, GAP = current_cfg
+
+    profit, engine, ns, nw, nwr, nev = simulate(block, LOOKBACK, GAP)
+    total_profit += profit
+
+    full_engine.extend(engine)
+    next_signal, next_window, next_wr, next_ev = ns, nw, nwr, nev
+
+    start = end
 
 # ================= DASHBOARD =================
-st.title("🚀 AI BETTING ENGINE — PRO AUTO")
+st.title("🚀 AI BETTING ENGINE — PRO MAX ADAPTIVE")
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Total Rounds", len(engine))
-col2.metric("Total Profit", round(best_profit, 2))
+col1.metric("Total Rounds", len(full_engine))
+col2.metric("Total Profit", round(total_profit, 2))
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
+hits = [x["hit"] for x in full_engine if x["hit"] is not None]
 wr = np.mean(hits) if hits else 0
 col3.metric("Winrate %", round(wr * 100, 2))
 
-st.caption(f"Auto-Optimized | Lookback={LOOKBACK} | Gap={GAP}")
+st.caption(f"Adaptive Re-Optimization every {REOPT_BLOCK} rounds | Windows = {WINDOWS}")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
@@ -175,5 +196,5 @@ else:
 
 # ================= HISTORY =================
 st.subheader("History")
-hist_df = pd.DataFrame(engine).iloc[::-1]
+hist_df = pd.DataFrame(full_engine).iloc[::-1]
 st.dataframe(hist_df, use_container_width=True)
