@@ -10,9 +10,8 @@ LOSE_LOSS = 1
 
 WINDOW_MIN = 8
 WINDOW_MAX = 17
-
-LOOKBACK = 24   # ngắn để bám live
-BASE_GAP = 1    # vào lệnh nhanh
+LOOKBACK = 24
+BASE_GAP = 1
 
 st.set_page_config(layout="wide")
 
@@ -45,6 +44,8 @@ next_window = None
 next_wr = None
 next_ev = None
 
+loss_streak = 0
+
 for i, n in enumerate(numbers):
     g = get_group(n)
 
@@ -66,28 +67,37 @@ for i, n in enumerate(numbers):
 
         if hit:
             total_profit += WIN_PROFIT
+            loss_streak = 0
         else:
             total_profit -= LOSE_LOSS
+            loss_streak += 1
 
         state = "TRADE"
         last_trade_round = i
         next_signal = None
 
-    # ===== ADAPTIVE GAP (không khóa thị trường xấu) =====
-    recent_hits = [x["hit"] for x in engine[-12:] if x["hit"] is not None]
-    if len(recent_hits) >= 6:
-        wr_live = np.mean(recent_hits)
-        if wr_live > 0.34:
-            GAP = BASE_GAP
-        elif wr_live > 0.28:
-            GAP = BASE_GAP + 1
-        else:
-            GAP = BASE_GAP + 2
+    # ===== MARKET REGIME =====
+    recent_hits = [x["hit"] for x in engine[-15:] if x["hit"] is not None]
+    wr_live = np.mean(recent_hits) if recent_hits else 0
+
+    if wr_live > 0.34:
+        regime = "HOT"
+    elif wr_live > 0.28:
+        regime = "WARM"
     else:
-        GAP = BASE_GAP
+        regime = "COLD"
+
+    # ===== GAP CONTROL =====
+    GAP = BASE_GAP
+    if loss_streak >= 2:
+        GAP += 1
+    if loss_streak >= 4:
+        GAP += 1
+    if loss_streak >= 6:
+        GAP += 2
 
     # ===== GENERATE SIGNAL =====
-    if len(engine) >= 30 and i - last_trade_round > GAP:
+    if len(engine) >= 25 and i - last_trade_round > GAP:
         best_window = None
         best_ev = -999
         best_wr = 0
@@ -111,16 +121,30 @@ for i, n in enumerate(numbers):
                     best_window = w
                     best_wr = wr
 
-        # ===== TURBO ENTRY (nới điều kiện) =====
-        if best_window is not None and best_wr > 0.27 and best_ev > -0.05:
-            g1 = engine[-best_window]["group"]
+        # ===== ENTRY FILTER =====
+        if best_window is not None:
+            wr_ok = best_wr > 0.28
+            ev_ok = best_ev > 0
 
-            if engine[-1]["group"] != g1:
-                next_signal = g1
-                next_window = best_window
-                next_wr = best_wr
-                next_ev = best_ev
-                state = "SIGNAL"
+            # Regime filter
+            if regime == "WARM":
+                wr_ok = best_wr > 0.30
+            if regime == "COLD":
+                wr_ok = best_wr > 0.32
+                ev_ok = best_ev > 0.05
+
+            # Loss protection
+            if loss_streak >= 4:
+                ev_ok = best_ev > 0.08
+
+            if wr_ok and ev_ok:
+                g1 = engine[-best_window]["group"]
+                if engine[-1]["group"] != g1:
+                    next_signal = g1
+                    next_window = best_window
+                    next_wr = best_wr
+                    next_ev = best_ev
+                    state = "SIGNAL"
 
     engine.append({
         "round": i + 1,
@@ -135,17 +159,18 @@ for i, n in enumerate(numbers):
     })
 
 # ================= DASHBOARD =================
-st.title("⚡ TURBO LIVE AI ENGINE")
+st.title("⚡🛡 TURBO + RISK AI ENGINE")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("Rounds", len(engine))
 col2.metric("Profit", round(total_profit, 2))
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
-wr = np.mean(hits) if hits else 0
-col3.metric("Winrate %", round(wr * 100, 2))
+wr_total = np.mean(hits) if hits else 0
+col3.metric("Winrate %", round(wr_total * 100, 2))
+col4.metric("Loss Streak", loss_streak)
 
-st.caption(f"Adaptive Window {WINDOW_MIN}-{WINDOW_MAX} | Lookback={LOOKBACK} | Live Gap")
+st.caption(f"Adaptive Window {WINDOW_MIN}-{WINDOW_MAX} | Lookback={LOOKBACK} | Regime={regime}")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
@@ -165,7 +190,7 @@ if next_signal is not None:
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("Scanning market...")
+    st.info("Smart filter active — waiting setup")
 
 # ================= HISTORY =================
 st.subheader("History")
