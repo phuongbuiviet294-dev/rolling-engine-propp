@@ -69,7 +69,7 @@ def run_engine(LOOKBACK, GAP):
             next_signal = None
 
         # ===== GENERATE =====
-        if len(engine) >= 40 and i - last_trade_round > GAP:
+        if len(engine) >= 20 and i - last_trade_round > GAP:
             best_window = None
             best_ev = -999
             best_wr = 0
@@ -95,7 +95,7 @@ def run_engine(LOOKBACK, GAP):
 
             # ===== CONFIRM =====
             if best_window is not None:
-                if best_wr > 0.29 and best_ev > 0:
+                if best_wr > 0.28 and best_ev > -0.01:
                     g1 = engine[-best_window]["group"]
 
                     # timing filter
