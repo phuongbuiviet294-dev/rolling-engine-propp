@@ -7,7 +7,12 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9]
+
+WINDOW_RANGE = range(8,18)
+BASE_LOOKBACK = 30
+MIN_SAMPLE = 20
+BASE_GAP = 4
+DD_LIMIT = 5
 
 st.set_page_config(layout="wide")
 
@@ -31,140 +36,149 @@ if df.empty:
 numbers = df["number"].dropna().astype(int).tolist()
 
 # ================= ENGINE =================
-def run_engine(LOOKBACK, GAP):
-    engine=[]
-    total_profit=0
-    last_trade_round=-999
-    next_signal=None
-    next_window=None
-    next_wr=None
-    next_ev=None
+engine=[]
+equity=[]
+total_profit=0
+last_trade_round=-999
+loss_streak=0
 
-    for i,n in enumerate(numbers):
-        g=get_group(n)
-        predicted=None; hit=None; state="SCAN"
-        window_used=None; rolling_wr=None; ev_value=None
+next_signal=None
+next_window=None
+next_wr=None
+next_ev=None
+regime="—"
 
-        # ===== EXECUTE =====
-        if next_signal is not None:
-            predicted=next_signal
-            window_used=next_window
-            rolling_wr=next_wr
-            ev_value=next_ev
+def detect_regime(vol):
+    if vol < 0.12: return "🚀 TREND"
+    if vol < 0.20: return "🌊 SIDEWAY"
+    return "🌪 CHAOS"
 
-            hit=1 if predicted==g else 0
-            total_profit += WIN_PROFIT if hit else -LOSE_LOSS
+for i,n in enumerate(numbers):
+    g=get_group(n)
+    predicted=None
+    hit=None
+    state="SCAN"
+    window_used=None
+    wr_used=None
+    ev_used=None
 
-            state="TRADE"
-            last_trade_round=i
-            next_signal=None
+    # ===== EXECUTE =====
+    if next_signal is not None:
+        predicted=next_signal
+        window_used=next_window
+        wr_used=next_wr
+        ev_used=next_ev
 
-        # ===== AUTO SAMPLE DETECTOR =====
-        short_hits=[]
-        for k in range(max(1,len(engine)-15),len(engine)):
-            short_hits.append(engine[k]["hit"] if engine[k]["hit"] is not None else 0)
+        hit=1 if predicted==g else 0
 
-        if len(short_hits)>=10:
-            short_wr=np.mean(short_hits)
+        if hit:
+            total_profit+=WIN_PROFIT
+            loss_streak=0
         else:
-            short_wr=0.5
+            total_profit-=LOSE_LOSS
+            loss_streak+=1
 
-        if short_wr>0.60:
-            MIN_SAMPLES=20
-        elif short_wr>0.45:
-            MIN_SAMPLES=30
-        else:
-            MIN_SAMPLES=40
+        state="TRADE"
+        last_trade_round=i
+        next_signal=None
 
-        # ===== GENERATE =====
-        if len(engine)>=MIN_SAMPLES and i-last_trade_round>GAP:
-            best_window=None; best_ev=-999; best_wr=0
+    equity.append(total_profit)
 
-            for w in WINDOWS:
-                recent_hits=[]
-                start=max(w,len(engine)-LOOKBACK)
+    # ===== ADAPTIVE LOOKBACK =====
+    if len(engine)>50:
+        recent=[x["hit"] for x in engine[-30:] if x["hit"] is not None]
+        vol=np.std(recent) if recent else 0.2
+        LOOKBACK=int(BASE_LOOKBACK*(1+vol))
+        GAP=int(BASE_GAP*(1+vol))
+    else:
+        LOOKBACK=BASE_LOOKBACK
+        GAP=BASE_GAP
+        vol=0.2
 
-                for j in range(start,len(engine)):
-                    if j>=w:
-                        recent_hits.append(
-                            1 if engine[j]["group"]==engine[j-w]["group"] else 0
-                        )
+    regime=detect_regime(vol)
 
-                if len(recent_hits)>=20:
-                    wr=np.mean(recent_hits)
-                    ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+    # ===== SIGNAL ENGINE =====
+    if len(engine)>=40 and i-last_trade_round>GAP and loss_streak<DD_LIMIT and regime!="🌪 CHAOS":
 
-                    if ev>best_ev:
-                        best_ev=ev; best_window=w; best_wr=wr
+        scores=[]
 
-            if best_window is not None and best_wr>0.29 and best_ev>0:
-                g1=engine[-best_window]["group"]
-                if engine[-1]["group"]!=g1:
-                    next_signal=g1
-                    next_window=best_window
-                    next_wr=best_wr
-                    next_ev=best_ev
-                    state="SIGNAL"
+        for w in WINDOW_RANGE:
+            hits=[]
+            start=max(w,len(engine)-LOOKBACK)
 
-        engine.append({
-            "round":i+1,
-            "number":n,
-            "group":g,
-            "predicted":predicted,
-            "hit":hit,
-            "window":window_used,
-            "wr":None if rolling_wr is None else round(rolling_wr*100,2),
-            "ev":None if ev_value is None else round(ev_value,3),
-            "min_samples":MIN_SAMPLES,
-            "state":state
-        })
+            for j in range(start,len(engine)):
+                if j>=w:
+                    hits.append(1 if engine[j]["group"]==engine[j-w]["group"] else 0)
 
-    return total_profit,engine,next_signal,next_window,next_wr,next_ev
+            if len(hits)>=MIN_SAMPLE:
+                wr=np.mean(hits)
+                ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+                vol_w=np.std(hits)
+                scores.append((w,wr,ev,vol_w))
 
-# ================= AUTO OPT =================
-best_profit=-999
-best_cfg=None
-best_engine=None
-best_next=None
+        if scores:
+            best_ev=max(scores,key=lambda x:x[2])
+            best_wr=max(scores,key=lambda x:x[1])
+            best_stable=min(scores,key=lambda x:x[3])
 
-for LOOKBACK in range(20,41):
-    for GAP in range(3,7):
-        profit,eng,ns,nw,nwr,nev=run_engine(LOOKBACK,GAP)
-        if profit>best_profit:
-            best_profit=profit
-            best_cfg=(LOOKBACK,GAP)
-            best_engine=eng
-            best_next=(ns,nw,nwr,nev)
+            # ===== Ensemble Vote =====
+            votes=[]
+            for w,wr,ev,vol_w in [best_ev,best_wr,best_stable]:
+                votes.append(engine[-w]["group"])
 
-LOOKBACK,GAP=best_cfg
-engine=best_engine
-next_signal,next_window,next_wr,next_ev=best_next
+            vote=max(set(votes),key=votes.count)
 
-# ================= UI =================
-st.title("🧠 AUTO SAMPLE ENGINE")
+            if engine[-1]["group"]!=vote:
+                next_signal=vote
+                next_window=best_ev[0]
+                next_wr=best_ev[1]
+                next_ev=best_ev[2]
+                state="SIGNAL"
 
-c1,c2,c3=st.columns(3)
-c1.metric("Rounds",len(engine))
-c2.metric("Profit",round(best_profit,2))
+    engine.append({
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "window":window_used,
+        "wr":wr_used,
+        "ev":ev_used,
+        "state":state
+    })
+
+# ================= DASHBOARD =================
+st.title("🚀 ULTRA PRO MAX — LIVE ADAPTIVE AI")
+
+c1,c2,c3,c4=st.columns(4)
+c1.metric("Total Rounds",len(engine))
+c2.metric("Total Profit",round(total_profit,2))
 
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
+c4.metric("Market Regime",regime)
 
-st.caption(f"Lookback={LOOKBACK} | Gap={GAP}")
-
+# ================= NEXT SIGNAL =================
 if next_signal is not None:
     st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;border-radius:12px;text-align:center;font-size:26px;font-weight:bold'>
-    🚨 READY TO BET 🚨<br>
-    🎯 NEXT GROUP: {next_signal}<br>
-    Window: {next_window}<br>
-    WR: {round(next_wr*100,2)}%<br>
-    EV: {round(next_ev,3)}
+    <div style='padding:22px;background:#c62828;color:white;
+                border-radius:14px;text-align:center;
+                font-size:30px;font-weight:bold'>
+        🎯 NEXT GROUP: {next_signal}
+        <br>Window: {next_window}
+        <br>WR: {round(next_wr*100,2)}%
+        <br>EV: {round(next_ev,3)}
     </div>
     """,unsafe_allow_html=True)
 else:
     st.info("No valid signal")
 
+# ================= EQUITY CURVE =================
+st.subheader("Profit Curve")
+st.line_chart(equity)
+
+# ================= HISTORY =================
 st.subheader("History")
-st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
+hist_df=pd.DataFrame(engine).iloc[::-1]
+st.dataframe(hist_df,use_container_width=True)
