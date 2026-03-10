@@ -10,7 +10,7 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = [9,15]
+WINDOWS = [8,15]
 
 st.set_page_config(layout="wide")
 
