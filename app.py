@@ -1,6 +1,109 @@
 import streamlit as st
 import pandas as pd
+import numpy as npimport streamlit as st
+import pandas as pd
 import numpy as np
+
+# ================= CONFIG =================
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+AUTO_REFRESH = 5
+WIN_PROFIT = 2.5
+LOSE_LOSS = 1
+WINDOW = [9,15]
+LOOKBACK = 26
+GAP = 3
+
+st.set_page_config(layout="wide")
+
+# ================= GROUP =================
+def get_group(n):
+    if 1 <= n <= 3: return 1
+    if 4 <= n <= 6: return 2
+    if 7 <= n <= 9: return 3
+    if 10 <= n <= 12: return 4
+    return None
+
+# ================= LOAD =================
+@st.cache_data(ttl=AUTO_REFRESH)
+def load():
+    return pd.read_csv(GOOGLE_SHEET_CSV)
+
+df = load()
+numbers = df["number"].dropna().astype(int).tolist()
+
+# ================= ENGINE =================
+engine=[]
+total_profit=0
+last_trade_round=-999
+next_signal=None
+next_wr=None
+next_ev=None
+
+for i,n in enumerate(numbers):
+    g=get_group(n)
+    predicted=None; hit=None; state="SCAN"
+
+    # ===== EXECUTE =====
+    if next_signal is not None:
+        predicted=next_signal
+        hit=1 if predicted==g else 0
+        total_profit += WIN_PROFIT if hit else -LOSE_LOSS
+        state="TRADE"
+        last_trade_round=i
+        next_signal=None
+
+    # ===== GENERATE (LIVE ONLY) =====
+    if i == len(numbers)-1:  # chỉ tính tại thời điểm mới nhất
+        if len(engine)>=40 and i-last_trade_round>GAP:
+            recent_hits=[]
+            start=max(WINDOW,len(engine)-LOOKBACK)
+
+            for j in range(start,len(engine)):
+                if j>=WINDOW:
+                    recent_hits.append(
+                        1 if engine[j]["group"]==engine[j-WINDOW]["group"] else 0
+                    )
+
+            if len(recent_hits)>=20:
+                wr=np.mean(recent_hits)
+                ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+
+                if wr>0.29 and ev>0:
+                    g1=engine[-WINDOW]["group"]
+                    if engine[-1]["group"]!=g1:
+                        next_signal=g1
+                        next_wr=wr
+                        next_ev=ev
+                        state="SIGNAL"
+
+    engine.append({
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "state":state
+    })
+
+# ================= UI =================
+st.title("🔒 LIVE FIXED ENGINE")
+
+c1,c2,c3=st.columns(3)
+c1.metric("Rounds",len(engine))
+c2.metric("Profit",round(total_profit,2))
+hits=[x["hit"] for x in engine if x["hit"] is not None]
+wr=np.mean(hits) if hits else 0
+c3.metric("Winrate %",round(wr*100,2))
+
+st.caption("History Locked • No Re-Optimization • True Live Signal")
+
+if next_signal is not None:
+    st.success(f"🎯 NEXT GROUP: {next_signal} | WR={round(next_wr*100,2)}% | EV={round(next_ev,3)}")
+else:
+    st.info("No valid signal")
+
+st.subheader("History")
+st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
 
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
