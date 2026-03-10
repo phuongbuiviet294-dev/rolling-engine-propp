@@ -9,7 +9,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOW = [9,15]
+WINDOW = 9
 LOOKBACK = 26
 GAP = 3
 
