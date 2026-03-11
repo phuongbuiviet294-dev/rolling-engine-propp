@@ -5,15 +5,12 @@ import numpy as np
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 AUTO_REFRESH = 5
-
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-
 WINDOWS = [9,15]
 
-LOSS_STREAK_STOP = 6
-DRAWDOWN_STOP = 22
-COOLDOWN_ROUNDS = 25
+DRAW_THRESHOLD = 15
+REOPT_ROUNDS = 200
 
 st.set_page_config(layout="wide")
 
@@ -35,15 +32,15 @@ def load():
 df = load()
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= ENGINE =================
-def run_engine(numbers, LOOKBACK, GAP):
+# ================= CORE ENGINE =================
+def simulate(numbers, LOOKBACK, GAP):
     engine=[]
     total_profit=0
-    peak_profit=0
-    loss_streak=0
-    cooldown=0
     last_trade_round=-999
     next_signal=None
+
+    loss_streak=0
+    pause_until=-1
 
     for i,n in enumerate(numbers):
         g=get_group(n)
@@ -52,51 +49,28 @@ def run_engine(numbers, LOOKBACK, GAP):
         hit=None
         state="SCAN"
 
-        # ===== COOLDOWN =====
-        if cooldown>0:
-            cooldown-=1
-            state="COOLDOWN"
-
         # ===== EXECUTE TRADE =====
-        elif next_signal is not None:
+        if next_signal is not None and i>pause_until:
             predicted=next_signal
             hit=1 if predicted==g else 0
-
             pnl = WIN_PROFIT if hit else -LOSE_LOSS
             total_profit += pnl
-
-            if hit:
-                loss_streak=0
-            else:
-                loss_streak+=1
-
             state="TRADE"
             last_trade_round=i
             next_signal=None
 
-        # ===== UPDATE PEAK & DD =====
-        peak_profit=max(peak_profit,total_profit)
-        drawdown=peak_profit-total_profit
+            if hit==0:
+                loss_streak+=1
+            else:
+                loss_streak=0
 
-        # ===== RISK GUARD =====
-        if loss_streak>=LOSS_STREAK_STOP or drawdown>=DRAWDOWN_STOP:
-            cooldown=COOLDOWN_ROUNDS
-            state="RISK_STOP"
-
-        # ===== REGIME FILTER =====
-        allow_trade=True
-        recent_hits=[x["hit"] for x in engine[-30:] if x["hit"] is not None]
-        if len(recent_hits)>=15:
-            if np.mean(recent_hits)<0.27:
-                allow_trade=False
+            # ===== STOPLOSS PAUSE =====
+            if loss_streak>=5:
+                pause_until=i+GAP
+                state="COOLDOWN"
 
         # ===== GENERATE SIGNAL =====
-        if (
-            allow_trade and
-            cooldown==0 and
-            len(engine)>=40 and
-            i-last_trade_round>GAP
-        ):
+        if len(engine)>=40 and i-last_trade_round>GAP and i>pause_until:
             best_ev=-999
             best_window=None
             best_wr=0
@@ -119,7 +93,7 @@ def run_engine(numbers, LOOKBACK, GAP):
                         best_window=w
                         best_wr=wr
 
-            if best_window and best_wr>0.29 and best_ev>0.05:
+            if best_window and best_wr>0.29 and best_ev>-0.01:
                 g1=engine[-best_window]["group"]
                 if engine[-1]["group"]!=g1:
                     next_signal=g1
@@ -131,47 +105,107 @@ def run_engine(numbers, LOOKBACK, GAP):
             "predicted":predicted,
             "hit":hit,
             "state":state,
-            "profit":round(total_profit,2),
-            "peak":round(peak_profit,2),
-            "dd":round(drawdown,2)
+            "profit":round(total_profit,2)
         })
 
     return total_profit,engine,next_signal
 
-# ================= LOCK OPTIMIZER =================
+# ================= PEAK LOCK =================
 best_profit=-999
-best_cfg=(26,3)
+best_cfg=(26,4)
 
-for LB in range(18,33):
-    for GP in range(2,6):
-        p,_,_=run_engine(numbers,LB,GP)
+for LB in range(18,29):
+    for GP in range(3,7):
+        p,_,_=simulate(numbers,LB,GP)
         if p>best_profit:
             best_profit=p
             best_cfg=(LB,GP)
 
 LOCK_LB,LOCK_GP=best_cfg
 
-profit,engine,next_signal=run_engine(numbers,LOCK_LB,LOCK_GP)
+# ================= LIVE RUN =================
+profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
 
-# ================= UI =================
-st.title("🚀 LONG RUN PRO — PROFIT BIAS MODE")
+# ================= DASHBOARD =================
+st.title("🚀 PRO MAX ANALYTICS ENGINE")
 
-c1,c2,c3,c4=st.columns(4)
+c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
-c2.metric("Profit",engine[-1]["profit"])
-c3.metric("Peak",engine[-1]["peak"])
+c2.metric("Profit",round(engine[-1]["profit"],2))
 
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
-c4.metric("Winrate %",round(wr*100,2))
+c3.metric("Winrate %",round(wr*100,2))
 
 st.caption(f"Locked Config → Lookback={LOCK_LB} | Gap={LOCK_GP}")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
-    st.success(f"🎯 NEXT GROUP: {next_signal}")
+    st.markdown(f"""
+    <div style='padding:20px;
+                background:#c62828;
+                color:white;
+                border-radius:12px;
+                text-align:center;
+                font-size:28px;
+                font-weight:bold'>
+        🚨 READY TO BET 🚨<br>
+        🎯 NEXT GROUP: {next_signal}
+    </div>
+    """, unsafe_allow_html=True)
 else:
-    st.info("Scanning...")
+    st.info("Scanning... No valid signal")
+
+# ================= ANALYTICS =================
+profits = [x["profit"] for x in engine]
+peak_curve = np.maximum.accumulate(profits)
+drawdowns = peak_curve - profits
+
+peak_profit = max(profits)
+live_profit = profits[-1]
+max_dd = max(drawdowns)
+
+wins = sum(1 for x in hits if x==1)
+losses = sum(1 for x in hits if x==0)
+total_trades = wins + losses
+
+winrate = wins / total_trades if total_trades else 0
+gross_win = wins * WIN_PROFIT
+gross_loss = losses * LOSE_LOSS
+profit_factor = gross_win / gross_loss if gross_loss else 0
+expectancy = (winrate * WIN_PROFIT) - ((1 - winrate) * LOSE_LOSS)
+roi_100 = (live_profit / len(engine)) * 100 if engine else 0
+
+# ===== Streaks =====
+max_loss_streak=0
+cur_loss=0
+for h in hits:
+    if h==0:
+        cur_loss+=1
+        max_loss_streak=max(max_loss_streak,cur_loss)
+    else:
+        cur_loss=0
+
+# ================= EQUITY CURVE =================
+st.subheader("📈 Equity Curve")
+st.line_chart(profits)
+
+# ================= METRICS =================
+st.subheader("📊 Performance Metrics")
+
+m1,m2,m3=st.columns(3)
+m1.metric("Peak Profit",round(peak_profit,2))
+m2.metric("Max Drawdown",round(max_dd,2))
+m3.metric("ROI / 100 rounds",round(roi_100,2))
+
+n1,n2,n3=st.columns(3)
+n1.metric("Winrate %",round(winrate*100,2))
+n2.metric("Profit Factor",round(profit_factor,2))
+n3.metric("Expectancy",round(expectancy,3))
+
+k1,k2=st.columns(2)
+k1.metric("Max Loss Streak",max_loss_streak)
+k2.metric("Total Trades",total_trades)
 
 # ================= HISTORY =================
 st.subheader("History")
