@@ -9,11 +9,8 @@ WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 WINDOWS = [9,15]
 
-DRAW_THRESHOLD = 15
-REOPT_ROUNDS = 200
-
-STOPLOSS_STREAK = 4      # ❗ thua liên tiếp
-COOLDOWN_ROUNDS = 20     # ❗ dừng bao nhiêu round
+STOPLOSS_STREAK = 4
+COOLDOWN_ROUNDS = 6
 
 st.set_page_config(layout="wide")
 
@@ -29,56 +26,62 @@ def get_group(n):
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
     df = pd.read_csv(GOOGLE_SHEET_CSV)
-    df.columns = [c.strip().lower() for c in df.columns]
+    df.columns=[c.strip().lower() for c in df.columns]
     return df
 
-df = load()
-numbers = df["number"].dropna().astype(int).tolist()
+df=load()
+numbers=df["number"].dropna().astype(int).tolist()
 
-# ================= CORE ENGINE =================
-def simulate(numbers, LOOKBACK, GAP):
+# ================= ENGINE =================
+def simulate(nums,LOOKBACK,GAP):
     engine=[]
     total_profit=0
-    last_trade_round=-999
+    last_trade=-999
     next_signal=None
-
     loss_streak=0
-    cooldown_until=-1
+    cooldown=0
 
-    for i,n in enumerate(numbers):
+    for i,n in enumerate(nums):
         g=get_group(n)
-
-        predicted=None
         hit=None
         state="SCAN"
 
-        # ===== EXECUTE TRADE =====
-        if next_signal is not None and i>=cooldown_until:
-            predicted=next_signal
-            hit=1 if predicted==g else 0
-            total_profit += WIN_PROFIT if hit else -LOSE_LOSS
+        # ===== EXECUTE =====
+        if next_signal is not None:
+            hit=1 if next_signal==g else 0
+            pnl=WIN_PROFIT if hit else -LOSE_LOSS
+            total_profit+=pnl
             state="TRADE"
-            last_trade_round=i
+            last_trade=i
             next_signal=None
 
-            # ===== STOPLOSS TRACK =====
-            if hit==0:
-                loss_streak+=1
+            if hit:
+                loss_streak=0
             else:
-                loss_streak=0
+                loss_streak+=1
+                if loss_streak>=STOPLOSS_STREAK:
+                    cooldown=COOLDOWN_ROUNDS
 
-            # ===== ACTIVATE COOLDOWN =====
-            if loss_streak>=STOPLOSS_STREAK:
-                cooldown_until=i+COOLDOWN_ROUNDS
-                loss_streak=0
+        # ===== COOLDOWN =====
+        if cooldown>0:
+            cooldown-=1
+            engine.append({
+                "round":i+1,
+                "group":g,
+                "hit":hit,
+                "state":"COOLDOWN",
+                "profit":round(total_profit,2)
+            })
+            continue
 
-        elif i<cooldown_until:
-            state="COOLDOWN"
+        # ===== TREND CHECK =====
+        recent_hits=[x["hit"] for x in engine[-20:] if x["hit"] is not None]
+        short_wr=np.mean(recent_hits) if len(recent_hits)>=10 else 0.5
 
         # ===== GENERATE SIGNAL =====
-        if len(engine)>=40 and i-last_trade_round>GAP and i>=cooldown_until:
+        if len(engine)>=40 and i-last_trade>GAP and short_wr>0.48:
             best_ev=-999
-            best_window=None
+            best_w=None
             best_wr=0
 
             for w in WINDOWS:
@@ -89,18 +92,16 @@ def simulate(numbers, LOOKBACK, GAP):
                         recent.append(
                             1 if engine[j]["group"]==engine[j-w]["group"] else 0
                         )
-
-                if len(recent)>=20:
+                if len(recent)>=15:
                     wr=np.mean(recent)
                     ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
-
                     if ev>best_ev:
                         best_ev=ev
-                        best_window=w
+                        best_w=w
                         best_wr=wr
 
-            if best_window and best_wr>0.29 and best_ev>-0.01:
-                g1=engine[-best_window]["group"]
+            if best_w and best_wr>0.27 and best_ev>0:
+                g1=engine[-best_w]["group"]
                 if engine[-1]["group"]!=g1:
                     next_signal=g1
                     state="SIGNAL"
@@ -108,22 +109,29 @@ def simulate(numbers, LOOKBACK, GAP):
         engine.append({
             "round":i+1,
             "group":g,
-            "predicted":predicted,
             "hit":hit,
             "state":state,
-            "loss_streak":loss_streak,
             "profit":round(total_profit,2)
         })
 
-    return total_profit,engine,next_signal
+    return engine,total_profit,next_signal
 
-# ================= PEAK LOCK =================
+# ================= FIND PEAK LOCK =================
+eng_full,_,_=simulate(numbers,26,3)
+profits=[x["profit"] for x in eng_full]
+peak_idx=int(np.argmax(profits))
+peak_profit=max(profits)
+
+# chỉ dùng dữ liệu trước đỉnh
+train_numbers=numbers[:peak_idx]
+
+# ================= OPTIMIZE ON PAST =================
 best_profit=-999
 best_cfg=(26,3)
 
 for LB in range(18,29):
     for GP in range(3,7):
-        p,_,_=simulate(numbers,LB,GP)
+        _,p,_=simulate(train_numbers,LB,GP)
         if p>best_profit:
             best_profit=p
             best_cfg=(LB,GP)
@@ -131,60 +139,31 @@ for LB in range(18,29):
 LOCK_LB,LOCK_GP=best_cfg
 
 # ================= LIVE RUN =================
-profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
-current_profit=engine[-1]["profit"]
-
-# ================= REGIME CHECK =================
-peak_profit=max(x["profit"] for x in engine)
-drawdown=peak_profit-current_profit
-
-if drawdown>DRAW_THRESHOLD:
-    recent_numbers=numbers[-REOPT_ROUNDS:]
-    new_best=-999
-    new_cfg=best_cfg
-
-    for LB in range(18,29):
-        for GP in range(3,7):
-            p,_,_=simulate(recent_numbers,LB,GP)
-            if p>new_best:
-                new_best=p
-                new_cfg=(LB,GP)
-
-    if new_best>=best_profit*0.9:
-        LOCK_LB,LOCK_GP=new_cfg
-        profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
+engine,profit,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
 
 # ================= UI =================
-st.title("🧠 PEAK LOCK PRO — STOPLOSS MODE")
+st.title("🚀 TRUE LOCK PRO ENGINE")
 
 c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
-c2.metric("Profit",round(engine[-1]["profit"],2))
+c2.metric("Live Profit",engine[-1]["profit"])
 
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
 
-st.caption(f"Locked Config → Lookback={LOCK_LB} | Gap={LOCK_GP} | Stoploss ON")
+st.caption(f"LOCKED @ Peak Round {peak_idx} | Lookback={LOCK_LB} Gap={LOCK_GP}")
 
-# ================= NEXT SIGNAL =================
-if next_signal is not None:
+if next_signal:
     st.markdown(f"""
-    <div style='padding:20px;
-                background:#c62828;
-                color:white;
-                border-radius:12px;
-                text-align:center;
-                font-size:28px;
-                font-weight:bold'>
+    <div style='padding:20px;background:#c62828;color:white;border-radius:12px;
+                text-align:center;font-size:28px;font-weight:bold'>
         🚨 READY TO BET 🚨<br>
         🎯 NEXT GROUP: {next_signal}
     </div>
-    """, unsafe_allow_html=True)
+    """,unsafe_allow_html=True)
 else:
-    st.info("Scanning... No valid signal")
+    st.info("Scanning...")
 
-# ================= HISTORY =================
 st.subheader("History")
-hist=pd.DataFrame(engine)
-st.dataframe(hist.iloc[::-1],use_container_width=True)
+st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
