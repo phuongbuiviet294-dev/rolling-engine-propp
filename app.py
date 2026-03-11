@@ -1,176 +1,133 @@
-import streamlit as st
+# ======================================
+# STICKY WINDOW PRO — SAFE MODE
+# Google Sheet Live Data Version
+# ======================================
+
 import pandas as pd
 import numpy as np
 
-# ================= CONFIG =================
-GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-AUTO_REFRESH = 5
-WIN_PROFIT = 2.5
-LOSE_LOSS = 1
+# ===== DATA CONFIG =====
+DATA_SOURCE = "google_sheet"
 
-WINDOWS = list(range(8,19))   # 8 → 18
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv
+LOCAL_FILE = "data.csv"
 
-st.set_page_config(layout="wide")
+# ===== SAFE CONFIG =====
+WINDOW_RANGE = range(8, 19)
+LOOKBACK = 26
 
-# ================= GROUP =================
-def get_group(n):
-    if 1 <= n <= 3: return 1
-    if 4 <= n <= 6: return 2
-    if 7 <= n <= 9: return 3
-    if 10 <= n <= 12: return 4
-    return None
+MIN_REGIME_WR = 0.35
+MIN_TREND_WR = 0.50
+MIN_SHORT_PROFIT = 0
 
-# ================= LOAD DATA =================
-@st.cache_data(ttl=AUTO_REFRESH)
+DEAD_WINDOW_LOOKBACK = 5
+DEAD_WINDOW_MIN_HIT = 2
+
+SCAN_FORCE_LIMIT = 20
+
+
+# ===== LOAD DATA =====
 def load_data():
-    return pd.read_csv(GOOGLE_SHEET_CSV)
-
-df = load_data()
-if df.empty:
-    st.stop()
-
-numbers = df["number"].dropna().astype(int).tolist()
-
-# ================= ENGINE =================
-engine = []
-total_profit = 0
-last_trade_round = -999
-
-lock_window = None
-cooldown = 0
-loss_streak = 0
-
-def calc_profit(hit):
-    return WIN_PROFIT if hit==1 else -LOSE_LOSS
-
-def window_recent_performance(w):
-    hits=[]
-    profits=[]
-    for i in range(w, len(engine)):
-        h = 1 if engine[i]["group"]==engine[i-w]["group"] else 0
-        hits.append(h)
-        profits.append(calc_profit(h))
-    if len(hits)<20:
-        return None
-    return {
-        "wr": np.mean(hits),
-        "profit20": sum(profits[-20:]),
-        "profit10": sum(profits[-10:]),
-        "wr10": np.mean(hits[-10:])
-    }
-
-next_signal=None
-
-for i,n in enumerate(numbers):
-    g=get_group(n)
-    predicted=None
-    hit=None
-    state="SCAN"
-    window_used=None
-
-    # ===== EXECUTE TRADE =====
-    if next_signal is not None:
-        predicted=next_signal
-        hit=1 if predicted==g else 0
-        pnl=calc_profit(hit)
-        total_profit+=pnl
-        state="TRADE"
-        window_used=lock_window
-
-        if hit==0:
-            loss_streak+=1
-        else:
-            loss_streak=0
-
-        next_signal=None
-        last_trade_round=i
+    if DATA_SOURCE == "google_sheet":
+        df = pd.read_csv(GOOGLE_SHEET_CSV)
     else:
-        pnl=0
+        df = pd.read_csv(LOCAL_FILE)
+    
+    df = df.dropna()
+    return df
 
-    # ===== COOLDOWN =====
-    if cooldown>0:
-        cooldown-=1
-        state="COOLDOWN"
 
-    # ===== SELECT / MAINTAIN WINDOW =====
-    if cooldown==0 and i-last_trade_round>1:
+# ===== METRICS =====
+def winrate(series):
+    if len(series) == 0:
+        return 0
+    return np.mean(series)
 
-        change_window=False
 
-        # Check if locked window still good
-        if lock_window is not None:
-            perf=window_recent_performance(lock_window)
-            if perf:
-                if perf["profit10"] < -3 or perf["wr10"] < 0.25:
-                    change_window=True
-            else:
-                change_window=True
+def calc_profit(hits, win=2.5, lose=-1):
+    return sum([win if h==1 else lose for h in hits])
 
-        # Need new window
-        if lock_window is None or change_window:
-            best_w=None
-            best_score=-999
 
-            for w in WINDOWS:
-                perf=window_recent_performance(w)
-                if perf:
-                    score=perf["profit20"] + perf["wr"]*5
-                    if score>best_score:
-                        best_score=score
-                        best_w=w
+# ===== CHECKS =====
+def market_ok(data):
+    recent = data['hit'].tail(10)
+    return winrate(recent) >= MIN_REGIME_WR
 
-            lock_window=best_w
 
-        # ===== GENERATE SIGNAL =====
-        if lock_window is not None and len(engine)>=lock_window:
-            ref_group=engine[-lock_window]["group"]
-            if engine[-1]["group"]!=ref_group:
-                next_signal=ref_group
-                state="SIGNAL"
+def trend_ok(data):
+    recent = data['hit'].tail(5)
+    return winrate(recent) >= MIN_TREND_WR
 
-    # ===== HARD STOP LOSS =====
-    if loss_streak>=4:
-        cooldown=5
-        loss_streak=0
-        state="HARD_STOP"
 
-    engine.append({
-        "round":i+1,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "pnl":pnl,
-        "window":window_used,
-        "state":state,
-        "total_profit":round(total_profit,2)
-    })
+def short_profit_ok(data):
+    recent = data['hit'].tail(10)
+    return calc_profit(recent) >= MIN_SHORT_PROFIT
 
-# ================= UI =================
-st.title("🧠 STICKY WINDOW PRO — Trend Following AI")
 
-c1,c2,c3=st.columns(3)
-c1.metric("Rounds",len(engine))
-c2.metric("Total Profit",round(total_profit,2))
+def window_alive(data):
+    recent = data['hit'].tail(DEAD_WINDOW_LOOKBACK)
+    return sum(recent) >= DEAD_WINDOW_MIN_HIT
 
-hits=[x["hit"] for x in engine if x["hit"] is not None]
-wr=np.mean(hits) if hits else 0
-c3.metric("Winrate %",round(wr*100,2))
 
-st.caption(f"Sticky Window Mode | Active Window: {lock_window}")
+# ===== WINDOW PICK =====
+def evaluate_window(data, w):
+    hits = data['hit'].tail(w)
+    wr = winrate(hits)
+    profit = calc_profit(hits)
+    return {'window': w, 'wr': wr, 'profit': profit}
 
-if next_signal is not None:
-    st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;
-                border-radius:12px;text-align:center;
-                font-size:28px;font-weight:bold'>
-        🚨 READY TO BET 🚨<br>
-        🎯 NEXT GROUP: {next_signal}<br>
-        Window: {lock_window}
-    </div>
-    """,unsafe_allow_html=True)
-else:
-    st.info("Scanning market...")
 
-st.subheader("Live History (No Repaint)")
-st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
+def pick_best_window(data):
+    results = []
+    for w in WINDOW_RANGE:
+        if len(data) >= w:
+            results.append(evaluate_window(data, w))
+    if not results:
+        return None
+    return max(results, key=lambda x: x['profit'])
+
+
+# ===== ENGINE =====
+class SafeEngine:
+    def __init__(self):
+        self.current_window = None
+        self.scan_count = 0
+    
+    def decide(self, data):
+        if len(data) < LOOKBACK:
+            return "SCAN", None
+        
+        if not market_ok(data):
+            return "PAUSE_MARKET", None
+        
+        if not trend_ok(data):
+            self.scan_count += 1
+            if self.scan_count >= SCAN_FORCE_LIMIT:
+                best = pick_best_window(data)
+                self.scan_count = 0
+                if best:
+                    return "FORCE_TRADE", best['window']
+            return "SCAN", None
+        
+        if not short_profit_ok(data):
+            return "WAIT_PROFIT", None
+        
+        if not self.current_window or not window_alive(data):
+            best = pick_best_window(data)
+            if not best:
+                return "SCAN", None
+            self.current_window = best['window']
+        
+        self.scan_count = 0
+        return "TRADE", self.current_window
+
+
+# ===== RUN =====
+if __name__ == "__main__":
+    df = load_data()
+    
+    engine = SafeEngine()
+    state, window = engine.decide(df)
+    
+    print("STATE:", state)
+    print("WINDOW:", window)
