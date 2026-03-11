@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 AUTO_REFRESH = 5
-
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 WINDOWS = [9,15]
@@ -39,22 +37,19 @@ def run_engine(numbers,LOOKBACK=26,GAP=4):
     max_dd=0
     last_trade=-999
     next_signal=None
-    next_meta=None
     loss_streak=0
     max_loss_streak=0
+    win_streak=0
+    max_win_streak=0
 
     for i,n in enumerate(numbers):
         g=get_group(n)
         predicted=None
         hit=None
         state="SCAN"
-        window_used=None
-        wr_used=None
-        ev_used=None
 
         if next_signal is not None:
             predicted=next_signal
-            window_used,wr_used,ev_used=next_meta
             hit=1 if predicted==g else 0
             pnl=WIN_PROFIT if hit else -LOSE_LOSS
             total_profit+=pnl
@@ -65,11 +60,14 @@ def run_engine(numbers,LOOKBACK=26,GAP=4):
             last_trade=i
             next_signal=None
 
-            if hit==0:
-                loss_streak+=1
-                max_loss_streak=max(max_loss_streak,loss_streak)
-            else:
+            if hit:
+                win_streak+=1
                 loss_streak=0
+                max_win_streak=max(max_win_streak,win_streak)
+            else:
+                loss_streak+=1
+                win_streak=0
+                max_loss_streak=max(max_loss_streak,loss_streak)
 
         if len(engine)>=40 and i-last_trade>GAP:
             best_ev=-999
@@ -92,7 +90,6 @@ def run_engine(numbers,LOOKBACK=26,GAP=4):
                 g1=engine[-best_w]["group"]
                 if engine[-1]["group"]!=g1:
                     next_signal=g1
-                    next_meta=(best_w,best_wr,best_ev)
                     state="SIGNAL"
 
         engine.append({
@@ -101,19 +98,17 @@ def run_engine(numbers,LOOKBACK=26,GAP=4):
             "group":g,
             "predicted":predicted,
             "hit":hit,
-            "window":window_used,
-            "wr":wr_used,
-            "ev":ev_used,
             "state":state,
             "profit":total_profit,
             "drawdown":peak-total_profit,
+            "win_streak":win_streak,
             "loss_streak":loss_streak
         })
 
-    return pd.DataFrame(engine),peak,max_dd,max_loss_streak
+    return pd.DataFrame(engine),peak,max_dd,max_win_streak,max_loss_streak
 
 # ================= RUN =================
-hist,peak,max_dd,max_loss_streak=run_engine(numbers)
+hist,peak,max_dd,max_win_streak,max_loss_streak=run_engine(numbers)
 
 # ================= METRICS =================
 hits=hist["hit"].dropna()
@@ -128,7 +123,7 @@ pf=gross_win/gross_loss if gross_loss>0 else 0
 expectancy=(wr*WIN_PROFIT)-(1-wr)*LOSE_LOSS
 
 # ================= UI =================
-st.title("🧠 PRO ANALYTICS DASHBOARD")
+st.title("🧠 PRO ANALYTICS — LIGHT VERSION")
 
 c1,c2,c3,c4=st.columns(4)
 c1.metric("Profit",round(profit,2))
@@ -142,44 +137,16 @@ c6.metric("Expectancy",round(expectancy,3))
 c7.metric("ROI / 100 rounds",round(roi_100,2))
 c8.metric("Total Trades",total_trades)
 
+c9,c10=st.columns(2)
+c9.metric("Max Win Streak",max_win_streak)
+c10.metric("Max Loss Streak",max_loss_streak)
+
 st.divider()
 
-# ================= EQUITY CURVE =================
-st.subheader("📈 Equity Curve")
-fig1,ax1=plt.subplots()
-ax1.plot(hist["profit"].values)
-ax1.set_title("Equity Curve")
-st.pyplot(fig1)
-
-# ================= DRAWDOWN =================
-st.subheader("📉 Drawdown Curve")
-fig2,ax2=plt.subplots()
-ax2.plot(hist["drawdown"].values)
-ax2.set_title("Drawdown")
-st.pyplot(fig2)
-
-# ================= WINRATE BY WINDOW =================
-st.subheader("🎯 Winrate by Window")
-win_df=hist.dropna(subset=["hit","window"])
-if len(win_df)>0:
-    grp=win_df.groupby("window")["hit"].mean()*100
-    fig3,ax3=plt.subplots()
-    ax3.bar(grp.index.astype(str),grp.values)
-    ax3.set_ylabel("Winrate %")
-    st.pyplot(fig3)
-else:
-    st.info("No trades yet")
-
-# ================= STATE BREAKDOWN =================
+# ================= STATE STATS =================
 st.subheader("⚙️ State Breakdown")
 state_counts=hist["state"].value_counts()
-fig4,ax4=plt.subplots()
-ax4.pie(state_counts.values,labels=state_counts.index,autopct='%1.0f%%')
-st.pyplot(fig4)
-
-# ================= LOSS STREAK =================
-st.subheader("⚠️ Loss Streak")
-st.metric("Max Loss Streak",max_loss_streak)
+st.dataframe(state_counts)
 
 # ================= HISTORY =================
 st.subheader("📜 Full History")
