@@ -9,6 +9,9 @@ WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 WINDOWS = [9, 15]
 
+BASE_LOOKBACK = 26
+BASE_GAP = 3
+
 st.set_page_config(layout="wide")
 
 # ================= GROUP =================
@@ -36,25 +39,37 @@ if df.empty or "number" not in df.columns:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= PARAM ADAPT =================
-BASE_LOOKBACK = 26
-BASE_GAP = 3
-
+# ================= AUTO ADAPT =================
 def adapt_params(engine):
     recent_hits = [x["hit"] for x in engine[-25:] if x["hit"] is not None]
-    if len(recent_hits) < 10:
-        return BASE_LOOKBACK, BASE_GAP
 
-    wr = np.mean(recent_hits)
+    # ===== Adapt theo HIT =====
+    if len(recent_hits) >= 5:
+        wr = np.mean(recent_hits)
 
-    if wr > 0.55:      # trend tốt
-        return 22, 2
-    elif wr > 0.48:    # trung bình
-        return 26, 3
-    else:              # xấu → giãn lệnh
-        return 32, 5
+        if wr > 0.55:
+            return 22, 2   # trend mạnh → vào nhanh
+        elif wr > 0.48:
+            return 26, 3   # ổn định
+        else:
+            return 32, 5   # xấu → giãn lệnh
 
-# ================= LIVE ENGINE =================
+    # ===== Adapt theo PROFIT FLOW =====
+    if len(engine) >= 20:
+        p0 = engine[-20]["total_profit"]
+        p1 = engine[-1]["total_profit"]
+        slope = p1 - p0
+
+        if slope > 5:
+            return 22, 2
+        elif slope > 0:
+            return 26, 3
+        else:
+            return 32, 5
+
+    return BASE_LOOKBACK, BASE_GAP
+
+# ================= ENGINE =================
 def run_live_engine():
     engine = []
     total_profit = 0
@@ -96,6 +111,7 @@ def run_live_engine():
             last_trade_round = i
             next_signal = None
 
+            # Sticky logic
             if hit:
                 sticky_window = window_used
                 sticky_loss = 0
@@ -129,7 +145,7 @@ def run_live_engine():
                             1 if engine[j]["group"] == engine[j - w]["group"] else 0
                         )
 
-                if len(recent_hits) >= 15:
+                if len(recent_hits) >= 12:
                     wr = np.mean(recent_hits)
                     ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
@@ -138,8 +154,10 @@ def run_live_engine():
                         best_window = w
                         best_wr = wr
 
+            # ===== SOFT ENTRY (không scan vô hạn) =====
             if best_window is not None and best_wr > 0.27:
                 g1 = engine[-best_window]["group"]
+
                 if engine[-1]["group"] != g1:
                     next_signal = g1
                     next_window = best_window
@@ -168,7 +186,7 @@ def run_live_engine():
 engine, next_signal, next_window, next_wr, next_ev = run_live_engine()
 
 # ================= DASHBOARD =================
-st.title("📈 LIVE BETTING ENGINE — LOCK MODE")
+st.title("🚀 LIVE BETTING ENGINE — AUTO ADAPT FIXED")
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Rounds", len(engine))
@@ -178,7 +196,7 @@ hits = [x["hit"] for x in engine if x["hit"] is not None]
 wr = np.mean(hits) if hits else 0
 c3.metric("Winrate %", round(wr * 100, 2))
 
-st.caption(f"Windows={WINDOWS} | Sticky Window ON | Adaptive Lookback & Gap")
+st.caption(f"Windows={WINDOWS} | Sticky Window ON | Auto Lookback & Gap")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
