@@ -7,7 +7,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1.0
-WINDOWS = [9, 15] # 8 → 18
+WINDOWS = [9] # 8 → 18
 
 st.set_page_config(layout="wide")
 
