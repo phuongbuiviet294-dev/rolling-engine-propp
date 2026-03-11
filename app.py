@@ -10,7 +10,7 @@ LOSE_LOSS = 1
 WINDOWS = [9, 15]
 
 DRAW_THRESHOLD = 15
-REOPT_ROUNDS = 400
+REOPT_ROUNDS = 200   # ✅ giảm còn 200
 
 st.set_page_config(layout="wide")
 
@@ -41,19 +41,25 @@ def simulate(numbers, LOOKBACK, GAP):
 
     for i,n in enumerate(numbers):
         g=get_group(n)
+
+        predicted=None
         hit=None
         state="SCAN"
 
+        # ===== EXECUTE TRADE =====
         if next_signal is not None:
-            hit=1 if next_signal==g else 0
+            predicted=next_signal
+            hit=1 if predicted==g else 0
             total_profit += WIN_PROFIT if hit else -LOSE_LOSS
             state="TRADE"
             last_trade_round=i
             next_signal=None
 
+        # ===== GENERATE SIGNAL =====
         if len(engine)>=40 and i-last_trade_round>GAP:
             best_ev=-999
             best_window=None
+            best_wr=0
 
             for w in WINDOWS:
                 recent=[]
@@ -63,9 +69,11 @@ def simulate(numbers, LOOKBACK, GAP):
                         recent.append(
                             1 if engine[j]["group"]==engine[j-w]["group"] else 0
                         )
+
                 if len(recent)>=20:
                     wr=np.mean(recent)
                     ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+
                     if ev>best_ev:
                         best_ev=ev
                         best_window=w
@@ -78,13 +86,15 @@ def simulate(numbers, LOOKBACK, GAP):
                     state="SIGNAL"
 
         engine.append({
+            "round":i+1,
             "group":g,
+            "predicted":predicted,
             "hit":hit,
             "state":state,
-            "profit":total_profit
+            "profit":round(total_profit,2)
         })
 
-    return total_profit,engine
+    return total_profit,engine,next_signal
 
 # ================= PEAK LOCK =================
 best_profit=-999
@@ -92,7 +102,7 @@ best_cfg=(26,3)
 
 for LB in range(18,41):
     for GP in range(2,7):
-        p,_=simulate(numbers,LB,GP)
+        p,_,_=simulate(numbers,LB,GP)
         if p>best_profit:
             best_profit=p
             best_cfg=(LB,GP)
@@ -100,7 +110,7 @@ for LB in range(18,41):
 LOCK_LB,LOCK_GP=best_cfg
 
 # ================= LIVE RUN =================
-profit,engine=simulate(numbers,LOCK_LB,LOCK_GP)
+profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
 current_profit=engine[-1]["profit"]
 
 # ================= REGIME CHECK =================
@@ -114,17 +124,17 @@ if drawdown>DRAW_THRESHOLD:
 
     for LB in range(18,41):
         for GP in range(2,7):
-            p,_=simulate(recent_numbers,LB,GP)
+            p,_,_=simulate(recent_numbers,LB,GP)
             if p>new_best:
                 new_best=p
                 new_cfg=(LB,GP)
 
     if new_best>=best_profit*0.9:
         LOCK_LB,LOCK_GP=new_cfg
-        profit,engine=simulate(numbers,LOCK_LB,LOCK_GP)
+        profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
 
 # ================= UI =================
-st.title("🧠 PEAK LOCK AI REGIME ENGINE")
+st.title("🧠 PEAK LOCK PRO — NEXT SIGNAL MODE")
 
 c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
@@ -136,6 +146,24 @@ c3.metric("Winrate %",round(wr*100,2))
 
 st.caption(f"Locked Config → Lookback={LOCK_LB} | Gap={LOCK_GP}")
 
+# ================= NEXT SIGNAL =================
+if next_signal is not None:
+    st.markdown(f"""
+    <div style='padding:20px;
+                background:#c62828;
+                color:white;
+                border-radius:12px;
+                text-align:center;
+                font-size:28px;
+                font-weight:bold'>
+        🚨 READY TO BET 🚨<br>
+        🎯 NEXT GROUP: {next_signal}
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.info("Scanning... No valid signal")
+
+# ================= HISTORY =================
 st.subheader("History")
 hist=pd.DataFrame(engine)
 st.dataframe(hist.iloc[::-1],use_container_width=True)
