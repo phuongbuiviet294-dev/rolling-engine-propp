@@ -36,23 +36,8 @@ if df.empty or "number" not in df.columns:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= ADAPT PARAM =================
-def adapt_params(engine):
-    recent_hits = [x["hit"] for x in engine[-20:] if x["hit"] is not None]
-    if len(recent_hits) < 8:
-        return 26, 3
-
-    wr = np.mean(recent_hits)
-
-    if wr > 0.55:
-        return 22, 1   # vào rất nhanh
-    elif wr > 0.48:
-        return 26, 2
-    else:
-        return 32, 4   # giãn lệnh
-
-# ================= WINDOW PROFIT CHECK =================
-def window_real_profit(engine, w, lookback):
+# ================= REAL PROFIT WINDOW =================
+def window_profit(engine, w, lookback):
     profit = 0
     start = max(w, len(engine) - lookback)
 
@@ -63,136 +48,133 @@ def window_real_profit(engine, w, lookback):
     return profit
 
 # ================= ENGINE =================
-def run_engine():
-    engine = []
-    total_profit = 0
-    last_trade_round = -999
+engine = []
+total_profit = 0
+last_trade_round = -999
 
-    next_signal = None
-    next_window = None
-    next_wr = None
-    next_ev = None
+next_signal = None
+next_window = None
+next_wr = None
+next_ev = None
 
-    sticky_window = None
-    sticky_loss = 0
+sticky_window = None
+losing_streak = 0
 
-    LOOKBACK = 26
-    GAP = 2
+LOOKBACK = 60   # trung hạn
+BASE_GAP = 3
 
-    for i, n in enumerate(numbers):
-        g = get_group(n)
+for i, n in enumerate(numbers):
+    g = get_group(n)
 
-        predicted=None; hit=None; state="SCAN"
-        window_used=None; rolling_wr=None; ev_value=None
+    predicted=None; hit=None; state="SCAN"
+    window_used=None; rolling_wr=None; ev_value=None
 
-        # ===== EXECUTE =====
-        if next_signal is not None:
-            predicted = next_signal
-            window_used = next_window
-            rolling_wr = next_wr
-            ev_value = next_ev
+    # ===== EXECUTE =====
+    if next_signal is not None:
+        predicted = next_signal
+        window_used = next_window
+        rolling_wr = next_wr
+        ev_value = next_ev
 
-            hit = 1 if predicted == g else 0
-            pnl = WIN_PROFIT if hit else -LOSE_LOSS
-            total_profit += pnl
+        hit = 1 if predicted == g else 0
+        pnl = WIN_PROFIT if hit else -LOSE_LOSS
+        total_profit += pnl
 
-            state="TRADE"
-            last_trade_round=i
-            next_signal=None
+        state="TRADE"
+        last_trade_round=i
+        next_signal=None
 
-            if hit:
-                sticky_window=window_used
-                sticky_loss=0
-            else:
-                sticky_loss+=1
-                if sticky_loss>=3:
-                    sticky_window=None
+        if hit:
+            sticky_window = window_used
+            losing_streak = 0
+        else:
+            losing_streak += 1
+            if losing_streak >= 3:
+                sticky_window = None
 
-        # ===== ADAPT =====
-        if len(engine)>25:
-            LOOKBACK,GAP = adapt_params(engine)
+    # ===== GAP CONTROL (ANTI LOSING STREAK) =====
+    GAP = BASE_GAP + losing_streak
 
-        # ===== GENERATE =====
-        if len(engine)>=28 and i-last_trade_round>GAP:
+    # ===== GENERATE =====
+    if len(engine) >= 50 and i - last_trade_round > GAP:
 
-            candidate_windows=[sticky_window] if sticky_window else WINDOWS
+        candidate_windows = [sticky_window] if sticky_window else WINDOWS
 
-            best_window=None
-            best_profit=-999
+        best_window = None
+        best_profit = -999
 
-            for w in candidate_windows:
-                if w is None: continue
-                pf = window_real_profit(engine,w,LOOKBACK)
-                if pf>best_profit:
-                    best_profit=pf
-                    best_window=w
+        for w in candidate_windows:
+            if w is None: continue
+            pf = window_profit(engine, w, LOOKBACK)
+            if pf > best_profit:
+                best_profit = pf
+                best_window = w
 
-            if best_window is not None:
-                recent_hits=[]
-                start=max(best_window,len(engine)-LOOKBACK)
-                for j in range(start,len(engine)):
-                    if j>=best_window:
-                        recent_hits.append(
-                            1 if engine[j]["group"]==engine[j-best_window]["group"] else 0
-                        )
+        if best_window is not None:
 
-                if len(recent_hits)>=12:
-                    wr=np.mean(recent_hits)
-                    ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+            recent_hits = []
+            start = max(best_window, len(engine) - LOOKBACK)
 
-                    if wr>0.24:
-                        g1=engine[-best_window]["group"]
-                        if engine[-1]["group"]!=g1:
-                            next_signal=g1
-                            next_window=best_window
-                            next_wr=wr
-                            next_ev=ev
-                            state="SIGNAL"
+            for j in range(start, len(engine)):
+                if j >= best_window:
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j-best_window]["group"] else 0
+                    )
 
-        engine.append({
-            "round":i+1,
-            "number":n,
-            "group":g,
-            "predicted":predicted,
-            "hit":hit,
-            "window":window_used,
-            "wr":None if rolling_wr is None else round(rolling_wr*100,2),
-            "ev":None if ev_value is None else round(ev_value,3),
-            "state":state,
-            "profit":round(total_profit,2),
-            "lb":LOOKBACK,
-            "gap":GAP
-        })
+            if len(recent_hits) >= 20:
+                wr = np.mean(recent_hits)
+                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
-    return engine,next_signal,next_window,next_wr,next_ev
+                # Chỉ vào khi trend đủ ổn định
+                if wr > 0.30 and best_profit > 0:
+                    g1 = engine[-best_window]["group"]
 
-# ================= RUN =================
-engine,next_signal,next_window,next_wr,next_ev = run_engine()
+                    if engine[-1]["group"] != g1:
+                        next_signal = g1
+                        next_window = best_window
+                        next_wr = wr
+                        next_ev = ev
+                        state="SIGNAL"
+
+    engine.append({
+        "round": i+1,
+        "number": n,
+        "group": g,
+        "predicted": predicted,
+        "hit": hit,
+        "window": window_used,
+        "wr": None if rolling_wr is None else round(rolling_wr*100,2),
+        "ev": None if ev_value is None else round(ev_value,3),
+        "state": state,
+        "profit": round(total_profit,2),
+        "losing_streak": losing_streak
+    })
 
 # ================= UI =================
-st.title("⚡ TURBO LIVE ENGINE — FAST ENTRY MODE")
+st.title("📈 PRO STABLE ENGINE — LONG TERM PROFIT")
 
-c1,c2,c3=st.columns(3)
-c1.metric("Rounds",len(engine))
-c2.metric("Profit",engine[-1]["profit"])
+c1,c2,c3 = st.columns(3)
+c1.metric("Rounds", len(engine))
+c2.metric("Profit", engine[-1]["profit"])
+
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
-c3.metric("Winrate %",round(wr*100,2))
+c3.metric("Winrate %", round(wr*100,2))
 
-st.caption("Fast Entry | Real Profit Window | Adaptive Speed")
+st.caption("Stable Mode | Real Profit Window | Anti Losing Streak")
 
 if next_signal is not None:
     st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;border-radius:12px;text-align:center;font-size:28px;font-weight:bold'>
-    🚨 READY TO BET 🚨<br>
+    <div style='padding:20px;background:#1b5e20;color:white;border-radius:12px;text-align:center;font-size:28px;font-weight:bold'>
+    ✅ STABLE ENTRY<br>
     🎯 NEXT GROUP: {next_signal}<br>
     Window: {next_window}<br>
     WR: {round(next_wr*100,2)}%<br>
     EV: {round(next_ev,3)}
     </div>
-    """,unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 else:
-    st.info("Scanning...")
+    st.info("Waiting for stable trend...")
 
 st.subheader("History")
-st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
+st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
