@@ -7,7 +7,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 15]
+WINDOWS = list(range(8,19))  # ✅ FULL ADAPTIVE WINDOW
 
 st.set_page_config(layout="wide")
 
@@ -39,29 +39,29 @@ def market_adaptive(engine):
     wr = np.mean([x["hit"] for x in recent])
     
     if wr >= 0.38:
-        return 22, 2
+        return 22, 2   # thị trường đẹp → vào nhanh
     elif wr >= 0.32:
         return 26, 3
     else:
-        return 30, 5
+        return 30, 5   # thị trường xấu → giãn lệnh
 
 # ================= WINDOW REAL PROFIT =================
 def window_real_profit(engine, w, lookback):
-    hits = []
-    start = max(w, len(engine) - lookback)
+    hits=[]
+    start=max(w,len(engine)-lookback)
     
-    for j in range(start, len(engine)):
-        if j >= w:
-            hit = 1 if engine[j]["group"] == engine[j - w]["group"] else 0
+    for j in range(start,len(engine)):
+        if j>=w:
+            hit = 1 if engine[j]["group"]==engine[j-w]["group"] else 0
             hits.append(hit)
     
-    if len(hits) < 20:
-        return -999, 0, 0
+    if len(hits)<20:
+        return -999,0,0
     
-    profit = sum([WIN_PROFIT if h==1 else -LOSE_LOSS for h in hits])
-    wr = np.mean(hits)
-    count = sum(hits)
-    return profit, wr, count
+    profit=sum([WIN_PROFIT if h else -LOSE_LOSS for h in hits])
+    wr=np.mean(hits)
+    count=sum(hits)
+    return profit,wr,count
 
 # ================= ENGINE =================
 engine=[]
@@ -93,7 +93,7 @@ for i,n in enumerate(numbers):
         next_signal=None
 
     # ===== ADAPTIVE PARAM =====
-    LOOKBACK, GAP = market_adaptive(engine)
+    LOOKBACK,GAP=market_adaptive(engine)
 
     # ===== GENERATE =====
     if len(engine)>=40 and i-last_trade_round>GAP:
@@ -103,9 +103,9 @@ for i,n in enumerate(numbers):
         best_hits=0
 
         for w in WINDOWS:
-            profit, wr, hits = window_real_profit(engine, w, LOOKBACK)
+            profit,wr,hits=window_real_profit(engine,w,LOOKBACK)
 
-            if profit > best_profit:
+            if profit>best_profit:
                 best_profit=profit
                 best_window=w
                 best_wr=wr
@@ -114,9 +114,9 @@ for i,n in enumerate(numbers):
         # ===== REAL MONEY FILTER =====
         if (
             best_window is not None
-            and best_profit > 0
-            and best_wr > 0.30
-            and best_hits >= 6
+            and best_profit>0
+            and best_wr>0.30
+            and best_hits>=6
         ):
             g1=engine[-best_window]["group"]
             if engine[-1]["group"]!=g1:
@@ -134,13 +134,13 @@ for i,n in enumerate(numbers):
         "hit":hit,
         "window":window_used,
         "wr":None if wr_used is None else round(wr_used*100,2),
-        "win_profit":profit_used,
+        "window_profit":profit_used,
         "state":state,
         "total_profit":round(total_profit,2)
     })
 
 # ================= UI =================
-st.title("🧠⚡ PRO+ MAX — REAL PROFIT WINDOW")
+st.title("⚡ TURBO ADAPTIVE PRO+ MAX — FULL WINDOW")
 
 c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
@@ -150,7 +150,7 @@ hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
 
-st.caption("Adaptive Lookback + Adaptive Gap + Window chọn theo PROFIT THẬT")
+st.caption("Adaptive Lookback + Adaptive Gap + Window 8→18 chọn theo PROFIT THẬT")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
@@ -158,9 +158,9 @@ if next_signal is not None:
     <div style='padding:20px;background:#c62828;color:white;border-radius:12px;text-align:center;font-size:26px;font-weight:bold'>
     🚨 READY TO BET 🚨<br>
     🎯 NEXT GROUP: {next_signal}<br>
-    Window (Best Profit): {next_window}<br>
-    Window WR: {round(next_wr*100,2)}%<br>
-    Window Profit: {round(next_profit,2)}
+    🪟 Best Window: {next_window}<br>
+    📈 WR: {round(next_wr*100,2)}%<br>
+    💰 Window Profit: {round(next_profit,2)}
     </div>
     """,unsafe_allow_html=True)
 else:
