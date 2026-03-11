@@ -7,7 +7,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 15]
+WINDOWS = [9]
 
 DRAW_THRESHOLD = 15
 REOPT_ROUNDS = 200   # ✅ giảm còn 200
