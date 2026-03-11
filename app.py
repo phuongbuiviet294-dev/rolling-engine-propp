@@ -10,7 +10,10 @@ LOSE_LOSS = 1
 WINDOWS = [9,15]
 
 DRAW_THRESHOLD = 15
-REOPT_ROUNDS = 200   # ✅ giảm còn 200
+REOPT_ROUNDS = 200
+
+STOPLOSS_STREAK = 4      # ❗ thua liên tiếp
+COOLDOWN_ROUNDS = 20     # ❗ dừng bao nhiêu round
 
 st.set_page_config(layout="wide")
 
@@ -39,6 +42,9 @@ def simulate(numbers, LOOKBACK, GAP):
     last_trade_round=-999
     next_signal=None
 
+    loss_streak=0
+    cooldown_until=-1
+
     for i,n in enumerate(numbers):
         g=get_group(n)
 
@@ -47,7 +53,7 @@ def simulate(numbers, LOOKBACK, GAP):
         state="SCAN"
 
         # ===== EXECUTE TRADE =====
-        if next_signal is not None:
+        if next_signal is not None and i>=cooldown_until:
             predicted=next_signal
             hit=1 if predicted==g else 0
             total_profit += WIN_PROFIT if hit else -LOSE_LOSS
@@ -55,8 +61,22 @@ def simulate(numbers, LOOKBACK, GAP):
             last_trade_round=i
             next_signal=None
 
+            # ===== STOPLOSS TRACK =====
+            if hit==0:
+                loss_streak+=1
+            else:
+                loss_streak=0
+
+            # ===== ACTIVATE COOLDOWN =====
+            if loss_streak>=STOPLOSS_STREAK:
+                cooldown_until=i+COOLDOWN_ROUNDS
+                loss_streak=0
+
+        elif i<cooldown_until:
+            state="COOLDOWN"
+
         # ===== GENERATE SIGNAL =====
-        if len(engine)>=40 and i-last_trade_round>GAP:
+        if len(engine)>=40 and i-last_trade_round>GAP and i>=cooldown_until:
             best_ev=-999
             best_window=None
             best_wr=0
@@ -91,6 +111,7 @@ def simulate(numbers, LOOKBACK, GAP):
             "predicted":predicted,
             "hit":hit,
             "state":state,
+            "loss_streak":loss_streak,
             "profit":round(total_profit,2)
         })
 
@@ -134,7 +155,7 @@ if drawdown>DRAW_THRESHOLD:
         profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
 
 # ================= UI =================
-st.title("🧠 PEAK LOCK PRO — NEXT SIGNAL MODE")
+st.title("🧠 PEAK LOCK PRO — STOPLOSS MODE")
 
 c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
@@ -144,7 +165,7 @@ hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
 
-st.caption(f"Locked Config → Lookback={LOCK_LB} | Gap={LOCK_GP}")
+st.caption(f"Locked Config → Lookback={LOCK_LB} | Gap={LOCK_GP} | Stoploss ON")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
