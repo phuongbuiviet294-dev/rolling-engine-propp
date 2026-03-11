@@ -7,7 +7,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = list(range(8,19))   # full chu kỳ
+WINDOWS = list(range(8,19))   # full chu kỳ thị trường
 
 st.set_page_config(layout="wide")
 
@@ -37,8 +37,7 @@ last_trade_round=-999
 next_signal=None
 next_window=None
 
-win_streak=0
-loss_streak=0
+RECENT_SPAN = 120   # vùng thị trường hiện tại
 
 for i,n in enumerate(numbers):
     g=get_group(n)
@@ -50,70 +49,36 @@ for i,n in enumerate(numbers):
         predicted=next_signal
         window_used=next_window
         hit=1 if predicted==g else 0
-
-        if hit:
-            total_profit+=WIN_PROFIT
-            win_streak+=1
-            loss_streak=0
-        else:
-            total_profit-=LOSE_LOSS
-            loss_streak+=1
-            win_streak=0
-
+        total_profit += WIN_PROFIT if hit else -LOSE_LOSS
         state="TRADE"
         last_trade_round=i
         next_signal=None
 
-    # ===== EQUITY =====
-    profits=[x["profit"] for x in engine[-20:] if "profit" in x]
-    if len(profits)>=10 and profits[-1]<profits[0]:
-        equity_bad=True
-    else:
-        equity_bad=False
-
-    # ===== ADAPTIVE LOOKBACK =====
-    if equity_bad:
-        LOOKBACK=40
-    elif win_streak>=3:
-        LOOKBACK=120
-    else:
-        LOOKBACK=70
-
-    # ===== ADAPTIVE GAP =====
-    if loss_streak>=2:
-        GAP=5
-    elif win_streak>=2:
-        GAP=2
-    else:
-        GAP=3
-
-    # ===== SCAN WINDOWS BY REAL PROFIT =====
-    if len(engine)>LOOKBACK and i-last_trade_round>GAP:
+    # ===== SCAN WINDOW REAL PROFIT =====
+    if len(engine)>150 and i-last_trade_round>2:
         best_window=None
-        best_profit=-999
-        best_trades=0
+        best_score=-999
 
         for w in WINDOWS:
-            profit=0; hits=0; trades=0
-            start=max(w,len(engine)-LOOKBACK)
+            profit_all=0; trades_all=0
+            profit_recent=0; trades_recent=0
 
-            for j in range(start,len(engine)):
-                if j>=w:
-                    trades+=1
-                    if engine[j]["group"]==engine[j-w]["group"]:
-                        profit+=WIN_PROFIT; hits+=1
-                    else:
-                        profit-=LOSE_LOSS
+            for j in range(w,len(engine)):
+                pnl = WIN_PROFIT if engine[j]["group"]==engine[j-w]["group"] else -LOSE_LOSS
+                profit_all += pnl
+                trades_all += 1
 
-            if trades>=10:
-                stability=profit/trades
-                if profit>0 and hits>=6 and stability>0.12:
-                    if profit>best_profit or (profit==best_profit and trades>best_trades):
-                        best_profit=profit
-                        best_trades=trades
-                        best_window=w
+                if j > len(engine)-RECENT_SPAN:
+                    profit_recent += pnl
+                    trades_recent += 1
 
-        # ===== TURBO ENTRY =====
+            if trades_all>=20 and trades_recent>=5:
+                score = profit_all*0.6 + profit_recent*1.4
+                if score>0 and score>best_score:
+                    best_score=score
+                    best_window=w
+
+        # ===== ENTRY =====
         if best_window is not None:
             g1=engine[-best_window]["group"]
             if engine[-1]["group"]!=g1:
@@ -133,7 +98,7 @@ for i,n in enumerate(numbers):
     })
 
 # ================= UI =================
-st.title("⚡ TURBO PRO+ MAX — LIVE REAL PROFIT")
+st.title("⚡ TURBO PRO+ MAX REAL — LIVE PROFIT")
 
 c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
@@ -143,7 +108,7 @@ hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
 
-st.caption(f"Adaptive Lookback={LOOKBACK} | Adaptive Gap={GAP} | Windows=8→18")
+st.caption("Window chọn theo PROFIT THẬT • Ưu tiên thị trường hiện tại")
 
 # ===== SIGNAL =====
 if next_signal is not None:
@@ -151,7 +116,7 @@ if next_signal is not None:
     <div style='padding:20px;background:#c62828;color:white;
                 border-radius:12px;text-align:center;
                 font-size:26px;font-weight:bold'>
-    🚀 TURBO SIGNAL 🚀<br>
+    🚀 REAL SIGNAL 🚀<br>
     🎯 NEXT GROUP: {next_signal}<br>
     Window: {next_window}
     </div>
