@@ -1,160 +1,204 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
+from collections import deque
 
-# ================= CONFIG =================
-GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-AUTO_REFRESH = 5
-WIN_PROFIT = 2.5
-LOSE_LOSS = 1
-WINDOWS = [9]
-
-LOOKBACK = 20
-GAP = 1
-
-FLOW_RANGE = 6        # số round tính profit flow
-HIT_RANGE = 8         # số round tính hit trend
-MIN_HIT_RATE = 0.40   # hit ≥40%
-STOP_LOSS_FLOW = -3   # stop khi âm sâu
-
+# ===================== CONFIG =====================
 st.set_page_config(layout="wide")
 
-# ================= GROUP =================
-def get_group(n):
-    if 1 <= n <= 3: return 1
-    if 4 <= n <= 6: return 2
-    if 7 <= n <= 9: return 3
-    if 10 <= n <= 12: return 4
-    return None
+WIN_PROFIT = 1
+LOSE_LOSS  = 1
 
-# ================= LOAD =================
-@st.cache_data(ttl=AUTO_REFRESH)
-def load():
-    return pd.read_csv(GOOGLE_SHEET_CSV)
+WINDOWS = list(range(8,19))        # 8 → 18
+LOOKBACKS = [12,16,20,24,28]
+GAPS = [1,2,3,4]
 
-df = load()
-if df.empty:
-    st.stop()
+MIN_SAMPLE = 15
+RECENT_FLOW_N = 6
 
-numbers = df["number"].dropna().astype(int).tolist()
+SOFT_FLOW_ALLOW = -2
+HARD_STOP_LOSS_STREAK = 4
+COOLDOWN_ROUNDS = 5
 
-# ================= ENGINE =================
-engine=[]
-total_profit=0
-last_trade_round=-999
+# ====== GOOGLE SHEET CSV ======
+DATA_URL = st.secrets.get(
+    "DATA_URL",
+    "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv
+)
 
-next_signal=None
-next_window=None
-next_wr=None
-next_ev=None
+# ===================== DATA LOAD =====================
+@st.cache_data(ttl=3)
+def load_data():
+    df = pd.read_csv(DATA_URL)
+    df = df.dropna()
+    df["group"] = df["group"].astype(int)
+    return df
 
-for i,n in enumerate(numbers):
-    g=get_group(n)
-    predicted=None; hit=None; state="SCAN"
-    window_used=None; wr_used=None; ev_used=None
+df = load_data()
 
-    # ===== EXECUTE =====
-    if next_signal is not None:
-        predicted=next_signal
-        window_used=next_window
-        wr_used=next_wr
-        ev_used=next_ev
+# ===================== ENGINE STATE =====================
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-        hit=1 if predicted==g else 0
-        pnl = WIN_PROFIT if hit else -LOSE_LOSS
-        total_profit += pnl
+history = st.session_state.history
 
-        state="TRADE"
-        last_trade_round=i
-        next_signal=None
+# ===================== UTILS =====================
+def calc_hits(seq, gap):
+    hits=[]
+    for i in range(gap,len(seq)):
+        hits.append(1 if seq[i]==seq[i-gap] else 0)
+    return hits
 
-    # ===== FLOW PROFIT =====
-    recent_pnls=[]
-    for r in engine[-FLOW_RANGE:]:
-        if r["hit"] is not None:
-            recent_pnls.append(WIN_PROFIT if r["hit"]==1 else -LOSE_LOSS)
-    recent_profit=sum(recent_pnls)
+def pnl_from_hits(hits):
+    return [WIN_PROFIT if h==1 else -LOSE_LOSS for h in hits]
 
-    # ===== HIT TREND =====
-    recent_hits=[r["hit"] for r in engine[-HIT_RANGE:] if r["hit"] is not None]
-    hit_rate=np.mean(recent_hits) if recent_hits else 0.5
+def recent_profit_flow(pnls):
+    return sum(pnls[-RECENT_FLOW_N:]) if pnls else 0
 
-    # ===== GENERATE SIGNAL =====
-    if len(engine)>=40 and i-last_trade_round>GAP:
+# ===================== ADAPTIVE PARAM SEARCH =====================
+def find_best_params(groups):
 
-        best_w=None; best_ev=-999; best_wr=0
+    best=None
+    best_score=-999
 
-        for w in WINDOWS:
-            hits=[]
-            start=max(w,len(engine)-LOOKBACK)
-            for j in range(start,len(engine)):
-                if j>=w:
-                    hits.append(1 if engine[j]["group"]==engine[j-w]["group"] else 0)
+    for lb in LOOKBACKS:
+        sub = groups[-lb:]
+        if len(sub)<max(lb,MIN_SAMPLE):
+            continue
 
-            if len(hits)>=15:
-                wr=np.mean(hits)
-                ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
-                if ev>best_ev:
-                    best_ev=ev; best_w=w; best_wr=wr
+        for gp in GAPS:
+            hits = calc_hits(sub,gp)
+            if len(hits)<MIN_SAMPLE:
+                continue
 
-        if best_w is not None:
-            g1=engine[-best_w]["group"]
+            wr = np.mean(hits)
+            ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+            pnls = pnl_from_hits(hits)
+            flow = recent_profit_flow(pnls)
 
-            # ===== HYBRID ENTRY =====
-            if (
-                best_ev>0 and
-                recent_profit>=0 and
-                hit_rate>=MIN_HIT_RATE and
-                engine[-1]["group"]!=g1
-            ):
-                next_signal=g1
-                next_window=best_w
-                next_wr=best_wr
-                next_ev=best_ev
-                state="SIGNAL"
+            score = flow*2 + wr*1.5 + ev*10
 
-    # ===== HARD STOP =====
-    if recent_profit<=STOP_LOSS_FLOW:
-        next_signal=None
+            if score>best_score:
+                best_score=score
+                best=(lb,gp,wr,ev,flow)
 
-    engine.append({
-        "round":i+1,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "profit_flow":recent_profit,
-        "hit_rate":round(hit_rate*100,1),
-        "window":window_used,
-        "wr":None if wr_used is None else round(wr_used*100,1),
-        "ev":None if ev_used is None else round(ev_used,3),
-        "state":state
-    })
+    return best
 
-# ================= UI =================
-st.title("🧠 FLOW + HIT HYBRID ENGINE")
+# ===================== WINDOW SCORING =====================
+def score_window(groups, window):
+    if len(groups)<window:
+        return None
+
+    sub=groups[-window:]
+    hits = calc_hits(sub,1)
+    if len(hits)<MIN_SAMPLE:
+        return None
+
+    wr=np.mean(hits)
+    ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+    pnls=pnl_from_hits(hits)
+    flow=recent_profit_flow(pnls)
+    total=sum(pnls)
+
+    score = flow*2 + wr*1.5 + ev*10 + total*0.5
+    return score,wr,ev,flow,total
+
+def pick_best_window(groups):
+    best=None
+    best_score=-999
+    for w in WINDOWS:
+        res=score_window(groups,w)
+        if not res: continue
+        score,wr,ev,flow,total=res
+        if score>best_score:
+            best_score=score
+            best=(w,wr,ev,flow,total)
+    return best
+
+# ===================== MAIN ENGINE =====================
+groups=df["group"].tolist()
+
+param=find_best_params(groups)
+window_pick=pick_best_window(groups)
+
+state="SCAN"
+next_group=None
+
+loss_streak=0
+cooldown=0
+
+if history:
+    loss_streak=history[-1]["loss_streak"]
+    cooldown=history[-1]["cooldown"]
+
+if param and window_pick:
+
+    lb,gp,wr,ev,flow=param
+    win_w,wr_w,ev_w,flow_w,total_w=window_pick
+
+    # HARD STOP
+    if loss_streak>=HARD_STOP_LOSS_STREAK:
+        state="HARD_STOP"
+
+    # COOLDOWN
+    elif cooldown>0:
+        state="COOLDOWN"
+        cooldown-=1
+
+    # ENTRY LOGIC
+    else:
+        if flow>=SOFT_FLOW_ALLOW and ev>0:
+            state="TRADE"
+            next_group=groups[-gp]
+        else:
+            state="SCAN"
+
+# ===================== RESULT SIM =====================
+hit=None
+pnl=0
+
+if state=="TRADE":
+    real=groups[-1]
+    hit = 1 if next_group==real else 0
+    pnl = WIN_PROFIT if hit else -LOSE_LOSS
+
+    if hit==0:
+        loss_streak+=1
+        cooldown=COOLDOWN_ROUNDS
+    else:
+        loss_streak=0
+
+# ===================== SAVE HISTORY =====================
+history.append({
+    "round":len(groups),
+    "state":state,
+    "next":next_group,
+    "hit":hit,
+    "pnl":pnl,
+    "loss_streak":loss_streak,
+    "cooldown":cooldown
+})
+
+total_profit=sum(h["pnl"] for h in history)
+winrate = np.mean([h["hit"] for h in history if h["hit"] is not None])*100 if history else 0
+
+# ===================== UI =====================
+st.title("🚀 TURBO FLOW HIT — ADAPTIVE PARAM PRO")
 
 c1,c2,c3=st.columns(3)
-c1.metric("Rounds",len(engine))
-c2.metric("Profit",round(total_profit,2))
+c1.metric("Rounds",len(groups))
+c2.metric("Total Profit",round(total_profit,2))
+c3.metric("Winrate %",round(winrate,2))
 
-hits=[x["hit"] for x in engine if x["hit"] is not None]
-wr=np.mean(hits) if hits else 0
-c3.metric("Winrate %",round(wr*100,2))
-
-# ================= NEXT SIGNAL =================
-if next_signal is not None:
-    st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;border-radius:12px;text-align:center;font-size:26px;font-weight:bold'>
-    🚨 READY TO BET 🚨<br>
-    🎯 NEXT GROUP: {next_signal}<br>
-    Window: {next_window}<br>
-    WR: {round(next_wr*100,2)}%<br>
-    EV: {round(next_ev,3)}
-    </div>
-    """,unsafe_allow_html=True)
+if state=="TRADE":
+    st.success(f"READY TO BET — NEXT GROUP: {next_group}")
+elif state=="COOLDOWN":
+    st.warning(f"COOLDOWN — {cooldown} rounds left")
+elif state=="HARD_STOP":
+    st.error("HARD STOP — Market bad")
 else:
-    st.info("No signal — Waiting for Profit Flow")
+    st.info("Scanning market...")
 
-st.subheader("History")
-st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
+st.subheader("Live History (No Repaint)")
+st.dataframe(pd.DataFrame(history[::-1]),use_container_width=True)
