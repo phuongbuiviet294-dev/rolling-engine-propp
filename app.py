@@ -1,3 +1,7 @@
+# ==========================================
+# TURBO TREND PRO MAX C++ — LIVE ONLINE
+# ==========================================
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,12 +11,14 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 
 WIN_PROFIT = 2.5
-LOSE_LOSS = 1
+LOSE_LOSS  = 1
 
-WINDOWS = list(range(8,19))   # 8 → 18
-BASE_GAP = 2
-LOOKBACK = 26
-RECENT_N = 50
+WINDOW_RANGE = range(8,19)
+
+SHORT_LOOKBACK = 40
+COOLDOWN_ROUNDS = 4
+LOSS_STREAK_LIMIT = 4
+HARD_STOP_DD = -15
 
 st.set_page_config(layout="wide")
 
@@ -24,139 +30,140 @@ def get_group(n):
     if 10 <= n <= 12: return 4
     return None
 
-# ================= LOAD =================
+# ================= LOAD DATA =================
 @st.cache_data(ttl=AUTO_REFRESH)
-def load():
+def load_data():
     return pd.read_csv(GOOGLE_SHEET_CSV)
 
-df = load()
+df = load_data()
 if df.empty:
     st.stop()
 
 numbers = df["number"].dropna().astype(int).tolist()
 
 # ================= ENGINE =================
-engine = []
-total_profit = 0
-last_trade_round = -999
+def calc_hit_rate(x): return np.mean(x) if len(x)>0 else 0
+def calc_profit(x): return sum(x)
+def calc_ev(hit): return hit*WIN_PROFIT-(1-hit)*LOSE_LOSS
 
-next_signal = None
-next_window = None
-gap = BASE_GAP
+def window_score(p,h,e):
+    return p*0.5 + h*0.3 + e*0.2
 
-for i, n in enumerate(numbers):
-    g = get_group(n)
-    predicted = None
-    hit = None
-    state = "SCAN"
-    window_used = None
+engine=[]
+total_profit=0
+loss_streak=0
+cooldown=0
+last_trade_round=-999
+next_signal=None
+next_window=None
+next_hit=None
+next_ev=None
+
+for i,n in enumerate(numbers):
+    g=get_group(n)
+    predicted=None
+    hit=None
+    pnl=None
+    state="SCAN"
 
     # ===== EXECUTE =====
     if next_signal is not None:
-        predicted = next_signal
-        window_used = next_window
-        hit = 1 if predicted == g else 0
-        total_profit += WIN_PROFIT if hit else -LOSE_LOSS
-        state = "TRADE"
-        last_trade_round = i
-        next_signal = None
+        predicted=next_signal
+        hit=1 if predicted==g else 0
+        pnl = WIN_PROFIT if hit else -LOSE_LOSS
+        total_profit += pnl
 
-    # ===== REAL PERFORMANCE CHECK =====
-    recent_trades = [x for x in engine if x["hit"] is not None][-RECENT_N:]
-    recent_hits = [x["hit"] for x in recent_trades]
+        if pnl<0: loss_streak+=1
+        else: loss_streak=0
 
-    if recent_hits:
-        recent_profit = sum(WIN_PROFIT if h else -LOSE_LOSS for h in recent_hits)
-        recent_wr = np.mean(recent_hits)
-    else:
-        recent_profit = 0
-        recent_wr = 0
+        if loss_streak>=LOSS_STREAK_LIMIT:
+            cooldown=COOLDOWN_ROUNDS
 
-    loss_streak = 0
-    for h in reversed(recent_hits):
-        if h == 0:
-            loss_streak += 1
-        else:
-            break
+        state="TRADE"
+        last_trade_round=i
+        next_signal=None
 
-    HARD_STOP = recent_profit <= -15 or loss_streak >= 5
-    SOFT_LOCK = recent_profit <= -8
+    # ===== COOLDOWN =====
+    if cooldown>0:
+        cooldown-=1
 
-    gap = BASE_GAP + 2 if SOFT_LOCK else BASE_GAP
+    # ===== SELECT WINDOW =====
+    best=None
+    best_score=-999
 
-    # ===== SIGNAL ENGINE =====
-    if (
-        not HARD_STOP
-        and len(engine) >= LOOKBACK
-        and i - last_trade_round > gap
-    ):
-        candidates = []
+    if len(engine)>=SHORT_LOOKBACK:
+        for w in WINDOW_RANGE:
+            if len(engine)<w+SHORT_LOOKBACK:
+                continue
 
-        for w in WINDOWS:
-            hits = []
-            start = max(w, len(engine) - LOOKBACK)
-            for j in range(start, len(engine)):
-                if j >= w:
-                    hits.append(
-                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
-                    )
+            recent=engine[-SHORT_LOOKBACK:]
+            hits=[x["hit"] for x in recent if x["hit"] is not None]
+            profits=[x["pnl"] for x in recent if x["pnl"] is not None]
 
-            if len(hits) >= 15:
-                wr = np.mean(hits)
-                profit = sum(WIN_PROFIT if h else -LOSE_LOSS for h in hits)
-                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+            if len(hits)<10: continue
 
-                # ✅ CHỈ GIỮ WINDOW ĐANG CHẠY TỐT GẦN ĐÂY
-                if profit > 0 and wr >= 0.34:
-                    candidates.append((profit, wr, ev, w))
+            h=calc_hit_rate(hits)
+            p=calc_profit(profits)
+            e=calc_ev(h)
 
-        if candidates:
-            candidates.sort(reverse=True)
-            _, wr, ev, best_w = candidates[0]
+            s=window_score(p,h,e)
+            if s>best_score:
+                best_score=s
+                best=(w,h,p,e)
 
-            g1 = engine[-best_w]["group"]
-            if engine[-1]["group"] != g1:
-                next_signal = g1
-                next_window = best_w
-                state = "SIGNAL"
+    # ===== GENERATE SIGNAL =====
+    if best and cooldown==0 and total_profit>HARD_STOP_DD:
+        w,h,p,e=best
+        if i-last_trade_round>=1 and h>0.35:
+            g1=engine[-w]["group"] if len(engine)>=w else None
+            if g1 and engine[-1]["group"]!=g1:
+                next_signal=g1
+                next_window=w
+                next_hit=h
+                next_ev=e
+                state="SIGNAL"
 
     engine.append({
-        "round": i + 1,
-        "number": n,
-        "group": g,
-        "predicted": predicted,
-        "hit": hit,
-        "window": window_used,
-        "state": state,
-        "total_profit": round(total_profit,1),
-        "recent_profit": round(recent_profit,1),
-        "loss_streak": loss_streak,
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "pnl":pnl,
+        "state":state
     })
 
 # ================= UI =================
-st.title("🧠 TREND MASTER — REAL PERFORMANCE LOCK PRO")
+st.title("🚀 TURBO TREND PRO MAX C++ — LIVE")
 
-c1,c2,c3 = st.columns(3)
-c1.metric("Rounds", len(engine))
-c2.metric("Total Profit", round(total_profit,1))
+c1,c2,c3=st.columns(3)
+c1.metric("Rounds",len(engine))
+c2.metric("Profit",round(total_profit,2))
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
-wr = np.mean(hits) if hits else 0
-c3.metric("Winrate %", round(wr*100,2))
+hits=[x["hit"] for x in engine if x["hit"] is not None]
+wr=np.mean(hits) if hits else 0
+c3.metric("Winrate %",round(wr*100,2))
 
-st.caption(f"Window 8→18 | Lookback={LOOKBACK} | Gap={gap}")
-
-# ===== STATUS =====
-if HARD_STOP:
-    st.error("🛑 HARD STOP — Market bad, trading paused")
-elif SOFT_LOCK:
-    st.warning("⚠️ SOFT LOCK — Reducing trade frequency")
-elif next_signal is not None:
-    st.success(f"🚨 READY TO BET — NEXT GROUP: {next_signal}")
+# ================= NEXT SIGNAL =================
+if next_signal is not None:
+    st.markdown(f"""
+    <div style='padding:20px;
+                background:#c62828;
+                color:white;
+                border-radius:12px;
+                text-align:center;
+                font-size:26px;
+                font-weight:bold'>
+    🚨 READY TO BET 🚨<br>
+    🎯 NEXT GROUP: {next_signal}<br>
+    Window: {next_window}<br>
+    HitRate: {round(next_hit*100,2)}%<br>
+    EV: {round(next_ev,3)}
+    </div>
+    """,unsafe_allow_html=True)
 else:
-    st.info("Scanning trend...")
+    st.info("Scanning market...")
 
-# ===== HISTORY =====
-st.subheader("Live History (No Repaint)")
-hist = pd.DataFrame(engine).iloc[::-1]
-st.dataframe(hist, use_container_width=True)
+# ================= HISTORY =================
+st.subheader("History")
+st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
