@@ -9,14 +9,16 @@ AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 
-WINDOWS = list(range(8,19))  # 8 → 18
-
-BASE_LOOKBACK = 26
+WINDOW_RANGE = range(8,19)
+LOOKBACK = 26
 BASE_GAP = 2
 
-SOFT_EV = -0.05
-HARD_STOPLOSS_STREAK = 5
-COOLDOWN_ROUNDS = 6
+# ===== V12 FILTER =====
+RECENT_N = 20
+MIN_RECENT_TRADES = 8
+MIN_HIT_RATE = 0.38      # ≥38% hit gần đây
+MIN_EV = 0.05            # EV tối thiểu
+SOFT_PROFIT_ALLOW = -5   # âm nhẹ vẫn cho vào
 
 st.set_page_config(layout="wide")
 
@@ -43,112 +45,117 @@ numbers = df["number"].dropna().astype(int).tolist()
 engine=[]
 total_profit=0
 last_trade_round=-999
-cooldown=0
-loss_streak=0
-win_streak=0
 
 next_signal=None
 next_window=None
-next_ev=None
-next_wr=None
+
+loss_streak=0
+cooldown=0
+
+def calc_gap():
+    if loss_streak>=3: return 4
+    if loss_streak==2: return 3
+    return BASE_GAP
+
+def calc_recent_trend(w):
+    hits=[]
+    profit=0
+    trades=0
+    for row in engine[-RECENT_N:]:
+        if row["window"]==w and row["hit"] is not None:
+            trades+=1
+            hits.append(row["hit"])
+            profit += WIN_PROFIT if row["hit"]==1 else -LOSE_LOSS
+    if trades < MIN_RECENT_TRADES:
+        return None
+    hit_rate = sum(hits)/len(hits)
+    return hit_rate, profit
 
 for i,n in enumerate(numbers):
-
     g=get_group(n)
     predicted=None
     hit=None
     state="SCAN"
-    window_used=None
-    wr_used=None
-    ev_used=None
+    used_window=None
 
-    # ===== EXECUTE TRADE =====
-    if next_signal is not None:
+    # ===== COOLDOWN =====
+    if cooldown>0:
+        cooldown-=1
+        state="COOLDOWN"
+
+    # ===== EXECUTE =====
+    elif next_signal is not None:
         predicted=next_signal
-        window_used=next_window
-        wr_used=next_wr
-        ev_used=next_ev
+        used_window=next_window
 
-        hit = 1 if predicted==g else 0
-        profit_change = WIN_PROFIT if hit else -LOSE_LOSS
-        total_profit += profit_change
+        hit=1 if predicted==g else 0
+        change = WIN_PROFIT if hit else -LOSE_LOSS
+        total_profit+=change
+
+        if hit: loss_streak=0
+        else: loss_streak+=1
 
         state="TRADE"
         last_trade_round=i
         next_signal=None
 
-        if hit:
-            win_streak+=1
-            loss_streak=0
-        else:
-            loss_streak+=1
-            win_streak=0
+        if loss_streak>=4:
+            cooldown=5
 
-    # ===== STOPLOSS =====
-    if loss_streak >= HARD_STOPLOSS_STREAK:
-        cooldown = COOLDOWN_ROUNDS
-        loss_streak = 0
-
-    if cooldown>0:
-        state="COOLDOWN"
-        cooldown-=1
-
-    # ===== REGIME AI =====
-    recent_hits=[x["hit"] for x in engine[-20:] if x["hit"] is not None]
-    recent_wr=np.mean(recent_hits) if recent_hits else 0
-
-    recent_profit = sum(
-        WIN_PROFIT if x["hit"]==1 else -LOSE_LOSS
-        for x in engine[-20:] if x["hit"] is not None
-    )
-
-    if recent_wr>=0.45 and recent_profit>0:
-        regime="TREND"
-        dynamic_gap=1
-        ev_threshold=SOFT_EV
-    elif recent_wr>=0.30:
-        regime="SIDEWAY"
-        dynamic_gap=3
-        ev_threshold=0
+    # ===== GENERATE =====
     else:
-        regime="CHAOS"
-        dynamic_gap=5
-        ev_threshold=0.05
+        gap=calc_gap()
+        if len(engine)>LOOKBACK and i-last_trade_round>gap:
 
-    # ===== GENERATE SIGNAL =====
-    if (
-        cooldown==0
-        and len(engine)>=40
-        and i-last_trade_round>dynamic_gap
-    ):
-        best_window=None
-        best_ev=-999
-        best_wr=0
+            best_score=-999
+            best_w=None
+            best_ev=0
+            best_hr=0
+            best_pf=0
 
-        for w in WINDOWS:
-            hits=[]
-            start=max(w,len(engine)-BASE_LOOKBACK)
-            for j in range(start,len(engine)):
-                if j>=w:
-                    hits.append(
-                        1 if engine[j]["group"]==engine[j-w]["group"] else 0
-                    )
-            if len(hits)>=20:
+            for w in WINDOW_RANGE:
+                # ===== Pattern stats =====
+                hits=[]
+                start=max(w,len(engine)-LOOKBACK)
+                for j in range(start,len(engine)):
+                    if j>=w:
+                        hits.append(1 if engine[j]["group"]==engine[j-w]["group"] else 0)
+                if len(hits)<20:
+                    continue
+
                 wr=np.mean(hits)
                 ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
-                if ev>best_ev:
-                    best_ev=ev
-                    best_wr=wr
-                    best_window=w
 
-        if best_window is not None and best_ev>ev_threshold:
-            g1=engine[-best_window]["group"]
-            if engine[-1]["group"]!=g1:
-                next_signal=g1
-                next_window=best_window
-                next_ev=best_ev
-                next_wr=best_wr
-                state="SIGNAL"
+                # ===== Trend thật =====
+                trend=calc_recent_trend(w)
+                if trend is None:
+                    continue
+                hr_recent, pf_recent = trend
+
+                # ===== V12 FILTER =====
+                if hr_recent < MIN_HIT_RATE:
+                    continue
+                if pf_recent < SOFT_PROFIT_ALLOW:
+                    continue
+                if ev < MIN_EV:
+                    continue
+
+                # ===== Score =====
+                score = hr_recent*0.6 + ev*0.3 + (pf_recent/10)*0.1
+
+                if score>best_score:
+                    best_score=score
+                    best_w=w
+                    best_ev=ev
+                    best_hr=hr_recent
+                    best_pf=pf_recent
+
+            if best_w is not None:
+                g1=engine[-best_w]["group"]
+                if engine[-1]["group"]!=g1:
+                    next_signal=g1
+                    next_window=best_w
+                    state="SIGNAL"
 
     engine.append({
         "round":i+1,
@@ -156,42 +163,41 @@ for i,n in enumerate(numbers):
         "group":g,
         "predicted":predicted,
         "hit":hit,
-        "window":window_used,
-        "wr":None if wr_used is None else round(wr_used*100,2),
-        "ev":None if ev_used is None else round(ev_used,3),
+        "window":used_window,
         "state":state,
-        "regime":regime,
-        "total_profit":round(total_profit,2)
+        "loss_streak":loss_streak,
+        "cooldown":cooldown,
+        "total_profit":round(total_profit,1)
     })
 
 # ================= UI =================
-st.title("⚡ TURBO TREND PRO v11 — REGIME AI")
+st.title("🧠 TURBO HIT-TREND PRO MAX — V12")
 
-c1,c2,c3,c4=st.columns(4)
+c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
-c2.metric("Total Profit",round(total_profit,2))
+c2.metric("Total Profit",round(total_profit,1))
 
 hits=[x["hit"] for x in engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
-c4.metric("Market Regime",regime)
 
-st.caption(f"Adaptive Window 8→18 | Regime Gap | Soft Entry EV>{SOFT_EV}")
+st.caption("V12 | Hit-Trend + EV Filter | Window 8→18 | Adaptive Gap")
 
-# ===== SIGNAL =====
-if next_signal is not None:
+if cooldown>0:
+    st.warning(f"🧊 COOLING DOWN — {cooldown} rounds left")
+
+if next_signal is not None and cooldown==0:
     st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;border-radius:12px;
-                text-align:center;font-size:26px;font-weight:bold'>
+    <div style='padding:20px;background:#c62828;color:white;
+                border-radius:12px;text-align:center;
+                font-size:28px;font-weight:bold'>
     🚨 READY TO BET 🚨<br>
     🎯 NEXT GROUP: {next_signal}<br>
-    Window: {next_window} | WR: {round(next_wr*100,2)}% | EV: {round(next_ev,3)}<br>
-    Regime: {regime}
+    Window: {next_window}
     </div>
     """,unsafe_allow_html=True)
 else:
-    st.info("Scanning live market...")
+    st.info("Scanning trend…")
 
-# ===== HISTORY =====
 st.subheader("Live History (No Repaint)")
 st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
