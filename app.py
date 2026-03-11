@@ -5,12 +5,18 @@ import numpy as np
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 AUTO_REFRESH = 5
+
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
+
 WINDOWS = [9, 15]
 
-BASE_LOOKBACK = 26
-BASE_GAP = 3
+# ---- Cycle Scan Config (QUAN TRỌNG) ----
+LOOKBACK_RANGE = range(18, 29)   # bắt trend ngắn hạn
+GAP_RANGE = range(2, 5)          # không bỏ nhịp
+MIN_WR = 0.30                    # winrate tối thiểu
+MIN_EV = 0.05                    # edge tối thiểu
+MIN_SAMPLE = 12                  # số mẫu tối thiểu
 
 st.set_page_config(layout="wide")
 
@@ -39,37 +45,54 @@ if df.empty or "number" not in df.columns:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= AUTO ADAPT =================
-def adapt_params(engine):
-    recent_hits = [x["hit"] for x in engine[-25:] if x["hit"] is not None]
+# ================= AUTO CYCLE OPTIMIZER =================
+def find_best_cycle(engine):
+    best_score = -999
+    best_lb = 26
+    best_gp = 3
 
-    # ===== Adapt theo HIT =====
-    if len(recent_hits) >= 5:
-        wr = np.mean(recent_hits)
+    for LB in LOOKBACK_RANGE:
+        for GP in GAP_RANGE:
+            profit = 0
+            last_trade = -999
+            trades = 0
 
-        if wr > 0.55:
-            return 22, 2   # trend mạnh → vào nhanh
-        elif wr > 0.48:
-            return 26, 3   # ổn định
-        else:
-            return 32, 5   # xấu → giãn lệnh
+            for i in range(len(engine)):
+                if i - last_trade <= GP:
+                    continue
 
-    # ===== Adapt theo PROFIT FLOW =====
-    if len(engine) >= 20:
-        p0 = engine[-20]["total_profit"]
-        p1 = engine[-1]["total_profit"]
-        slope = p1 - p0
+                best_ev = -999
 
-        if slope > 5:
-            return 22, 2
-        elif slope > 0:
-            return 26, 3
-        else:
-            return 32, 5
+                for w in WINDOWS:
+                    hits = []
+                    start = max(w, i - LB)
 
-    return BASE_LOOKBACK, BASE_GAP
+                    for j in range(start, i):
+                        if j >= w:
+                            hits.append(
+                                1 if engine[j]["group"] == engine[j-w]["group"] else 0
+                            )
 
-# ================= ENGINE =================
+                    if len(hits) >= MIN_SAMPLE:
+                        wr = np.mean(hits)
+                        ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+                        if wr >= MIN_WR and ev >= MIN_EV and ev > best_ev:
+                            best_ev = ev
+
+                if best_ev > 0:
+                    profit += best_ev
+                    trades += 1
+                    last_trade = i
+
+            score = profit * 0.7 + trades * 0.3
+            if score > best_score:
+                best_score = score
+                best_lb = LB
+                best_gp = GP
+
+    return best_lb, best_gp
+
+# ================= LIVE ENGINE =================
 def run_live_engine():
     engine = []
     total_profit = 0
@@ -83,8 +106,8 @@ def run_live_engine():
     sticky_window = None
     sticky_loss = 0
 
-    LB = BASE_LOOKBACK
-    GP = BASE_GAP
+    LB = 26
+    GP = 3
 
     for i, n in enumerate(numbers):
         g = get_group(n)
@@ -111,7 +134,6 @@ def run_live_engine():
             last_trade_round = i
             next_signal = None
 
-            # Sticky logic
             if hit:
                 sticky_window = window_used
                 sticky_loss = 0
@@ -120,9 +142,9 @@ def run_live_engine():
                 if sticky_loss >= 3:
                     sticky_window = None
 
-        # ===== ADAPT PARAMS REALTIME =====
-        if len(engine) > 30:
-            LB, GP = adapt_params(engine)
+        # ===== AUTO OPTIMIZE CYCLE =====
+        if len(engine) > 60 and i % 20 == 0:
+            LB, GP = find_best_cycle(engine)
 
         # ===== GENERATE SIGNAL =====
         if len(engine) >= 40 and i - last_trade_round > GP:
@@ -145,19 +167,17 @@ def run_live_engine():
                             1 if engine[j]["group"] == engine[j - w]["group"] else 0
                         )
 
-                if len(recent_hits) >= 12:
+                if len(recent_hits) >= MIN_SAMPLE:
                     wr = np.mean(recent_hits)
                     ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
 
-                    if ev > best_ev:
+                    if wr >= MIN_WR and ev >= MIN_EV and ev > best_ev:
                         best_ev = ev
                         best_window = w
                         best_wr = wr
 
-            # ===== SOFT ENTRY (không scan vô hạn) =====
-            if best_window is not None and best_wr > 0.27:
+            if best_window is not None:
                 g1 = engine[-best_window]["group"]
-
                 if engine[-1]["group"] != g1:
                     next_signal = g1
                     next_window = best_window
@@ -180,23 +200,23 @@ def run_live_engine():
             "gap": GP
         })
 
-    return engine, next_signal, next_window, next_wr, next_ev
+    return engine, total_profit, next_signal, next_window, next_wr, next_ev
 
 # ================= RUN =================
-engine, next_signal, next_window, next_wr, next_ev = run_live_engine()
+engine, total_profit, next_signal, next_window, next_wr, next_ev = run_live_engine()
 
 # ================= DASHBOARD =================
-st.title("🚀 LIVE BETTING ENGINE — AUTO ADAPT FIXED")
+st.title("🚀 AUTO CYCLE TREND ENGINE")
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Rounds", len(engine))
-c2.metric("Profit", engine[-1]["total_profit"])
+c2.metric("Profit", total_profit)
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
 wr = np.mean(hits) if hits else 0
 c3.metric("Winrate %", round(wr * 100, 2))
 
-st.caption(f"Windows={WINDOWS} | Sticky Window ON | Auto Lookback & Gap")
+st.caption(f"Windows={WINDOWS} | Auto Cycle ON | Sticky Window ON")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
