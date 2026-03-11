@@ -9,9 +9,6 @@ WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 WINDOWS = [9, 15]
 
-LOOKBACK = 26   # cố định — không tối ưu quá khứ
-GAP = 3         # chống spam lệnh
-
 st.set_page_config(layout="wide")
 
 # ================= GROUP =================
@@ -38,125 +35,142 @@ if df.empty or "number" not in df.columns:
     st.stop()
 
 numbers = df["number"].dropna().astype(int).tolist()
+groups = [get_group(n) for n in numbers]
 
-# ================= LIVE ENGINE =================
-engine = []
-total_profit = 0
-last_trade_round = -999
+# =========================================================
+# 1️⃣ FIND MAX PROFIT PERIOD (LOCK ZONE)
+# =========================================================
+def backtest_period(start, end, lookback, gap, window):
+    profit = 0
+    last_trade = -999
+    next_signal = None
+    
+    for i in range(start, end):
+        g = groups[i]
 
-next_signal = None
-next_window = None
-next_wr = None
-next_ev = None
+        if next_signal is not None:
+            hit = 1 if g == next_signal else 0
+            profit += WIN_PROFIT if hit else -LOSE_LOSS
+            last_trade = i
+            next_signal = None
 
-for i, n in enumerate(numbers):
-    g = get_group(n)
+        if i - last_trade > gap and i > start + lookback + window:
+            hits = []
+            for j in range(i-lookback, i):
+                if j-window >= start:
+                    hits.append(1 if groups[j]==groups[j-window] else 0)
 
-    predicted = None
-    hit = None
-    state = "SCAN"
-    window_used = None
-    rolling_wr = None
-    ev_value = None
+            if len(hits) >= 15:
+                wr = np.mean(hits)
+                ev = wr*WIN_PROFIT - (1-wr)*LOSE_LOSS
+                if wr > 0.29 and ev > 0:
+                    pred = groups[i-window]
+                    if pred != groups[i-1]:
+                        next_signal = pred
+    return profit
 
-    # ===== EXECUTE TRADE (lệnh đã báo trước đó) =====
-    if next_signal is not None:
-        predicted = next_signal
-        window_used = next_window
-        rolling_wr = next_wr
-        ev_value = next_ev
 
-        hit = 1 if predicted == g else 0
-        pnl = WIN_PROFIT if hit else -LOSE_LOSS
-        total_profit += pnl
+best_profit = -999
+best_zone = None
+best_params = None
 
-        state = "TRADE"
-        last_trade_round = i
-        next_signal = None
+N = len(groups)
+ZONE = 600  # mỗi block ~2 ngày
 
-    # ===== GENERATE SIGNAL CHO VÁN TỚI =====
-    if len(engine) >= 40 and i - last_trade_round > GAP:
-        best_window = None
-        best_ev = -999
-        best_wr = 0
+for start in range(0, N-ZONE, ZONE//2):
+    end = start + ZONE
+    
+    for w in WINDOWS:
+        for lb in range(22, 36):
+            for gp in range(2, 6):
+                pf = backtest_period(start, end, lb, gp, w)
+                if pf > best_profit:
+                    best_profit = pf
+                    best_zone = (start, end)
+                    best_params = (w, lb, gp)
 
-        for w in WINDOWS:
-            recent_hits = []
-            start = max(w, len(engine) - LOOKBACK)
+LOCK_START, LOCK_END = best_zone
+LOCK_WINDOW, LOCK_LOOKBACK, LOCK_GAP = best_params
 
-            for j in range(start, len(engine)):
-                if j >= w:
-                    recent_hits.append(
-                        1 if engine[j]["group"] == engine[j - w]["group"] else 0
-                    )
+# =========================================================
+# 2️⃣ LIVE ENGINE (LOCKED PARAMS — NO REOPTIMIZE)
+# =========================================================
+def run_live():
+    engine=[]
+    total_profit=0
+    last_trade=-999
+    next_signal=None
+    
+    for i in range(LOCK_END, N):
+        g=groups[i]
+        predicted=None
+        hit=None
+        state="SCAN"
 
-            if len(recent_hits) >= 15:
-                wr = np.mean(recent_hits)
-                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+        # EXECUTE
+        if next_signal is not None:
+            predicted=next_signal
+            hit=1 if g==predicted else 0
+            total_profit += WIN_PROFIT if hit else -LOSE_LOSS
+            state="TRADE"
+            last_trade=i
+            next_signal=None
 
-                if ev > best_ev:
-                    best_ev = ev
-                    best_window = w
-                    best_wr = wr
+        # GENERATE
+        if i-last_trade>LOCK_GAP and i>LOCK_LOOKBACK+LOCK_WINDOW:
+            hits=[]
+            for j in range(i-LOCK_LOOKBACK, i):
+                if j-LOCK_WINDOW>=0:
+                    hits.append(1 if groups[j]==groups[j-LOCK_WINDOW] else 0)
 
-        # Điều kiện vào lệnh (LIVE mềm)
-        if best_window is not None and best_wr > 0.28:
-            g1 = engine[-best_window]["group"]
+            if len(hits)>=15:
+                wr=np.mean(hits)
+                ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+                if wr>0.29 and ev>0:
+                    pred=groups[i-LOCK_WINDOW]
+                    if pred!=groups[i-1]:
+                        next_signal=pred
+                        state="SIGNAL"
 
-            if engine[-1]["group"] != g1:
-                next_signal = g1
-                next_window = best_window
-                next_wr = best_wr
-                next_ev = best_ev
-                state = "SIGNAL"
+        engine.append({
+            "round":i+1,
+            "group":g,
+            "predicted":predicted,
+            "hit":hit,
+            "state":state,
+            "profit":round(total_profit,2)
+        })
+    return engine,next_signal,total_profit
 
-    engine.append({
-        "round": i + 1,
-        "number": n,
-        "group": g,
-        "predicted": predicted,
-        "hit": hit,
-        "window": window_used,
-        "wr": None if rolling_wr is None else round(rolling_wr * 100, 2),
-        "ev": None if ev_value is None else round(ev_value, 3),
-        "state": state,
-        "total_profit": round(total_profit, 2)
-    })
+engine,next_signal,live_profit=run_live()
 
-# ================= DASHBOARD =================
-st.title("🔴 LIVE BETTING ENGINE — REAL MODE")
+# =========================================================
+# DASHBOARD
+# =========================================================
+st.title("🔒 AUTO MAX PROFIT LOCK PRO ENGINE")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Rounds", len(engine))
-c2.metric("Live Profit", engine[-1]["total_profit"])
+c1,c2,c3=st.columns(3)
+c1.metric("LOCK PROFIT",round(best_profit,2))
+c2.metric("LIVE PROFIT",round(live_profit,2))
+c3.metric("TOTAL ROUNDS",len(engine))
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
-wr = np.mean(hits) if hits else 0
-c3.metric("Winrate %", round(wr * 100, 2))
+st.caption(f"""
+LOCK ZONE: Rounds {LOCK_START} → {LOCK_END}
+WINDOW={LOCK_WINDOW} | LOOKBACK={LOCK_LOOKBACK} | GAP={LOCK_GAP}
+""")
 
-st.caption(f"LIVE MODE | Windows={WINDOWS} | Lookback={LOOKBACK} | Gap={GAP}")
-
-# ================= NEXT SIGNAL =================
+# NEXT SIGNAL
 if next_signal is not None:
     st.markdown(f"""
-    <div style='padding:20px;
-                background:#c62828;
-                color:white;
-                border-radius:12px;
-                text-align:center;
-                font-size:28px;
-                font-weight:bold'>
-        🚨 READY TO BET 🚨<br>
-        🎯 NEXT GROUP: {next_signal}<br>
-        Window: {next_window}<br>
-        WR: {round(next_wr*100,2)}%<br>
-        EV: {round(next_ev,3)}
+    <div style='padding:20px;background:#c62828;color:white;border-radius:12px;
+                text-align:center;font-size:28px;font-weight:bold'>
+    🚨 READY TO BET 🚨<br>
+    🎯 NEXT GROUP: {next_signal}
     </div>
-    """, unsafe_allow_html=True)
+    """,unsafe_allow_html=True)
 else:
-    st.info("Scanning... No valid signal")
+    st.info("Scanning...")
 
-# ================= HISTORY =================
-st.subheader("History (Live Only)")
-hist_df = pd.DataFrame(engine).iloc[::-1]
-st.dataframe(hist_df, use_container_width=True)
+# HISTORY
+st.subheader("Live History")
+st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
