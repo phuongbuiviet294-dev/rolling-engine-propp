@@ -4,15 +4,10 @@ import numpy as np
 
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-
 WINDOW = 9
-LOOKBACK_RANGE = range(18, 29)
-GAP_RANGE = range(3, 6)
-
-RELOCK_DRAWDOWN = 10
-RECENT_SCAN = 1200
 
 st.set_page_config(layout="wide")
 
@@ -25,106 +20,136 @@ def get_group(n):
     return None
 
 # ================= LOAD =================
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=AUTO_REFRESH)
 def load():
     df = pd.read_csv(GOOGLE_SHEET_CSV)
     df.columns = [c.strip().lower() for c in df.columns]
     return df
 
 df = load()
+if df.empty or "number" not in df.columns:
+    st.error("Data lỗi hoặc thiếu cột 'number'")
+    st.stop()
+
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= ENGINE CORE =================
-def simulate(lookback, gap, nums):
-    engine = []
-    profit = 0
-    last_trade = -999
-    next_signal = None
-    peak_profit = 0
+# ================= TURBO PARAM ADAPT =================
+def turbo_params(engine):
+    recent_hits = [x["hit"] for x in engine[-12:] if x["hit"] is not None]
+    if len(recent_hits) < 6:
+        return 22, 2, "WARMUP"
 
-    for i,n in enumerate(nums):
+    wr = np.mean(recent_hits)
+
+    if wr >= 0.58:
+        return 18, 1, "🚀 TURBO"
+    elif wr >= 0.48:
+        return 22, 2, "⚖️ NORMAL"
+    else:
+        return 28, 4, "🧊 SAFE"
+
+# ================= ENGINE =================
+def run_engine():
+    engine = []
+    total_profit = 0
+    peak_profit = 0
+    last_trade_round = -999
+
+    next_signal = None
+    mode = "WARMUP"
+    LB, GAP = 22, 2
+
+    for i, n in enumerate(numbers):
         g = get_group(n)
+
+        predicted = None
         hit = None
         state = "SCAN"
+        wr_view = None
+        ev_view = None
 
+        # ===== EXECUTE =====
         if next_signal is not None:
-            hit = 1 if next_signal == g else 0
-            profit += WIN_PROFIT if hit else -LOSE_LOSS
+            predicted = next_signal
+            hit = 1 if predicted == g else 0
+            pnl = WIN_PROFIT if hit else -LOSE_LOSS
+            total_profit += pnl
+            peak_profit = max(peak_profit, total_profit)
+
             state = "TRADE"
-            last_trade = i
+            last_trade_round = i
             next_signal = None
 
-        if len(engine) >= lookback and i - last_trade > gap:
-            hits=[]
-            for j in range(len(engine)-lookback, len(engine)):
-                if j>=WINDOW:
-                    hits.append(
-                        1 if engine[j]["group"]==engine[j-WINDOW]["group"] else 0
-                    )
-            if len(hits)>=12:
-                wr=np.mean(hits)
-                ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
-                if ev>0 and wr>0.27:
-                    g1=engine[-WINDOW]["group"]
-                    if engine[-1]["group"]!=g1:
-                        next_signal=g1
-                        state="SIGNAL"
+        # ===== ADAPT TURBO =====
+        if len(engine) > 20:
+            LB, GAP, mode = turbo_params(engine)
 
-        peak_profit=max(peak_profit,profit)
+        # ===== SIGNAL =====
+        if len(engine) >= 40 and i - last_trade_round > GAP:
+            recent_hits = []
+            start = max(WINDOW, len(engine) - LB)
+
+            for j in range(start, len(engine)):
+                if j >= WINDOW:
+                    recent_hits.append(
+                        1 if engine[j]["group"] == engine[j - WINDOW]["group"] else 0
+                    )
+
+            if len(recent_hits) >= 12:
+                wr = np.mean(recent_hits)
+                ev = wr * WIN_PROFIT - (1 - wr) * LOSE_LOSS
+
+                # Turbo entry (nới điều kiện)
+                if wr > 0.24 and ev > -0.05:
+                    g1 = engine[-WINDOW]["group"]
+                    if engine[-1]["group"] != g1:
+                        next_signal = g1
+                        state = "SIGNAL"
+                        wr_view = round(wr * 100, 2)
+                        ev_view = round(ev, 3)
+
+        dd = peak_profit - total_profit
 
         engine.append({
-            "round":i+1,
-            "group":g,
-            "hit":hit,
-            "profit":profit,
-            "peak":peak_profit,
-            "dd":peak_profit-profit,
-            "state":state
+            "round": i + 1,
+            "number": n,
+            "group": g,
+            "predicted": predicted,
+            "hit": hit,
+            "state": state,
+            "profit": round(total_profit,2),
+            "peak": round(peak_profit,2),
+            "dd": round(dd,2),
+            "lookback": LB,
+            "gap": GAP,
+            "mode": mode,
+            "wr": wr_view,
+            "ev": ev_view
         })
 
-    return profit, engine
+    return engine, next_signal, mode
 
-# ================= FIND BEST LOCK =================
-recent_numbers = numbers[-RECENT_SCAN:]
+engine, next_signal, mode = run_engine()
 
-best_profit = -999
-best_cfg = None
+# ================= DASHBOARD =================
+st.title("🚀 TURBO TREND ENGINE")
 
-for lb in LOOKBACK_RANGE:
-    for gp in GAP_RANGE:
-        p,_ = simulate(lb,gp,recent_numbers)
-        if p>best_profit:
-            best_profit=p
-            best_cfg=(lb,gp)
+c1,c2,c3 = st.columns(3)
+c1.metric("Rounds", len(engine))
+c2.metric("Profit", engine[-1]["profit"])
+hits = [x["hit"] for x in engine if x["hit"] is not None]
+wr = np.mean(hits) if hits else 0
+c3.metric("Winrate %", round(wr*100,2))
 
-LOOKBACK,GAP=best_cfg
+st.caption(f"Window=9 | Turbo Adaptive | Mode: {mode}")
 
-# ================= RUN LIVE =================
-live_profit, engine = simulate(LOOKBACK,GAP,numbers)
+# ================= SIGNAL =================
+if next_signal:
+    st.error(f"🚨 NEXT GROUP: {next_signal}")
+else:
+    st.info("Scanning...")
 
-# ================= AUTO RELOCK =================
-dd = engine[-1]["dd"]
-if dd >= RELOCK_DRAWDOWN:
-    st.warning("♻️ Re-locking due to drawdown...")
-    best_profit=-999
-    for lb in LOOKBACK_RANGE:
-        for gp in GAP_RANGE:
-            p,_=simulate(lb,gp,numbers[-RECENT_SCAN:])
-            if p>best_profit:
-                best_profit=p
-                LOOKBACK,GAP=lb,gp
-    live_profit, engine = simulate(LOOKBACK,GAP,numbers)
-
-# ================= UI =================
-st.title("🔒 AUTO RELOCK PROFIT ENGINE")
-
-c1,c2,c3=st.columns(3)
-c1.metric("Rounds",len(engine))
-c2.metric("Live Profit",round(live_profit,2))
-hits=[x["hit"] for x in engine if x["hit"] is not None]
-wr=np.mean(hits) if hits else 0
-c3.metric("Winrate %",round(wr*100,2))
-
-st.caption(f"Window=9 | Lookback={LOOKBACK} | Gap={GAP}")
-
-st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
+# ================= HISTORY =================
+st.subheader("History")
+hist_df = pd.DataFrame(engine).iloc[::-1]
+st.dataframe(hist_df, use_container_width=True)
