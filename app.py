@@ -56,7 +56,7 @@ def simulate(numbers, LOOKBACK, GAP):
             next_signal=None
 
         # ===== GENERATE SIGNAL =====
-        if len(engine)>=20 and i-last_trade_round>GAP:
+        if len(engine)>=40 and i-last_trade_round>GAP:
             best_ev=-999
             best_window=None
             best_wr=0
