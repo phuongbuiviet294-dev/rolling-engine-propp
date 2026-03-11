@@ -5,14 +5,23 @@ import numpy as np
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 AUTO_REFRESH = 5
+
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
 WINDOWS = [9,15]
 
-DRAW_THRESHOLD = 15
-REOPT_ROUNDS = 200
+# ===== RISK GUARD =====
+LOSS_SOFT = 3
+LOSS_HARD = 5
+LOSS_KILL = 8
 
-st.set_page_config(layout="wide")
+COOLDOWN_SOFT = 0
+COOLDOWN_HARD = 3
+COOLDOWN_KILL = 10
+
+DD_LIMIT = 10
+DD_WINDOW = 50
+DD_COOLDOWN = 20
 
 # ================= GROUP =================
 def get_group(n):
@@ -32,15 +41,16 @@ def load():
 df = load()
 numbers = df["number"].dropna().astype(int).tolist()
 
-# ================= CORE ENGINE =================
+# ================= ENGINE =================
 def simulate(numbers, LOOKBACK, GAP):
     engine=[]
     total_profit=0
+    peak_profit=0
     last_trade_round=-999
     next_signal=None
 
     loss_streak=0
-    pause_until=-1
+    cooldown=0
 
     for i,n in enumerate(numbers):
         g=get_group(n)
@@ -49,28 +59,60 @@ def simulate(numbers, LOOKBACK, GAP):
         hit=None
         state="SCAN"
 
+        # ===== COOLDOWN =====
+        if cooldown>0:
+            cooldown-=1
+            state="COOLDOWN"
+            engine.append({
+                "round":i+1,
+                "group":g,
+                "hit":None,
+                "state":state,
+                "profit":round(total_profit,2)
+            })
+            continue
+
         # ===== EXECUTE TRADE =====
-        if next_signal is not None and i>pause_until:
+        if next_signal is not None:
             predicted=next_signal
             hit=1 if predicted==g else 0
-            pnl = WIN_PROFIT if hit else -LOSE_LOSS
+
+            bet_win=WIN_PROFIT
+            bet_loss=LOSE_LOSS
+
+            # soft reduce bet
+            if loss_streak>=LOSS_SOFT:
+                bet_win*=0.5
+                bet_loss*=0.5
+
+            pnl = bet_win if hit else -bet_loss
             total_profit += pnl
+            peak_profit=max(peak_profit,total_profit)
+
             state="TRADE"
             last_trade_round=i
             next_signal=None
 
-            if hit==0:
-                loss_streak+=1
-            else:
+            if hit:
                 loss_streak=0
+            else:
+                loss_streak+=1
 
-            # ===== STOPLOSS PAUSE =====
-            if loss_streak>=5:
-                pause_until=i+GAP
-                state="COOLDOWN"
+        # ===== LOSS STREAK GUARD =====
+        if loss_streak>=LOSS_KILL:
+            cooldown=COOLDOWN_KILL
+        elif loss_streak>=LOSS_HARD:
+            cooldown=COOLDOWN_HARD
+
+        # ===== DRAWDOWN GUARD =====
+        if len(engine)>DD_WINDOW:
+            recent=engine[-DD_WINDOW:]
+            p0=recent[0]["profit"]
+            if peak_profit-total_profit>=DD_LIMIT and total_profit<p0:
+                cooldown=DD_COOLDOWN
 
         # ===== GENERATE SIGNAL =====
-        if len(engine)>=40 and i-last_trade_round>GAP and i>pause_until:
+        if len(engine)>=40 and i-last_trade_round>GAP:
             best_ev=-999
             best_window=None
             best_wr=0
@@ -102,112 +144,50 @@ def simulate(numbers, LOOKBACK, GAP):
         engine.append({
             "round":i+1,
             "group":g,
-            "predicted":predicted,
             "hit":hit,
             "state":state,
             "profit":round(total_profit,2)
         })
 
-    return total_profit,engine,next_signal
+    return engine,next_signal
 
-# ================= PEAK LOCK =================
+# ================= LOCK CONFIG =================
 best_profit=-999
 best_cfg=(26,4)
 
-for LB in range(18,29):
+for LB in range(18,31):
     for GP in range(3,7):
-        p,_,_=simulate(numbers,LB,GP)
+        eng,_=simulate(numbers,LB,GP)
+        p=eng[-1]["profit"]
         if p>best_profit:
             best_profit=p
             best_cfg=(LB,GP)
 
 LOCK_LB,LOCK_GP=best_cfg
+engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
 
-# ================= LIVE RUN =================
-profit,engine,next_signal=simulate(numbers,LOCK_LB,LOCK_GP)
+# ================= STATS =================
+profits=[x["profit"] for x in engine]
+peak=max(profits)
+dd=max(peak-p for p in profits)
 
-# ================= DASHBOARD =================
-st.title("🚀 PRO MAX ANALYTICS ENGINE")
+hits=[x["hit"] for x in engine if x["hit"] is not None]
+wr=np.mean(hits) if hits else 0
+
+# ================= UI =================
+st.title("🧠 SMART RISK GUARD — BALANCED")
 
 c1,c2,c3=st.columns(3)
 c1.metric("Rounds",len(engine))
 c2.metric("Profit",round(engine[-1]["profit"],2))
-
-hits=[x["hit"] for x in engine if x["hit"] is not None]
-wr=np.mean(hits) if hits else 0
 c3.metric("Winrate %",round(wr*100,2))
 
-st.caption(f"Locked Config → Lookback={LOCK_LB} | Gap={LOCK_GP}")
+st.caption(f"Lookback={LOCK_LB} | Gap={LOCK_GP} | Risk Guard ON")
 
-# ================= NEXT SIGNAL =================
-if next_signal is not None:
-    st.markdown(f"""
-    <div style='padding:20px;
-                background:#c62828;
-                color:white;
-                border-radius:12px;
-                text-align:center;
-                font-size:28px;
-                font-weight:bold'>
-        🚨 READY TO BET 🚨<br>
-        🎯 NEXT GROUP: {next_signal}
-    </div>
-    """, unsafe_allow_html=True)
+if next_signal:
+    st.success(f"🎯 NEXT GROUP: {next_signal}")
 else:
-    st.info("Scanning... No valid signal")
+    st.info("Scanning...")
 
-# ================= ANALYTICS =================
-profits = [x["profit"] for x in engine]
-peak_curve = np.maximum.accumulate(profits)
-drawdowns = peak_curve - profits
-
-peak_profit = max(profits)
-live_profit = profits[-1]
-max_dd = max(drawdowns)
-
-wins = sum(1 for x in hits if x==1)
-losses = sum(1 for x in hits if x==0)
-total_trades = wins + losses
-
-winrate = wins / total_trades if total_trades else 0
-gross_win = wins * WIN_PROFIT
-gross_loss = losses * LOSE_LOSS
-profit_factor = gross_win / gross_loss if gross_loss else 0
-expectancy = (winrate * WIN_PROFIT) - ((1 - winrate) * LOSE_LOSS)
-roi_100 = (live_profit / len(engine)) * 100 if engine else 0
-
-# ===== Streaks =====
-max_loss_streak=0
-cur_loss=0
-for h in hits:
-    if h==0:
-        cur_loss+=1
-        max_loss_streak=max(max_loss_streak,cur_loss)
-    else:
-        cur_loss=0
-
-# ================= EQUITY CURVE =================
-st.subheader("📈 Equity Curve")
-st.line_chart(profits)
-
-# ================= METRICS =================
-st.subheader("📊 Performance Metrics")
-
-m1,m2,m3=st.columns(3)
-m1.metric("Peak Profit",round(peak_profit,2))
-m2.metric("Max Drawdown",round(max_dd,2))
-m3.metric("ROI / 100 rounds",round(roi_100,2))
-
-n1,n2,n3=st.columns(3)
-n1.metric("Winrate %",round(winrate*100,2))
-n2.metric("Profit Factor",round(profit_factor,2))
-n3.metric("Expectancy",round(expectancy,3))
-
-k1,k2=st.columns(2)
-k1.metric("Max Loss Streak",max_loss_streak)
-k2.metric("Total Trades",total_trades)
-
-# ================= HISTORY =================
 st.subheader("History")
-hist=pd.DataFrame(engine)
-st.dataframe(hist.iloc[::-1],use_container_width=True)
+st.dataframe(pd.DataFrame(engine).iloc[::-1],use_container_width=True)
