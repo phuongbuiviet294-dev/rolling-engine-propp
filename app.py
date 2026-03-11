@@ -1,158 +1,105 @@
+# ================== IMPORT ==================
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ================= CONFIG =================
-WINDOW_FIXED = 9
-
+# ================== CONFIG ==================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-BET_SIZE = 1
-WIN_RETURN = 2
-LOSS_RETURN = -1
+WINDOW = 9
+BASE_LOOKBACK = 26
+BASE_GAP = 2
 
-# ================ LOAD DATA ================
-@st.cache_data(ttl=5)
+# ================== LOAD DATA ==================
+@st.cache_data(ttl=10)
 def load_data():
-    df = pd.read_csv(GOOGLE_SHEET_CSV)
-    df = df.dropna()
-    df = df.reset_index(drop=True)
-    return df
+    try:
+        df = pd.read_csv(GOOGLE_SHEET_CSV)
+        df.columns = [c.strip().lower() for c in df.columns]
+        return df
+    except:
+        return pd.DataFrame()
 
 df = load_data()
 
-# ================ UI =================
-st.title("⚡ AUTO LOOKBACK GAP PRO")
+st.title("⚡ TURBO ENGINE — AUTO LOOKBACK GAP PRO (FIXED)")
 
-rounds = len(df)
-st.metric("Rounds", rounds)
+if df.empty:
+    st.error("Không tải được dữ liệu Google Sheet")
+    st.stop()
 
-# ================ ENGINE =================
+# ================== PREP ==================
+if "group" not in df.columns:
+    st.error("Thiếu cột: group")
+    st.stop()
+
+groups = df["group"].tolist()
+n = len(groups)
+
 history = []
 total_profit = 0
+last_trade_round = -999
 loss_streak = 0
-cooldown = 0
 
-def calc_hit(pred, actual):
-    return 1 if pred == actual else 0
+# ================== AUTO LOOKBACK GAP ==================
+def auto_params(loss_streak):
+    lookback = BASE_LOOKBACK + min(loss_streak * 2, 20)
+    gap = max(1, BASE_GAP - min(loss_streak // 2, 1))
+    return lookback, gap
 
-def choose_group(window_slice):
-    counts = window_slice.value_counts()
-    return counts.idxmax()
+# ================== ENGINE ==================
+for i in range(n):
+    state = "SCAN"
+    pred = None
+    hit = None
+    pnl = 0
 
-def auto_mode(hit_hist, pnl_hist):
-    if len(hit_hist) < 12:
-        return 26, 2
+    LOOKBACK, GAP = auto_params(loss_streak)
 
-    hit_rate = sum(hit_hist[-12:]) / 12
-    profit_flow = sum(pnl_hist[-12:])
+    if i >= LOOKBACK and i - last_trade_round >= GAP:
+        window_data = groups[i-LOOKBACK:i]
+        freq = pd.Series(window_data).value_counts()
 
-    if hit_rate >= 0.45 and profit_flow > 0:
-        return 18, 1   # Trend mạnh
-    elif hit_rate >= 0.30:
-        return 26, 2   # Trung tính
-    else:
-        return 36, 4   # Nhiễu
+        if WINDOW in freq.index:
+            pred = WINDOW
+            state = "TRADE"
+            last_trade_round = i
 
-hit_hist = []
-pnl_hist = []
+            if i+1 < n:
+                actual = groups[i+1]
+                hit = 1 if actual == pred else 0
+                pnl = 2 if hit else -1
+                total_profit += pnl
+                loss_streak = 0 if hit else loss_streak + 1
 
-for i in range(rounds):
-
-    actual = df.iloc[i]["group"]
-
-    LOOKBACK, GAP = auto_mode(hit_hist, pnl_hist)
-
-    if i < LOOKBACK:
-        history.append({
-            "round": i+1,
-            "predicted": None,
-            "hit": None,
-            "pnl": 0,
-            "lookback": LOOKBACK,
-            "gap": GAP,
-            "state": "SCAN",
-            "total_profit": total_profit
-        })
-        continue
-
-    if cooldown > 0:
-        cooldown -= 1
-        history.append({
-            "round": i+1,
-            "predicted": None,
-            "hit": None,
-            "pnl": 0,
-            "lookback": LOOKBACK,
-            "gap": GAP,
-            "state": "COOLDOWN",
-            "total_profit": total_profit
-        })
-        continue
-
-    window_data = df.iloc[i-LOOKBACK:i]["group"]
-
-    if i % GAP != 0:
-        history.append({
-            "round": i+1,
-            "predicted": None,
-            "hit": None,
-            "pnl": 0,
-            "lookback": LOOKBACK,
-            "gap": GAP,
-            "state": "WAIT",
-            "total_profit": total_profit
-        })
-        continue
-
-    pred = choose_group(window_data)
-    hit = calc_hit(pred, actual)
-
-    pnl = WIN_RETURN if hit else LOSS_RETURN
-    total_profit += pnl
-
-    hit_hist.append(hit)
-    pnl_hist.append(pnl)
-
-    if hit == 0:
-        loss_streak += 1
-    else:
-        loss_streak = 0
-
-    if loss_streak >= 4:
-        cooldown = 5
-        loss_streak = 0
-
+    # ===== SAFE HISTORY RECORD =====
     history.append({
         "round": i+1,
+        "group": groups[i],
         "predicted": pred,
         "hit": hit,
         "pnl": pnl,
         "lookback": LOOKBACK,
         "gap": GAP,
-        "state": "TRADE",
+        "state": state,
         "total_profit": total_profit
     })
 
-# ================ STATS =================
+# ================== SAFE STATS ==================
 df_hist = pd.DataFrame(history)
 
-wins = df_hist["hit"].fillna(0).sum()
-trades = df_hist["hit"].notna().sum()
+if "hit" in df_hist.columns:
+    wins = df_hist["hit"].fillna(0).sum()
+    trades = df_hist["hit"].notna().sum()
+else:
+    wins = 0
+    trades = 0
+
 winrate = (wins / trades * 100) if trades > 0 else 0
 
+# ================== UI ==================
+st.metric("Rounds", n)
 st.metric("Total Profit", round(total_profit,2))
 st.metric("Winrate %", round(winrate,2))
 
-# ================ STATUS =================
-last = df_hist.iloc[-1]
-if last["state"] == "TRADE":
-    st.success(f"🎯 READY — Next bet FOLLOW window {WINDOW_FIXED}")
-elif last["state"] == "COOLDOWN":
-    st.warning("🧊 Cooling down...")
-else:
-    st.info("⏳ Waiting signal...")
-
-# ================ TABLE =================
-st.subheader("Live History")
 st.dataframe(df_hist.tail(50), use_container_width=True)
