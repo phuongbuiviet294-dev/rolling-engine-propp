@@ -7,7 +7,7 @@ GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLll
 AUTO_REFRESH = 5
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9]
+WINDOWS = [9],15
 
 DRAW_THRESHOLD = 15
 REOPT_ROUNDS = 200   # ✅ giảm còn 200
@@ -56,7 +56,7 @@ def simulate(numbers, LOOKBACK, GAP):
             next_signal=None
 
         # ===== GENERATE SIGNAL =====
-        if len(engine)>=40 and i-last_trade_round>GAP:
+        if len(engine)>=20 and i-last_trade_round>GAP:
             best_ev=-999
             best_window=None
             best_wr=0
@@ -79,7 +79,7 @@ def simulate(numbers, LOOKBACK, GAP):
                         best_window=w
                         best_wr=wr
 
-            if best_window and best_wr>0.29 and best_ev>0:
+            if best_window and best_wr>0.29 and best_ev>-0.01:
                 g1=engine[-best_window]["group"]
                 if engine[-1]["group"]!=g1:
                     next_signal=g1
@@ -100,8 +100,8 @@ def simulate(numbers, LOOKBACK, GAP):
 best_profit=-999
 best_cfg=(26,3)
 
-for LB in range(18,41):
-    for GP in range(2,7):
+for LB in range(18,29):
+    for GP in range(3,7):
         p,_,_=simulate(numbers,LB,GP)
         if p>best_profit:
             best_profit=p
@@ -122,8 +122,8 @@ if drawdown>DRAW_THRESHOLD:
     new_best=-999
     new_cfg=best_cfg
 
-    for LB in range(18,41):
-        for GP in range(2,7):
+    for LB in range(18,29):
+        for GP in range(3,7):
             p,_,_=simulate(recent_numbers,LB,GP)
             if p>new_best:
                 new_best=p
