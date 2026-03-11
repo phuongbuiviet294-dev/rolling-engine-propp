@@ -5,9 +5,10 @@ import numpy as np
 # ================= CONFIG =================
 GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 AUTO_REFRESH = 5
+
 WIN_PROFIT = 2.5
 LOSE_LOSS = 1
-WINDOWS = [9, 15]   # ✅ dùng 2 window cố định
+WINDOWS = [9, 15]   # 2 window mạnh nhất
 
 st.set_page_config(layout="wide")
 
@@ -30,8 +31,31 @@ if df.empty:
 
 numbers = df["number"].dropna().astype(int).tolist()
 
+# ================= ADAPTIVE CORE =================
+def calc_short_wr(engine, span=18):
+    hits = [x["hit"] for x in engine[-span:] if x["hit"] is not None]
+    return np.mean(hits) if hits else 0.5
+
+def adaptive_lookback(short_wr):
+    if short_wr >= 0.38:
+        return 18   # thị trường rõ nhịp → bám sát
+    elif short_wr >= 0.32:
+        return 22
+    else:
+        return 28   # nhiễu → nhìn dài hơn
+
+def adaptive_gap(ev):
+    if ev is None:
+        return 3
+    if ev >= 0.40:
+        return 1    # tín hiệu mạnh → vào nhanh
+    elif ev >= 0.20:
+        return 2
+    else:
+        return 4    # yếu → giãn lệnh
+
 # ================= ENGINE =================
-def run_engine(LOOKBACK, GAP):
+def run_engine():
     engine = []
     total_profit = 0
     last_trade_round = -999
@@ -43,20 +67,19 @@ def run_engine(LOOKBACK, GAP):
 
     for i, n in enumerate(numbers):
         g = get_group(n)
-
         predicted = None
         hit = None
         state = "SCAN"
         window_used = None
-        rolling_wr = None
-        ev_value = None
+        wr_used = None
+        ev_used = None
 
         # ===== EXECUTE TRADE =====
         if next_signal is not None:
             predicted = next_signal
             window_used = next_window
-            rolling_wr = next_wr
-            ev_value = next_ev
+            wr_used = next_wr
+            ev_used = next_ev
 
             hit = 1 if predicted == g else 0
             total_profit += WIN_PROFIT if hit else -LOSE_LOSS
@@ -65,8 +88,12 @@ def run_engine(LOOKBACK, GAP):
             last_trade_round = i
             next_signal = None
 
+        # ===== ADAPTIVE MARKET READ =====
+        short_wr = calc_short_wr(engine)
+        LOOKBACK = adaptive_lookback(short_wr)
+
         # ===== GENERATE SIGNAL =====
-        if len(engine) >= 40 and i - last_trade_round > GAP:
+        if len(engine) >= 40:
             best_window = None
             best_ev = -999
             best_wr = 0
@@ -90,11 +117,17 @@ def run_engine(LOOKBACK, GAP):
                         best_window = w
                         best_wr = wr
 
+            GAP = adaptive_gap(best_ev)
+
             # ===== CONFIRM SIGNAL =====
-            if best_window is not None and best_wr > 0.29 and best_ev > 0:
+            if (
+                best_window is not None
+                and best_wr > 0.29
+                and best_ev > 0
+                and i - last_trade_round > GAP
+            ):
                 g1 = engine[-best_window]["group"]
 
-                # timing filter
                 if engine[-1]["group"] != g1:
                     next_signal = g1
                     next_window = best_window
@@ -109,47 +142,29 @@ def run_engine(LOOKBACK, GAP):
             "predicted": predicted,
             "hit": hit,
             "window": window_used,
-            "wr": None if rolling_wr is None else round(rolling_wr * 100, 2),
-            "ev": None if ev_value is None else round(ev_value, 3),
+            "wr": None if wr_used is None else round(wr_used * 100, 2),
+            "ev": None if ev_used is None else round(ev_used, 3),
             "state": state,
             "profit": round(total_profit, 2)
         })
 
     return total_profit, engine, next_signal, next_window, next_wr, next_ev
 
+# ================= RUN =================
+profit, engine, next_signal, next_window, next_wr, next_ev = run_engine()
 
-# ================= AUTO OPTIMIZE =================
-best_profit = -999
-best_cfg = None
-best_engine = None
-best_next = None
+# ================= DASHBOARD =================
+st.title("⚡ TURBO ADAPTIVE PRO — LIVE")
 
-for LOOKBACK in range(20, 41):
-    for GAP in range(3, 7):
-        profit, eng, ns, nw, nwr, nev = run_engine(LOOKBACK, GAP)
-
-        if profit > best_profit:
-            best_profit = profit
-            best_cfg = (LOOKBACK, GAP)
-            best_engine = eng
-            best_next = (ns, nw, nwr, nev)
-
-LOOKBACK, GAP = best_cfg
-engine = best_engine
-next_signal, next_window, next_wr, next_ev = best_next
-
-# ================= UI =================
-st.title("🚀 LIVE BETTING ENGINE — STABLE AUTO")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Rounds", len(engine))
-col2.metric("Profit", round(best_profit, 2))
+c1, c2, c3 = st.columns(3)
+c1.metric("Rounds", len(engine))
+c2.metric("Profit", round(profit, 2))
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
 wr = np.mean(hits) if hits else 0
-col3.metric("Winrate %", round(wr * 100, 2))
+c3.metric("Winrate %", round(wr * 100, 2))
 
-st.caption(f"Auto Mode | Windows={WINDOWS} | Lookback={LOOKBACK} | Gap={GAP}")
+st.caption("Adaptive Lookback + Adaptive Gap | Windows=[9,15]")
 
 # ================= NEXT SIGNAL =================
 if next_signal is not None:
@@ -173,5 +188,4 @@ else:
 
 # ================= HISTORY =================
 st.subheader("Live History (No Repaint)")
-hist_df = pd.DataFrame(engine).iloc[::-1]
-st.dataframe(hist_df, use_container_width=True)
+st.dataframe(pd.DataFrame(engine).iloc[::-1], use_container_width=True)
