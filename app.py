@@ -4,247 +4,228 @@ import numpy as np
 
 # ================= CONFIG =================
 
-DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE = 400
+WINDOWS=range(8,18)
+LOOKBACKS=range(18,33)
+GAPS=[4,5]
 
-WINDOWS = range(8,18)
-LOOKBACKS = range(18,41)
-GAPS = range(2,7)
+TRAIN_SIZE=400
 
-WIN = 2.5
-LOSS = 1
+WIN=2.5
+LOSS=1
+
+st.set_page_config(layout="wide")
 
 # ================= GROUP =================
 
 def group(n):
 
-    if n <= 3:
-        return 1
-    if n <= 6:
-        return 2
-    if n <= 9:
-        return 3
+    if n<=3:return 1
+    if n<=6:return 2
+    if n<=9:return 3
     return 4
 
 
-# ================= LOAD DATA =================
+# ================= LOAD =================
 
 @st.cache_data(ttl=5)
 def load():
 
-    df = pd.read_csv(DATA_URL)
+    df=pd.read_csv(DATA_URL)
 
-    df.columns = [c.strip().lower() for c in df.columns]
+    df.columns=[c.strip().lower() for c in df.columns]
 
-    numbers = df["number"].dropna().astype(int).tolist()
-
-    return numbers
+    return df["number"].dropna().astype(int).tolist()
 
 
-numbers = load()
+numbers=load()
 
 # ================= SIM ENGINE =================
 
-def simulate(nums, LB, GAP, W):
+def simulate(nums,LB,GAP,W):
 
-    profit = 0
-    hits = []
+    profit=0
+    next_signal=None
+    last_trade=-999
 
-    next_signal = None
-    last_trade = -999
+    for i,n in enumerate(nums):
 
-    for i, n in enumerate(nums):
-
-        g = group(n)
+        g=group(n)
 
         if next_signal is not None:
 
-            hit = 1 if next_signal == g else 0
+            hit=1 if next_signal==g else 0
 
-            hits.append(hit)
+            profit+=WIN if hit else -LOSS
 
-            profit += WIN if hit else -LOSS
+            next_signal=None
+            last_trade=i
 
-            next_signal = None
-            last_trade = i
+        if i-last_trade>GAP and i>LB:
 
-        if i - last_trade > GAP and i > LB:
+            rec=[]
 
-            rec = []
+            for j in range(max(W,i-LB),i):
 
-            for j in range(max(W, i-LB), i):
-
-                if j >= W:
+                if j>=W:
 
                     rec.append(
-                        1 if group(nums[j]) == group(nums[j-W]) else 0
+                        1 if group(nums[j])==group(nums[j-W]) else 0
                     )
 
-            if len(rec) > 15:
+            if len(rec)>15:
 
-                wr = np.mean(rec)
+                wr=np.mean(rec)
 
-                ev = wr * WIN - (1-wr) * LOSS
+                ev=wr*WIN-(1-wr)*LOSS
 
-                if ev > 0:
+                if ev>0:
 
-                    g1 = group(nums[i-W])
+                    g1=group(nums[i-W])
 
-                    if group(nums[i-1]) != g1:
+                    if group(nums[i-1])!=g1:
 
-                        next_signal = g1
+                        next_signal=g1
 
-    return profit, hits
-
-
-# ================= TRAIN BEST PARAM =================
-
-def find_best(train):
-
-    best = -999
-    best_cfg = (26,4,9)
-
-    for LB in LOOKBACKS:
-
-        for GAP in GAPS:
-
-            for W in WINDOWS:
-
-                p,_ = simulate(train,LB,GAP,W)
-
-                if p > best:
-
-                    best = p
-                    best_cfg = (LB,GAP,W)
-
-    return best_cfg
+    return profit
 
 
-# ================= WALK FORWARD =================
+# ================= FIND BEST CONFIG =================
 
-profit = 0
-equity = []
+train=numbers[:TRAIN_SIZE]
 
-segments = []
+best_profit=-999
+best_cfg=(26,4,9)
 
-start = 0
+for LB in LOOKBACKS:
+    for GP in GAPS:
+        for W in WINDOWS:
 
-while start + TRAIN_SIZE < len(numbers):
+            p=simulate(train,LB,GP,W)
 
-    train = numbers[:start + TRAIN_SIZE]
+            if p>best_profit:
 
-    LB,GAP,W = find_best(train)
+                best_profit=p
+                best_cfg=(LB,GP,W)
 
-    trade = numbers[start + TRAIN_SIZE:start + TRAIN_SIZE*2]
+LB,GP,W=best_cfg
 
-    p,_ = simulate(trade,LB,GAP,W)
+# ================= LIVE RUN =================
 
-    profit += p
+profit=0
+next_signal=None
+last_trade=-999
+
+history=[]
+hits=[]
+equity=[]
+
+for i,n in enumerate(numbers):
+
+    g=group(n)
+
+    predicted=None
+    hit=None
+    state="SCAN"
+
+    if next_signal is not None:
+
+        predicted=next_signal
+
+        hit=1 if predicted==g else 0
+
+        profit+=WIN if hit else -LOSS
+
+        hits.append(hit)
+
+        state="TRADE"
+
+        next_signal=None
+        last_trade=i
+
+    if i-last_trade>GP and i>LB:
+
+        rec=[]
+
+        for j in range(max(W,i-LB),i):
+
+            if j>=W:
+
+                rec.append(
+                    1 if group(numbers[j])==group(numbers[j-W]) else 0
+                )
+
+        if len(rec)>15:
+
+            wr=np.mean(rec)
+
+            ev=wr*WIN-(1-wr)*LOSS
+
+            if ev>0:
+
+                g1=group(numbers[i-W])
+
+                if group(numbers[i-1])!=g1:
+
+                    next_signal=g1
+                    state="SIGNAL"
 
     equity.append(profit)
 
-    segments.append({
+    history.append({
 
-        "start":start,
-        "LOOKBACK":LB,
-        "GAP":GAP,
-        "WINDOW":W,
-        "profit":p
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "state":state,
+        "profit":profit
 
     })
-
-    start += TRAIN_SIZE
 
 
 # ================= METRICS =================
 
-hits_total = []
-profit_curve = []
+wr=np.mean(hits) if hits else 0
 
-next_signal = None
-last_trade = -999
-profit_live = 0
+wins=hits.count(1)*WIN
+loss=hits.count(0)*LOSS
 
-for i,n in enumerate(numbers):
-
-    g = group(n)
-
-    if next_signal is not None:
-
-        hit = 1 if next_signal == g else 0
-
-        hits_total.append(hit)
-
-        profit_live += WIN if hit else -LOSS
-
-        next_signal = None
-        last_trade = i
-
-    if i-last_trade > 4 and i > 30:
-
-        g1 = group(numbers[i-9])
-
-        if group(numbers[i-1]) != g1:
-
-            next_signal = g1
-
-    profit_curve.append(profit_live)
+pf=wins/loss if loss else 0
 
 # ================= DASHBOARD =================
 
-st.title("🚀 LIVE QUANT ENGINE")
+st.title("🚀 LIVE ENGINE TEST")
 
-wr = np.mean(hits_total) if hits_total else 0
+c1,c2,c3=st.columns(3)
 
-wins = hits_total.count(1)*WIN
-loss = hits_total.count(0)*LOSS
-
-pf = wins/loss if loss else 0
-
-peak = max(profit_curve)
-dd = peak - profit_curve[-1]
-
-c1,c2,c3 = st.columns(3)
-
-c1.metric("Profit",round(profit_live,2))
+c1.metric("Profit",round(profit,2))
 c2.metric("Winrate %",round(wr*100,2))
 c3.metric("Profit Factor",round(pf,2))
 
-c4,c5 = st.columns(2)
-
-c4.metric("Drawdown",round(dd,2))
-c5.metric("Trades",len(hits_total))
+st.caption(f"LOCKED CONFIG → Lookback={LB} | Gap={GP} | Window={W}")
 
 st.subheader("Equity Curve")
 
-st.line_chart(pd.DataFrame({"equity":profit_curve}))
+st.line_chart(pd.DataFrame({"equity":equity}))
 
-st.subheader("Walk Forward Segments")
-
-st.dataframe(pd.DataFrame(segments))
-
-# ================= NEXT GROUP =================
-
-st.subheader("NEXT GROUP SIGNAL")
+st.subheader("Next Group")
 
 if next_signal:
 
     st.markdown(f"""
-
-    <div style='padding:20px;
-    background:#c62828;
-    color:white;
-    border-radius:10px;
-    text-align:center;
-    font-size:30px'>
-
+    <div style='padding:20px;background:#c62828;color:white;
+    border-radius:10px;text-align:center;font-size:30px'>
     NEXT GROUP → {next_signal}
-
     </div>
-
     """,unsafe_allow_html=True)
 
 else:
 
     st.info("Scanning...")
+
+st.subheader("History")
+
+st.dataframe(pd.DataFrame(history).iloc[::-1],use_container_width=True)
