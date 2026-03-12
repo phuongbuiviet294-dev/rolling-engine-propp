@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from collections import Counter
 import math
 
@@ -48,13 +49,12 @@ def entropy(g):
 ent=entropy(analysis)
 
 
-# ---------- pattern edge ----------
+# ---------- pattern ----------
 def pattern_edge(g):
 
     if len(g)<6:return None,0
 
     key=tuple(g[-3:])
-
     nexts=[]
 
     for i in range(len(g)-3):
@@ -66,13 +66,46 @@ def pattern_edge(g):
     if len(nexts)<5:return None,0
 
     c=Counter(nexts)
-    best=max(c,key=c.get)
 
+    best=max(c,key=c.get)
     prob=c[best]/len(nexts)
 
-    if prob>0.37:
+    if prob>0.33:
 
         return best,prob
+
+    return None,0
+
+
+# ---------- markov ----------
+def markov_edge(g):
+
+    if len(g)<50:return None,0
+
+    current=g[-1]
+
+    trans={1:0,2:0,3:0,4:0}
+
+    total=0
+
+    for i in range(len(g)-1):
+
+        if g[i]==current:
+
+            trans[g[i+1]]+=1
+            total+=1
+
+    if total<10:return None,0
+
+    for k in trans:
+
+        trans[k]/=total
+
+    best=max(trans,key=trans.get)
+
+    if trans[best]>0.30:
+
+        return best,trans[best]
 
     return None,0
 
@@ -87,7 +120,7 @@ def imbalance_edge(g):
 
         if c.get(i,0)<=5:
 
-            return i,0.3
+            return i,0.25
 
     return None,0
 
@@ -101,41 +134,43 @@ def streak_edge(g):
 
             if i!=g[-1]:
 
-                return i,0.25
+                return i,0.15
 
     return None,0
 
 
-# ---------- detect edge ----------
+# ---------- detect ----------
 def detect_edge(g):
 
     score={1:0,2:0,3:0,4:0}
-    source=[]
+    edges=[]
 
     p,sp=pattern_edge(g)
-
     if p:
-        score[p]+=sp*0.45
-        source.append("pattern")
+        score[p]+=sp*0.4
+        edges.append("pattern")
+
+    m,sm=markov_edge(g)
+    if m:
+        score[m]+=sm*0.3
+        edges.append("markov")
 
     i,si=imbalance_edge(g)
-
     if i:
-        score[i]+=si
-        source.append("imbalance")
+        score[i]+=si*0.2
+        edges.append("imbalance")
 
     s,ss=streak_edge(g)
-
     if s:
         score[s]+=ss
-        source.append("streak")
+        edges.append("streak")
 
     best=max(score,key=score.get)
     strength=score[best]
 
-    if strength>0.65:
+    if strength>0.55:
 
-        return best,strength,",".join(source)
+        return best,strength,"+".join(edges)
 
     return None,0,""
 
@@ -146,7 +181,7 @@ history=[]
 
 for i in range(200,len(groups)-1):
 
-    g=groups[:i]
+    g=groups[max(0,i-150):i]
 
     pred,strength,edge=detect_edge(g)
 
@@ -168,7 +203,8 @@ for i in range(200,len(groups)-1):
         "actual":groups[i],
         "pred":pred,
         "hit":hit,
-        "profit":profit
+        "profit":profit,
+        "edge":edge
     })
 
 hist=pd.DataFrame(history)
@@ -186,20 +222,20 @@ drawdown=(hist.profit.cummax()-hist.profit).max()
 
 
 # ---------- UI ----------
-st.title("🚀 V25 PRO LIVE ENGINE")
+st.title("🚀 V26 PRO LIVE ENGINE")
 
-col1,col2,col3,col4=st.columns(4)
+c1,c2,c3,c4=st.columns(4)
 
-col1.metric("Rounds",len(groups))
-col2.metric("Trades",trades)
-col3.metric("Winrate %",round(wr*100,2))
-col4.metric("EV",round(ev,3))
+c1.metric("Rounds",len(groups))
+c2.metric("Trades",trades)
+c3.metric("Winrate %",round(wr*100,2))
+c4.metric("EV",round(ev,3))
 
-col5,col6,col7=st.columns(3)
+c5,c6,c7=st.columns(3)
 
-col5.metric("Profit",round(profit,2))
-col6.metric("Drawdown",round(drawdown,2))
-col7.metric("Entropy",round(ent,3))
+c5.metric("Profit",round(profit,2))
+c6.metric("Drawdown",round(drawdown,2))
+c7.metric("Entropy",round(ent,3))
 
 
 # ---------- next group ----------
@@ -207,7 +243,7 @@ st.subheader("Next Group")
 
 pred,strength,edge=detect_edge(analysis)
 
-if pred and ent<1.97:
+if pred and ent<1.995:
 
     st.success(f"BET → {pred} | strength {round(strength,2)} | edge {edge}")
 
