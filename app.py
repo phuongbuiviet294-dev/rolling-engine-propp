@@ -2,10 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ======================================
-# CONFIG
-# ======================================
-
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 WIN=2.5
@@ -14,98 +10,69 @@ LOSS=1
 TRAIN_STEP=400
 TRADE_STEP=400
 
-WINDOWS=[7,9,11,15]
+LOOKBACK_RANGE=range(20,33)
+GAP_RANGE=range(3,6)
 
-LOOKBACK_RANGE=range(18,41)
-GAP_RANGE=range(2,7)
-
-AUTO_REFRESH=5
+WINDOW=9
 
 st.set_page_config(layout="wide")
-st.title("🚀 LIVE EXPANDING WALK FORWARD ENGINE")
-
-# ======================================
-# GROUP
-# ======================================
+st.title("🚀 LIVE WALK FORWARD ENGINE")
 
 def group(n):
-
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
     return 4
 
-# ======================================
-# LOAD DATA
-# ======================================
-
-@st.cache_data(ttl=AUTO_REFRESH)
+@st.cache_data
 def load():
-
     df=pd.read_csv(DATA_URL)
-
     df.columns=[c.strip().lower() for c in df.columns]
-
-    numbers=df["number"].dropna().astype(int).tolist()
-
-    return numbers
+    return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
 
-# ======================================
-# SIGNAL ENGINE
-# ======================================
+# ---------------------------
+# SIGNAL
+# ---------------------------
 
-def signal_engine(data,lookback):
+def signal(data,lookback):
 
-    votes=[]
-    edges=[]
+    if len(data)<lookback:
+        return None
 
-    for W in WINDOWS:
+    seq=[]
 
-        if len(data)<lookback:continue
+    start=max(WINDOW,len(data)-lookback)
 
-        seq=[]
+    for j in range(start,len(data)):
 
-        start=max(W,len(data)-lookback)
+        if j>=WINDOW:
 
-        for j in range(start,len(data)):
+            seq.append(
+                1 if group(data[j])==group(data[j-WINDOW]) else 0
+            )
 
-            if j>=W:
+    if len(seq)<10:
+        return None
 
-                seq.append(
-                    1 if group(data[j])==group(data[j-W]) else 0
-                )
+    wr=np.mean(seq)
 
-        if len(seq)<15:continue
+    ev=wr*WIN-(1-wr)*LOSS
 
-        wr=np.mean(seq)
+    if ev>0:
 
-        ev=wr*WIN-(1-wr)*LOSS
+        g1=group(data[-WINDOW])
 
-        if ev>0:
+        if group(data[-1])!=g1:
+            return g1
 
-            g1=group(data[-W])
+    return None
 
-            if group(data[-1])!=g1:
 
-                votes.append(g1)
-
-                edges.append(ev)
-
-    if not votes:
-
-        return None,0
-
-    vote=pd.Series(votes).mode()[0]
-
-    edge=np.mean(edges)
-
-    return vote,edge
-
-# ======================================
-# OPTIMIZER
-# ======================================
+# ---------------------------
+# OPTIMIZE
+# ---------------------------
 
 def optimize(train):
 
@@ -121,11 +88,13 @@ def optimize(train):
 
             for i in range(len(train)):
 
-                if i-last<GP:continue
+                if i-last<GP:
+                    continue
 
-                vote,_=signal_engine(train[:i],LB)
+                vote=signal(train[:i],LB)
 
-                if vote is None:continue
+                if vote is None:
+                    continue
 
                 g=group(train[i])
 
@@ -143,13 +112,13 @@ def optimize(train):
 
     return best_cfg
 
-# ======================================
-# WALK FORWARD ENGINE
-# ======================================
+
+# ---------------------------
+# WALK FORWARD
+# ---------------------------
 
 profit=0
 engine=[]
-windows=[]
 
 train_end=TRAIN_STEP
 
@@ -164,8 +133,6 @@ while train_end+TRADE_STEP<=len(numbers):
     last_trade=-999
     next_signal=None
 
-    window_profit=0
-
     for i,n in enumerate(trade):
 
         g=group(n)
@@ -177,29 +144,24 @@ while train_end+TRADE_STEP<=len(numbers):
         if next_signal is not None:
 
             predicted=next_signal
-
             hit=1 if predicted==g else 0
 
-            window_profit+=WIN if hit else -LOSS
             profit+=WIN if hit else -LOSS
 
             state="TRADE"
 
             last_trade=i
-
             next_signal=None
 
         if i-last_trade>GP:
 
-            vote,_=signal_engine(trade[:i],LB)
+            vote=signal(trade[:i],LB)
 
             if vote:
-
                 next_signal=vote
                 state="SIGNAL"
 
         engine.append({
-
             "round":train_end+i,
             "number":n,
             "group":g,
@@ -209,28 +171,20 @@ while train_end+TRADE_STEP<=len(numbers):
             "profit":profit
         })
 
-    windows.append({
-
-        "train_range":f"1-{train_end}",
-        "trade_range":f"{train_end+1}-{train_end+TRADE_STEP}",
-        "lookback":LB,
-        "gap":GP,
-        "window_profit":window_profit
-    })
-
     train_end+=TRADE_STEP
 
-# ======================================
-# NEXT GROUP LIVE
-# ======================================
+
+# ---------------------------
+# NEXT GROUP
+# ---------------------------
 
 LB,GP=optimize(numbers)
 
-next_group,_=signal_engine(numbers,LB)
+next_group=signal(numbers,LB)
 
-# ======================================
+# ---------------------------
 # METRICS
-# ======================================
+# ---------------------------
 
 hits=[x["hit"] for x in engine if x["hit"]!=None]
 
@@ -241,76 +195,54 @@ losses=hits.count(0)*LOSS
 
 pf=wins/losses if losses else 0
 
-expect=wr*WIN-(1-wr)*LOSS
-
 profits=[x["profit"] for x in engine]
 
 peak=max(profits) if profits else 0
-
 dd=peak-profits[-1] if profits else 0
 
-# ======================================
+# ---------------------------
 # DASHBOARD
-# ======================================
+# ---------------------------
 
 c1,c2,c3=st.columns(3)
 
-c1.metric("Live Profit",round(profit,2))
+c1.metric("Profit",round(profit,2))
 c2.metric("Winrate %",round(wr*100,2))
-c3.metric("Profit Factor",round(pf,2))
+c3.metric("PF",round(pf,2))
 
-c4,c5,c6=st.columns(3)
+c4,c5=st.columns(2)
 
 c4.metric("Drawdown",round(dd,2))
-c5.metric("Expectancy",round(expect,3))
-c6.metric("Total Trades",len(hits))
+c5.metric("Trades",len(hits))
 
-# ======================================
-# NEXT GROUP SIGNAL
-# ======================================
+# ---------------------------
+# SIGNAL
+# ---------------------------
 
 if next_group:
 
     st.markdown(
-
         f"""
         <div style='padding:20px;background:#c62828;color:white;
         border-radius:12px;text-align:center;font-size:30px;font-weight:bold'>
-        🔥 NEXT GROUP LIVE 🔥<br>
-        GROUP {next_group}
+        NEXT GROUP: {next_group}
         </div>
         """,
-
         unsafe_allow_html=True
-
     )
 
 else:
 
-    st.info("Scanning for signal...")
+    st.info("Scanning...")
 
-# ======================================
-# EQUITY CURVE
-# ======================================
-
-st.subheader("Equity Curve")
+# ---------------------------
+# EQUITY
+# ---------------------------
 
 st.line_chart(pd.DataFrame(profits))
 
-# ======================================
-# LIVE HISTORY
-# ======================================
+# ---------------------------
+# HISTORY
+# ---------------------------
 
-st.subheader("Live History")
-
-hist=pd.DataFrame(engine)
-
-st.dataframe(hist.iloc[::-1],use_container_width=True)
-
-# ======================================
-# WINDOW REPORT
-# ======================================
-
-st.subheader("Walk Forward Window Report")
-
-st.dataframe(pd.DataFrame(windows))
+st.dataframe(pd.DataFrame(engine).iloc[::-1])
