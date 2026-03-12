@@ -9,12 +9,11 @@ GAP=4
 
 WINDOWS=range(6,19)
 
-TRAIN_SIZE=400
+TRAIN_SIZE=800
+TRADE_SIZE=400
 
 WIN=2.5
 LOSS=1
-
-WR_THRESHOLD=0.29
 
 TREND_CONFIRM=10
 TREND_LOSS=4
@@ -22,7 +21,7 @@ TREND_PEAK=50
 
 st.set_page_config(layout="wide")
 
-# ---------------- GROUP ----------------
+# ---------- GROUP ----------
 
 def group(n):
 
@@ -32,7 +31,7 @@ def group(n):
     return 4
 
 
-# ---------------- LOAD ----------------
+# ---------- LOAD DATA ----------
 
 @st.cache_data(ttl=5)
 def load():
@@ -46,50 +45,53 @@ def load():
 numbers=load()
 
 
-# ---------------- WR ----------------
+# ---------- SIMULATE WINDOW ----------
 
-def calc_wr(nums,start,end,w):
+def simulate_window(nums,start,end,w):
 
-    rec=[]
+    profit=0
+    last_trade=-999
 
-    for j in range(start,end):
+    for i in range(start,end):
 
-        if j>=w:
+        if i>w and i-last_trade>=GAP:
 
-            rec.append(group(nums[j])==group(nums[j-w]))
+            pred=group(nums[i-w])
 
-    if len(rec)<20:
-        return 0
+            if group(nums[i-1])!=pred:
 
-    return np.mean(rec)
+                if group(nums[i])==pred:
+
+                    profit+=WIN
+                else:
+
+                    profit-=LOSS
+
+                last_trade=i
+
+    return profit
 
 
-# ---------------- WINDOW TRAIN ----------------
+# ---------- TRAIN WINDOW ----------
 
 def train_window(nums,start,end):
 
     best=None
-    best_score=0
+    best_profit=-999
 
     for w in WINDOWS:
 
-        wr=calc_wr(nums,start,end,w)
+        p=simulate_window(nums,start,end,w)
 
-        ev=wr*WIN-(1-wr)*LOSS
+        if p>best_profit:
 
-        if wr>WR_THRESHOLD and ev>0:
-
-            score=wr*ev
-
-            if score>best_score:
-
-                best_score=score
-                best=w
+            best_profit=p
+            best=w
 
     return best
 
 
-# ---------------- ENGINE ----------------
+# ---------- ENGINE ----------
 
 profit=0
 equity=[]
@@ -106,6 +108,8 @@ trend_active=False
 
 train_start=0
 train_end=TRAIN_SIZE
+trade_end=train_end+TRADE_SIZE
+
 
 for i in range(len(numbers)):
 
@@ -116,7 +120,8 @@ for i in range(len(numbers)):
     hit=None
     state="SCAN"
 
-    # ---------------- TRAIN ----------------
+
+    # ---------- TRAIN ----------
 
     if locked_window is None and i>=train_end:
 
@@ -124,9 +129,10 @@ for i in range(len(numbers)):
 
         train_start=i
         train_end=i+TRAIN_SIZE
+        trade_end=i+TRADE_SIZE
 
 
-    # ---------------- TRADE ----------------
+    # ---------- TRADE ----------
 
     if next_signal is not None and i-last_trade>=GAP:
 
@@ -149,28 +155,28 @@ for i in range(len(numbers)):
         state="TRADE"
 
 
-    # ---------------- SIGNAL ----------------
+    # ---------- SIGNAL ----------
 
     if locked_window and i-last_trade>=GAP:
 
         if i>locked_window:
 
-            g_pred=group(numbers[i-locked_window])
+            pred=group(numbers[i-locked_window])
 
-            if group(numbers[i-1])!=g_pred:
+            if group(numbers[i-1])!=pred:
 
-                next_signal=g_pred
+                next_signal=pred
                 state="SIGNAL"
 
 
-    # ---------------- TREND ----------------
+    # ---------- TREND ----------
 
     if profit>=TREND_CONFIRM:
 
         trend_active=True
 
 
-    # ---------------- RESET ----------------
+    # ---------- RESET ----------
 
     if trend_active and loss_streak>=TREND_LOSS:
 
@@ -202,7 +208,7 @@ for i in range(len(numbers)):
     })
 
 
-# ---------------- ANALYTICS ----------------
+# ---------- ANALYTICS ----------
 
 wins=hits.count(True)*WIN
 losses=hits.count(False)*LOSS
@@ -219,9 +225,9 @@ drawdown=(peak-equity_np).max()
 trades=len(hits)
 
 
-# ---------------- DASHBOARD ----------------
+# ---------- DASHBOARD ----------
 
-st.title("🚀 QUANT ENGINE V9 PRO")
+st.title("🚀 QUANT ENGINE V10")
 
 c1,c2,c3=st.columns(3)
 
