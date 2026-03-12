@@ -28,131 +28,71 @@ def load():
 numbers=load()
 groups=[group(n) for n in numbers]
 
-analysis=groups[-300:]
+analysis=groups[-500:]
 
-# ---------- entropy ----------
-def entropy(g):
+# ---------- pattern scanner ----------
+def scan_patterns(g):
 
-    c=Counter(g)
-    total=len(g)
+    best=None
+    best_edge=0
+    best_pred=None
+    best_sample=0
 
-    e=0
+    for L in [1,2,3,4]:
 
-    for v in c.values():
-
-        p=v/total
-        e-=p*math.log2(p)
-
-    return e
-
-# ---------- chi square ----------
-def chi_square(g):
-
-    c=Counter(g)
-    total=len(g)
-
-    expected=total/4
-
-    chi=0
-
-    for i in [1,2,3,4]:
-
-        obs=c.get(i,0)
-
-        chi+=(obs-expected)**2/expected
-
-    return chi
-
-# ---------- markov dependency ----------
-def markov_bias(g):
-
-    trans={}
-
-    for i in range(len(g)-1):
-
-        a=g[i]
-        b=g[i+1]
-
-        if a not in trans:
-
-            trans[a]=Counter()
-
-        trans[a][b]+=1
-
-    bias=0
-
-    for k,v in trans.items():
-
-        total=sum(v.values())
-
-        if total<20:
+        if len(g)<L+50:
             continue
 
-        probs=[x/total for x in v.values()]
+        key=tuple(g[-L:])
 
-        bias+=max(probs)-0.25
+        nexts=[]
 
-    return bias
+        for i in range(len(g)-L):
 
-# ---------- pattern bias ----------
-def pattern_bias(g):
+            if tuple(g[i:i+L])==key:
 
-    seq=Counter()
+                nexts.append(g[i+L])
 
-    for i in range(len(g)-3):
+        sample=len(nexts)
 
-        seq[tuple(g[i:i+3])] +=1
+        if sample<25:
+            continue
 
-    if not seq:
-        return 0
+        c=Counter(nexts)
 
-    top=max(seq.values())
+        pred=max(c,key=c.get)
 
-    avg=np.mean(list(seq.values()))
+        prob=c[pred]/sample
 
-    return (top-avg)/avg
+        bias=prob-0.25
 
-# ---------- edge score ----------
-def edge_score(g):
+        if bias<0.03:
+            continue
 
-    e=entropy(g)
-    chi=chi_square(g)
-    mb=markov_bias(g)
-    pb=pattern_bias(g)
+        edge=bias*math.log(sample)
 
-    entropy_bias=max(0,2-e)
+        if edge>best_edge:
 
-    chi_bias=chi/10
+            best_edge=edge
+            best=key
+            best_pred=pred
+            best_sample=sample
 
-    score=0.3*entropy_bias+0.3*chi_bias+0.2*mb+0.2*pb
-
-    return score,e,chi,mb,pb
-
-# ---------- next group ----------
-def next_group(g):
-
-    c=Counter(g[-50:])
-
-    best=max(c,key=c.get)
-
-    return best
+    return best,best_pred,best_edge,best_sample
 
 # ---------- backtest ----------
 profit=0
 history=[]
 
-for i in range(300,len(groups)-1):
+for i in range(500,len(groups)-1):
 
-    g=groups[i-300:i]
+    g=groups[i-500:i]
 
-    score,e,chi,mb,pb=edge_score(g)
+    pattern,pred,edge,sample=scan_patterns(g)
 
-    pred=None
     hit=False
 
-    if score>0.55:
-
-        pred=next_group(g)
+    if edge>0.18:
 
         if groups[i]==pred:
 
@@ -163,13 +103,18 @@ for i in range(300,len(groups)-1):
 
             profit-=1
 
+    else:
+
+        pred=None
+
     history.append({
         "round":i,
         "actual":groups[i],
         "pred":pred,
         "hit":hit,
         "profit":profit,
-        "edge":score
+        "edge":edge,
+        "pattern":pattern
     })
 
 hist=pd.DataFrame(history)
@@ -184,10 +129,10 @@ ev=wr*2.5-(1-wr)
 
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
-score,e,chi,mb,pb=edge_score(analysis)
+pattern,pred,edge,sample=scan_patterns(analysis)
 
 # ---------- UI ----------
-st.title("🧠 V34 RNG Detector Engine")
+st.title("🚀 V35 Bias Hunter Engine")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -200,23 +145,22 @@ c5,c6,c7=st.columns(3)
 
 c5.metric("Profit",round(profit,2))
 c6.metric("Drawdown",round(drawdown,2))
-c7.metric("Edge Score",round(score,3))
+c7.metric("Edge Score",round(edge,3))
 
-st.subheader("Randomness Tests")
+st.subheader("Best Pattern")
 
-r1,r2,r3,r4=st.columns(4)
+p1,p2,p3=st.columns(3)
 
-r1.metric("Entropy",round(e,3))
-r2.metric("Chi-square",round(chi,2))
-r3.metric("Markov Bias",round(mb,3))
-r4.metric("Pattern Bias",round(pb,3))
+p1.metric("Pattern",pattern)
+p2.metric("Sample Size",sample)
+p3.metric("Prediction",pred)
 
 # ---------- next ----------
 st.subheader("Next Group")
 
-if score>0.55:
+if edge>0.18:
 
-    st.success(f"BET → {next_group(analysis)}")
+    st.success(f"BET → {pred}")
 
 else:
 
