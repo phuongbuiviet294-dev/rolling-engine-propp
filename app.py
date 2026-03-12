@@ -9,7 +9,6 @@ DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_V
 st.set_page_config(layout="wide")
 
 # ---------- group ----------
-
 def group(n):
 
     if n<=3:return 1
@@ -19,7 +18,6 @@ def group(n):
 
 
 # ---------- load ----------
-
 @st.cache_data(ttl=5)
 def load():
 
@@ -32,9 +30,10 @@ numbers=load()
 
 groups=[group(n) for n in numbers]
 
+recent=groups[-120:]
+
 
 # ---------- entropy ----------
-
 def entropy(g):
 
     c=Counter(g)
@@ -49,11 +48,10 @@ def entropy(g):
 
     return e
 
-ent=entropy(groups)
+ent=entropy(recent)
 
 
 # ---------- markov ----------
-
 def markov(g):
 
     trans={}
@@ -77,68 +75,62 @@ def markov(g):
 
     return probs
 
-markov_matrix=markov(groups)
+mk=markov(recent)
 
 
-# ---------- edge detection ----------
-
+# ---------- edge detect ----------
 def detect_edge(g):
 
     score={1:0,2:0,3:0,4:0}
-    edge=""
+    edge=[]
 
     # streak
     if len(g)>=3 and g[-1]==g[-2]==g[-3]:
 
         for i in [1,2,3,4]:
             if i!=g[-1]:
-                score[i]+=0.6
+                score[i]+=0.4
 
-        edge="streak"
+        edge.append("streak")
 
     # imbalance
-    if len(g)>=25:
+    window=g[-30:]
+    c=Counter(window)
 
-        window=g[-25:]
-        c=Counter(window)
+    for i in [1,2,3,4]:
 
-        for i in [1,2,3,4]:
+        if c.get(i,0)<4:
 
-            diff=max(0,6-c.get(i,0))
-
-            score[i]+=diff*0.08
-
-            if diff>0:
-                edge="imbalance"
+            score[i]+=0.3
+            edge.append("imbalance")
 
     # markov
     last=g[-1]
 
-    if last in markov_matrix:
+    if last in mk:
 
-        for i,p in markov_matrix[last].items():
+        for i,p in mk[last].items():
 
-            if p>0.33:
+            if p>0.34:
 
-                score[i]+=0.4
-                edge="markov"
+                score[i]+=0.3
+                edge.append("markov")
 
     best=max(score,key=score.get)
     strength=score[best]
 
     if strength>0.55:
 
-        return best,strength,edge
+        return best,strength,",".join(edge)
 
     return None,0,""
 
 
 # ---------- backtest ----------
-
 profit=0
 history=[]
 
-for i in range(80,len(groups)-1):
+for i in range(150,len(groups)-1):
 
     g=groups[:i]
 
@@ -170,21 +162,18 @@ hist=pd.DataFrame(history)
 
 
 # ---------- metrics ----------
-
 trades=len(hist[hist.pred.notna()])
 wins=len(hist[hist.hit==True])
 
 wr=wins/trades if trades else 0
 
-ev=wr*2.5-(1-wr)*1
+ev=wr*2.5-(1-wr)
 
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
 
 # ---------- UI ----------
-
-st.title("🚀 V23 REAL EDGE ENGINE")
-
+st.title("🚀 V24 PRO LIVE ENGINE")
 
 col1,col2,col3,col4=st.columns(4)
 
@@ -201,13 +190,12 @@ col6.metric("Drawdown",round(drawdown,2))
 col7.metric("Entropy",round(ent,3))
 
 
-# ---------- next group ----------
-
+# ---------- next ----------
 st.subheader("Next Group")
 
-pred,strength,edge=detect_edge(groups)
+pred,strength,edge=detect_edge(recent)
 
-if pred:
+if pred and ent<1.97:
 
     st.success(f"BET → {pred} | strength {round(strength,2)} | edge {edge}")
 
@@ -217,14 +205,12 @@ else:
 
 
 # ---------- equity ----------
-
 st.subheader("Equity Curve")
 
 st.line_chart(hist.profit)
 
 
 # ---------- history ----------
-
 st.subheader("Trade History")
 
 st.dataframe(hist.tail(100))
