@@ -4,17 +4,18 @@ import numpy as np
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE=800
-TRADE_SIZE=400
-
-WINDOWS=[9,10,11]
-LOOKBACKS=range(22,29)
+WINDOWS=[9,10,11,12]
+LOOKBACK=26
 GAP=4
 
 WIN=2.5
 LOSS=1
 
-CONF_THRESHOLD=0.31
+REGIME_WR=0.27
+SIGNAL_WR=0.30
+
+PAUSE_DD=25
+PAUSE_ROUNDS=100
 
 st.set_page_config(layout="wide")
 
@@ -37,77 +38,25 @@ def load():
 
 numbers=load()
 
-# ---------------- SIMULATION ----------------
+# ================= EDGE =================
 
-def simulate(nums,LB,W):
+def calc_wr(nums,W):
 
-    profit=0
-    next_signal=None
-    last_trade=-999
+    rec=[]
 
-    for i,n in enumerate(nums):
+    for i in range(W,len(nums)):
 
-        g=group(n)
+        rec.append(
+            1 if group(nums[i])==group(nums[i-W]) else 0
+        )
 
-        if next_signal is not None:
+    if len(rec)<30:
+        return 0
 
-            hit=1 if next_signal==g else 0
-
-            profit+=WIN if hit else -LOSS
-
-            next_signal=None
-            last_trade=i
-
-        if i-last_trade>GAP and i>LB:
-
-            rec=[]
-
-            for j in range(max(W,i-LB),i):
-
-                if j>=W:
-
-                    rec.append(
-                        1 if group(nums[j])==group(nums[j-W]) else 0
-                    )
-
-            if len(rec)>20:
-
-                wr=np.mean(rec)
-
-                ev=wr*WIN-(1-wr)*LOSS
-
-                if ev>0 and wr>CONF_THRESHOLD:
-
-                    g1=group(nums[i-W])
-
-                    if group(nums[i-1])!=g1:
-
-                        next_signal=g1
-
-    return profit
+    return np.mean(rec[-LOOKBACK:])
 
 
-# ---------------- FIND CONFIG ----------------
-
-def find_best(train):
-
-    best_profit=-999
-    best=(26,9)
-
-    for LB in LOOKBACKS:
-        for W in WINDOWS:
-
-            p=simulate(train,LB,W)
-
-            if p>best_profit:
-
-                best_profit=p
-                best=(LB,W)
-
-    return best
-
-
-# ---------------- WALK FORWARD ----------------
+# ================= ENGINE =================
 
 profit=0
 equity=[]
@@ -117,96 +66,85 @@ hits=[]
 next_signal=None
 last_trade=-999
 
-for start in range(TRAIN_SIZE,len(numbers),TRADE_SIZE):
+pause_until=-1
 
-    train=numbers[:start]
+for i,n in enumerate(numbers):
 
-    LB,W=find_best(train)
+    g=group(n)
 
-    end=min(start+TRADE_SIZE,len(numbers))
+    predicted=None
+    hit=None
+    state="SCAN"
 
-    segment=numbers[start:end]
+    # ===== EXECUTE =====
 
-    for j,n in enumerate(segment):
+    if next_signal is not None:
 
-        idx=start+j
+        predicted=next_signal
 
-        g=group(n)
+        hit=1 if predicted==g else 0
 
-        predicted=None
-        hit=None
-        state="SCAN"
+        profit+=WIN if hit else -LOSS
 
-        # ---------- EXECUTE ----------
+        hits.append(hit)
 
-        if next_signal is not None:
+        last_trade=i
+        next_signal=None
 
-            predicted=next_signal
+        state="TRADE"
 
-            hit=1 if predicted==g else 0
+    # ===== DRAW DOWN =====
 
-            profit+=WIN if hit else -LOSS
+    if equity:
 
-            hits.append(hit)
+        peak=max(equity)
 
-            next_signal=None
-            last_trade=idx
+        if peak-profit>PAUSE_DD:
 
-            state="TRADE"
+            pause_until=i+PAUSE_ROUNDS
 
-        # ---------- SIGNAL ----------
+    # ===== SIGNAL =====
 
-        if idx-last_trade>GAP and idx>LB:
+    if i>LOOKBACK and i-last_trade>GAP and i>pause_until:
 
-            votes=[]
+        votes=[]
 
-            for W in WINDOWS:
+        for W in WINDOWS:
 
-                rec=[]
+            wr=calc_wr(numbers[:i],W)
 
-                for k in range(max(W,idx-LB),idx):
+            if wr>SIGNAL_WR:
 
-                    if k>=W:
+                g1=group(numbers[i-W])
 
-                        rec.append(
-                            1 if group(numbers[k])==group(numbers[k-W]) else 0
-                        )
+                if group(numbers[i-1])!=g1:
 
-                if len(rec)>20:
+                    votes.append(g1)
 
-                    wr=np.mean(rec)
+        score=len(votes)/len(WINDOWS)
 
-                    ev=wr*WIN-(1-wr)*LOSS
+        if score>=0.5:
 
-                    if ev>0 and wr>CONF_THRESHOLD:
+            next_signal=max(set(votes), key=votes.count)
 
-                        g1=group(numbers[idx-W])
+            state="SIGNAL"
 
-                        if group(numbers[idx-1])!=g1:
+    equity.append(profit)
 
-                            votes.append(g1)
+    history.append({
 
-            if len(votes)>=2:
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "state":state,
+        "profit":profit
 
-                next_signal=max(set(votes), key=votes.count)
-                state="SIGNAL"
-
-        equity.append(profit)
-
-        history.append({
-
-            "round":idx+1,
-            "number":n,
-            "group":g,
-            "predicted":predicted,
-            "hit":hit,
-            "state":state,
-            "profit":profit
-
-        })
+    })
 
 
-# ---------------- METRICS ----------------
+# ================= METRICS =================
 
 wr=np.mean(hits) if hits else 0
 
@@ -215,12 +153,12 @@ loss=hits.count(0)*LOSS
 
 pf=wins/loss if loss else 0
 
-peak=max(equity)
-dd=peak-equity[-1]
+peak=max(equity) if equity else 0
+dd=peak-equity[-1] if equity else 0
 
-# ---------------- DASHBOARD ----------------
+# ================= DASHBOARD =================
 
-st.title("🚀 QUANT ENGINE V2")
+st.title("🚀 QUANT ENGINE V4")
 
 c1,c2,c3=st.columns(3)
 
@@ -228,7 +166,10 @@ c1.metric("Profit",round(profit,2))
 c2.metric("Winrate %",round(wr*100,2))
 c3.metric("Profit Factor",round(pf,2))
 
-st.metric("Drawdown",round(dd,2))
+c4,c5=st.columns(2)
+
+c4.metric("Drawdown",round(dd,2))
+c5.metric("Trades",len(hits))
 
 st.subheader("Equity Curve")
 
