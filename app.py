@@ -1,189 +1,164 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+# =========================
+# CONFIG
+# =========================
 
-WIN=2.5
-LOSS=1
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-LOOKBACK=26
-GAP=4
-WINDOW=9
+WINDOW = 9
+LOOKBACK = 26
+GAP = 4
 
-st.set_page_config(layout="wide")
-st.title("🚀 LIVE TRADING ENGINE")
+WIN = 2.5
+LOSS = 1
 
-# -------------------------
+
+# =========================
 # GROUP
-# -------------------------
+# =========================
 
 def group(n):
 
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
+    if n <= 3:
+        return 1
+    if n <= 6:
+        return 2
+    if n <= 9:
+        return 3
     return 4
 
-# -------------------------
+
+# =========================
 # LOAD DATA
-# -------------------------
+# =========================
 
-@st.cache_data(ttl=10)
-def load():
+df = pd.read_csv(DATA_URL)
 
-    df=pd.read_csv(DATA_URL)
+numbers = df["number"].dropna().astype(int).tolist()
 
-    df.columns=[c.strip().lower() for c in df.columns]
+print("Total rounds:", len(numbers))
 
-    return df["number"].dropna().astype(int).tolist()
 
-numbers=load()
-
-# -------------------------
+# =========================
 # ENGINE
-# -------------------------
+# =========================
 
-profit=0
-engine=[]
-next_signal=None
-last_trade=-999
+profit = 0
+profits = []
 
-for i,n in enumerate(numbers):
+engine = []
 
-    g=group(n)
+next_signal = None
+last_trade_round = -999
 
-    predicted=None
-    hit=None
-    state="SCAN"
+for i, n in enumerate(numbers):
 
-    # execute trade
+    g = group(n)
+
+    predicted = None
+    hit = None
+    state = "SCAN"
+
+    # ===== EXECUTE TRADE =====
+
     if next_signal is not None:
 
-        predicted=next_signal
+        predicted = next_signal
 
-        hit=1 if predicted==g else 0
+        hit = 1 if predicted == g else 0
 
-        profit += WIN if hit else -LOSS
+        if hit == 1:
+            profit += WIN
+        else:
+            profit -= LOSS
 
-        state="TRADE"
+        state = "TRADE"
 
-        last_trade=i
-        next_signal=None
+        last_trade_round = i
 
-    # signal scan
-    if i-last_trade>GAP and i>LOOKBACK:
+        next_signal = None
 
-        seq=[]
+    # ===== SIGNAL GENERATION =====
 
-        start=max(WINDOW,i-LOOKBACK)
+    if i - last_trade_round > GAP and i > LOOKBACK:
 
-        for j in range(start,i):
+        recent = []
 
-            if j>=WINDOW:
+        start = max(WINDOW, i - LOOKBACK)
 
-                seq.append(
-                    1 if group(numbers[j])==group(numbers[j-WINDOW]) else 0
+        for j in range(start, i):
+
+            if j >= WINDOW:
+
+                recent.append(
+                    1 if group(numbers[j]) == group(numbers[j - WINDOW]) else 0
                 )
 
-        if len(seq)>10:
+        if len(recent) > 10:
 
-            wr=np.mean(seq)
+            wr = np.mean(recent)
 
-            ev=wr*WIN-(1-wr)*LOSS
+            ev = wr * WIN - (1 - wr) * LOSS
 
-            if ev>0:
+            if ev > 0:
 
-                g1=group(numbers[i-WINDOW])
+                g1 = group(numbers[i - WINDOW])
 
-                if group(numbers[i-1])!=g1:
+                if group(numbers[i - 1]) != g1:
 
-                    next_signal=g1
-                    state="SIGNAL"
+                    next_signal = g1
+                    state = "SIGNAL"
+
+    profits.append(profit)
 
     engine.append({
-
-        "round":i+1,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "state":state,
-        "profit":profit
-
+        "round": i+1,
+        "number": n,
+        "group": g,
+        "predicted": predicted,
+        "hit": hit,
+        "state": state,
+        "profit": profit
     })
 
-# -------------------------
-# METRICS
-# -------------------------
 
-hits=[x["hit"] for x in engine if x["hit"]!=None]
+# =========================
+# STATS
+# =========================
 
-wr=np.mean(hits) if hits else 0
+peak = max(profits)
+final = profits[-1]
 
-wins=hits.count(1)*WIN
-losses=hits.count(0)*LOSS
+print("Peak profit:", peak)
+print("Final profit:", final)
 
-pf=wins/losses if losses else 0
+hits = [x["hit"] for x in engine if x["hit"] is not None]
 
-profits=[x["profit"] for x in engine]
+wr = np.mean(hits) if hits else 0
 
-peak=max(profits) if profits else 0
+print("Trades:", len(hits))
+print("Winrate:", wr)
 
-dd=peak-profits[-1] if profits else 0
 
-# -------------------------
-# DASHBOARD
-# -------------------------
+# =========================
+# EQUITY CURVE
+# =========================
 
-c1,c2,c3=st.columns(3)
+plt.figure(figsize=(12,6))
 
-c1.metric("Profit",round(profit,2))
-c2.metric("Winrate %",round(wr*100,2))
-c3.metric("Profit Factor",round(pf,2))
+plt.plot(profits, label="Equity Curve")
 
-c4,c5=st.columns(2)
+plt.axhline(0, linestyle="--")
 
-c4.metric("Drawdown",round(dd,2))
-c5.metric("Trades",len(hits))
+plt.scatter(profits.index(peak), peak, color="red", label="Peak")
 
-# -------------------------
-# SIGNAL
-# -------------------------
+plt.title("Equity Curve (4000 rounds)")
+plt.xlabel("Round")
+plt.ylabel("Profit")
 
-if next_signal:
+plt.legend()
 
-    st.markdown(
-
-        f"""
-        <div style='padding:25px;background:#c62828;color:white;
-        border-radius:12px;text-align:center;font-size:30px;font-weight:bold'>
-        NEXT GROUP: {next_signal}
-        </div>
-        """,
-
-        unsafe_allow_html=True
-
-    )
-
-else:
-
-    st.info("Scanning...")
-
-# -------------------------
-# EQUITY
-# -------------------------
-
-st.subheader("Equity Curve")
-
-st.line_chart(pd.DataFrame(profits))
-
-# -------------------------
-# HISTORY
-# -------------------------
-
-st.subheader("History")
-
-hist=pd.DataFrame(engine)
-
-st.dataframe(hist.iloc[::-1],use_container_width=True)
+plt.show()
