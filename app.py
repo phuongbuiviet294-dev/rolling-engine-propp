@@ -15,6 +15,9 @@ GAPS=[4,5]
 WIN=2.5
 LOSS=1
 
+CONF_THRESHOLD=0.33
+ENTROPY_THRESHOLD=1.32
+
 st.set_page_config(layout="wide")
 
 # ================= GROUP =================
@@ -25,6 +28,7 @@ def group(n):
     if n<=6:return 2
     if n<=9:return 3
     return 4
+
 
 # ================= LOAD =================
 
@@ -37,7 +41,18 @@ def load():
 
     return df["number"].dropna().astype(int).tolist()
 
+
 numbers=load()
+
+# ================= ENTROPY =================
+
+def entropy(groups):
+
+    counts=np.bincount(groups)[1:]
+    p=counts/np.sum(counts)
+
+    return -np.sum(p*np.log2(p+1e-9))
+
 
 # ================= SIM ENGINE =================
 
@@ -78,7 +93,7 @@ def simulate(nums,LB,GAP,W):
 
                 ev=wr*WIN-(1-wr)*LOSS
 
-                if ev>0:
+                if ev>0 and wr>CONF_THRESHOLD:
 
                     g1=group(nums[i-W])
 
@@ -144,6 +159,31 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
         hit=None
         state="SCAN"
 
+        # REGIME CHECK
+        recent_groups=[group(x) for x in numbers[max(0,idx-50):idx]]
+
+        if len(recent_groups)>10:
+
+            ent=entropy(recent_groups)
+
+            if ent>ENTROPY_THRESHOLD:
+
+                state="RANDOM"
+                equity.append(profit)
+
+                history.append({
+                    "round":idx+1,
+                    "number":n,
+                    "group":g,
+                    "predicted":None,
+                    "hit":None,
+                    "state":state,
+                    "profit":profit
+                })
+
+                continue
+
+
         if next_signal is not None:
 
             predicted=next_signal
@@ -158,6 +198,7 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
             last_trade=idx
 
             state="TRADE"
+
 
         if idx-last_trade>GP and idx>LB:
 
@@ -177,7 +218,7 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
                 ev=wr*WIN-(1-wr)*LOSS
 
-                if ev>0:
+                if ev>0 and wr>CONF_THRESHOLD:
 
                     g1=group(numbers[idx-W])
 
@@ -185,6 +226,7 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
                         next_signal=g1
                         state="SIGNAL"
+
 
         equity.append(profit)
 
@@ -213,9 +255,10 @@ pf=wins/loss if loss else 0
 peak=max(equity) if equity else 0
 dd=peak-equity[-1] if equity else 0
 
+
 # ================= DASHBOARD =================
 
-st.title("🚀 WALK FORWARD LIVE ENGINE")
+st.title("🚀 QUANT WALK FORWARD ENGINE")
 
 c1,c2,c3=st.columns(3)
 
@@ -232,6 +275,9 @@ st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
+
+# ================= NEXT SIGNAL =================
+
 st.subheader("Next Group")
 
 if next_signal:
@@ -246,6 +292,9 @@ if next_signal:
 else:
 
     st.info("Scanning...")
+
+
+# ================= HISTORY =================
 
 st.subheader("History")
 
