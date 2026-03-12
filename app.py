@@ -28,7 +28,7 @@ def load():
 numbers=load()
 groups=[group(n) for n in numbers]
 
-analysis=groups[-500:]
+analysis=groups[-1000:]
 
 # ---------- entropy ----------
 def entropy(g):
@@ -45,11 +45,10 @@ def entropy(g):
 
     return e
 
-# ---------- chi square ----------
+# ---------- chi-square ----------
 def chi_square(g):
 
     c=Counter(g)
-
     total=len(g)
 
     expected=total/4
@@ -64,182 +63,139 @@ def chi_square(g):
 
     return chi
 
-# ---------- RNG detector ----------
-def rng_bias(g):
+# ---------- distribution bias ----------
+def distribution_bias(g):
 
-    e=entropy(g)
-    chi=chi_square(g)
+    c=Counter(g)
 
-    if e<1.97 and chi>6:
+    total=len(g)
 
-        return True
+    max_bias=0
 
-    return False
+    for i in [1,2,3,4]:
 
-# ---------- pattern detector ----------
-def pattern_bias(g):
+        p=c.get(i,0)/total
 
-    best=None
-    best_prob=0
+        bias=abs(p-0.25)
 
-    for L in [1,2,3]:
+        max_bias=max(max_bias,bias)
 
-        key=tuple(g[-L:])
+    return max_bias*4
 
-        nexts=[]
-
-        for i in range(len(g)-L):
-
-            if tuple(g[i:i+L])==key:
-
-                nexts.append(g[i+L])
-
-        if len(nexts)<30:
-            continue
-
-        c=Counter(nexts)
-
-        pred=max(c,key=c.get)
-
-        prob=c[pred]/len(nexts)
-
-        if prob>best_prob and prob>0.28:
-
-            best_prob=prob
-            best=pred
-
-    return best
-
-# ---------- transition detector ----------
+# ---------- transition bias ----------
 def transition_bias(g):
 
-    cur=g[-1]
-
-    trans=Counter()
+    trans={}
 
     for i in range(len(g)-1):
 
-        if g[i]==cur:
+        a=g[i]
+        b=g[i+1]
 
-            trans[g[i+1]]+=1
+        if a not in trans:
 
-    total=sum(trans.values())
+            trans[a]=Counter()
 
-    if total<50:
-        return None
+        trans[a][b]+=1
 
-    pred=max(trans,key=trans.get)
+    max_bias=0
 
-    prob=trans[pred]/total
+    for cur in trans:
 
-    se=math.sqrt(0.25*0.75/total)
+        total=sum(trans[cur].values())
 
-    z=(prob-0.25)/se
+        if total<50:
+            continue
 
-    if abs(z)>2:
+        for nxt in [1,2,3,4]:
 
-        return pred
+            p=trans[cur].get(nxt,0)/total
 
-    return None
+            bias=abs(p-0.25)
 
-# ---------- ensemble ----------
-def ensemble(g):
+            max_bias=max(max_bias,bias)
 
-    signals=[]
+    return max_bias*4
 
-    p=pattern_bias(g)
-    t=transition_bias(g)
+# ---------- pattern bias ----------
+def pattern_bias(g):
 
-    if p:
-        signals.append(p)
+    seq=Counter()
 
-    if t:
-        signals.append(t)
+    for i in range(len(g)-2):
 
-    if len(signals)>=2:
+        seq[(g[i],g[i+1],g[i+2])]+=1
 
-        return Counter(signals).most_common(1)[0][0]
+    if not seq:
+        return 0
 
-    return None
+    top=max(seq.values())
 
-# ---------- backtest ----------
-profit=0
-history=[]
+    avg=np.mean(list(seq.values()))
 
-for i in range(500,len(groups)-1):
+    return (top-avg)/avg
 
-    g=groups[i-500:i]
+# ---------- runs bias ----------
+def runs_bias(g):
 
-    pred=ensemble(g)
+    max_run=1
+    run=1
 
-    hit=False
+    for i in range(1,len(g)):
 
-    if pred:
+        if g[i]==g[i-1]:
 
-        if groups[i]==pred:
+            run+=1
 
-            profit+=2.5
-            hit=True
+            max_run=max(max_run,run)
 
         else:
 
-            profit-=1
+            run=1
 
-    history.append({
-        "round":i,
-        "actual":groups[i],
-        "pred":pred,
-        "hit":hit,
-        "profit":profit
-    })
+    expected=math.log(len(g),4)
 
-hist=pd.DataFrame(history)
+    return max(0,(max_run-expected)/expected)
 
-# ---------- metrics ----------
-trades=len(hist[hist.pred.notna()])
-wins=len(hist[hist.hit==True])
+# ---------- edge score ----------
+dist=distribution_bias(analysis)
+trans=transition_bias(analysis)
+pattern=pattern_bias(analysis)
+runs=runs_bias(analysis)
 
-wr=wins/trades if trades else 0
-
-ev=wr*2.5-(1-wr)
-
-drawdown=(hist.profit.cummax()-hist.profit).max()
+edge=(dist+trans+pattern+runs)/4
 
 # ---------- UI ----------
-st.title("⚡ V37 Ensemble Edge Engine")
+st.title("🔎 V38 Casino Bias Scanner")
 
 c1,c2,c3,c4=st.columns(4)
 
-c1.metric("Rounds",len(groups))
-c2.metric("Trades",trades)
-c3.metric("Winrate %",round(wr*100,2))
-c4.metric("EV",round(ev,3))
+c1.metric("Entropy",round(entropy(analysis),3))
+c2.metric("Chi-square",round(chi_square(analysis),2))
+c3.metric("Distribution Bias",round(dist,3))
+c4.metric("Transition Bias",round(trans,3))
 
 c5,c6,c7=st.columns(3)
 
-c5.metric("Profit",round(profit,2))
-c6.metric("Drawdown",round(drawdown,2))
-c7.metric("Entropy",round(entropy(analysis),3))
+c5.metric("Pattern Bias",round(pattern,3))
+c6.metric("Runs Bias",round(runs,3))
+c7.metric("Edge Score",round(edge,3))
 
-# ---------- next ----------
-st.subheader("Next Group")
+# ---------- classification ----------
+st.subheader("Bias Classification")
 
-pred=ensemble(analysis)
+if edge>0.7:
 
-if pred:
+    st.error("🔥 Strong Bias Detected")
 
-    st.success(f"BET → {pred}")
+elif edge>0.5:
+
+    st.warning("⚠️ Tradable Bias")
+
+elif edge>0.3:
+
+    st.info("Weak Bias")
 
 else:
 
-    st.info("SKIP")
-
-# ---------- equity ----------
-st.subheader("Equity Curve")
-
-st.line_chart(hist.profit)
-
-# ---------- history ----------
-st.subheader("Trade History")
-
-st.dataframe(hist.tail(100))
+    st.success("Dataset appears Random")
