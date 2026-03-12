@@ -1,10 +1,10 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 
-# =========================
+# =============================
 # CONFIG
-# =========================
+# =============================
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -15,10 +15,13 @@ GAP = 4
 WIN = 2.5
 LOSS = 1
 
+st.set_page_config(layout="wide")
 
-# =========================
+st.title("🚀 FULL BACKTEST ENGINE")
+
+# =============================
 # GROUP
-# =========================
+# =============================
 
 def group(n):
 
@@ -30,21 +33,28 @@ def group(n):
         return 3
     return 4
 
-
-# =========================
+# =============================
 # LOAD DATA
-# =========================
+# =============================
 
-df = pd.read_csv(DATA_URL)
+@st.cache_data
+def load_data():
 
-numbers = df["number"].dropna().astype(int).tolist()
+    df = pd.read_csv(DATA_URL)
 
-print("Total rounds:", len(numbers))
+    df.columns = [c.strip().lower() for c in df.columns]
 
+    numbers = df["number"].dropna().astype(int).tolist()
 
-# =========================
+    return numbers
+
+numbers = load_data()
+
+st.write("Total rounds:", len(numbers))
+
+# =============================
 # ENGINE
-# =========================
+# =============================
 
 profit = 0
 profits = []
@@ -115,50 +125,94 @@ for i, n in enumerate(numbers):
     profits.append(profit)
 
     engine.append({
-        "round": i+1,
+
+        "round": i + 1,
         "number": n,
         "group": g,
         "predicted": predicted,
         "hit": hit,
         "state": state,
         "profit": profit
+
     })
 
-
-# =========================
-# STATS
-# =========================
-
-peak = max(profits)
-final = profits[-1]
-
-print("Peak profit:", peak)
-print("Final profit:", final)
+# =============================
+# METRICS
+# =============================
 
 hits = [x["hit"] for x in engine if x["hit"] is not None]
 
 wr = np.mean(hits) if hits else 0
 
-print("Trades:", len(hits))
-print("Winrate:", wr)
+wins = hits.count(1) * WIN
+losses = hits.count(0) * LOSS
 
+pf = wins / losses if losses else 0
 
-# =========================
+peak = max(profits)
+final_profit = profits[-1]
+
+drawdown = peak - final_profit
+
+# =============================
+# DASHBOARD
+# =============================
+
+c1, c2, c3 = st.columns(3)
+
+c1.metric("Profit", round(final_profit,2))
+c2.metric("Winrate %", round(wr * 100,2))
+c3.metric("Profit Factor", round(pf,2))
+
+c4, c5 = st.columns(2)
+
+c4.metric("Drawdown", round(drawdown,2))
+c5.metric("Trades", len(hits))
+
+# =============================
 # EQUITY CURVE
-# =========================
+# =============================
 
-plt.figure(figsize=(12,6))
+st.subheader("Equity Curve")
 
-plt.plot(profits, label="Equity Curve")
+equity = pd.DataFrame({"profit": profits})
 
-plt.axhline(0, linestyle="--")
+st.line_chart(equity)
 
-plt.scatter(profits.index(peak), peak, color="red", label="Peak")
+# =============================
+# SEGMENT TEST (EDGE STABILITY)
+# =============================
 
-plt.title("Equity Curve (4000 rounds)")
-plt.xlabel("Round")
-plt.ylabel("Profit")
+st.subheader("Segment Analysis")
 
-plt.legend()
+segments = 4
 
-plt.show()
+size = len(numbers) // segments
+
+segment_results = []
+
+for s in range(segments):
+
+    start = s * size
+    end = (s + 1) * size
+
+    seg = profits[start:end]
+
+    segment_results.append({
+
+        "segment": f"{start}-{end}",
+        "profit": seg[-1] - seg[0]
+
+    })
+
+st.dataframe(pd.DataFrame(segment_results))
+
+# =============================
+# HISTORY
+# =============================
+
+st.subheader("Trade History")
+
+hist = pd.DataFrame(engine)
+
+st.dataframe(hist.iloc[::-1], use_container_width=True)
