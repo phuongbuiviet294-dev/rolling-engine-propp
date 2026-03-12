@@ -28,71 +28,73 @@ def load():
 numbers=load()
 groups=[group(n) for n in numbers]
 
-analysis=groups[-500:]
+analysis=groups[-600:]
 
-# ---------- pattern scanner ----------
-def scan_patterns(g):
+# ---------- transition bias ----------
+def transition_bias(g):
+
+    trans={}
+
+    for i in range(len(g)-1):
+
+        a=g[i]
+        b=g[i+1]
+
+        if a not in trans:
+            trans[a]=Counter()
+
+        trans[a][b]+=1
 
     best=None
-    best_edge=0
     best_pred=None
+    best_edge=0
+    best_z=0
     best_sample=0
 
-    for L in [1,2,3,4]:
+    for cur in trans:
 
-        if len(g)<L+50:
+        total=sum(trans[cur].values())
+
+        if total<50:
             continue
 
-        key=tuple(g[-L:])
+        for nxt in [1,2,3,4]:
 
-        nexts=[]
+            obs=trans[cur].get(nxt,0)
 
-        for i in range(len(g)-L):
+            p=obs/total
 
-            if tuple(g[i:i+L])==key:
+            bias=p-0.25
 
-                nexts.append(g[i+L])
+            se=math.sqrt(0.25*0.75/total)
 
-        sample=len(nexts)
+            z=bias/se
 
-        if sample<25:
-            continue
+            edge=abs(bias)*math.log(total)
 
-        c=Counter(nexts)
+            if abs(z)>2 and edge>best_edge:
 
-        pred=max(c,key=c.get)
+                best_edge=edge
+                best=(cur,nxt)
+                best_pred=nxt
+                best_z=z
+                best_sample=total
 
-        prob=c[pred]/sample
-
-        bias=prob-0.25
-
-        if bias<0.03:
-            continue
-
-        edge=bias*math.log(sample)
-
-        if edge>best_edge:
-
-            best_edge=edge
-            best=key
-            best_pred=pred
-            best_sample=sample
-
-    return best,best_pred,best_edge,best_sample
+    return best,best_pred,best_edge,best_z,best_sample
 
 # ---------- backtest ----------
 profit=0
 history=[]
 
-for i in range(500,len(groups)-1):
+for i in range(600,len(groups)-1):
 
-    g=groups[i-500:i]
+    g=groups[i-600:i]
 
-    pattern,pred,edge,sample=scan_patterns(g)
+    pattern,pred,edge,z,sample=transition_bias(g)
 
     hit=False
 
-    if edge>0.18:
+    if edge>0.08:
 
         if groups[i]==pred:
 
@@ -114,7 +116,7 @@ for i in range(500,len(groups)-1):
         "hit":hit,
         "profit":profit,
         "edge":edge,
-        "pattern":pattern
+        "z":z
     })
 
 hist=pd.DataFrame(history)
@@ -129,10 +131,10 @@ ev=wr*2.5-(1-wr)
 
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
-pattern,pred,edge,sample=scan_patterns(analysis)
+pattern,pred,edge,z,sample=transition_bias(analysis)
 
 # ---------- UI ----------
-st.title("🚀 V35 Bias Hunter Engine")
+st.title("🔬 V36 Bias Microscope Engine")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -147,18 +149,19 @@ c5.metric("Profit",round(profit,2))
 c6.metric("Drawdown",round(drawdown,2))
 c7.metric("Edge Score",round(edge,3))
 
-st.subheader("Best Pattern")
+st.subheader("Detected Bias")
 
-p1,p2,p3=st.columns(3)
+p1,p2,p3,p4=st.columns(4)
 
-p1.metric("Pattern",pattern)
+p1.metric("Transition",pattern)
 p2.metric("Sample Size",sample)
-p3.metric("Prediction",pred)
+p3.metric("Z-score",round(z,2))
+p4.metric("Prediction",pred)
 
 # ---------- next ----------
 st.subheader("Next Group")
 
-if edge>0.18:
+if edge>0.08:
 
     st.success(f"BET → {pred}")
 
