@@ -1,177 +1,143 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import requests, io
+import requests
+import io
 from collections import Counter
+import random
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOW=9
-LOOKBACK=26
-GAP=4
-
-WIN=3
-LOSS=1
-
 st.set_page_config(layout="wide")
 
-# ---------- group ----------
+# ---------- group mapping ----------
 def group(n):
-
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
     return 4
 
-# ---------- load ----------
-@st.cache_data(ttl=5)
+# ---------- load data ----------
+@st.cache_data(ttl=3)
 def load():
-
     r=requests.get(DATA_URL)
-
     df=pd.read_csv(io.StringIO(r.text))
-
     df.columns=[c.lower() for c in df.columns]
-
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
-
 groups=[group(n) for n in numbers]
 
-# ---------- simulate ----------
-profit=0
-history=[]
-equity=[]
+# ---------- signals ----------
+def streak_signal(g):
+    if len(g)<3:return None,0
+    if g[-1]==g[-2]==g[-3]:
+        return [x for x in [1,2,3,4] if x!=g[-1]],3
+    return None,0
 
-last_trade=-999
-next_signal=None
+def imbalance_signal(g):
+    if len(g)<40:return None,0
+    w=g[-40:]
+    c=Counter(w)
+    for i in range(1,5): c.setdefault(i,0)
+    exp=10
+    diff={i:exp-c[i] for i in c}
+    best=max(diff,key=diff.get)
+    if diff[best]>=4:
+        return [best],4
+    return None,0
 
-for i in range(len(groups)):
+def cluster_signal(g):
+    if len(g)<6:return None,0
+    s=g[-6:]
+    if s[0]==s[2]==s[4] and s[1]==s[3]==s[5]:
+        return [s[-1],s[-2]],3
+    return None,0
 
-    g=groups[i]
+def detect_edge(g):
+    preds=[]
+    score=0
+    for fn in [streak_signal,imbalance_signal,cluster_signal]:
+        p,s=fn(g)
+        if p:
+            preds+=p
+            score+=s
+    if score>=6:
+        return list(set(preds)),score
+    return None,score
 
-    predicted=None
-    hit=None
+# ---------- session state ----------
+if "last_round" not in st.session_state:
+    st.session_state.last_round=len(groups)
+    st.session_state.profit=0
+    st.session_state.trades=0
+    st.session_state.wins=0
+    st.session_state.history=[]
 
-    if next_signal is not None:
+# ---------- detect new round ----------
+current_round=len(groups)
 
-        predicted=next_signal
+if current_round>st.session_state.last_round:
 
-        hit=1 if predicted==g else 0
+    new_group=groups[-1]
 
-        if hit:
-            profit+=WIN
+    pred,score=detect_edge(groups[:-1])
+
+    hit=False
+
+    if pred:
+        choice=random.choice(pred)
+        st.session_state.trades+=1
+
+        if new_group==choice:
+            st.session_state.wins+=1
+            st.session_state.profit+=3
+            hit=True
         else:
-            profit-=LOSS
+            st.session_state.profit-=1
 
-        next_signal=None
-        last_trade=i
+        st.session_state.history.append({
+            "round":current_round,
+            "actual":new_group,
+            "pred":choice,
+            "hit":hit,
+            "profit":st.session_state.profit
+        })
 
-    if i-last_trade>GAP and i>LOOKBACK:
-
-        rec=[]
-
-        for j in range(max(WINDOW,i-LOOKBACK),i):
-
-            if j>=WINDOW:
-
-                rec.append(
-                    1 if groups[j]==groups[j-WINDOW] else 0
-                )
-
-        if len(rec)>15:
-
-            wr=np.mean(rec)
-
-            ev=wr*WIN-(1-wr)*LOSS
-
-            if wr>0.28 and ev>0:
-
-                next_signal=groups[i-WINDOW]
-
-    equity.append(profit)
-
-    history.append({
-
-        "round":i+1,
-        "actual":g,
-        "pred":predicted,
-        "hit":hit,
-        "profit":profit
-
-    })
-
-hist=pd.DataFrame(history)
+    st.session_state.last_round=current_round
 
 # ---------- metrics ----------
-trades=len(hist[hist.pred.notna()])
-wins=len(hist[hist.hit==1])
+wr=st.session_state.wins/st.session_state.trades if st.session_state.trades else 0
 
-wr=wins/trades if trades else 0
+st.title("🚀 V18 PRO Live Quant Engine")
 
-losses=trades-wins
+c1,c2,c3=st.columns(3)
 
-pf=(wins*WIN)/(losses*LOSS) if losses else 0
-
-drawdown=max(equity)-min(equity)
-
-ev=wr*WIN-(1-wr)*LOSS
-
-# ---------- UI ----------
-st.title("🚀 V19 Quant Dashboard")
-
-c1,c2,c3,c4,c5,c6=st.columns(6)
-
-c1.metric("Profit",profit)
-c2.metric("Trades",trades)
+c1.metric("Profit",st.session_state.profit)
+c2.metric("Trades",st.session_state.trades)
 c3.metric("Winrate",round(wr*100,2))
-c4.metric("Profit Factor",round(pf,2))
-c5.metric("Drawdown",drawdown)
-c6.metric("EV",round(ev,3))
-
-# ---------- parameters ----------
-st.subheader("Engine Parameters")
-
-st.write({
-
-"Window":WINDOW,
-"Lookback":LOOKBACK,
-"Gap":GAP
-
-})
 
 # ---------- next signal ----------
+pred,score=detect_edge(groups)
+
 st.subheader("Next Group")
 
-if next_signal:
-
-    st.success(f"NEXT GROUP → {next_signal}")
-
+if pred:
+    st.success(f"BET {pred} | score {score}")
 else:
+    st.info("SKIP")
 
-    st.info("Scanning...")
-
-# ---------- equity ----------
-st.subheader("Equity Curve")
-
-st.line_chart(equity)
+# ---------- recent groups ----------
+st.subheader("Recent Groups")
+st.write(groups[-20:])
 
 # ---------- history ----------
-st.subheader("Trade History")
-
-st.dataframe(hist.tail(50))
+if st.session_state.history:
+    st.subheader("Trade History")
+    st.dataframe(pd.DataFrame(st.session_state.history).tail(20))
 
 # ---------- distribution ----------
-st.subheader("Group Distribution")
-
 dist=Counter(groups)
+df=pd.DataFrame({"group":dist.keys(),"count":dist.values()})
 
-df=pd.DataFrame({
-
-"group":dist.keys(),
-"count":dist.values()
-
-})
-
+st.subheader("Group Distribution")
 st.bar_chart(df.set_index("group"))
