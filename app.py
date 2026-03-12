@@ -22,7 +22,7 @@ STATE_FILE="engine_state.pkl"
 
 st.set_page_config(layout="wide")
 
-# ---------------- GROUP ----------------
+# ---------- GROUP ----------
 
 def group(n):
 
@@ -32,12 +32,13 @@ def group(n):
     return 4
 
 
-# ---------------- LOAD DATA ----------------
+# ---------- LOAD DATA ----------
 
 @st.cache_data(ttl=5)
 def load():
 
     df=pd.read_csv(DATA_URL)
+
     df.columns=[c.strip().lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
@@ -46,34 +47,42 @@ def load():
 numbers=load()
 
 
-# ---------------- LOAD STATE ----------------
+# ---------- LOAD STATE ----------
 
 def load_state():
 
     try:
+
         with open(STATE_FILE,"rb") as f:
+
             return pickle.load(f)
+
     except:
+
         return {
+
             "config":None,
             "profit":0,
             "cycle_profit":0,
             "peak":0,
             "loss_streak":0,
-            "last_index":0
+            "last_index":0,
+            "history":[],
+            "equity":[]
         }
 
 
 def save_state(state):
 
     with open(STATE_FILE,"wb") as f:
+
         pickle.dump(state,f)
 
 
 state=load_state()
 
 
-# ---------------- EDGE ----------------
+# ---------- EDGE ----------
 
 def calc_wr(nums,i,W,LB):
 
@@ -88,12 +97,13 @@ def calc_wr(nums,i,W,LB):
             )
 
     if len(rec)<10:
+
         return 0
 
     return np.mean(rec)
 
 
-# ---------------- SIM ----------------
+# ---------- SIM ----------
 
 def simulate(nums,W,LB,G):
 
@@ -108,6 +118,7 @@ def simulate(nums,W,LB,G):
         if next_signal is not None:
 
             hit=1 if g==next_signal else 0
+
             profit+=WIN if hit else -LOSS
 
             next_signal=None
@@ -130,7 +141,7 @@ def simulate(nums,W,LB,G):
     return profit
 
 
-# ---------------- FIND CONFIG ----------------
+# ---------- FIND CONFIG ----------
 
 def find_config(train):
 
@@ -151,7 +162,7 @@ def find_config(train):
     return best
 
 
-# ---------------- TRAIN IF NEEDED ----------------
+# ---------- TRAIN ----------
 
 if state["config"] is None and len(numbers)>=TRAIN_SIZE:
 
@@ -169,22 +180,30 @@ cycle_profit=state["cycle_profit"]
 peak=state["peak"]
 loss_streak=state["loss_streak"]
 
+history=state["history"]
+equity=state["equity"]
+
 last_index=state["last_index"]
 
 
 next_signal=None
 last_trade=-999
 
-# ---------------- PROCESS NEW DATA ----------------
+# ---------- PROCESS NEW DATA ----------
 
 for i in range(last_index,len(numbers)):
 
     n=numbers[i]
     g=group(n)
 
+    predicted=None
+    hit=None
+
     if next_signal is not None:
 
-        hit=1 if g==next_signal else 0
+        predicted=next_signal
+
+        hit=1 if g==predicted else 0
 
         p=WIN if hit else -LOSS
 
@@ -200,6 +219,7 @@ for i in range(last_index,len(numbers)):
 
         next_signal=None
         last_trade=i
+
 
     if config:
 
@@ -220,7 +240,7 @@ for i in range(last_index,len(numbers)):
                     next_signal=g1
 
 
-    # -------- RESET --------
+    # RESET
 
     if cycle_profit>=TARGET_PROFIT or peak-cycle_profit>=MAX_DRAWDOWN or loss_streak>=LOSS_STREAK_LIMIT:
 
@@ -230,21 +250,67 @@ for i in range(last_index,len(numbers)):
         loss_streak=0
 
 
+    equity.append(profit)
+
+    history.append({
+
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "profit":profit
+
+    })
+
+
 state.update({
+
     "config":config,
     "profit":profit,
     "cycle_profit":cycle_profit,
     "peak":peak,
     "loss_streak":loss_streak,
-    "last_index":len(numbers)
+    "last_index":len(numbers),
+    "history":history[-200:],
+    "equity":equity
+
 })
 
 save_state(state)
 
-# ---------------- UI ----------------
+
+# ---------- UI ----------
 
 st.title("🚀 QUANT PRO ENGINE")
 
 st.metric("Total Profit",round(profit,2))
 
 st.write("CONFIG",config)
+
+
+st.subheader("Equity Curve")
+
+st.line_chart(pd.DataFrame({"equity":equity}))
+
+
+st.subheader("Next Group")
+
+if next_signal:
+
+    st.markdown(
+
+        f"<h1 style='color:red;text-align:center'>NEXT GROUP → {next_signal}</h1>",
+
+        unsafe_allow_html=True
+
+    )
+
+else:
+
+    st.info("Scanning...")
+
+
+st.subheader("History")
+
+st.dataframe(pd.DataFrame(history[::-1]),use_container_width=True)
