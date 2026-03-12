@@ -28,73 +28,153 @@ def load():
 numbers=load()
 groups=[group(n) for n in numbers]
 
-analysis=groups[-600:]
+analysis=groups[-500:]
 
-# ---------- transition bias ----------
+# ---------- entropy ----------
+def entropy(g):
+
+    c=Counter(g)
+    total=len(g)
+
+    e=0
+
+    for v in c.values():
+
+        p=v/total
+        e-=p*math.log2(p)
+
+    return e
+
+# ---------- chi square ----------
+def chi_square(g):
+
+    c=Counter(g)
+
+    total=len(g)
+
+    expected=total/4
+
+    chi=0
+
+    for i in [1,2,3,4]:
+
+        obs=c.get(i,0)
+
+        chi+=(obs-expected)**2/expected
+
+    return chi
+
+# ---------- RNG detector ----------
+def rng_bias(g):
+
+    e=entropy(g)
+    chi=chi_square(g)
+
+    if e<1.97 and chi>6:
+
+        return True
+
+    return False
+
+# ---------- pattern detector ----------
+def pattern_bias(g):
+
+    best=None
+    best_prob=0
+
+    for L in [1,2,3]:
+
+        key=tuple(g[-L:])
+
+        nexts=[]
+
+        for i in range(len(g)-L):
+
+            if tuple(g[i:i+L])==key:
+
+                nexts.append(g[i+L])
+
+        if len(nexts)<30:
+            continue
+
+        c=Counter(nexts)
+
+        pred=max(c,key=c.get)
+
+        prob=c[pred]/len(nexts)
+
+        if prob>best_prob and prob>0.28:
+
+            best_prob=prob
+            best=pred
+
+    return best
+
+# ---------- transition detector ----------
 def transition_bias(g):
 
-    trans={}
+    cur=g[-1]
+
+    trans=Counter()
 
     for i in range(len(g)-1):
 
-        a=g[i]
-        b=g[i+1]
+        if g[i]==cur:
 
-        if a not in trans:
-            trans[a]=Counter()
+            trans[g[i+1]]+=1
 
-        trans[a][b]+=1
+    total=sum(trans.values())
 
-    best=None
-    best_pred=None
-    best_edge=0
-    best_z=0
-    best_sample=0
+    if total<50:
+        return None
 
-    for cur in trans:
+    pred=max(trans,key=trans.get)
 
-        total=sum(trans[cur].values())
+    prob=trans[pred]/total
 
-        if total<50:
-            continue
+    se=math.sqrt(0.25*0.75/total)
 
-        for nxt in [1,2,3,4]:
+    z=(prob-0.25)/se
 
-            obs=trans[cur].get(nxt,0)
+    if abs(z)>2:
 
-            p=obs/total
+        return pred
 
-            bias=p-0.25
+    return None
 
-            se=math.sqrt(0.25*0.75/total)
+# ---------- ensemble ----------
+def ensemble(g):
 
-            z=bias/se
+    signals=[]
 
-            edge=abs(bias)*math.log(total)
+    p=pattern_bias(g)
+    t=transition_bias(g)
 
-            if abs(z)>2 and edge>best_edge:
+    if p:
+        signals.append(p)
 
-                best_edge=edge
-                best=(cur,nxt)
-                best_pred=nxt
-                best_z=z
-                best_sample=total
+    if t:
+        signals.append(t)
 
-    return best,best_pred,best_edge,best_z,best_sample
+    if len(signals)>=2:
+
+        return Counter(signals).most_common(1)[0][0]
+
+    return None
 
 # ---------- backtest ----------
 profit=0
 history=[]
 
-for i in range(600,len(groups)-1):
+for i in range(500,len(groups)-1):
 
-    g=groups[i-600:i]
+    g=groups[i-500:i]
 
-    pattern,pred,edge,z,sample=transition_bias(g)
+    pred=ensemble(g)
 
     hit=False
 
-    if edge>0.08:
+    if pred:
 
         if groups[i]==pred:
 
@@ -105,18 +185,12 @@ for i in range(600,len(groups)-1):
 
             profit-=1
 
-    else:
-
-        pred=None
-
     history.append({
         "round":i,
         "actual":groups[i],
         "pred":pred,
         "hit":hit,
-        "profit":profit,
-        "edge":edge,
-        "z":z
+        "profit":profit
     })
 
 hist=pd.DataFrame(history)
@@ -131,10 +205,8 @@ ev=wr*2.5-(1-wr)
 
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
-pattern,pred,edge,z,sample=transition_bias(analysis)
-
 # ---------- UI ----------
-st.title("🔬 V36 Bias Microscope Engine")
+st.title("⚡ V37 Ensemble Edge Engine")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -147,21 +219,14 @@ c5,c6,c7=st.columns(3)
 
 c5.metric("Profit",round(profit,2))
 c6.metric("Drawdown",round(drawdown,2))
-c7.metric("Edge Score",round(edge,3))
-
-st.subheader("Detected Bias")
-
-p1,p2,p3,p4=st.columns(4)
-
-p1.metric("Transition",pattern)
-p2.metric("Sample Size",sample)
-p3.metric("Z-score",round(z,2))
-p4.metric("Prediction",pred)
+c7.metric("Entropy",round(entropy(analysis),3))
 
 # ---------- next ----------
 st.subheader("Next Group")
 
-if edge>0.08:
+pred=ensemble(analysis)
+
+if pred:
 
     st.success(f"BET → {pred}")
 
