@@ -9,6 +9,8 @@ GAP=4
 
 WINDOWS=range(6,19)
 
+TRAIN_SIZE=400
+
 WIN=2.5
 LOSS=1
 
@@ -30,7 +32,7 @@ def group(n):
     return 4
 
 
-# ---------------- LOAD DATA ----------------
+# ---------------- LOAD ----------------
 
 @st.cache_data(ttl=5)
 def load():
@@ -46,45 +48,43 @@ numbers=load()
 
 # ---------------- WR ----------------
 
-def calc_wr(nums,i,w):
+def calc_wr(nums,start,end,w):
 
     rec=[]
 
-    for j in range(max(w,i-LOOKBACK),i):
+    for j in range(start,end):
 
         if j>=w:
 
             rec.append(group(nums[j])==group(nums[j-w]))
 
-    if len(rec)<12:
+    if len(rec)<20:
         return 0
 
     return np.mean(rec)
 
 
-# ---------------- WINDOW SCAN ----------------
+# ---------------- WINDOW TRAIN ----------------
 
-def scan_window(nums,i):
+def train_window(nums,start,end):
 
     best=None
     best_score=0
 
     for w in WINDOWS:
 
-        if i>w:
+        wr=calc_wr(nums,start,end,w)
 
-            wr=calc_wr(nums,i,w)
+        ev=wr*WIN-(1-wr)*LOSS
 
-            ev=wr*WIN-(1-wr)*LOSS
+        if wr>WR_THRESHOLD and ev>0:
 
-            if wr>WR_THRESHOLD and ev>0:
+            score=wr*ev
 
-                score=wr*ev
+            if score>best_score:
 
-                if score>best_score:
-
-                    best_score=score
-                    best=w
+                best_score=score
+                best=w
 
     return best
 
@@ -104,6 +104,9 @@ last_trade=-999
 loss_streak=0
 trend_active=False
 
+train_start=0
+train_end=TRAIN_SIZE
+
 for i in range(len(numbers)):
 
     n=numbers[i]
@@ -112,6 +115,16 @@ for i in range(len(numbers)):
     predicted=None
     hit=None
     state="SCAN"
+
+    # ---------------- TRAIN ----------------
+
+    if locked_window is None and i>=train_end:
+
+        locked_window=train_window(numbers,train_start,train_end)
+
+        train_start=i
+        train_end=i+TRAIN_SIZE
+
 
     # ---------------- TRADE ----------------
 
@@ -136,16 +149,6 @@ for i in range(len(numbers)):
         state="TRADE"
 
 
-    # ---------------- WINDOW LOCK ----------------
-
-    if locked_window is None and i>LOOKBACK:
-
-        w=scan_window(numbers,i)
-
-        if w:
-            locked_window=w
-
-
     # ---------------- SIGNAL ----------------
 
     if locked_window and i-last_trade>=GAP:
@@ -160,7 +163,7 @@ for i in range(len(numbers)):
                 state="SIGNAL"
 
 
-    # ---------------- TREND DETECTION ----------------
+    # ---------------- TREND ----------------
 
     if profit>=TREND_CONFIRM:
 
@@ -218,7 +221,7 @@ trades=len(hits)
 
 # ---------------- DASHBOARD ----------------
 
-st.title("🚀 QUANT ENGINE V8 FIX")
+st.title("🚀 QUANT ENGINE V9 PRO")
 
 c1,c2,c3=st.columns(3)
 
