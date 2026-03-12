@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from collections import Counter
+import numpy as np
 import math
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
@@ -17,8 +18,10 @@ def group(n):
 # ---------- load ----------
 @st.cache_data(ttl=5)
 def load():
+
     df=pd.read_csv(DATA_URL)
     df.columns=[c.lower() for c in df.columns]
+
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
@@ -28,11 +31,13 @@ analysis=groups[-200:]
 
 # ---------- entropy ----------
 def entropy(g):
+
     c=Counter(g)
     total=len(g)
 
     e=0
     for v in c.values():
+
         p=v/total
         e-=p*math.log2(p)
 
@@ -40,26 +45,16 @@ def entropy(g):
 
 ent=entropy(analysis)
 
-# ---------- threshold ----------
-def threshold(ent):
-
-    if ent>1.99:
-        return 0.46,"random"
-
-    if ent>1.97:
-        return 0.40,"medium"
-
-    return 0.35,"bias"
-
-# ---------- markov1 ----------
+# ---------- models ----------
 def markov1(g):
 
     cur=g[-1]
-
     trans=Counter()
 
     for i in range(len(g)-1):
+
         if g[i]==cur:
+
             trans[g[i+1]]+=1
 
     total=sum(trans.values())
@@ -70,13 +65,12 @@ def markov1(g):
 
     return best,trans[best]/total
 
-# ---------- markov2 ----------
+
 def markov2(g):
 
     if len(g)<3:return None,0
 
     key=(g[-2],g[-1])
-
     trans=Counter()
 
     for i in range(len(g)-2):
@@ -93,7 +87,7 @@ def markov2(g):
 
     return best,trans[best]/total
 
-# ---------- pattern ----------
+
 def pattern(g):
 
     if len(g)<10:return None,0
@@ -113,11 +107,8 @@ def pattern(g):
 
     best=max(c,key=c.get)
 
-    prob=c[best]/len(nexts)
+    return best,c[best]/len(nexts)
 
-    rarity=1/len(nexts)
-
-    return best,prob*rarity
 
 # ---------- detect ----------
 def detect(g):
@@ -137,18 +128,24 @@ def detect(g):
     best,strength=ranked[0]
     second=ranked[1][1]
 
-    th,reg=threshold(ent)
-
     gap=strength-second
 
-    if strength==0:
-        return None,0,reg,0
+    return best,strength,gap
 
-    if strength>th and gap>0.10:
 
-        return best,strength,reg,gap
+# ---------- collect strengths ----------
+strengths=[]
 
-    return None,0,reg,gap
+for i in range(200,len(groups)-1):
+
+    g=groups[max(0,i-200):i]
+
+    best,strength,gap=detect(g)
+
+    strengths.append(strength)
+
+# dynamic threshold
+th=np.percentile(strengths,92)
 
 # ---------- backtest ----------
 profit=0
@@ -158,11 +155,11 @@ for i in range(200,len(groups)-1):
 
     g=groups[max(0,i-200):i]
 
-    pred,strength,reg,gap=detect(g)
+    pred,strength,gap=detect(g)
 
     hit=False
 
-    if pred:
+    if strength>th and gap>0.08:
 
         if groups[i]==pred:
 
@@ -173,14 +170,17 @@ for i in range(200,len(groups)-1):
 
             profit-=1
 
+    else:
+
+        pred=None
+
     history.append({
         "round":i,
         "actual":groups[i],
         "pred":pred,
         "hit":hit,
         "profit":profit,
-        "strength":strength,
-        "gap":gap
+        "strength":strength
     })
 
 hist=pd.DataFrame(history)
@@ -196,7 +196,7 @@ ev=wr*2.5-(1-wr)
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
 # ---------- UI ----------
-st.title("⚡ V32 REAL EDGE ENGINE")
+st.title("⚡ V33 FINAL EDGE ENGINE")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -214,15 +214,15 @@ c7.metric("Entropy",round(ent,3))
 # ---------- next ----------
 st.subheader("Next Group")
 
-pred,strength,reg,gap=detect(analysis)
+pred,strength,gap=detect(analysis)
 
-if pred:
+if strength>th and gap>0.08:
 
-    st.success(f"BET → {pred} | strength {round(strength,2)}")
+    st.success(f"BET → {pred}")
 
 else:
 
-    st.info(f"SKIP | regime {reg}")
+    st.info("SKIP")
 
 # ---------- equity ----------
 st.subheader("Equity Curve")
