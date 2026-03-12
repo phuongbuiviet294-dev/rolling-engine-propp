@@ -2,22 +2,22 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+# ================= CONFIG =================
+
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOWS=[9,10,11,12]
+WINDOW=9
 LOOKBACK=26
 GAP=4
 
 WIN=2.5
 LOSS=1
 
-REGIME_WR=0.27
-SIGNAL_WR=0.30
-
-PAUSE_DD=25
-PAUSE_ROUNDS=100
+TRAIN_STEP=400
 
 st.set_page_config(layout="wide")
+
+# ================= GROUP =================
 
 def group(n):
 
@@ -26,6 +26,8 @@ def group(n):
     if n<=9:return 3
     return 4
 
+
+# ================= LOAD =================
 
 @st.cache_data(ttl=5)
 def load():
@@ -40,20 +42,22 @@ numbers=load()
 
 # ================= EDGE =================
 
-def calc_wr(nums,W):
+def edge(nums,i):
 
     rec=[]
 
-    for i in range(W,len(nums)):
+    for j in range(max(WINDOW,i-LOOKBACK),i):
 
-        rec.append(
-            1 if group(nums[i])==group(nums[i-W]) else 0
-        )
+        if j>=WINDOW:
 
-    if len(rec)<30:
+            rec.append(
+                1 if group(nums[j])==group(nums[j-WINDOW]) else 0
+            )
+
+    if len(rec)<10:
         return 0
 
-    return np.mean(rec[-LOOKBACK:])
+    return np.mean(rec)
 
 
 # ================= ENGINE =================
@@ -66,8 +70,6 @@ hits=[]
 next_signal=None
 last_trade=-999
 
-pause_until=-1
-
 for i,n in enumerate(numbers):
 
     g=group(n)
@@ -76,7 +78,7 @@ for i,n in enumerate(numbers):
     hit=None
     state="SCAN"
 
-    # ===== EXECUTE =====
+    # ===== EXECUTE TRADE =====
 
     if next_signal is not None:
 
@@ -93,41 +95,22 @@ for i,n in enumerate(numbers):
 
         state="TRADE"
 
-    # ===== DRAW DOWN =====
+    # ===== FIND SIGNAL =====
 
-    if equity:
+    if i-last_trade>=GAP and i>LOOKBACK:
 
-        peak=max(equity)
+        wr=edge(numbers,i)
 
-        if peak-profit>PAUSE_DD:
+        ev=wr*WIN-(1-wr)*LOSS
 
-            pause_until=i+PAUSE_ROUNDS
+        if ev>0:
 
-    # ===== SIGNAL =====
+            g1=group(numbers[i-WINDOW])
 
-    if i>LOOKBACK and i-last_trade>GAP and i>pause_until:
+            if group(numbers[i-1])!=g1:
 
-        votes=[]
-
-        for W in WINDOWS:
-
-            wr=calc_wr(numbers[:i],W)
-
-            if wr>SIGNAL_WR:
-
-                g1=group(numbers[i-W])
-
-                if group(numbers[i-1])!=g1:
-
-                    votes.append(g1)
-
-        score=len(votes)/len(WINDOWS)
-
-        if score>=0.5:
-
-            next_signal=max(set(votes), key=votes.count)
-
-            state="SIGNAL"
+                next_signal=g1
+                state="SIGNAL"
 
     equity.append(profit)
 
@@ -158,7 +141,7 @@ dd=peak-equity[-1] if equity else 0
 
 # ================= DASHBOARD =================
 
-st.title("🚀 QUANT ENGINE V4")
+st.title("🚀 LIVE TRADING ENGINE")
 
 c1,c2,c3=st.columns(3)
 
