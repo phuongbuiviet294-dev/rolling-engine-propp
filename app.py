@@ -4,16 +4,17 @@ import numpy as np
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_STEP=400
+TRAIN_SIZE=800
+TRADE_SIZE=400
 
-WINDOWS=range(8,13)
-LOOKBACKS=range(20,31)
-GAPS=[4,5]
+WINDOWS=[9,10,11]
+LOOKBACKS=range(22,29)
+GAP=4
 
 WIN=2.5
 LOSS=1
 
-CONF_THRESHOLD=0.30
+CONF_THRESHOLD=0.31
 
 st.set_page_config(layout="wide")
 
@@ -36,8 +37,9 @@ def load():
 
 numbers=load()
 
+# ---------------- SIMULATION ----------------
 
-def simulate(nums,LB,GAP,W):
+def simulate(nums,LB,W):
 
     profit=0
     next_signal=None
@@ -68,7 +70,7 @@ def simulate(nums,LB,GAP,W):
                         1 if group(nums[j])==group(nums[j-W]) else 0
                     )
 
-            if len(rec)>15:
+            if len(rec)>20:
 
                 wr=np.mean(rec)
 
@@ -85,24 +87,27 @@ def simulate(nums,LB,GAP,W):
     return profit
 
 
+# ---------------- FIND CONFIG ----------------
+
 def find_best(train):
 
     best_profit=-999
-    best_cfg=(26,4,9)
+    best=(26,9)
 
     for LB in LOOKBACKS:
-        for GP in GAPS:
-            for W in WINDOWS:
+        for W in WINDOWS:
 
-                p=simulate(train,LB,GP,W)
+            p=simulate(train,LB,W)
 
-                if p>best_profit:
+            if p>best_profit:
 
-                    best_profit=p
-                    best_cfg=(LB,GP,W)
+                best_profit=p
+                best=(LB,W)
 
-    return best_cfg
+    return best
 
+
+# ---------------- WALK FORWARD ----------------
 
 profit=0
 equity=[]
@@ -112,25 +117,27 @@ hits=[]
 next_signal=None
 last_trade=-999
 
-for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
+for start in range(TRAIN_SIZE,len(numbers),TRADE_SIZE):
 
-    train=numbers[:i]
+    train=numbers[:start]
 
-    LB,GP,W=find_best(train)
+    LB,W=find_best(train)
 
-    end=min(i+TRAIN_STEP,len(numbers))
+    end=min(start+TRADE_SIZE,len(numbers))
 
-    segment=numbers[i:end]
+    segment=numbers[start:end]
 
     for j,n in enumerate(segment):
 
-        idx=i+j
+        idx=start+j
 
         g=group(n)
 
         predicted=None
         hit=None
         state="SCAN"
+
+        # ---------- EXECUTE ----------
 
         if next_signal is not None:
 
@@ -147,32 +154,42 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
             state="TRADE"
 
-        if idx-last_trade>GP and idx>LB:
+        # ---------- SIGNAL ----------
 
-            rec=[]
+        if idx-last_trade>GAP and idx>LB:
 
-            for k in range(max(W,idx-LB),idx):
+            votes=[]
 
-                if k>=W:
+            for W in WINDOWS:
 
-                    rec.append(
-                        1 if group(numbers[k])==group(numbers[k-W]) else 0
-                    )
+                rec=[]
 
-            if len(rec)>15:
+                for k in range(max(W,idx-LB),idx):
 
-                wr=np.mean(rec)
+                    if k>=W:
 
-                ev=wr*WIN-(1-wr)*LOSS
+                        rec.append(
+                            1 if group(numbers[k])==group(numbers[k-W]) else 0
+                        )
 
-                if ev>0 and wr>CONF_THRESHOLD:
+                if len(rec)>20:
 
-                    g1=group(numbers[idx-W])
+                    wr=np.mean(rec)
 
-                    if group(numbers[idx-1])!=g1:
+                    ev=wr*WIN-(1-wr)*LOSS
 
-                        next_signal=g1
-                        state="SIGNAL"
+                    if ev>0 and wr>CONF_THRESHOLD:
+
+                        g1=group(numbers[idx-W])
+
+                        if group(numbers[idx-1])!=g1:
+
+                            votes.append(g1)
+
+            if len(votes)>=2:
+
+                next_signal=max(set(votes), key=votes.count)
+                state="SIGNAL"
 
         equity.append(profit)
 
@@ -189,6 +206,8 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
         })
 
 
+# ---------------- METRICS ----------------
+
 wr=np.mean(hits) if hits else 0
 
 wins=hits.count(1)*WIN
@@ -199,8 +218,9 @@ pf=wins/loss if loss else 0
 peak=max(equity)
 dd=peak-equity[-1]
 
+# ---------------- DASHBOARD ----------------
 
-st.title("🚀 QUANT WALK FORWARD ENGINE")
+st.title("🚀 QUANT ENGINE V2")
 
 c1,c2,c3=st.columns(3)
 
@@ -210,8 +230,11 @@ c3.metric("Profit Factor",round(pf,2))
 
 st.metric("Drawdown",round(dd,2))
 
+st.subheader("Equity Curve")
+
 st.line_chart(pd.DataFrame({"equity":equity}))
 
+st.subheader("Next Group")
 
 if next_signal:
 
@@ -226,5 +249,6 @@ else:
 
     st.info("Scanning...")
 
+st.subheader("History")
 
-st.dataframe(pd.DataFrame(history).iloc[::-1])
+st.dataframe(pd.DataFrame(history).iloc[::-1],use_container_width=True)
