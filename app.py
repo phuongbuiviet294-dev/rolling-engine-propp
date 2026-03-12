@@ -4,28 +4,34 @@ import numpy as np
 
 # ================= CONFIG =================
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-LOOKBACK=26
-GAP=4
-WINDOWS=range(6,16)
+LOOKBACK = 26
+GAP = 4
 
-TRAIN_SIZE=200
-LOCK_PROFIT=10
-LOSS_STREAK_RESET=4
+TRAIN_SIZE = 400
 
-WIN=2.5
-LOSS=1
+WINDOWS = range(6,16)
+
+LOCK_PROFIT = 10
+LOSS_STREAK_RESET = 4
+
+WIN = 2.5
+LOSS = 1
 
 st.set_page_config(layout="wide")
+
 
 # ================= GROUP =================
 
 def group(n):
 
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
+    if n <= 3:
+        return 1
+    if n <= 6:
+        return 2
+    if n <= 9:
+        return 3
     return 4
 
 
@@ -34,214 +40,228 @@ def group(n):
 @st.cache_data(ttl=5)
 def load():
 
-    df=pd.read_csv(DATA_URL)
+    df = pd.read_csv(DATA_URL)
 
-    df.columns=[c.strip().lower() for c in df.columns]
+    df.columns = [c.strip().lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
 
 
-numbers=load()
+numbers = load()
 
-# ================= CALC WR =================
 
-def calc_wr(nums,i,window):
+# ================= WINRATE CALC =================
 
-    rec=[]
+def calc_wr(nums, i, window):
 
-    for j in range(max(window,i-LOOKBACK),i):
+    rec = []
 
-        if j>=window:
+    for j in range(max(window, i-LOOKBACK), i):
 
-            rec.append(
-                1 if group(nums[j])==group(nums[j-window]) else 0
-            )
+        if j >= window:
 
-    if len(rec)<10:
+            hit = group(nums[j]) == group(nums[j-window])
+
+            rec.append(hit)
+
+    if len(rec) < 12:
         return 0
 
     return np.mean(rec)
 
 
-# ================= SIMULATE =================
+# ================= SIGNAL ENGINE =================
 
-def simulate(nums,window):
+def next_signal_calc(nums, i, window):
 
-    profit=0
-    next_signal=None
-    last_trade=-999
+    wr = calc_wr(nums, i, window)
 
-    for i,n in enumerate(nums):
+    ev = wr*WIN - (1-wr)*LOSS
 
-        g=group(n)
+    if ev <= 0:
+        return None
 
-        if next_signal is not None:
+    g = group(nums[i-window])
 
-            hit=(g==next_signal)
+    if group(nums[i-1]) != g:
 
-            profit+=WIN if hit else -LOSS
+        return g
 
-            next_signal=None
-            last_trade=i
-
-        if i-last_trade>=GAP and i>LOOKBACK:
-
-            wr=calc_wr(nums,i,window)
-
-            ev=wr*WIN-(1-wr)*LOSS
-
-            if ev>0:
-
-                g1=group(nums[i-window])
-
-                if group(nums[i-1])!=g1:
-
-                    next_signal=g1
-
-    return profit
+    return None
 
 
-# ================= FIND WINDOW =================
+# ================= WINDOW SEARCH =================
 
-def find_window(train):
+def find_best_window(train):
 
-    best=None
-    best_profit=-999
+    best_window = None
+    best_profit = -999
 
     for w in WINDOWS:
 
-        p=simulate(train,w)
+        profit = 0
+        next_signal = None
+        last_trade = -999
 
-        if p>=LOCK_PROFIT and p>best_profit:
+        for i in range(len(train)):
 
-            best_profit=p
-            best=w
+            g = group(train[i])
 
-    return best
+            if next_signal is not None:
+
+                hit = g == next_signal
+
+                profit += WIN if hit else -LOSS
+
+                next_signal = None
+                last_trade = i
+
+            if i-last_trade >= GAP and i > LOOKBACK:
+
+                sig = next_signal_calc(train, i, w)
+
+                if sig is not None:
+
+                    next_signal = sig
+
+        if profit >= LOCK_PROFIT and profit > best_profit:
+
+            best_profit = profit
+            best_window = w
+
+    return best_window
 
 
-# ================= ENGINE =================
+# ================= LIVE ENGINE =================
 
-profit=0
-equity=[]
-hits=[]
-history=[]
-windows_used=[]
+profit = 0
+equity = []
+history = []
+hits = []
 
-loss_streak=0
-window=None
-next_signal=None
-last_trade=-999
+window = None
+loss_streak = 0
 
-for i in range(TRAIN_SIZE,len(numbers)):
+next_signal = None
+last_trade = -999
 
-    if window is None:
 
-        train=numbers[i-TRAIN_SIZE:i]
+for i in range(len(numbers)):
 
-        window=find_window(train)
+    # ===== TRAIN WINDOW =====
 
-        loss_streak=0
+    if window is None and i > TRAIN_SIZE:
 
-        if window:
-            windows_used.append(window)
+        train = numbers[i-TRAIN_SIZE:i]
 
-    n=numbers[i]
-    g=group(n)
+        window = find_best_window(train)
 
-    predicted=None
-    hit=None
-    state="SCAN"
+        loss_streak = 0
 
-    if next_signal is not None:
 
-        predicted=next_signal
+    n = numbers[i]
+    g = group(n)
 
-        hit=(g==predicted)
+    predicted = None
+    hit = None
+    state = "SCAN"
 
-        profit+=WIN if hit else -LOSS
+
+    # ===== TRADE =====
+
+    if next_signal is not None and window is not None:
+
+        predicted = next_signal
+
+        hit = g == predicted
+
+        profit += WIN if hit else -LOSS
 
         hits.append(hit)
 
         if hit:
-            loss_streak=0
+            loss_streak = 0
         else:
-            loss_streak+=1
+            loss_streak += 1
 
-        next_signal=None
-        last_trade=i
+        state = "TRADE"
 
-        state="TRADE"
+        next_signal = None
+        last_trade = i
 
-    if window and i-last_trade>=GAP and i>LOOKBACK:
 
-        wr=calc_wr(numbers,i,window)
+    # ===== SIGNAL =====
 
-        ev=wr*WIN-(1-wr)*LOSS
+    if window is not None and i-last_trade >= GAP and i > LOOKBACK:
 
-        if ev>0:
+        sig = next_signal_calc(numbers, i, window)
 
-            g1=group(numbers[i-window])
+        if sig is not None:
 
-            if group(numbers[i-1])!=g1:
+            next_signal = sig
 
-                next_signal=g1
+            state = "SIGNAL"
 
-                state="SIGNAL"
 
-    if loss_streak>=LOSS_STREAK_RESET:
+    # ===== RESET CONDITION =====
 
-        window=None
+    if loss_streak >= LOSS_STREAK_RESET:
+
+        window = None
+        next_signal = None
+        loss_streak = 0
+
 
     equity.append(profit)
 
+
     history.append({
 
-        "round":i+1,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "profit":profit,
-        "window":window,
-        "state":state
+        "round": i+1,
+        "number": n,
+        "group": g,
+        "predicted": predicted,
+        "hit": hit,
+        "profit": profit,
+        "window": window,
+        "state": state
 
     })
 
 
 # ================= ANALYTICS =================
 
-wins=hits.count(True)*WIN
-losses=hits.count(False)*LOSS
+wins = hits.count(True) * WIN
+losses = hits.count(False) * LOSS
 
-pf=wins/losses if losses else 0
+pf = wins / losses if losses else 0
 
-wr=sum(hits)/len(hits) if hits else 0
+wr = sum(hits)/len(hits) if hits else 0
 
-equity_np=np.array(equity)
+equity_np = np.array(equity)
 
-peak=np.maximum.accumulate(equity_np)
+peak = np.maximum.accumulate(equity_np)
 
-drawdown=(peak-equity_np).max()
+drawdown = (peak-equity_np).max()
 
-trades=len(hits)
+trades = len(hits)
 
 
 # ================= DASHBOARD =================
 
 st.title("🚀 LIVE BETTING ENGINE")
 
-c1,c2,c3=st.columns(3)
+c1,c2,c3 = st.columns(3)
 
-c1.metric("Profit",round(profit,2))
-c2.metric("Winrate %",round(wr*100,2))
-c3.metric("Profit Factor",round(pf,2))
+c1.metric("Profit", round(profit,2))
+c2.metric("Winrate %", round(wr*100,2))
+c3.metric("Profit Factor", round(pf,2))
 
-c4,c5,c6=st.columns(3)
+c4,c5,c6 = st.columns(3)
 
-c4.metric("Drawdown",round(drawdown,2))
-c5.metric("Trades",trades)
-c6.metric("Window Locked",window)
+c4.metric("Drawdown", round(drawdown,2))
+c5.metric("Trades", trades)
+c6.metric("Window Locked", window)
 
 st.caption(f"Lookback={LOOKBACK} | Gap={GAP}")
 
@@ -258,7 +278,7 @@ if next_signal:
                 color:white;
                 border-radius:12px;
                 text-align:center;
-                font-size:30px;
+                font-size:32px;
                 font-weight:bold'>
         NEXT GROUP → {next_signal}
     </div>
@@ -280,6 +300,6 @@ st.line_chart(pd.DataFrame({"profit":equity}))
 
 st.subheader("History")
 
-hist_df=pd.DataFrame(history)
+hist_df = pd.DataFrame(history)
 
-st.dataframe(hist_df.iloc[::-1],use_container_width=True)
+st.dataframe(hist_df.iloc[::-1], use_container_width=True)
