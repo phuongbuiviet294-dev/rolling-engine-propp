@@ -2,327 +2,185 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# =====================================
-# CONFIG
-# =====================================
+# ================= CONFIG =================
+GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+AUTO_REFRESH = 5
+WIN_PROFIT = 2.5
+LOSE_LOSS = 1
 
-WIN = 2.5
-LOSS = 1
-
-WINDOWS = [7,9,11,15]
-
+WINDOWS = [9,15]
 LOOKBACK_RANGE = range(18,41)
 GAP_RANGE = range(2,7)
 
-TRAIN_SIZE = 2000
-LIVE_SIZE = 400
+LOCK_ROUND = 3662   # ✅ mốc khóa thực chiến
 
-STOPLOSS = 5
-PAUSE_ROUNDS = 3
-
-AUTO_REFRESH = 5
+STOPLOSS_STREAK = 5
+PAUSE_AFTER_SL = 3
 
 st.set_page_config(layout="wide")
-st.title("🚀 QUANT LIVE TRADING ENGINE")
 
-# =====================================
-# GROUP
-# =====================================
+# ================= GROUP =================
+def get_group(n):
+    if 1 <= n <= 3: return 1
+    if 4 <= n <= 6: return 2
+    if 7 <= n <= 9: return 3
+    if 10 <= n <= 12: return 4
+    return None
 
-def group(n):
-
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
-    return 4
-
-# =====================================
-# LOAD DATA
-# =====================================
-
+# ================= LOAD =================
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
-
-    df=pd.read_csv(DATA_URL)
-
+    df = pd.read_csv(GOOGLE_SHEET_CSV)
     df.columns=[c.strip().lower() for c in df.columns]
+    return df
 
-    numbers=df["number"].dropna().astype(int).tolist()
+df = load()
+numbers = df["number"].dropna().astype(int).tolist()
 
-    return numbers
+# ================= CORE ENGINE =================
+def simulate(numbers, LOOKBACK, GAP, WINDOW):
+    total_profit = 0
+    engine=[]
+    next_signal=None
+    last_trade_round=-999
+    loss_streak=0
+    pause=0
 
-numbers=load()
+    for i,n in enumerate(numbers):
+        g=get_group(n)
 
-# =====================================
-# REGIME DETECTOR
-# =====================================
+        predicted=None
+        hit=None
+        state="SCAN"
 
-def regime(data):
+        # ===== STOPLOSS PAUSE =====
+        if pause>0:
+            state="PAUSE"
+            pause-=1
+        else:
 
-    if len(data)<50:return "UNKNOWN"
+            # ===== EXECUTE =====
+            if next_signal is not None:
+                predicted=next_signal
+                hit=1 if predicted==g else 0
+                total_profit += WIN_PROFIT if hit else -LOSE_LOSS
+                state="TRADE"
+                last_trade_round=i
+                next_signal=None
 
-    seq=[]
-
-    for i in range(20,len(data)):
-
-        seq.append(
-            1 if group(data[i])==group(data[i-9]) else 0
-        )
-
-    s=np.mean(seq)
-
-    if s>0.55:return "TREND"
-    if s<0.45:return "RANDOM"
-    return "MEAN"
-
-# =====================================
-# SIGNAL ENGINE
-# =====================================
-
-def signal_engine(data,lookback,gap):
-
-    scores=[]
-    votes=[]
-
-    for W in WINDOWS:
-
-        if len(data)<lookback:continue
-
-        seq=[]
-
-        start=max(W,len(data)-lookback)
-
-        for j in range(start,len(data)):
-
-            if j>=W:
-
-                seq.append(
-                    1 if group(data[j])==group(data[j-W]) else 0
-                )
-
-        if len(seq)<15:continue
-
-        wr=np.mean(seq)
-
-        ev=wr*WIN-(1-wr)*LOSS
-
-        if ev>0:
-
-            g1=group(data[-W])
-
-            if group(data[-1])!=g1:
-
-                votes.append(g1)
-
-                scores.append(ev)
-
-    if not votes:
-
-        return None,0
-
-    vote=pd.Series(votes).mode()[0]
-
-    edge=np.mean(scores)
-
-    return vote,edge
-
-# =====================================
-# BACKTEST OPTIMIZER
-# =====================================
-
-def optimize(train):
-
-    best=-999
-    best_cfg=(26,4)
-
-    for LB in LOOKBACK_RANGE:
-
-        for GP in GAP_RANGE:
-
-            profit=0
-            last=-999
-
-            for i in range(len(train)):
-
-                if i-last<GP:continue
-
-                vote,edge=signal_engine(train[:i],LB,GP)
-
-                if vote is None:continue
-
-                g=group(train[i])
-
-                if vote==g:
-                    profit+=WIN
+                if hit==0:
+                    loss_streak+=1
+                    if loss_streak>=STOPLOSS_STREAK:
+                        state="STOPLOSS"
+                        pause=PAUSE_AFTER_SL
+                        loss_streak=0
                 else:
-                    profit-=LOSS
+                    loss_streak=0
 
-                last=i
+            # ===== SIGNAL =====
+            if len(engine)>=40 and i-last_trade_round>GAP:
+                recent=[]
+                start=max(WINDOW,len(engine)-LOOKBACK)
+                for j in range(start,len(engine)):
+                    if j>=WINDOW:
+                        recent.append(
+                            1 if engine[j]["group"]==engine[j-WINDOW]["group"] else 0
+                        )
+                if len(recent)>=20:
+                    wr=np.mean(recent)
+                    ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+                    if wr>0.30 and ev>0:
+                        g1=engine[-WINDOW]["group"]
+                        if engine[-1]["group"]!=g1:
+                            next_signal=g1
+                            state="SIGNAL"
 
-            if profit>best:
+        engine.append({
+            "round":i+1,
+            "number":n,
+            "group":g,
+            "predicted":predicted,
+            "hit":hit,
+            "state":state,
+            "profit":round(total_profit,2)
+        })
 
-                best=profit
+    return total_profit,engine,next_signal
 
-                best_cfg=(LB,GP)
+# ================= BACKTEST → FIND BEST CONFIG =================
+best_profit=-999
+best_cfg=(26,4,9)
 
-    return best_cfg
+train_numbers = numbers[:LOCK_ROUND]
 
-# =====================================
-# WALK FORWARD
-# =====================================
+for LB in LOOKBACK_RANGE:
+    for GP in GAP_RANGE:
+        for W in WINDOWS:
+            p,_,_=simulate(train_numbers,LB,GP,W)
+            if p>best_profit:
+                best_profit=p
+                best_cfg=(LB,GP,W)
 
-train=numbers[-TRAIN_SIZE:]
+LOCK_LB,LOCK_GP,LOCK_W = best_cfg
 
-LB,GP=optimize(train)
+# ================= LIVE SIMULATION =================
+live_numbers = numbers[LOCK_ROUND:]
 
-live=numbers[-LIVE_SIZE:]
+live_profit,live_engine,next_signal = simulate(
+    live_numbers,LOCK_LB,LOCK_GP,LOCK_W
+)
 
-# =====================================
-# LIVE ENGINE
-# =====================================
-
-profit=0
-last_trade=-999
-loss_streak=0
-pause=0
-
-engine=[]
-next_signal=None
-
-for i,n in enumerate(live):
-
-    g=group(n)
-
-    predicted=None
-    hit=None
-    state="SCAN"
-
-    if pause>0:
-
-        pause-=1
-        state="PAUSE"
-
-    else:
-
-        if next_signal is not None:
-
-            predicted=next_signal
-
-            hit=1 if predicted==g else 0
-
-            profit+=WIN if hit else -LOSS
-
-            state="TRADE"
-
-            last_trade=i
-
-            if hit==0:
-                loss_streak+=1
-            else:
-                loss_streak=0
-
-            if loss_streak>=STOPLOSS:
-
-                pause=PAUSE_ROUNDS
-                loss_streak=0
-
-            next_signal=None
-
-        if i-last_trade>GP:
-
-            vote,edge=signal_engine(live[:i],LB,GP)
-
-            if vote:
-
-                next_signal=vote
-                state="SIGNAL"
-
-    engine.append({
-        "round":i,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "state":state,
-        "profit":profit
-    })
-
-# =====================================
-# METRICS
-# =====================================
-
-hits=[x["hit"] for x in engine if x["hit"]!=None]
-
+# ================= METRICS =================
+hits=[x["hit"] for x in live_engine if x["hit"] is not None]
 wr=np.mean(hits) if hits else 0
 
-wins=hits.count(1)*WIN
-losses=hits.count(0)*LOSS
-
-pf=wins/losses if losses else 0
-
-expect=wr*WIN-(1-wr)*LOSS
-
-profits=[x["profit"] for x in engine]
-
+profits=[x["profit"] for x in live_engine]
 peak=max(profits) if profits else 0
-
 dd=peak-profits[-1] if profits else 0
 
-# =====================================
-# DASHBOARD
-# =====================================
+wins=[WIN_PROFIT for x in hits if x==1]
+losses=[LOSE_LOSS for x in hits if x==0]
+
+pf=sum(wins)/sum(losses) if losses else 0
+exp=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
+
+# ================= UI =================
+st.title("🚀 LIVE TRADING ENGINE — NO REPAINT")
 
 c1,c2,c3=st.columns(3)
-
-c1.metric("Live Profit",round(profit,2))
-c2.metric("Winrate %",round(wr*100,2))
-c3.metric("Profit Factor",round(pf,2))
+c1.metric("Live Rounds",len(live_engine))
+c2.metric("Live Profit",round(profits[-1],2))
+c3.metric("Live Winrate %",round(wr*100,2))
 
 c4,c5,c6=st.columns(3)
+c4.metric("Peak Profit",round(peak,2))
+c5.metric("Drawdown",round(dd,2))
+c6.metric("Profit Factor",round(pf,2))
 
-c4.metric("Drawdown",round(dd,2))
-c5.metric("Expectancy",round(expect,3))
-c6.metric("Regime",regime(live))
+c7,c8=st.columns(2)
+c7.metric("Expectancy",round(exp,3))
+c8.metric("Total Trades",len(hits))
 
-st.caption(f"Config → Lookback {LB} | Gap {GP}")
+st.caption(f"🔒 LOCKED @ Round {LOCK_ROUND} → Lookback={LOCK_LB} | Gap={LOCK_GP} | Window={LOCK_W}")
 
-# =====================================
-# LIVE NEXT GROUP
-# =====================================
-
+# ================= NEXT SIGNAL =================
 if next_signal:
-
-    st.markdown(
-        f"""
-        <div style='padding:20px;background:#c62828;color:white;
-        border-radius:12px;text-align:center;font-size:30px;font-weight:bold'>
-        🔥 NEXT GROUP LIVE SIGNAL 🔥<br>
-        GROUP {next_signal}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
+    st.markdown(f"""
+    <div style='padding:20px;background:#c62828;color:white;
+                border-radius:12px;text-align:center;font-size:28px;font-weight:bold'>
+        🚨 LIVE SIGNAL 🚨<br>
+        🎯 NEXT GROUP: {next_signal}
+    </div>
+    """, unsafe_allow_html=True)
 else:
+    st.info("Scanning live...")
 
-    st.info("Scanning for next signal...")
-
-# =====================================
-# EQUITY
-# =====================================
-
-st.subheader("Equity Curve")
-
-st.line_chart(pd.DataFrame(profits))
-
-# =====================================
-# HISTORY
-# =====================================
-
-st.subheader("Live History")
-
-hist=pd.DataFrame(engine)
-
+# ================= HISTORY =================
+st.subheader("Live History (No Repaint)")
+hist=pd.DataFrame(live_engine)
 st.dataframe(hist.iloc[::-1],use_container_width=True)
+
+
+
+
