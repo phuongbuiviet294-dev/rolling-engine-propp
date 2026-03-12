@@ -8,17 +8,17 @@ DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_V
 
 st.set_page_config(layout="wide")
 
-# ---------------- GROUP ----------------
+# ---------- group ----------
 
 def group(n):
 
-    if n<=3: return 1
-    if n<=6: return 2
-    if n<=9: return 3
+    if n<=3:return 1
+    if n<=6:return 2
+    if n<=9:return 3
     return 4
 
 
-# ---------------- LOAD DATA ----------------
+# ---------- load ----------
 
 @st.cache_data(ttl=5)
 def load():
@@ -26,21 +26,18 @@ def load():
     df=pd.read_csv(DATA_URL)
     df.columns=[c.lower() for c in df.columns]
 
-    nums=df["number"].dropna().astype(int).tolist()
-
-    return nums
+    return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
 
 groups=[group(n) for n in numbers]
 
 
-# ---------------- ENTROPY ----------------
+# ---------- entropy ----------
 
 def entropy(g):
 
     c=Counter(g)
-
     total=len(g)
 
     e=0
@@ -48,7 +45,6 @@ def entropy(g):
     for v in c.values():
 
         p=v/total
-
         e-=p*math.log2(p)
 
     return e
@@ -56,20 +52,7 @@ def entropy(g):
 ent=entropy(groups)
 
 
-# ---------------- DISTRIBUTION ----------------
-
-dist=Counter(groups)
-
-dist_df=pd.DataFrame({
-
-"group":list(dist.keys()),
-"count":list(dist.values())
-})
-
-dist_df["ratio"]=dist_df["count"]/len(groups)
-
-
-# ---------------- MARKOV MATRIX ----------------
+# ---------- markov ----------
 
 def markov(g):
 
@@ -88,7 +71,6 @@ def markov(g):
     for k,v in trans.items():
 
         c=Counter(v)
-
         total=sum(c.values())
 
         probs[k]={i:c.get(i,0)/total for i in [1,2,3,4]}
@@ -98,31 +80,36 @@ def markov(g):
 markov_matrix=markov(groups)
 
 
-# ---------------- EDGE DETECT ----------------
+# ---------- edge detection ----------
 
 def detect_edge(g):
 
     score={1:0,2:0,3:0,4:0}
+    edge=""
 
     # streak
     if len(g)>=3 and g[-1]==g[-2]==g[-3]:
 
         for i in [1,2,3,4]:
-
             if i!=g[-1]:
+                score[i]+=0.6
 
-                score[i]+=0.3
+        edge="streak"
 
     # imbalance
-    if len(g)>=40:
+    if len(g)>=25:
 
-        window=g[-40:]
-
+        window=g[-25:]
         c=Counter(window)
 
         for i in [1,2,3,4]:
 
-            score[i]+=max(0,(10-c.get(i,0)))*0.02
+            diff=max(0,6-c.get(i,0))
+
+            score[i]+=diff*0.08
+
+            if diff>0:
+                edge="imbalance"
 
     # markov
     last=g[-1]
@@ -131,30 +118,31 @@ def detect_edge(g):
 
         for i,p in markov_matrix[last].items():
 
-            score[i]+=p*0.3
+            if p>0.33:
+
+                score[i]+=0.4
+                edge="markov"
 
     best=max(score,key=score.get)
-
     strength=score[best]
 
-    if strength>0.35:
+    if strength>0.55:
 
-        return best,strength
+        return best,strength,edge
 
-    return None,None
+    return None,0,""
 
 
-# ---------------- BACKTEST ----------------
+# ---------- backtest ----------
 
 profit=0
-
 history=[]
 
-for i in range(60,len(groups)-1):
+for i in range(80,len(groups)-1):
 
     g=groups[:i]
 
-    pred,strength=detect_edge(g)
+    pred,strength,edge=detect_edge(g)
 
     hit=False
 
@@ -181,10 +169,9 @@ for i in range(60,len(groups)-1):
 hist=pd.DataFrame(history)
 
 
-# ---------------- METRICS ----------------
+# ---------- metrics ----------
 
 trades=len(hist[hist.pred.notna()])
-
 wins=len(hist[hist.hit==True])
 
 wr=wins/trades if trades else 0
@@ -194,9 +181,9 @@ ev=wr*2.5-(1-wr)*1
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
 
-# ---------------- UI ----------------
+# ---------- UI ----------
 
-st.title("🚀 V21 QUANT ENGINE")
+st.title("🚀 V23 REAL EDGE ENGINE")
 
 
 col1,col2,col3,col4=st.columns(4)
@@ -214,47 +201,29 @@ col6.metric("Drawdown",round(drawdown,2))
 col7.metric("Entropy",round(ent,3))
 
 
-# ---------------- NEXT GROUP ----------------
+# ---------- next group ----------
 
 st.subheader("Next Group")
 
-pred,strength=detect_edge(groups)
+pred,strength,edge=detect_edge(groups)
 
 if pred:
 
-    st.success(f"BET → {pred}  (strength {round(strength,2)})")
+    st.success(f"BET → {pred} | strength {round(strength,2)} | edge {edge}")
 
 else:
 
     st.info("SKIP")
 
 
-# ---------------- DISTRIBUTION ----------------
-
-st.subheader("Group Distribution")
-
-st.dataframe(dist_df)
-
-st.bar_chart(dist_df.set_index("group")["ratio"])
-
-
-# ---------------- MARKOV ----------------
-
-st.subheader("Markov Transition")
-
-mk=pd.DataFrame(markov_matrix).T
-
-st.dataframe(mk)
-
-
-# ---------------- EQUITY ----------------
+# ---------- equity ----------
 
 st.subheader("Equity Curve")
 
 st.line_chart(hist.profit)
 
 
-# ---------------- HISTORY ----------------
+# ---------- history ----------
 
 st.subheader("Trade History")
 
