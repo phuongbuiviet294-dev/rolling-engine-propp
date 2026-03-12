@@ -7,18 +7,14 @@ DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_V
 LOOKBACK=26
 GAP=4
 
-WINDOWS=range(6,19)
-
-TRAIN_SMALL=400
-TRAIN_LARGE=1000
+WINDOWS=[6,8,10,12,15,18]
 
 WIN=2.5
 LOSS=1
 
 WR_THRESHOLD=0.29
-LOCK_PROFIT=10
 
-RESET_LOSS_STREAK=4
+RESET_LOSS=4
 
 st.set_page_config(layout="wide")
 
@@ -43,21 +39,20 @@ def load():
 
     return df["number"].dropna().astype(int).tolist()
 
-
 numbers=load()
 
 # ---------------- WR ----------------
 
-def calc_wr(nums,i,window):
+def calc_wr(nums,i,w):
 
     rec=[]
 
-    for j in range(max(window,i-LOOKBACK),i):
+    for j in range(max(w,i-LOOKBACK),i):
 
-        if j>=window:
+        if j>=w:
 
             rec.append(
-                group(nums[j])==group(nums[j-window])
+                group(nums[j])==group(nums[j-w])
             )
 
     if len(rec)<12:
@@ -65,12 +60,11 @@ def calc_wr(nums,i,window):
 
     return np.mean(rec)
 
-
 # ---------------- SIGNAL ----------------
 
-def get_signal(nums,i,window):
+def window_signal(nums,i,w):
 
-    wr=calc_wr(nums,i,window)
+    wr=calc_wr(nums,i,w)
 
     if wr<WR_THRESHOLD:
         return None
@@ -80,7 +74,7 @@ def get_signal(nums,i,window):
     if ev<=0:
         return None
 
-    g=group(nums[i-window])
+    g=group(nums[i-w])
 
     if group(nums[i-1])!=g:
 
@@ -88,48 +82,32 @@ def get_signal(nums,i,window):
 
     return None
 
+# ---------------- VOTING ----------------
 
-# ---------------- WINDOW SEARCH ----------------
+def voting_signal(nums,i):
 
-def find_window(train):
-
-    best=None
-    best_profit=-999
+    votes=[]
 
     for w in WINDOWS:
 
-        profit=0
-        next_signal=None
-        last_trade=-999
+        if i>w:
 
-        for i in range(len(train)):
+            sig=window_signal(nums,i,w)
 
-            g=group(train[i])
+            if sig:
 
-            if next_signal is not None:
+                votes.append(sig)
 
-                hit=(g==next_signal)
+    if len(votes)<3:
+        return None,len(votes)
 
-                profit+=WIN if hit else -LOSS
+    g=max(set(votes),key=votes.count)
 
-                next_signal=None
-                last_trade=i
+    if votes.count(g)>=3:
 
-            if i-last_trade>=GAP and i>LOOKBACK:
+        return g,len(votes)
 
-                sig=get_signal(train,i,w)
-
-                if sig:
-
-                    next_signal=sig
-
-        if profit>best_profit:
-
-            best_profit=profit
-            best=w
-
-    return best,best_profit
-
+    return None,len(votes)
 
 # ---------------- ENGINE ----------------
 
@@ -138,33 +116,12 @@ equity=[]
 history=[]
 hits=[]
 
-window=None
-next_signal=None
-
-last_trade=-999
 loss_streak=0
-
-train_size=TRAIN_SMALL
+next_signal=None
+last_trade=-999
+strength=0
 
 for i in range(len(numbers)):
-
-    # -------- TRAIN --------
-
-    if window is None and i>train_size:
-
-        train=numbers[i-train_size:i]
-
-        w,p=find_window(train)
-
-        if p<LOCK_PROFIT and train_size==TRAIN_SMALL:
-
-            train_size=TRAIN_LARGE
-            continue
-
-        window=w
-
-        loss_streak=0
-
 
     n=numbers[i]
     g=group(n)
@@ -173,9 +130,9 @@ for i in range(len(numbers)):
     hit=None
     state="SCAN"
 
-    # -------- TRADE --------
+    # TRADE
 
-    if next_signal is not None and window is not None:
+    if next_signal is not None:
 
         predicted=next_signal
 
@@ -195,12 +152,11 @@ for i in range(len(numbers)):
         next_signal=None
         last_trade=i
 
+    # SIGNAL
 
-    # -------- SIGNAL --------
+    if i-last_trade>=GAP and i>LOOKBACK:
 
-    if window is not None and i-last_trade>=GAP and i>LOOKBACK:
-
-        sig=get_signal(numbers,i,window)
+        sig,strength=voting_signal(numbers,i)
 
         if sig:
 
@@ -208,17 +164,13 @@ for i in range(len(numbers)):
 
             state="SIGNAL"
 
+    # RESET
 
-    # -------- RESET --------
+    if loss_streak>=RESET_LOSS:
 
-    if loss_streak>=RESET_LOSS_STREAK:
-
-        window=None
         next_signal=None
         last_trade=-999
-        train_size=TRAIN_SMALL
         loss_streak=0
-
 
     equity.append(profit)
 
@@ -230,7 +182,7 @@ for i in range(len(numbers)):
         "predicted":predicted,
         "hit":hit,
         "profit":profit,
-        "window":window,
+        "votes":strength,
         "state":state
 
     })
@@ -253,10 +205,9 @@ drawdown=(peak-equity_np).max()
 
 trades=len(hits)
 
-
 # ---------------- DASHBOARD ----------------
 
-st.title("🚀 QUANT BETTING ENGINE V5")
+st.title("🚀 QUANT ENGINE V6")
 
 c1,c2,c3=st.columns(3)
 
@@ -268,26 +219,18 @@ c4,c5,c6=st.columns(3)
 
 c4.metric("Drawdown",round(drawdown,2))
 c5.metric("Trades",trades)
-c6.metric("Window Locked",window)
+c6.metric("Signal Strength",strength)
 
-st.caption(f"Lookback={LOOKBACK} | Gap={GAP}")
-
-
-# ---------------- NEXT GROUP ----------------
+# NEXT GROUP
 
 st.subheader("Next Group")
 
 if next_signal:
 
     st.markdown(f"""
-    <div style='padding:20px;
-                background:#c62828;
-                color:white;
-                border-radius:12px;
-                text-align:center;
-                font-size:30px;
-                font-weight:bold'>
-        NEXT GROUP → {next_signal}
+    <div style='padding:20px;background:#c62828;color:white;
+    border-radius:12px;text-align:center;font-size:32px'>
+    NEXT GROUP → {next_signal}
     </div>
     """,unsafe_allow_html=True)
 
@@ -295,15 +238,13 @@ else:
 
     st.info("Scanning...")
 
-
-# ---------------- EQUITY ----------------
+# EQUITY
 
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"profit":equity}))
 
-
-# ---------------- HISTORY ----------------
+# HISTORY
 
 st.subheader("History")
 
