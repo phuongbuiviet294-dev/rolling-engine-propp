@@ -10,11 +10,14 @@ WINDOWS=range(8,13)
 LOOKBACKS=range(18,33)
 GAPS=[3,4,5]
 
-TRAIN_SIZE=400
-STEP=400
+TRAIN_SIZE=1000
 
 WIN=2.5
 LOSS=1
+
+TARGET_PROFIT=50
+MAX_DRAWDOWN=20
+LOSS_STREAK_LIMIT=5
 
 st.set_page_config(layout="wide")
 
@@ -34,7 +37,6 @@ def group(n):
 def load():
 
     df=pd.read_csv(DATA_URL)
-
     df.columns=[c.strip().lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
@@ -43,7 +45,7 @@ def load():
 numbers=load()
 
 
-# ================= EDGE FUNCTION =================
+# ================= EDGE =================
 
 def calc_wr(nums,i,W,LB):
 
@@ -63,11 +65,14 @@ def calc_wr(nums,i,W,LB):
     return np.mean(rec)
 
 
-# ================= BACKTEST CONFIG =================
+# ================= SIMULATION =================
 
 def simulate(nums,W,LB,GAP):
 
     profit=0
+    trades=0
+    hits=[]
+
     next_signal=None
     last_trade=-999
 
@@ -80,6 +85,8 @@ def simulate(nums,W,LB,GAP):
             hit=1 if g==next_signal else 0
 
             profit+=WIN if hit else -LOSS
+            trades+=1
+            hits.append(hit)
 
             next_signal=None
             last_trade=i
@@ -98,78 +105,96 @@ def simulate(nums,W,LB,GAP):
 
                     next_signal=g1
 
-    return profit
+    wins=hits.count(1)*WIN
+    losses=hits.count(0)*LOSS
+
+    pf=wins/losses if losses>0 else 0
+
+    return profit,pf,trades
 
 
 # ================= FIND BEST CONFIG =================
 
-def find_best(train):
+def find_config(train):
 
-    best_profit=-999
-    best_cfg=(9,26,4)
+    best=None
+    best_pf=0
 
     for W in WINDOWS:
         for LB in LOOKBACKS:
             for G in GAPS:
 
-                p=simulate(train,W,LB,G)
+                profit,pf,trades=simulate(train,W,LB,G)
 
-                if p>best_profit:
+                if profit>=15 and pf>best_pf and trades>=20:
 
-                    best_profit=p
-                    best_cfg=(W,LB,G)
+                    best_pf=pf
+                    best=(W,LB,G)
 
-    return best_cfg
+    return best
 
 
-# ================= WALK FORWARD ENGINE =================
+# ================= ENGINE =================
 
 profit=0
 equity=[]
 history=[]
-hits=[]
 
+cycle_profit=0
+peak_cycle=0
+loss_streak=0
+
+config=None
 next_signal=None
 last_trade=-999
 
-current_cfg=(9,26,4)
+for i,n in enumerate(numbers):
 
-for start in range(TRAIN_SIZE,len(numbers),STEP):
+    # ===== TRAIN =====
 
-    train=numbers[:start]
+    if config is None and i>=TRAIN_SIZE:
 
-    current_cfg=find_best(train)
+        train=numbers[i-TRAIN_SIZE:i]
 
-    W,LB,GAP=current_cfg
+        config=find_config(train)
 
-    end=min(start+STEP,len(numbers))
+        cycle_profit=0
+        peak_cycle=0
+        loss_streak=0
 
-    segment=numbers[start:end]
 
-    for j,n in enumerate(segment):
+    g=group(n)
 
-        i=start+j
+    predicted=None
+    hit=None
+    state="SCAN"
 
-        g=group(n)
+    if next_signal is not None:
 
-        predicted=None
-        hit=None
-        state="SCAN"
+        predicted=next_signal
 
-        if next_signal is not None:
+        hit=1 if g==predicted else 0
 
-            predicted=next_signal
+        p=WIN if hit else -LOSS
 
-            hit=1 if g==predicted else 0
+        profit+=p
+        cycle_profit+=p
 
-            profit+=WIN if hit else -LOSS
+        if hit==0:
+            loss_streak+=1
+        else:
+            loss_streak=0
 
-            hits.append(hit)
+        peak_cycle=max(peak_cycle,cycle_profit)
 
-            next_signal=None
-            last_trade=i
+        next_signal=None
+        last_trade=i
 
-            state="TRADE"
+        state="TRADE"
+
+    if config:
+
+        W,LB,GAP=config
 
         if i-last_trade>=GAP and i>LB:
 
@@ -186,59 +211,51 @@ for start in range(TRAIN_SIZE,len(numbers),STEP):
                     next_signal=g1
                     state="SIGNAL"
 
-        equity.append(profit)
 
-        history.append({
+    # ===== RESET RULES =====
 
-            "round":i+1,
-            "number":n,
-            "group":g,
-            "predicted":predicted,
-            "hit":hit,
-            "state":state,
-            "profit":profit,
-            "window":W,
-            "lookback":LB,
-            "gap":GAP
+    if config:
 
-        })
+        if cycle_profit>=TARGET_PROFIT:
+
+            config=None
+
+        if peak_cycle-cycle_profit>=MAX_DRAWDOWN:
+
+            config=None
+
+        if loss_streak>=LOSS_STREAK_LIMIT:
+
+            config=None
 
 
-# ================= METRICS =================
+    equity.append(profit)
 
-wr=np.mean(hits) if hits else 0
+    history.append({
 
-wins=hits.count(1)*WIN
-loss=hits.count(0)*LOSS
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "profit":profit,
+        "state":state,
+        "config":config
 
-pf=wins/loss if loss else 0
-
-peak=max(equity) if equity else 0
-dd=peak-equity[-1] if equity else 0
+    })
 
 
 # ================= DASHBOARD =================
 
-st.title("🚀 WALK FORWARD LIVE ENGINE")
+st.title("🚀 ADAPTIVE QUANT ENGINE")
 
-c1,c2,c3=st.columns(3)
+st.metric("Total Profit",round(profit,2))
 
-c1.metric("Profit",round(profit,2))
-c2.metric("Winrate %",round(wr*100,2))
-c3.metric("Profit Factor",round(pf,2))
-
-c4,c5=st.columns(2)
-
-c4.metric("Drawdown",round(dd,2))
-c5.metric("Trades",len(hits))
+st.line_chart(pd.DataFrame({"equity":equity}))
 
 st.subheader("Current Config")
 
-st.write(current_cfg)
-
-st.subheader("Equity Curve")
-
-st.line_chart(pd.DataFrame({"equity":equity}))
+st.write(config)
 
 st.subheader("Next Group")
 
