@@ -2,181 +2,188 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ================= CONFIG =================
-GOOGLE_SHEET_CSV = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-AUTO_REFRESH = 5
-WIN_PROFIT = 2.5
-LOSE_LOSS = 1
+WIN=2.5
+LOSS=1
 
-WINDOWS = [9,15]
-LOOKBACK_RANGE = range(18,41)
-GAP_RANGE = range(2,7)
-
-LOCK_ROUND = 3662   # ✅ mốc khóa thực chiến
-
-STOPLOSS_STREAK = 5
-PAUSE_AFTER_SL = 3
+LOOKBACK=26
+GAP=4
+WINDOW=9
 
 st.set_page_config(layout="wide")
+st.title("🚀 LIVE TRADING ENGINE")
 
-# ================= GROUP =================
-def get_group(n):
-    if 1 <= n <= 3: return 1
-    if 4 <= n <= 6: return 2
-    if 7 <= n <= 9: return 3
-    if 10 <= n <= 12: return 4
-    return None
+# -------------------------
+# GROUP
+# -------------------------
 
-# ================= LOAD =================
-@st.cache_data(ttl=AUTO_REFRESH)
+def group(n):
+
+    if n<=3:return 1
+    if n<=6:return 2
+    if n<=9:return 3
+    return 4
+
+# -------------------------
+# LOAD DATA
+# -------------------------
+
+@st.cache_data(ttl=10)
 def load():
-    df = pd.read_csv(GOOGLE_SHEET_CSV)
+
+    df=pd.read_csv(DATA_URL)
+
     df.columns=[c.strip().lower() for c in df.columns]
-    return df
 
-df = load()
-numbers = df["number"].dropna().astype(int).tolist()
+    return df["number"].dropna().astype(int).tolist()
 
-# ================= CORE ENGINE =================
-def simulate(numbers, LOOKBACK, GAP, WINDOW):
-    total_profit = 0
-    engine=[]
-    next_signal=None
-    last_trade_round=-999
-    loss_streak=0
-    pause=0
+numbers=load()
 
-    for i,n in enumerate(numbers):
-        g=get_group(n)
+# -------------------------
+# ENGINE
+# -------------------------
 
-        predicted=None
-        hit=None
-        state="SCAN"
+profit=0
+engine=[]
+next_signal=None
+last_trade=-999
 
-        # ===== STOPLOSS PAUSE =====
-        if pause>0:
-            state="PAUSE"
-            pause-=1
-        else:
+for i,n in enumerate(numbers):
 
-            # ===== EXECUTE =====
-            if next_signal is not None:
-                predicted=next_signal
-                hit=1 if predicted==g else 0
-                total_profit += WIN_PROFIT if hit else -LOSE_LOSS
-                state="TRADE"
-                last_trade_round=i
-                next_signal=None
+    g=group(n)
 
-                if hit==0:
-                    loss_streak+=1
-                    if loss_streak>=STOPLOSS_STREAK:
-                        state="STOPLOSS"
-                        pause=PAUSE_AFTER_SL
-                        loss_streak=0
-                else:
-                    loss_streak=0
+    predicted=None
+    hit=None
+    state="SCAN"
 
-            # ===== SIGNAL =====
-            if len(engine)>=40 and i-last_trade_round>GAP:
-                recent=[]
-                start=max(WINDOW,len(engine)-LOOKBACK)
-                for j in range(start,len(engine)):
-                    if j>=WINDOW:
-                        recent.append(
-                            1 if engine[j]["group"]==engine[j-WINDOW]["group"] else 0
-                        )
-                if len(recent)>=20:
-                    wr=np.mean(recent)
-                    ev=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
-                    if wr>0.30 and ev>0:
-                        g1=engine[-WINDOW]["group"]
-                        if engine[-1]["group"]!=g1:
-                            next_signal=g1
-                            state="SIGNAL"
+    # execute trade
+    if next_signal is not None:
 
-        engine.append({
-            "round":i+1,
-            "number":n,
-            "group":g,
-            "predicted":predicted,
-            "hit":hit,
-            "state":state,
-            "profit":round(total_profit,2)
-        })
+        predicted=next_signal
 
-    return total_profit,engine,next_signal
+        hit=1 if predicted==g else 0
 
-# ================= BACKTEST → FIND BEST CONFIG =================
-best_profit=-999
-best_cfg=(26,4,9)
+        profit += WIN if hit else -LOSS
 
-train_numbers = numbers[:LOCK_ROUND]
+        state="TRADE"
 
-for LB in LOOKBACK_RANGE:
-    for GP in GAP_RANGE:
-        for W in WINDOWS:
-            p,_,_=simulate(train_numbers,LB,GP,W)
-            if p>best_profit:
-                best_profit=p
-                best_cfg=(LB,GP,W)
+        last_trade=i
+        next_signal=None
 
-LOCK_LB,LOCK_GP,LOCK_W = best_cfg
+    # signal scan
+    if i-last_trade>GAP and i>LOOKBACK:
 
-# ================= LIVE SIMULATION =================
-live_numbers = numbers[LOCK_ROUND:]
+        seq=[]
 
-live_profit,live_engine,next_signal = simulate(
-    live_numbers,LOCK_LB,LOCK_GP,LOCK_W
-)
+        start=max(WINDOW,i-LOOKBACK)
 
-# ================= METRICS =================
-hits=[x["hit"] for x in live_engine if x["hit"] is not None]
+        for j in range(start,i):
+
+            if j>=WINDOW:
+
+                seq.append(
+                    1 if group(numbers[j])==group(numbers[j-WINDOW]) else 0
+                )
+
+        if len(seq)>10:
+
+            wr=np.mean(seq)
+
+            ev=wr*WIN-(1-wr)*LOSS
+
+            if ev>0:
+
+                g1=group(numbers[i-WINDOW])
+
+                if group(numbers[i-1])!=g1:
+
+                    next_signal=g1
+                    state="SIGNAL"
+
+    engine.append({
+
+        "round":i+1,
+        "number":n,
+        "group":g,
+        "predicted":predicted,
+        "hit":hit,
+        "state":state,
+        "profit":profit
+
+    })
+
+# -------------------------
+# METRICS
+# -------------------------
+
+hits=[x["hit"] for x in engine if x["hit"]!=None]
+
 wr=np.mean(hits) if hits else 0
 
-profits=[x["profit"] for x in live_engine]
+wins=hits.count(1)*WIN
+losses=hits.count(0)*LOSS
+
+pf=wins/losses if losses else 0
+
+profits=[x["profit"] for x in engine]
+
 peak=max(profits) if profits else 0
+
 dd=peak-profits[-1] if profits else 0
 
-wins=[WIN_PROFIT for x in hits if x==1]
-losses=[LOSE_LOSS for x in hits if x==0]
-
-pf=sum(wins)/sum(losses) if losses else 0
-exp=wr*WIN_PROFIT-(1-wr)*LOSE_LOSS
-
-# ================= UI =================
-st.title("🚀 LIVE TRADING ENGINE — NO REPAINT")
+# -------------------------
+# DASHBOARD
+# -------------------------
 
 c1,c2,c3=st.columns(3)
-c1.metric("Live Rounds",len(live_engine))
-c2.metric("Live Profit",round(profits[-1],2))
-c3.metric("Live Winrate %",round(wr*100,2))
 
-c4,c5,c6=st.columns(3)
-c4.metric("Peak Profit",round(peak,2))
-c5.metric("Drawdown",round(dd,2))
-c6.metric("Profit Factor",round(pf,2))
+c1.metric("Profit",round(profit,2))
+c2.metric("Winrate %",round(wr*100,2))
+c3.metric("Profit Factor",round(pf,2))
 
-c7,c8=st.columns(2)
-c7.metric("Expectancy",round(exp,3))
-c8.metric("Total Trades",len(hits))
+c4,c5=st.columns(2)
 
-st.caption(f"🔒 LOCKED @ Round {LOCK_ROUND} → Lookback={LOCK_LB} | Gap={LOCK_GP} | Window={LOCK_W}")
+c4.metric("Drawdown",round(dd,2))
+c5.metric("Trades",len(hits))
 
-# ================= NEXT SIGNAL =================
+# -------------------------
+# SIGNAL
+# -------------------------
+
 if next_signal:
-    st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;
-                border-radius:12px;text-align:center;font-size:28px;font-weight:bold'>
-        🚨 LIVE SIGNAL 🚨<br>
-        🎯 NEXT GROUP: {next_signal}
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    st.info("Scanning live...")
 
-# ================= HISTORY =================
-st.subheader("Live History (No Repaint)")
-hist=pd.DataFrame(live_engine)
+    st.markdown(
+
+        f"""
+        <div style='padding:25px;background:#c62828;color:white;
+        border-radius:12px;text-align:center;font-size:30px;font-weight:bold'>
+        NEXT GROUP: {next_signal}
+        </div>
+        """,
+
+        unsafe_allow_html=True
+
+    )
+
+else:
+
+    st.info("Scanning...")
+
+# -------------------------
+# EQUITY
+# -------------------------
+
+st.subheader("Equity Curve")
+
+st.line_chart(pd.DataFrame(profits))
+
+# -------------------------
+# HISTORY
+# -------------------------
+
+st.subheader("History")
+
+hist=pd.DataFrame(engine)
+
 st.dataframe(hist.iloc[::-1],use_container_width=True)
