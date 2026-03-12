@@ -51,12 +51,12 @@ ent=entropy(analysis)
 def threshold(ent):
 
     if ent<1.97:
-        return 0.42,"strong"
+        return 0.42,"bias"
 
     if ent<1.99:
-        return 0.36,"medium"
+        return 0.38,"medium"
 
-    return 0.32,"random"
+    return 0.40,"random"
 
 
 # ---------- pattern ----------
@@ -139,30 +139,36 @@ def streak_edge(g):
 # ---------- detect ----------
 def detect_edge(g):
 
+    votes={}
     score={1:0,2:0,3:0,4:0}
 
-    p,sp=pattern_edge(g)
-    m,sm=markov_edge(g)
-    i,si=imbalance_edge(g)
-    s,ss=streak_edge(g)
+    edges=[pattern_edge,markov_edge,imbalance_edge,streak_edge]
 
-    if p:score[p]+=sp*0.35
-    if m:score[m]+=sm*0.30
-    if i:score[i]+=si*0.20
-    if s:score[s]+=ss*0.15
+    for fn in edges:
+
+        p,s=fn(g)
+
+        if p:
+
+            votes[p]=votes.get(p,0)+1
+            score[p]+=s
 
     ranked=sorted(score.items(),key=lambda x:x[1],reverse=True)
 
     best,strength=ranked[0]
     second=ranked[1][1]
 
+    vote=votes.get(best,0)
+
     th,reg=threshold(ent)
 
-    if strength>th and (strength-second)>0.05:
+    gap=strength-second
 
-        return best,strength,reg
+    if vote>=2 and strength>th and gap>0.07:
 
-    return None,0,reg
+        return best,strength,reg,vote,gap
+
+    return None,0,reg,vote,gap
 
 
 # ---------- backtest ----------
@@ -173,7 +179,7 @@ for i in range(200,len(groups)-1):
 
     g=groups[max(0,i-200):i]
 
-    pred,strength,reg=detect_edge(g)
+    pred,strength,reg,vote,gap=detect_edge(g)
 
     hit=False
 
@@ -195,7 +201,9 @@ for i in range(200,len(groups)-1):
         "hit":hit,
         "profit":profit,
         "strength":strength,
-        "regime":reg
+        "regime":reg,
+        "vote":vote,
+        "gap":gap
     })
 
 hist=pd.DataFrame(history)
@@ -212,7 +220,7 @@ drawdown=(hist.profit.cummax()-hist.profit).max()
 
 
 # ---------- UI ----------
-st.title("🚀 V29 AI EDGE ENGINE")
+st.title("🚀 V30 PRO EDGE ENGINE")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -231,11 +239,11 @@ c7.metric("Entropy",round(ent,3))
 # ---------- next group ----------
 st.subheader("Next Group")
 
-pred,strength,reg=detect_edge(analysis)
+pred,strength,reg,vote,gap=detect_edge(analysis)
 
 if pred:
 
-    st.success(f"BET → {pred} | strength {round(strength,2)} | regime {reg}")
+    st.success(f"BET → {pred} | strength {round(strength,2)} | vote {vote} | regime {reg}")
 
 else:
 
