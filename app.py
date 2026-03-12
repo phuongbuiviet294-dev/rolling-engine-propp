@@ -15,8 +15,8 @@ GAPS=[4,5]
 WIN=2.5
 LOSS=1
 
-CONF_THRESHOLD=0.33
-ENTROPY_THRESHOLD=1.32
+CONF_THRESHOLD=0.30
+ENTROPY_THRESHOLD=1.45
 
 st.set_page_config(layout="wide")
 
@@ -54,7 +54,7 @@ def entropy(groups):
     return -np.sum(p*np.log2(p+1e-9))
 
 
-# ================= SIM ENGINE =================
+# ================= SIMULATE =================
 
 def simulate(nums,LB,GAP,W):
 
@@ -69,7 +69,6 @@ def simulate(nums,LB,GAP,W):
         if next_signal is not None:
 
             hit=1 if next_signal==g else 0
-
             profit+=WIN if hit else -LOSS
 
             next_signal=None
@@ -135,15 +134,11 @@ hits=[]
 next_signal=None
 last_trade=-999
 
-configs=[]
-
 for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
     train=numbers[:i]
 
     LB,GP,W=find_best(train)
-
-    configs.append((i,LB,GP,W))
 
     end=min(i+TRAIN_STEP,len(numbers))
 
@@ -159,19 +154,22 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
         hit=None
         state="SCAN"
 
-        # REGIME CHECK
-        recent_groups=[group(x) for x in numbers[max(0,idx-50):idx]]
+        # -------- REGIME CHECK --------
 
-        if len(recent_groups)>10:
+        recent=[group(x) for x in numbers[max(0,idx-30):idx]]
 
-            ent=entropy(recent_groups)
+        if len(recent)>10:
+
+            ent=entropy(recent)
 
             if ent>ENTROPY_THRESHOLD:
 
                 state="RANDOM"
+
                 equity.append(profit)
 
                 history.append({
+
                     "round":idx+1,
                     "number":n,
                     "group":g,
@@ -183,6 +181,7 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
                 continue
 
+        # -------- EXECUTE TRADE --------
 
         if next_signal is not None:
 
@@ -199,6 +198,7 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
             state="TRADE"
 
+        # -------- SIGNAL --------
 
         if idx-last_trade>GP and idx>LB:
 
@@ -226,7 +226,6 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
 
                         next_signal=g1
                         state="SIGNAL"
-
 
         equity.append(profit)
 
