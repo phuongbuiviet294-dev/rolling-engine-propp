@@ -7,7 +7,7 @@ DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_V
 LOOKBACK=26
 GAP=4
 
-WINDOWS=[6,8,10,12,15,18]
+WINDOWS=range(6,19)
 
 WIN=2.5
 LOSS=1
@@ -51,18 +51,16 @@ def calc_wr(nums,i,w):
 
         if j>=w:
 
-            rec.append(
-                group(nums[j])==group(nums[j-w])
-            )
+            rec.append(group(nums[j])==group(nums[j-w]))
 
     if len(rec)<12:
         return 0
 
     return np.mean(rec)
 
-# ---------------- SIGNAL ----------------
+# ---------------- WINDOW SCORE ----------------
 
-def window_signal(nums,i,w):
+def window_score(nums,i,w):
 
     wr=calc_wr(nums,i,w)
 
@@ -74,40 +72,49 @@ def window_signal(nums,i,w):
     if ev<=0:
         return None
 
+    score=wr*ev
+
     g=group(nums[i-w])
 
-    if group(nums[i-1])!=g:
+    if group(nums[i-1])==g:
+        return None
 
-        return g
+    return g,score
 
-    return None
+# ---------------- DISCOVER WINDOWS ----------------
 
-# ---------------- VOTING ----------------
+def discover_windows(nums,i):
 
-def voting_signal(nums,i):
-
-    votes=[]
+    results=[]
 
     for w in WINDOWS:
 
         if i>w:
 
-            sig=window_signal(nums,i,w)
+            r=window_score(nums,i,w)
 
-            if sig:
+            if r:
 
-                votes.append(sig)
+                g,s=r
 
-    if len(votes)<3:
-        return None,len(votes)
+                results.append((w,g,s))
+
+    if len(results)==0:
+        return None,0
+
+    results=sorted(results,key=lambda x:x[2],reverse=True)
+
+    top=results[:3]
+
+    votes=[x[1] for x in top]
 
     g=max(set(votes),key=votes.count)
 
-    if votes.count(g)>=3:
+    if votes.count(g)>=2:
 
-        return g,len(votes)
+        return g,len(top)
 
-    return None,len(votes)
+    return None,len(top)
 
 # ---------------- ENGINE ----------------
 
@@ -156,7 +163,7 @@ for i in range(len(numbers)):
 
     if i-last_trade>=GAP and i>LOOKBACK:
 
-        sig,strength=voting_signal(numbers,i)
+        sig,strength=discover_windows(numbers,i)
 
         if sig:
 
@@ -182,7 +189,7 @@ for i in range(len(numbers)):
         "predicted":predicted,
         "hit":hit,
         "profit":profit,
-        "votes":strength,
+        "strength":strength,
         "state":state
 
     })
@@ -207,7 +214,7 @@ trades=len(hits)
 
 # ---------------- DASHBOARD ----------------
 
-st.title("🚀 QUANT ENGINE V6")
+st.title("🚀 QUANT ENGINE V7")
 
 c1,c2,c3=st.columns(3)
 
@@ -220,8 +227,6 @@ c4,c5,c6=st.columns(3)
 c4.metric("Drawdown",round(drawdown,2))
 c5.metric("Trades",trades)
 c6.metric("Signal Strength",strength)
-
-# NEXT GROUP
 
 st.subheader("Next Group")
 
@@ -238,13 +243,9 @@ else:
 
     st.info("Scanning...")
 
-# EQUITY
-
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"profit":equity}))
-
-# HISTORY
 
 st.subheader("History")
 
