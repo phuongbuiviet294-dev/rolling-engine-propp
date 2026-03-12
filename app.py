@@ -14,11 +14,11 @@ LOSS=1
 
 WR_THRESHOLD=0.29
 
-RESET_LOSS=4
+TREND_CONFIRM=10
+TREND_LOSS=4
+TREND_PEAK=50
 
 st.set_page_config(layout="wide")
-
-# ---------------- GROUP ----------------
 
 def group(n):
 
@@ -28,20 +28,16 @@ def group(n):
     return 4
 
 
-# ---------------- LOAD ----------------
-
 @st.cache_data(ttl=5)
 def load():
 
     df=pd.read_csv(DATA_URL)
-
     df.columns=[c.strip().lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
 
-# ---------------- WR ----------------
 
 def calc_wr(nums,i,w):
 
@@ -58,75 +54,43 @@ def calc_wr(nums,i,w):
 
     return np.mean(rec)
 
-# ---------------- WINDOW SCORE ----------------
 
-def window_score(nums,i,w):
+def scan_window(nums,i):
 
-    wr=calc_wr(nums,i,w)
-
-    if wr<WR_THRESHOLD:
-        return None
-
-    ev=wr*WIN-(1-wr)*LOSS
-
-    if ev<=0:
-        return None
-
-    score=wr*ev
-
-    g=group(nums[i-w])
-
-    if group(nums[i-1])==g:
-        return None
-
-    return g,score
-
-# ---------------- DISCOVER WINDOWS ----------------
-
-def discover_windows(nums,i):
-
-    results=[]
+    best=None
+    best_score=0
 
     for w in WINDOWS:
 
         if i>w:
 
-            r=window_score(nums,i,w)
+            wr=calc_wr(nums,i,w)
 
-            if r:
+            ev=wr*WIN-(1-wr)*LOSS
 
-                g,s=r
+            if wr>WR_THRESHOLD and ev>0:
 
-                results.append((w,g,s))
+                score=wr*ev
 
-    if len(results)==0:
-        return None,0
+                if score>best_score:
 
-    results=sorted(results,key=lambda x:x[2],reverse=True)
+                    best_score=score
+                    best=w
 
-    top=results[:3]
+    return best
 
-    votes=[x[1] for x in top]
-
-    g=max(set(votes),key=votes.count)
-
-    if votes.count(g)>=2:
-
-        return g,len(top)
-
-    return None,len(top)
-
-# ---------------- ENGINE ----------------
 
 profit=0
 equity=[]
 history=[]
 hits=[]
 
-loss_streak=0
+locked_window=None
 next_signal=None
-last_trade=-999
-strength=0
+
+loss_streak=0
+
+trend_active=False
 
 for i in range(len(numbers)):
 
@@ -136,8 +100,6 @@ for i in range(len(numbers)):
     predicted=None
     hit=None
     state="SCAN"
-
-    # TRADE
 
     if next_signal is not None:
 
@@ -157,26 +119,37 @@ for i in range(len(numbers)):
         state="TRADE"
 
         next_signal=None
-        last_trade=i
 
-    # SIGNAL
+    if locked_window is None:
 
-    if i-last_trade>=GAP and i>LOOKBACK:
+        w=scan_window(numbers,i)
 
-        sig,strength=discover_windows(numbers,i)
+        if w:
 
-        if sig:
+            locked_window=w
 
-            next_signal=sig
+    if locked_window and i>locked_window:
 
-            state="SIGNAL"
+        g_pred=group(numbers[i-locked_window])
 
-    # RESET
+        if group(numbers[i-1])!=g_pred:
 
-    if loss_streak>=RESET_LOSS:
+            next_signal=g_pred
 
-        next_signal=None
-        last_trade=-999
+    if profit>=TREND_CONFIRM:
+
+        trend_active=True
+
+    if trend_active and loss_streak>=TREND_LOSS:
+
+        locked_window=None
+        trend_active=False
+        loss_streak=0
+
+    if profit>=TREND_PEAK:
+
+        locked_window=None
+        trend_active=False
         loss_streak=0
 
     equity.append(profit)
@@ -189,19 +162,16 @@ for i in range(len(numbers)):
         "predicted":predicted,
         "hit":hit,
         "profit":profit,
-        "strength":strength,
+        "window":locked_window,
         "state":state
 
     })
 
 
-# ---------------- ANALYTICS ----------------
-
 wins=hits.count(True)*WIN
 losses=hits.count(False)*LOSS
 
 pf=wins/losses if losses else 0
-
 wr=sum(hits)/len(hits) if hits else 0
 
 equity_np=np.array(equity)
@@ -212,9 +182,8 @@ drawdown=(peak-equity_np).max()
 
 trades=len(hits)
 
-# ---------------- DASHBOARD ----------------
 
-st.title("🚀 QUANT ENGINE V7")
+st.title("🚀 QUANT ENGINE V8")
 
 c1,c2,c3=st.columns(3)
 
@@ -226,7 +195,7 @@ c4,c5,c6=st.columns(3)
 
 c4.metric("Drawdown",round(drawdown,2))
 c5.metric("Trades",trades)
-c6.metric("Signal Strength",strength)
+c6.metric("Window Locked",locked_window)
 
 st.subheader("Next Group")
 
