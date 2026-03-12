@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# ================= CONFIG =================
-
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 TRAIN_STEP=400
@@ -16,11 +14,8 @@ WIN=2.5
 LOSS=1
 
 CONF_THRESHOLD=0.30
-ENTROPY_THRESHOLD=1.45
 
 st.set_page_config(layout="wide")
-
-# ================= GROUP =================
 
 def group(n):
 
@@ -30,13 +25,10 @@ def group(n):
     return 4
 
 
-# ================= LOAD =================
-
 @st.cache_data(ttl=5)
 def load():
 
     df=pd.read_csv(DATA_URL)
-
     df.columns=[c.strip().lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
@@ -44,17 +36,6 @@ def load():
 
 numbers=load()
 
-# ================= ENTROPY =================
-
-def entropy(groups):
-
-    counts=np.bincount(groups)[1:]
-    p=counts/np.sum(counts)
-
-    return -np.sum(p*np.log2(p+1e-9))
-
-
-# ================= SIMULATE =================
 
 def simulate(nums,LB,GAP,W):
 
@@ -69,6 +50,7 @@ def simulate(nums,LB,GAP,W):
         if next_signal is not None:
 
             hit=1 if next_signal==g else 0
+
             profit+=WIN if hit else -LOSS
 
             next_signal=None
@@ -103,8 +85,6 @@ def simulate(nums,LB,GAP,W):
     return profit
 
 
-# ================= FIND BEST CONFIG =================
-
 def find_best(train):
 
     best_profit=-999
@@ -123,8 +103,6 @@ def find_best(train):
 
     return best_cfg
 
-
-# ================= WALK FORWARD =================
 
 profit=0
 equity=[]
@@ -154,35 +132,6 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
         hit=None
         state="SCAN"
 
-        # -------- REGIME CHECK --------
-
-        recent=[group(x) for x in numbers[max(0,idx-30):idx]]
-
-        if len(recent)>10:
-
-            ent=entropy(recent)
-
-            if ent>ENTROPY_THRESHOLD:
-
-                state="RANDOM"
-
-                equity.append(profit)
-
-                history.append({
-
-                    "round":idx+1,
-                    "number":n,
-                    "group":g,
-                    "predicted":None,
-                    "hit":None,
-                    "state":state,
-                    "profit":profit
-                })
-
-                continue
-
-        # -------- EXECUTE TRADE --------
-
         if next_signal is not None:
 
             predicted=next_signal
@@ -197,8 +146,6 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
             last_trade=idx
 
             state="TRADE"
-
-        # -------- SIGNAL --------
 
         if idx-last_trade>GP and idx>LB:
 
@@ -242,8 +189,6 @@ for i in range(TRAIN_STEP,len(numbers),TRAIN_STEP):
         })
 
 
-# ================= METRICS =================
-
 wr=np.mean(hits) if hits else 0
 
 wins=hits.count(1)*WIN
@@ -251,11 +196,9 @@ loss=hits.count(0)*LOSS
 
 pf=wins/loss if loss else 0
 
-peak=max(equity) if equity else 0
-dd=peak-equity[-1] if equity else 0
+peak=max(equity)
+dd=peak-equity[-1]
 
-
-# ================= DASHBOARD =================
 
 st.title("🚀 QUANT WALK FORWARD ENGINE")
 
@@ -265,19 +208,10 @@ c1.metric("Profit",round(profit,2))
 c2.metric("Winrate %",round(wr*100,2))
 c3.metric("Profit Factor",round(pf,2))
 
-c4,c5=st.columns(2)
-
-c4.metric("Drawdown",round(dd,2))
-c5.metric("Trades",len(hits))
-
-st.subheader("Equity Curve")
+st.metric("Drawdown",round(dd,2))
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
-
-# ================= NEXT SIGNAL =================
-
-st.subheader("Next Group")
 
 if next_signal:
 
@@ -293,8 +227,4 @@ else:
     st.info("Scanning...")
 
 
-# ================= HISTORY =================
-
-st.subheader("History")
-
-st.dataframe(pd.DataFrame(history).iloc[::-1],use_container_width=True)
+st.dataframe(pd.DataFrame(history).iloc[::-1])
