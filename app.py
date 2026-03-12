@@ -20,6 +20,8 @@ TREND_PEAK=50
 
 st.set_page_config(layout="wide")
 
+# ---------------- GROUP ----------------
+
 def group(n):
 
     if n<=3:return 1
@@ -28,16 +30,21 @@ def group(n):
     return 4
 
 
+# ---------------- LOAD DATA ----------------
+
 @st.cache_data(ttl=5)
 def load():
 
     df=pd.read_csv(DATA_URL)
+
     df.columns=[c.strip().lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
 
+
+# ---------------- WR ----------------
 
 def calc_wr(nums,i,w):
 
@@ -54,6 +61,8 @@ def calc_wr(nums,i,w):
 
     return np.mean(rec)
 
+
+# ---------------- WINDOW SCAN ----------------
 
 def scan_window(nums,i):
 
@@ -80,6 +89,8 @@ def scan_window(nums,i):
     return best
 
 
+# ---------------- ENGINE ----------------
+
 profit=0
 equity=[]
 history=[]
@@ -88,8 +99,9 @@ hits=[]
 locked_window=None
 next_signal=None
 
-loss_streak=0
+last_trade=-999
 
+loss_streak=0
 trend_active=False
 
 for i in range(len(numbers)):
@@ -101,7 +113,9 @@ for i in range(len(numbers)):
     hit=None
     state="SCAN"
 
-    if next_signal is not None:
+    # ---------------- TRADE ----------------
+
+    if next_signal is not None and i-last_trade>=GAP:
 
         predicted=next_signal
 
@@ -111,34 +125,49 @@ for i in range(len(numbers)):
 
         hits.append(hit)
 
+        last_trade=i
+
         if hit:
             loss_streak=0
         else:
             loss_streak+=1
 
+        next_signal=None
         state="TRADE"
 
-        next_signal=None
 
-    if locked_window is None:
+    # ---------------- WINDOW LOCK ----------------
+
+    if locked_window is None and i>LOOKBACK:
 
         w=scan_window(numbers,i)
 
         if w:
-
             locked_window=w
 
-    if locked_window and i>locked_window:
 
-        g_pred=group(numbers[i-locked_window])
+    # ---------------- SIGNAL ----------------
 
-        if group(numbers[i-1])!=g_pred:
+    if locked_window and i-last_trade>=GAP:
 
-            next_signal=g_pred
+        if i>locked_window:
+
+            g_pred=group(numbers[i-locked_window])
+
+            if group(numbers[i-1])!=g_pred:
+
+                next_signal=g_pred
+                state="SIGNAL"
+
+
+    # ---------------- TREND DETECTION ----------------
 
     if profit>=TREND_CONFIRM:
 
         trend_active=True
+
+
+    # ---------------- RESET ----------------
 
     if trend_active and loss_streak>=TREND_LOSS:
 
@@ -146,11 +175,13 @@ for i in range(len(numbers)):
         trend_active=False
         loss_streak=0
 
+
     if profit>=TREND_PEAK:
 
         locked_window=None
         trend_active=False
         loss_streak=0
+
 
     equity.append(profit)
 
@@ -168,6 +199,8 @@ for i in range(len(numbers)):
     })
 
 
+# ---------------- ANALYTICS ----------------
+
 wins=hits.count(True)*WIN
 losses=hits.count(False)*LOSS
 
@@ -183,7 +216,9 @@ drawdown=(peak-equity_np).max()
 trades=len(hits)
 
 
-st.title("🚀 QUANT ENGINE V8")
+# ---------------- DASHBOARD ----------------
+
+st.title("🚀 QUANT ENGINE V8 FIX")
 
 c1,c2,c3=st.columns(3)
 
@@ -196,6 +231,7 @@ c4,c5,c6=st.columns(3)
 c4.metric("Drawdown",round(drawdown,2))
 c5.metric("Trades",trades)
 c6.metric("Window Locked",locked_window)
+
 
 st.subheader("Next Group")
 
@@ -212,9 +248,11 @@ else:
 
     st.info("Scanning...")
 
+
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"profit":equity}))
+
 
 st.subheader("History")
 
