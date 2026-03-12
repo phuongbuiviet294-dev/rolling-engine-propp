@@ -2,217 +2,137 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# =============================
-# CONFIG
-# =============================
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+TRAIN_STEP=400
 
-WINDOW = 9
-LOOKBACK = 26
-GAP = 4
+WIN=2.5
+LOSS=1
 
-WIN = 2.5
-LOSS = 1
-
-st.set_page_config(layout="wide")
-
-st.title("🚀 FULL BACKTEST ENGINE")
-
-# =============================
-# GROUP
-# =============================
+WINDOWS=range(6,13)
+LOOKBACKS=range(18,41)
+GAPS=range(2,7)
 
 def group(n):
-
-    if n <= 3:
-        return 1
-    if n <= 6:
-        return 2
-    if n <= 9:
-        return 3
+    if n<=3:return 1
+    if n<=6:return 2
+    if n<=9:return 3
     return 4
 
-# =============================
-# LOAD DATA
-# =============================
-
 @st.cache_data
-def load_data():
+def load():
+    df=pd.read_csv(DATA_URL)
+    df.columns=[c.strip().lower() for c in df.columns]
+    return df["number"].dropna().astype(int).tolist()
 
-    df = pd.read_csv(DATA_URL)
+numbers=load()
 
-    df.columns = [c.strip().lower() for c in df.columns]
+def simulate(nums,LB,G,W):
 
-    numbers = df["number"].dropna().astype(int).tolist()
+    profit=0
+    hits=[]
+    next_signal=None
+    last_trade=-999
 
-    return numbers
+    for i,n in enumerate(nums):
 
-numbers = load_data()
+        g=group(n)
 
-st.write("Total rounds:", len(numbers))
+        if next_signal is not None:
 
-# =============================
-# ENGINE
-# =============================
+            hit=1 if next_signal==g else 0
+            hits.append(hit)
 
-profit = 0
-profits = []
+            profit+=WIN if hit else -LOSS
 
-engine = []
+            next_signal=None
+            last_trade=i
 
-next_signal = None
-last_trade_round = -999
+        if i-last_trade>G and i>LB:
 
-for i, n in enumerate(numbers):
+            rec=[]
 
-    g = group(n)
+            for j in range(max(W,i-LB),i):
 
-    predicted = None
-    hit = None
-    state = "SCAN"
+                if j>=W:
 
-    # ===== EXECUTE TRADE =====
+                    rec.append(
+                        1 if group(nums[j])==group(nums[j-W]) else 0
+                    )
 
-    if next_signal is not None:
+            if len(rec)>10:
 
-        predicted = next_signal
+                wr=np.mean(rec)
+                ev=wr*WIN-(1-wr)*LOSS
 
-        hit = 1 if predicted == g else 0
+                if ev>0:
 
-        if hit == 1:
-            profit += WIN
-        else:
-            profit -= LOSS
+                    g1=group(nums[i-W])
 
-        state = "TRADE"
+                    if group(nums[i-1])!=g1:
 
-        last_trade_round = i
+                        next_signal=g1
 
-        next_signal = None
+    return profit,hits
 
-    # ===== SIGNAL GENERATION =====
+# =========================
+# WALK FORWARD
+# =========================
 
-    if i - last_trade_round > GAP and i > LOOKBACK:
+profit=0
+equity=[]
+segments=[]
 
-        recent = []
+start=0
 
-        start = max(WINDOW, i - LOOKBACK)
+while start+TRAIN_STEP<len(numbers):
 
-        for j in range(start, i):
+    train=numbers[:start+TRAIN_STEP]
 
-            if j >= WINDOW:
+    best=-999
+    best_cfg=(26,4,9)
 
-                recent.append(
-                    1 if group(numbers[j]) == group(numbers[j - WINDOW]) else 0
-                )
+    for LB in LOOKBACKS:
+        for GP in GAPS:
+            for W in WINDOWS:
 
-        if len(recent) > 10:
+                p,_=simulate(train,LB,GP,W)
 
-            wr = np.mean(recent)
+                if p>best:
 
-            ev = wr * WIN - (1 - wr) * LOSS
+                    best=p
+                    best_cfg=(LB,GP,W)
 
-            if ev > 0:
+    LB,GP,W=best_cfg
 
-                g1 = group(numbers[i - WINDOW])
+    trade=numbers[start+TRAIN_STEP:start+TRAIN_STEP*2]
 
-                if group(numbers[i - 1]) != g1:
+    p,hits=simulate(trade,LB,GP,W)
 
-                    next_signal = g1
-                    state = "SIGNAL"
+    profit+=p
 
-    profits.append(profit)
+    equity.append(profit)
 
-    engine.append({
-
-        "round": i + 1,
-        "number": n,
-        "group": g,
-        "predicted": predicted,
-        "hit": hit,
-        "state": state,
-        "profit": profit
-
+    segments.append({
+        "start":start,
+        "LB":LB,
+        "GAP":GP,
+        "WINDOW":W,
+        "profit":p
     })
 
-# =============================
-# METRICS
-# =============================
+    start+=TRAIN_STEP
 
-hits = [x["hit"] for x in engine if x["hit"] is not None]
-
-wr = np.mean(hits) if hits else 0
-
-wins = hits.count(1) * WIN
-losses = hits.count(0) * LOSS
-
-pf = wins / losses if losses else 0
-
-peak = max(profits)
-final_profit = profits[-1]
-
-drawdown = peak - final_profit
-
-# =============================
+# =========================
 # DASHBOARD
-# =============================
+# =========================
 
-c1, c2, c3 = st.columns(3)
+st.title("LIVE WALK FORWARD ENGINE")
 
-c1.metric("Profit", round(final_profit,2))
-c2.metric("Winrate %", round(wr * 100,2))
-c3.metric("Profit Factor", round(pf,2))
+st.metric("Total Profit",round(profit,2))
 
-c4, c5 = st.columns(2)
+st.line_chart(pd.DataFrame({"equity":equity}))
 
-c4.metric("Drawdown", round(drawdown,2))
-c5.metric("Trades", len(hits))
+st.subheader("Segments")
 
-# =============================
-# EQUITY CURVE
-# =============================
-
-st.subheader("Equity Curve")
-
-equity = pd.DataFrame({"profit": profits})
-
-st.line_chart(equity)
-
-# =============================
-# SEGMENT TEST (EDGE STABILITY)
-# =============================
-
-st.subheader("Segment Analysis")
-
-segments = 4
-
-size = len(numbers) // segments
-
-segment_results = []
-
-for s in range(segments):
-
-    start = s * size
-    end = (s + 1) * size
-
-    seg = profits[start:end]
-
-    segment_results.append({
-
-        "segment": f"{start}-{end}",
-        "profit": seg[-1] - seg[0]
-
-    })
-
-st.dataframe(pd.DataFrame(segment_results))
-
-# =============================
-# HISTORY
-# =============================
-
-st.subheader("Trade History")
-
-hist = pd.DataFrame(engine)
-
-st.dataframe(hist.iloc[::-1], use_container_width=True)
+st.dataframe(pd.DataFrame(segments))
