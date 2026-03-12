@@ -10,6 +10,7 @@ st.set_page_config(layout="wide")
 
 # ---------- group ----------
 def group(n):
+
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
@@ -27,7 +28,7 @@ def load():
 numbers=load()
 groups=[group(n) for n in numbers]
 
-analysis=groups[-200:]
+analysis=groups[-300:]
 
 # ---------- entropy ----------
 def entropy(g):
@@ -36,6 +37,7 @@ def entropy(g):
     total=len(g)
 
     e=0
+
     for v in c.values():
 
         p=v/total
@@ -43,123 +45,114 @@ def entropy(g):
 
     return e
 
-ent=entropy(analysis)
+# ---------- chi square ----------
+def chi_square(g):
 
-# ---------- models ----------
-def markov1(g):
+    c=Counter(g)
+    total=len(g)
 
-    cur=g[-1]
-    trans=Counter()
+    expected=total/4
+
+    chi=0
+
+    for i in [1,2,3,4]:
+
+        obs=c.get(i,0)
+
+        chi+=(obs-expected)**2/expected
+
+    return chi
+
+# ---------- markov dependency ----------
+def markov_bias(g):
+
+    trans={}
 
     for i in range(len(g)-1):
 
-        if g[i]==cur:
+        a=g[i]
+        b=g[i+1]
 
-            trans[g[i+1]]+=1
+        if a not in trans:
 
-    total=sum(trans.values())
+            trans[a]=Counter()
 
-    if total<8:return None,0
+        trans[a][b]+=1
 
-    best=max(trans,key=trans.get)
+    bias=0
 
-    return best,trans[best]/total
+    for k,v in trans.items():
 
+        total=sum(v.values())
 
-def markov2(g):
+        if total<20:
+            continue
 
-    if len(g)<3:return None,0
+        probs=[x/total for x in v.values()]
 
-    key=(g[-2],g[-1])
-    trans=Counter()
+        bias+=max(probs)-0.25
 
-    for i in range(len(g)-2):
+    return bias
 
-        if (g[i],g[i+1])==key:
+# ---------- pattern bias ----------
+def pattern_bias(g):
 
-            trans[g[i+2]]+=1
-
-    total=sum(trans.values())
-
-    if total<6:return None,0
-
-    best=max(trans,key=trans.get)
-
-    return best,trans[best]/total
-
-
-def pattern(g):
-
-    if len(g)<10:return None,0
-
-    key=tuple(g[-3:])
-    nexts=[]
+    seq=Counter()
 
     for i in range(len(g)-3):
 
-        if tuple(g[i:i+3])==key:
+        seq[tuple(g[i:i+3])] +=1
 
-            nexts.append(g[i+3])
+    if not seq:
+        return 0
 
-    if len(nexts)<6:return None,0
+    top=max(seq.values())
 
-    c=Counter(nexts)
+    avg=np.mean(list(seq.values()))
+
+    return (top-avg)/avg
+
+# ---------- edge score ----------
+def edge_score(g):
+
+    e=entropy(g)
+    chi=chi_square(g)
+    mb=markov_bias(g)
+    pb=pattern_bias(g)
+
+    entropy_bias=max(0,2-e)
+
+    chi_bias=chi/10
+
+    score=0.3*entropy_bias+0.3*chi_bias+0.2*mb+0.2*pb
+
+    return score,e,chi,mb,pb
+
+# ---------- next group ----------
+def next_group(g):
+
+    c=Counter(g[-50:])
 
     best=max(c,key=c.get)
 
-    return best,c[best]/len(nexts)
-
-
-# ---------- detect ----------
-def detect(g):
-
-    probs={1:0,2:0,3:0,4:0}
-
-    p1,s1=markov1(g)
-    p2,s2=markov2(g)
-    p3,s3=pattern(g)
-
-    if p1:probs[p1]+=s1*0.25
-    if p2:probs[p2]+=s2*0.40
-    if p3:probs[p3]+=s3*0.35
-
-    ranked=sorted(probs.items(),key=lambda x:x[1],reverse=True)
-
-    best,strength=ranked[0]
-    second=ranked[1][1]
-
-    gap=strength-second
-
-    return best,strength,gap
-
-
-# ---------- collect strengths ----------
-strengths=[]
-
-for i in range(200,len(groups)-1):
-
-    g=groups[max(0,i-200):i]
-
-    best,strength,gap=detect(g)
-
-    strengths.append(strength)
-
-# dynamic threshold
-th=np.percentile(strengths,92)
+    return best
 
 # ---------- backtest ----------
 profit=0
 history=[]
 
-for i in range(200,len(groups)-1):
+for i in range(300,len(groups)-1):
 
-    g=groups[max(0,i-200):i]
+    g=groups[i-300:i]
 
-    pred,strength,gap=detect(g)
+    score,e,chi,mb,pb=edge_score(g)
 
+    pred=None
     hit=False
 
-    if strength>th and gap>0.08:
+    if score>0.55:
+
+        pred=next_group(g)
 
         if groups[i]==pred:
 
@@ -170,17 +163,13 @@ for i in range(200,len(groups)-1):
 
             profit-=1
 
-    else:
-
-        pred=None
-
     history.append({
         "round":i,
         "actual":groups[i],
         "pred":pred,
         "hit":hit,
         "profit":profit,
-        "strength":strength
+        "edge":score
     })
 
 hist=pd.DataFrame(history)
@@ -195,8 +184,10 @@ ev=wr*2.5-(1-wr)
 
 drawdown=(hist.profit.cummax()-hist.profit).max()
 
+score,e,chi,mb,pb=edge_score(analysis)
+
 # ---------- UI ----------
-st.title("⚡ V33 FINAL EDGE ENGINE")
+st.title("🧠 V34 RNG Detector Engine")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -209,16 +200,23 @@ c5,c6,c7=st.columns(3)
 
 c5.metric("Profit",round(profit,2))
 c6.metric("Drawdown",round(drawdown,2))
-c7.metric("Entropy",round(ent,3))
+c7.metric("Edge Score",round(score,3))
+
+st.subheader("Randomness Tests")
+
+r1,r2,r3,r4=st.columns(4)
+
+r1.metric("Entropy",round(e,3))
+r2.metric("Chi-square",round(chi,2))
+r3.metric("Markov Bias",round(mb,3))
+r4.metric("Pattern Bias",round(pb,3))
 
 # ---------- next ----------
 st.subheader("Next Group")
 
-pred,strength,gap=detect(analysis)
+if score>0.55:
 
-if strength>th and gap>0.08:
-
-    st.success(f"BET → {pred}")
+    st.success(f"BET → {next_group(analysis)}")
 
 else:
 
