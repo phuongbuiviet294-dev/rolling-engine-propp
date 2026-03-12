@@ -1,15 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import defaultdict
+from collections import Counter, defaultdict
+import math
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-
-WIN=2.5
-LOSS=1
-GAP=4
-
-PROB_THRESHOLD=0.35
 
 st.set_page_config(layout="wide")
 
@@ -21,138 +16,108 @@ def group(n):
 
 @st.cache_data(ttl=5)
 def load():
+
     df=pd.read_csv(DATA_URL)
     df.columns=[c.lower() for c in df.columns]
+
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
 
 groups=[group(n) for n in numbers]
 
-# ---------- build Markov table ----------
+st.title("🧠 V14 Pattern Detector")
+
+# ---------- distribution ----------
+
+dist=Counter(groups)
+
+dist_df=pd.DataFrame({
+    "group":dist.keys(),
+    "count":dist.values()
+})
+
+dist_df["ratio"]=dist_df["count"]/len(groups)
+
+st.subheader("Group Distribution")
+
+st.dataframe(dist_df)
+
+st.bar_chart(dist_df.set_index("group")["ratio"])
+
+
+# ---------- Markov transition ----------
 
 trans=defaultdict(lambda:defaultdict(int))
 
-for i in range(2,len(groups)):
-    
-    key=(groups[i-2],groups[i-1])
-    nxt=groups[i]
-    
-    trans[key][nxt]+=1
+for i in range(len(groups)-1):
+
+    g1=groups[i]
+    g2=groups[i+1]
+
+    trans[g1][g2]+=1
+
+rows=[]
+
+for g1 in trans:
+
+    total=sum(trans[g1].values())
+
+    for g2 in trans[g1]:
+
+        rows.append({
+            "from":g1,
+            "to":g2,
+            "prob":trans[g1][g2]/total
+        })
+
+trans_df=pd.DataFrame(rows)
+
+st.subheader("Markov Transition")
+
+st.dataframe(trans_df)
 
 
-# ---------- engine ----------
+# ---------- pattern test ----------
 
-profit=0
-equity=[]
-hits=[]
-history=[]
+patterns=Counter()
 
-last_trade=-999
-next_signal=None
+for i in range(len(groups)-3):
 
-for i in range(len(groups)):
+    key=(groups[i],groups[i+1],groups[i+2],groups[i+3])
 
-    g=groups[i]
+    patterns[key]+=1
 
-    predicted=None
-    hit=None
+top_patterns=pd.DataFrame(patterns.most_common(20),
+                         columns=["pattern","count"])
 
-    # trade
-    
-    if next_signal and i-last_trade>=GAP:
+st.subheader("Top Patterns")
 
-        predicted=next_signal
-        
-        hit=(g==predicted)
-
-        profit+=WIN if hit else -LOSS
-
-        hits.append(hit)
-
-        last_trade=i
-
-        next_signal=None
+st.dataframe(top_patterns)
 
 
-    # predict
+# ---------- entropy ----------
 
-    if i>=2:
+counts=np.array(list(dist.values()))
 
-        key=(groups[i-2],groups[i-1])
+probs=counts/counts.sum()
 
-        if key in trans:
+entropy=-np.sum(probs*np.log2(probs))
 
-            counts=trans[key]
+st.subheader("Entropy")
 
-            total=sum(counts.values())
+st.metric("Entropy",round(entropy,3))
 
-            probs={k:v/total for k,v in counts.items()}
-
-            best=max(probs,key=probs.get)
-
-            p=probs[best]
-
-            ev=p*WIN-(1-p)*LOSS
-
-            if p>=PROB_THRESHOLD and ev>0:
-
-                next_signal=best
+st.write("Max entropy for 4 states =",round(math.log2(4),3))
 
 
-    equity.append(profit)
+# ---------- randomness indicator ----------
 
-    history.append({
-        "round":i+1,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "profit":profit
-    })
+if entropy>1.9:
+    st.error("Dataset looks RANDOM")
 
-
-# ---------- analytics ----------
-
-wins=hits.count(True)*WIN
-losses=hits.count(False)*LOSS
-
-pf=wins/losses if losses else 0
-wr=sum(hits)/len(hits) if hits else 0
-
-eq=np.array(equity)
-peak=np.maximum.accumulate(eq)
-drawdown=(peak-eq).max()
-
-st.title("🚀 QUANT ENGINE V13 – Markov")
-
-c1,c2,c3=st.columns(3)
-
-c1.metric("Profit",round(profit,2))
-c2.metric("Winrate %",round(wr*100,2))
-c3.metric("Profit Factor",round(pf,2))
-
-c4,c5,c6=st.columns(3)
-
-c4.metric("Drawdown",round(drawdown,2))
-c5.metric("Trades",len(hits))
-c6.metric("Signal Threshold",PROB_THRESHOLD)
-
-st.subheader("Equity Curve")
-st.line_chart(pd.DataFrame({"profit":equity}))
-
-st.subheader("Next Group")
-
-if next_signal:
-
-    st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;
-    border-radius:12px;text-align:center;font-size:32px'>
-    NEXT GROUP → {next_signal}
-    </div>
-    """,unsafe_allow_html=True)
+elif entropy>1.7:
+    st.warning("Dataset mostly random")
 
 else:
-    st.info("Scanning...")
-
-st.subheader("History")
-st.dataframe(pd.DataFrame(history).iloc[::-1],use_container_width=True)
+    st.success("Dataset has structure")
