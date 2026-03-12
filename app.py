@@ -1,20 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from collections import defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOWS=range(6,19)
-
-LOOKBACK=26
-GAP=4
-
 WIN=2.5
 LOSS=1
+GAP=4
 
-TREND_START=10
-TREND_LOSS=4
-TREND_RESET=60
+PROB_THRESHOLD=0.35
 
 st.set_page_config(layout="wide")
 
@@ -32,131 +27,83 @@ def load():
 
 numbers=load()
 
-# ---------- simulate ----------
+groups=[group(n) for n in numbers]
 
-def simulate_segment(nums,w,start,end):
+# ---------- build Markov table ----------
 
-    profit=0
-    last=-999
+trans=defaultdict(lambda:defaultdict(int))
 
-    for i in range(start,end):
-
-        if i>w and i-last>=GAP:
-
-            pred=group(nums[i-w])
-
-            if group(nums[i-1])!=pred:
-
-                if group(nums[i])==pred:
-                    profit+=WIN
-                else:
-                    profit-=LOSS
-
-                last=i
-
-    return profit
+for i in range(2,len(groups)):
+    
+    key=(groups[i-2],groups[i-1])
+    nxt=groups[i]
+    
+    trans[key][nxt]+=1
 
 
-# ---------- window selection ----------
-
-segments=4
-seg_size=len(numbers)//segments
-
-best_window=None
-best_score=-999
-
-for w in WINDOWS:
-
-    profits=[]
-
-    for s in range(segments):
-
-        start=s*seg_size
-        end=start+seg_size
-
-        p=simulate_segment(numbers,w,start,end)
-
-        profits.append(p)
-
-    avg_profit=np.mean(profits)
-    stability=sum([1 for p in profits if p>0])
-
-    score=avg_profit+stability*20
-
-    if score>best_score:
-
-        best_score=score
-        best_window=w
-
-if best_window is None:
-    best_window=9
-
-locked_window=best_window
-
-
-# ---------- live engine ----------
+# ---------- engine ----------
 
 profit=0
 equity=[]
 hits=[]
 history=[]
 
-loss_streak=0
 last_trade=-999
-
 next_signal=None
-signal_strength=0
 
-for i in range(len(numbers)):
+for i in range(len(groups)):
 
-    n=numbers[i]
-    g=group(n)
+    g=groups[i]
 
     predicted=None
     hit=None
 
+    # trade
+    
     if next_signal and i-last_trade>=GAP:
 
         predicted=next_signal
+        
         hit=(g==predicted)
 
         profit+=WIN if hit else -LOSS
+
         hits.append(hit)
 
         last_trade=i
 
-        if hit:
-            loss_streak=0
-        else:
-            loss_streak+=1
-
         next_signal=None
-        signal_strength=0
 
 
-    if locked_window is not None and i>locked_window:
+    # predict
 
-        pred=group(numbers[i-locked_window])
+    if i>=2:
 
-        if group(numbers[i-1])!=pred:
+        key=(groups[i-2],groups[i-1])
 
-            signal_strength+=1
+        if key in trans:
 
-            if signal_strength>=2:
-                next_signal=pred
+            counts=trans[key]
 
+            total=sum(counts.values())
 
-    if loss_streak>=TREND_LOSS or profit>=TREND_RESET:
+            probs={k:v/total for k,v in counts.items()}
 
-        locked_window=best_window
-        loss_streak=0
+            best=max(probs,key=probs.get)
+
+            p=probs[best]
+
+            ev=p*WIN-(1-p)*LOSS
+
+            if p>=PROB_THRESHOLD and ev>0:
+
+                next_signal=best
 
 
     equity.append(profit)
 
     history.append({
         "round":i+1,
-        "number":n,
         "group":g,
         "predicted":predicted,
         "hit":hit,
@@ -176,7 +123,7 @@ eq=np.array(equity)
 peak=np.maximum.accumulate(eq)
 drawdown=(peak-eq).max()
 
-st.title("🚀 QUANT ENGINE V12")
+st.title("🚀 QUANT ENGINE V13 – Markov")
 
 c1,c2,c3=st.columns(3)
 
@@ -188,7 +135,7 @@ c4,c5,c6=st.columns(3)
 
 c4.metric("Drawdown",round(drawdown,2))
 c5.metric("Trades",len(hits))
-c6.metric("Window Locked",locked_window)
+c6.metric("Signal Threshold",PROB_THRESHOLD)
 
 st.subheader("Equity Curve")
 st.line_chart(pd.DataFrame({"profit":equity}))
@@ -205,7 +152,6 @@ if next_signal:
     """,unsafe_allow_html=True)
 
 else:
-
     st.info("Scanning...")
 
 st.subheader("History")
