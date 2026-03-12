@@ -1,27 +1,28 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-
-# ================= CONFIG =================
+import pickle
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 WINDOWS=range(8,13)
-LOOKBACKS=range(18,33)
-GAPS=[3,4,5]
+LOOKBACKS=range(18,29)
+GAPS=[3,4]
 
-TRAIN_SIZE=1000
+TRAIN_SIZE=600
 
 WIN=2.5
 LOSS=1
 
-TARGET_PROFIT=50
-MAX_DRAWDOWN=20
-LOSS_STREAK_LIMIT=5
+TARGET_PROFIT=25
+MAX_DRAWDOWN=12
+LOSS_STREAK_LIMIT=4
+
+STATE_FILE="engine_state.pkl"
 
 st.set_page_config(layout="wide")
 
-# ================= GROUP =================
+# ---------------- GROUP ----------------
 
 def group(n):
 
@@ -31,7 +32,7 @@ def group(n):
     return 4
 
 
-# ================= LOAD DATA =================
+# ---------------- LOAD DATA ----------------
 
 @st.cache_data(ttl=5)
 def load():
@@ -45,7 +46,34 @@ def load():
 numbers=load()
 
 
-# ================= EDGE =================
+# ---------------- LOAD STATE ----------------
+
+def load_state():
+
+    try:
+        with open(STATE_FILE,"rb") as f:
+            return pickle.load(f)
+    except:
+        return {
+            "config":None,
+            "profit":0,
+            "cycle_profit":0,
+            "peak":0,
+            "loss_streak":0,
+            "last_index":0
+        }
+
+
+def save_state(state):
+
+    with open(STATE_FILE,"wb") as f:
+        pickle.dump(state,f)
+
+
+state=load_state()
+
+
+# ---------------- EDGE ----------------
 
 def calc_wr(nums,i,W,LB):
 
@@ -65,14 +93,11 @@ def calc_wr(nums,i,W,LB):
     return np.mean(rec)
 
 
-# ================= SIMULATION =================
+# ---------------- SIM ----------------
 
-def simulate(nums,W,LB,GAP):
+def simulate(nums,W,LB,G):
 
     profit=0
-    trades=0
-    hits=[]
-
     next_signal=None
     last_trade=-999
 
@@ -83,15 +108,12 @@ def simulate(nums,W,LB,GAP):
         if next_signal is not None:
 
             hit=1 if g==next_signal else 0
-
             profit+=WIN if hit else -LOSS
-            trades+=1
-            hits.append(hit)
 
             next_signal=None
             last_trade=i
 
-        if i-last_trade>=GAP and i>LB:
+        if i-last_trade>=G and i>LB:
 
             wr=calc_wr(nums,i,W,LB)
 
@@ -105,98 +127,85 @@ def simulate(nums,W,LB,GAP):
 
                     next_signal=g1
 
-    wins=hits.count(1)*WIN
-    losses=hits.count(0)*LOSS
-
-    pf=wins/losses if losses>0 else 0
-
-    return profit,pf,trades
+    return profit
 
 
-# ================= FIND BEST CONFIG =================
+# ---------------- FIND CONFIG ----------------
 
 def find_config(train):
 
     best=None
-    best_pf=0
+    best_profit=-999
 
     for W in WINDOWS:
         for LB in LOOKBACKS:
             for G in GAPS:
 
-                profit,pf,trades=simulate(train,W,LB,G)
+                p=simulate(train,W,LB,G)
 
-                if profit>=15 and pf>best_pf and trades>=20:
+                if p>best_profit:
 
-                    best_pf=pf
+                    best_profit=p
                     best=(W,LB,G)
 
     return best
 
 
-# ================= ENGINE =================
+# ---------------- TRAIN IF NEEDED ----------------
 
-profit=0
-equity=[]
-history=[]
+if state["config"] is None and len(numbers)>=TRAIN_SIZE:
 
-cycle_profit=0
-peak_cycle=0
-loss_streak=0
+    train=numbers[-TRAIN_SIZE:]
 
-config=None
+    state["config"]=find_config(train)
+
+    st.success(f"CONFIG LOCKED {state['config']}")
+
+
+config=state["config"]
+
+profit=state["profit"]
+cycle_profit=state["cycle_profit"]
+peak=state["peak"]
+loss_streak=state["loss_streak"]
+
+last_index=state["last_index"]
+
+
 next_signal=None
 last_trade=-999
 
-for i,n in enumerate(numbers):
+# ---------------- PROCESS NEW DATA ----------------
 
-    # ===== TRAIN =====
+for i in range(last_index,len(numbers)):
 
-    if config is None and i>=TRAIN_SIZE:
-
-        train=numbers[i-TRAIN_SIZE:i]
-
-        config=find_config(train)
-
-        cycle_profit=0
-        peak_cycle=0
-        loss_streak=0
-
-
+    n=numbers[i]
     g=group(n)
-
-    predicted=None
-    hit=None
-    state="SCAN"
 
     if next_signal is not None:
 
-        predicted=next_signal
-
-        hit=1 if g==predicted else 0
+        hit=1 if g==next_signal else 0
 
         p=WIN if hit else -LOSS
 
         profit+=p
         cycle_profit+=p
 
+        peak=max(peak,cycle_profit)
+
         if hit==0:
             loss_streak+=1
         else:
             loss_streak=0
 
-        peak_cycle=max(peak_cycle,cycle_profit)
-
         next_signal=None
         last_trade=i
 
-        state="TRADE"
-
     if config:
 
-        W,LB,GAP=config
+        W,LB,G=config
 
-        if i-last_trade>=GAP and i>LB:
+        if i-last_trade>=G and i>LB:
 
             wr=calc_wr(numbers,i,W,LB)
 
@@ -209,69 +218,33 @@ for i,n in enumerate(numbers):
                 if group(numbers[i-1])!=g1:
 
                     next_signal=g1
-                    state="SIGNAL"
 
 
-    # ===== RESET RULES =====
+    # -------- RESET --------
 
-    if config:
+    if cycle_profit>=TARGET_PROFIT or peak-cycle_profit>=MAX_DRAWDOWN or loss_streak>=LOSS_STREAK_LIMIT:
 
-        if cycle_profit>=TARGET_PROFIT:
-
-            config=None
-
-        if peak_cycle-cycle_profit>=MAX_DRAWDOWN:
-
-            config=None
-
-        if loss_streak>=LOSS_STREAK_LIMIT:
-
-            config=None
+        config=None
+        cycle_profit=0
+        peak=0
+        loss_streak=0
 
 
-    equity.append(profit)
+state.update({
+    "config":config,
+    "profit":profit,
+    "cycle_profit":cycle_profit,
+    "peak":peak,
+    "loss_streak":loss_streak,
+    "last_index":len(numbers)
+})
 
-    history.append({
+save_state(state)
 
-        "round":i+1,
-        "number":n,
-        "group":g,
-        "predicted":predicted,
-        "hit":hit,
-        "profit":profit,
-        "state":state,
-        "config":config
+# ---------------- UI ----------------
 
-    })
-
-
-# ================= DASHBOARD =================
-
-st.title("🚀 ADAPTIVE QUANT ENGINE")
+st.title("🚀 QUANT PRO ENGINE")
 
 st.metric("Total Profit",round(profit,2))
 
-st.line_chart(pd.DataFrame({"equity":equity}))
-
-st.subheader("Current Config")
-
-st.write(config)
-
-st.subheader("Next Group")
-
-if next_signal:
-
-    st.markdown(f"""
-    <div style='padding:20px;background:#c62828;color:white;
-    border-radius:10px;text-align:center;font-size:30px'>
-    NEXT GROUP → {next_signal}
-    </div>
-    """,unsafe_allow_html=True)
-
-else:
-
-    st.info("Scanning...")
-
-st.subheader("History")
-
-st.dataframe(pd.DataFrame(history).iloc[::-1],use_container_width=True)
+st.write("CONFIG",config)
