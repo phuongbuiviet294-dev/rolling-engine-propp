@@ -7,14 +7,14 @@ DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_V
 
 st.set_page_config(layout="wide")
 
-# ---------- group ----------
+# -------- group mapping --------
 def group(n):
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
     return 4
 
-# ---------- load ----------
+# -------- load data --------
 @st.cache_data(ttl=5)
 def load():
     df=pd.read_csv(DATA_URL)
@@ -26,115 +26,106 @@ groups=[group(n) for n in numbers]
 
 ROUNDS=len(groups)
 
-# ---------- MARKOV ----------
-def markov_pred(g):
+# -------- ENTROPY --------
+def entropy_calc(g):
 
-    if len(g)<2:return None
+    probs=[g.count(i)/len(g) for i in [1,2,3,4]]
 
-    last=g[-1]
+    return -sum(p*np.log2(p) for p in probs if p>0)
 
-    trans={1:Counter(),2:Counter(),3:Counter(),4:Counter()}
+entropy=entropy_calc(groups)
+
+# -------- CHI SQUARE --------
+def chi_square(g):
+
+    c=Counter(g)
+
+    exp=len(g)/4
+
+    return sum((c[i]-exp)**2/exp for i in [1,2,3,4])
+
+chi=chi_square(groups)
+
+# -------- MARKOV BIAS --------
+def markov_bias(g):
+
+    trans={i:Counter() for i in [1,2,3,4]}
 
     for i in range(len(g)-1):
 
         trans[g[i]][g[i+1]]+=1
 
-    if not trans[last]:
+    bias=0
 
-        return None
+    for k in trans:
 
-    return max(trans[last],key=trans[last].get)
+        total=sum(trans[k].values())
 
-# ---------- PATTERN ----------
-def pattern_pred(g,L=3):
+        if total>0:
 
-    if len(g)<L+1:return None
+            p=max(trans[k].values())/total
 
-    key=tuple(g[-L:])
+            bias=max(bias,p-0.25)
 
-    counts=Counter()
+    return bias
+
+markov=markov_bias(groups)
+
+# -------- PATTERN STRENGTH --------
+def pattern_strength(g,L=3):
+
+    counts={}
 
     for i in range(len(g)-L):
 
-        if tuple(g[i:i+L])==key:
+        key=tuple(g[i:i+L])
 
-            counts[g[i+L]]+=1
+        nxt=g[i+L]
 
-    if not counts:return None
+        counts.setdefault(key,Counter())
 
-    return max(counts,key=counts.get)
+        counts[key][nxt]+=1
 
-# ---------- TRANSITION ----------
-def transition_pred(g):
+    best=0
 
-    if len(g)<30:return None
+    for k in counts:
 
-    last=g[-1]
+        total=sum(counts[k].values())
 
-    nxt=g[-30:]
+        if total>20:
 
-    c=Counter()
+            p=max(counts[k].values())/total
 
-    for i in range(len(nxt)-1):
+            best=max(best,p/0.25)
 
-        if nxt[i]==last:
+    return best
 
-            c[nxt[i+1]]+=1
+pattern=pattern_strength(groups)
 
-    if not c:return None
+# -------- EDGE SCORE --------
+edge_score=(markov*2)+(pattern/2)+(chi/10)
 
-    return max(c,key=c.get)
-
-# ---------- DISTRIBUTION ----------
-def distribution_pred(g):
-
-    w=g[-200:]
-
-    c=Counter(w)
-
-    expected=len(w)/4
-
-    diff={k:expected-c[k] for k in [1,2,3,4]}
-
-    return max(diff,key=diff.get)
-
-# ---------- RUNS ----------
-def runs_pred(g):
-
-    if len(g)<3:return None
-
-    if g[-1]==g[-2]:
-
-        return np.random.choice([x for x in [1,2,3,4] if x!=g[-1]])
-
-    return None
-
-# ---------- VOTE ----------
-engines={}
-
-engines["markov"]=markov_pred(groups)
-engines["pattern"]=pattern_pred(groups)
-engines["transition"]=transition_pred(groups)
-engines["distribution"]=distribution_pred(groups)
-engines["runs"]=runs_pred(groups)
-
-votes=Counter()
-
-for e in engines.values():
-
-    if e:
-
-        votes[e]+=1
-
+# -------- PREDICTION --------
 prediction=None
 confidence=0
 
-if votes:
+if entropy<1.98 and chi>2 and markov>0.08 and pattern>1.5:
 
-    prediction=max(votes,key=votes.get)
-    confidence=votes[prediction]/5
+    last=groups[-1]
 
-# ---------- BACKTEST ----------
+    trans={i:Counter() for i in [1,2,3,4]}
+
+    for i in range(len(groups)-1):
+
+        trans[groups[i]][groups[i+1]]+=1
+
+    if trans[last]:
+
+        prediction=max(trans[last],key=trans[last].get)
+
+        confidence=trans[last][prediction]/sum(trans[last].values())
+
+# -------- BACKTEST --------
 profit=0
 peak=0
 dd=0
@@ -157,6 +148,7 @@ for i in range(50,len(groups)-1):
             profit-=1
 
     peak=max(peak,profit)
+
     dd=max(dd,peak-profit)
 
     history.append({
@@ -173,11 +165,9 @@ trades=len(hist[hist.pred.notna()])
 wins=len(hist[hist.hit==True])
 wr=wins/trades if trades else 0
 
-entropy=-sum((groups.count(i)/len(groups))*np.log2(groups.count(i)/len(groups)) for i in [1,2,3,4])
+# -------- UI --------
 
-# ---------- UI ----------
-
-st.title("🤖 V47 Hybrid AI Engine")
+st.title("🤖 V48 Edge Detection AI")
 
 c1,c2,c3=st.columns(3)
 
@@ -191,31 +181,34 @@ c4.metric("Profit",profit)
 c5.metric("Drawdown",dd)
 c6.metric("Entropy",round(entropy,3))
 
-# ---------- ENGINE VOTES ----------
+st.subheader("Edge Analysis")
 
-st.subheader("Engine Predictions")
+st.write({
+"chi_square":round(chi,3),
+"markov_bias":round(markov,3),
+"pattern_strength":round(pattern,3),
+"edge_score":round(edge_score,3)
+})
 
-st.write(engines)
-
-# ---------- NEXT GROUP ----------
+# -------- NEXT GROUP --------
 
 st.subheader("Next Group")
 
-if prediction and confidence>=0.35:
+if prediction:
 
     st.success(f"TRADE → Group {prediction} (confidence {confidence:.2f})")
 
 else:
 
-    st.info("SKIP")
+    st.info("SKIP — No statistical edge")
 
-# ---------- EQUITY ----------
+# -------- EQUITY --------
 
 st.subheader("Equity Curve")
 
 st.line_chart(hist.profit)
 
-# ---------- HISTORY ----------
+# -------- HISTORY --------
 
 st.subheader("Trade History")
 
