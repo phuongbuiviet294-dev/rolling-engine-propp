@@ -2,185 +2,213 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+from collections import Counter
 
-st.set_page_config(page_title="V4000 RNG Analyzer", layout="wide")
+st.set_page_config(page_title="V5000 RNG Deep Analyzer",layout="wide")
 
-DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-# -----------------------
-# Load Data
-# -----------------------
+# -------------------------
+# LOAD DATA
+# -------------------------
 
 @st.cache_data
-def load_data():
-    df = pd.read_csv(DATA_URL)
-    df.columns = [c.strip().lower() for c in df.columns]
-    numbers = df["number"].dropna().astype(int)
-    return numbers
+def load():
+    df=pd.read_csv(DATA_URL)
+    df.columns=[c.lower().strip() for c in df.columns]
+    nums=df["number"].dropna().astype(int)
+    return nums
 
-numbers = load_data()
+numbers=load()
+n=len(numbers)
 
-st.title("🎲 V4000 Advanced RNG Analyzer")
+st.title("🎲 V5000 RNG Deep Analyzer")
 
-st.write("Total rounds:", len(numbers))
+st.write("Total rounds:",n)
 
-# -----------------------
-# Convert to groups
-# -----------------------
-
-def group(n):
-    if n <= 3:
-        return 1
-    elif n <= 6:
-        return 2
-    elif n <= 9:
-        return 3
-    else:
-        return 4
-
-groups = numbers.apply(group)
-g = groups.values
-
-# -----------------------
-# Global distribution
-# -----------------------
+# -------------------------
+# DISTRIBUTION
+# -------------------------
 
 st.header("Distribution")
 
-freq = groups.value_counts().sort_index()
-prob = freq / len(groups)
+freq=numbers.value_counts().sort_index()
+prob=freq/n
 
-dist_df = pd.DataFrame({
-    "group": freq.index,
-    "count": freq.values,
-    "prob": prob.values
+df=pd.DataFrame({
+    "number":freq.index,
+    "count":freq.values,
+    "prob":prob.values
 })
 
-st.dataframe(dist_df)
+st.dataframe(df)
 
-fig = px.bar(dist_df, x="group", y="prob")
-st.plotly_chart(fig, use_container_width=True)
+fig=px.bar(df,x="number",y="prob")
+st.plotly_chart(fig,use_container_width=True)
 
-# -----------------------
-# Lag correlation
-# -----------------------
+# -------------------------
+# SERIAL TEST
+# -------------------------
 
-st.header("Lag Correlation")
+st.header("Serial Test")
 
-lags = 10
-corr = []
+pairs=list(zip(numbers[:-1],numbers[1:]))
 
-for lag in range(1, lags+1):
-    c = np.corrcoef(g[:-lag], g[lag:])[0,1]
-    corr.append(c)
+pair_counts=Counter(pairs)
 
-corr_df = pd.DataFrame({
-    "lag": range(1,lags+1),
-    "correlation": corr
+serial_df=pd.DataFrame([
+    {"pair":str(k),"count":v}
+    for k,v in pair_counts.items()
+])
+
+st.dataframe(serial_df.head(20))
+
+# -------------------------
+# RUN LENGTH
+# -------------------------
+
+st.header("Run Length Test")
+
+runs=[]
+current=numbers.iloc[0]
+length=1
+
+for x in numbers.iloc[1:]:
+    
+    if x==current:
+        length+=1
+    else:
+        runs.append(length)
+        length=1
+        current=x
+
+runs.append(length)
+
+run_df=pd.DataFrame({"run_length":runs})
+
+fig2=px.histogram(run_df,x="run_length",nbins=20)
+
+st.plotly_chart(fig2,use_container_width=True)
+
+st.write("Average run:",np.mean(runs))
+
+# -------------------------
+# BIT BIAS
+# -------------------------
+
+st.header("Bit Bias Test")
+
+bits=[]
+
+for x in numbers:
+    
+    b=format(x,'04b')
+    
+    for i,bit in enumerate(b):
+        
+        bits.append((i,int(bit)))
+
+bit_df=pd.DataFrame(bits,columns=["bit","value"])
+
+bias=bit_df.groupby("bit")["value"].mean()
+
+bias_df=pd.DataFrame({
+    
+    "bit":bias.index,
+    "prob_one":bias.values
+    
 })
 
-st.dataframe(corr_df)
+st.dataframe(bias_df)
 
-fig2 = px.line(corr_df, x="lag", y="correlation")
-st.plotly_chart(fig2, use_container_width=True)
+fig3=px.bar(bias_df,x="bit",y="prob_one")
 
-# -----------------------
-# Entropy over time
-# -----------------------
+st.plotly_chart(fig3,use_container_width=True)
 
-st.header("Entropy Drift")
+# -------------------------
+# CYCLE DETECTION
+# -------------------------
 
-window = 200
-entropy_vals = []
-pos = []
+st.header("Cycle Detection")
 
-for i in range(0, len(g)-window):
-    seg = g[i:i+window]
-    counts = np.bincount(seg)[1:]
-    probs = counts / window
-    ent = -np.sum(probs * np.log2(probs + 1e-9))
-    entropy_vals.append(ent)
-    pos.append(i)
+seq=numbers.values
 
-entropy_df = pd.DataFrame({
-    "round": pos,
-    "entropy": entropy_vals
-})
+cycle=None
 
-fig3 = px.line(entropy_df, x="round", y="entropy")
-st.plotly_chart(fig3, use_container_width=True)
+for size in range(10,200):
+    
+    pattern=tuple(seq[-size:])
+    
+    for i in range(len(seq)-size*2):
+        
+        if tuple(seq[i:i+size])==pattern:
+            
+            cycle=size
+            
+            break
+    
+    if cycle:
+        break
 
-# -----------------------
-# Transition matrix
-# -----------------------
+if cycle:
+    
+    st.success("Cycle detected length:"+str(cycle))
 
-st.header("Markov Transition")
-
-matrix = np.zeros((4,4))
-
-for i in range(len(g)-1):
-    a = g[i]-1
-    b = g[i+1]-1
-    matrix[a][b] += 1
-
-matrix_df = pd.DataFrame(matrix,
-                         index=["1","2","3","4"],
-                         columns=["1","2","3","4"])
-
-st.dataframe(matrix_df)
-
-fig4 = px.imshow(matrix,
-                 labels=dict(x="Next", y="Current", color="Count"))
-st.plotly_chart(fig4, use_container_width=True)
-
-# -----------------------
-# Markov probability
-# -----------------------
-
-prob_matrix = matrix / matrix.sum(axis=1, keepdims=True)
-
-prob_df = pd.DataFrame(prob_matrix,
-                       index=["1","2","3","4"],
-                       columns=["1","2","3","4"])
-
-st.header("Transition Probability")
-
-st.dataframe(prob_df)
-
-# -----------------------
-# Detect edge
-# -----------------------
-
-edge_group = None
-edge_prob = 0
-
-for i in range(4):
-    m = prob_matrix[i].max()
-    if m > edge_prob:
-        edge_prob = m
-        edge_group = np.argmax(prob_matrix[i]) + 1
-
-st.header("Edge Detection")
-
-st.write("Max transition probability:", round(edge_prob,4))
-st.write("Edge group:", edge_group)
-
-if edge_prob > 0.32:
-    st.success("TRADE SIGNAL")
-    st.write("Bet group:", edge_group)
 else:
-    st.warning("NO EDGE")
+    
+    st.write("No cycle found")
 
-# -----------------------
-# Next signal
-# -----------------------
+# -------------------------
+# SPECTRAL TEST
+# -------------------------
 
-current = g[-1]
+st.header("Spectral Pattern")
 
-next_prob = prob_matrix[current-1]
-next_group = np.argmax(next_prob)+1
+x=numbers[:-1]
+y=numbers[1:]
 
-st.header("Next Signal")
+spec_df=pd.DataFrame({
+    
+    "x":x,
+    "y":y
+    
+})
 
-st.write("Current group:", current)
-st.write("Best next group:", next_group)
+fig4=px.scatter(spec_df,x="x",y="y")
+
+st.plotly_chart(fig4,use_container_width=True)
+
+# -------------------------
+# RANDOMNESS SCORE
+# -------------------------
+
+st.header("Randomness Score")
+
+score=100
+
+# distribution check
+expected=1/len(freq)
+dev=np.abs(prob-expected).mean()
+
+score-=dev*100
+
+# bit bias
+bit_dev=np.abs(bias-0.5).mean()
+
+score-=bit_dev*100
+
+score=max(score,0)
+
+st.metric("Randomness Score",round(score,2))
+
+if score>90:
+    
+    st.success("RNG looks strong")
+
+elif score>70:
+    
+    st.warning("Possible weak RNG")
+
+else:
+    
+    st.error("RNG likely exploitable")
