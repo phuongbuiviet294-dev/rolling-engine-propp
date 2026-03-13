@@ -7,46 +7,66 @@ DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi
 df = pd.read_csv(DATA_URL)
 numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("V900 State Pattern Scan")
-
-lookback = 5
-
-states = {}
-next_vals = {}
-
-for i in range(lookback, len(numbers)-1):
-
-    state = tuple(numbers[i-lookback:i])
-    nxt = numbers[i+1]
-
-    if state not in states:
-        states[state] = 0
-        next_vals[state] = []
-
-    states[state] += 1
-    next_vals[state].append(nxt)
+st.title("🚀 V1000 Edge Hunter Engine")
 
 results = []
 
-for state in states:
+for lookback in range(2,7):
 
-    if states[state] < 20:
-        continue
+    for gap in range(0,11):
 
-    counts = pd.Series(next_vals[state]).value_counts(normalize=True)
+        for window in range(3,21):
 
-    max_prob = counts.max()
+            trades = 0
+            wins = 0
 
-    results.append({
-        "state": state,
-        "samples": states[state],
-        "max_next_prob": max_prob
-    })
+            for i in range(lookback + gap + window, len(numbers)-1):
+
+                pattern = numbers[i-gap-lookback:i-gap]
+
+                history = []
+
+                for j in range(i-gap-window, i-gap):
+
+                    if j-lookback < 0:
+                        continue
+
+                    if numbers[j-lookback:j] == pattern:
+                        history.append(numbers[j])
+
+                if len(history) < 5:
+                    continue
+
+                pred = pd.Series(history).value_counts().idxmax()
+
+                trades += 1
+
+                if numbers[i+1] == pred:
+                    wins += 1
+
+            if trades < 30:
+                continue
+
+            winrate = wins / trades
+            ev = winrate * 9 - (1-winrate)
+
+            results.append({
+                "lookback": lookback,
+                "gap": gap,
+                "window": window,
+                "trades": trades,
+                "wins": wins,
+                "winrate": winrate,
+                "EV": ev
+            })
+
 
 df_res = pd.DataFrame(results)
 
-df_res = df_res.sort_values("max_next_prob", ascending=False)
+df_res = df_res.sort_values("EV", ascending=False)
+
+st.subheader("Top Edge Configurations")
 
 st.dataframe(df_res.head(20))
 
-st.bar_chart(df_res.head(20).set_index("state")["max_next_prob"])
+st.bar_chart(df_res.head(20).set_index(["lookback","gap","window"])["EV"])
