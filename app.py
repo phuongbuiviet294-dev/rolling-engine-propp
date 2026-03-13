@@ -2,74 +2,175 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.title("Pattern Probability Scanner")
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+WIN=2.5
+LOSS=1
 
-df = pd.read_csv(URL)
+WINDOW_RANGE=range(6,21)
+STEP=200
 
-numbers = df["number"].dropna().astype(int).values
+st.set_page_config(layout="wide")
+
+# ---------- GROUP ----------
 
 def group(n):
-    if n<=3: return 1
-    if n<=6: return 2
-    if n<=9: return 3
+    if n<=3:return 1
+    if n<=6:return 2
+    if n<=9:return 3
     return 4
 
-groups = np.array([group(x) for x in numbers])
+# ---------- LOAD ----------
 
-WINDOW = 9
+@st.cache_data(ttl=5)
+def load():
 
-hits = []
+    df=pd.read_csv(DATA_URL)
+    df.columns=[c.lower() for c in df.columns]
 
-for i in range(WINDOW,len(groups)):
-    
-    pred = groups[i-WINDOW]
-    
-    hit = 1 if groups[i]==pred else 0
-    
-    hits.append(hit)
+    return df["number"].dropna().astype(int).tolist()
 
-hits = np.array(hits)
+numbers=load()
+groups=[group(n) for n in numbers]
 
-base_wr = hits.mean()
+# ---------- SIM ----------
 
-st.write("Base winrate:",base_wr)
+def simulate(data,window):
 
-patterns = {
-    "1-1":[1,1],
-    "1-0-1":[1,0,1],
-    "0-1-1":[0,1,1],
-    "1-1-1":[1,1,1],
-    "0-0-1":[0,0,1],
-}
+    profit=0
 
-results = []
+    for i in range(window,len(data)):
 
-for name,p in patterns.items():
+        pred=data[i-window]
+        actual=data[i]
 
-    w = len(p)
+        if pred==actual:
+            profit+=WIN
+        else:
+            profit-=LOSS
 
-    total = 0
-    wins = 0
+    return profit
 
-    for i in range(w,len(hits)):
+# ---------- FIND BEST WINDOWS ----------
 
-        if list(hits[i-w:i]) == p:
+def best_windows(train):
 
-            total += 1
+    scores=[]
 
-            if hits[i]==1:
-                wins += 1
+    for w in WINDOW_RANGE:
 
-    if total>0:
+        p=simulate(train,w)
 
-        wr = wins/total
+        scores.append((w,p))
 
-        results.append((name,total,wr))
+    scores.sort(key=lambda x:x[1],reverse=True)
 
-st.subheader("Pattern Results")
+    return [x[0] for x in scores[:3]]
 
-for r in results:
+# ---------- WALK FORWARD ----------
 
-    st.write(r)
+profit=0
+equity=[]
+history=[]
+hits=[]
+
+start=2000
+windows=[9]
+
+for t in range(start,len(groups),STEP):
+
+    train=groups[:t]
+
+    windows=best_windows(train)
+
+    end=min(t+STEP,len(groups))
+
+    for i in range(t,end):
+
+        preds=[groups[i-w] for w in windows]
+
+        vote=max(set(preds),key=preds.count)
+
+        vote_count=preds.count(vote)
+
+        predicted=None
+        hit=None
+        state="SCAN"
+
+        if vote_count>=2:
+
+            predicted=vote
+
+            actual=groups[i]
+
+            hit=1 if predicted==actual else 0
+
+            hits.append(hit)
+
+            if hit:
+                profit+=WIN
+            else:
+                profit-=LOSS
+
+            state="TRADE"
+
+        equity.append(profit)
+
+        history.append({
+            "round":i,
+            "windows":windows,
+            "predicted":predicted,
+            "actual":groups[i],
+            "hit":hit,
+            "profit":profit
+        })
+
+# ---------- NEXT GROUP ----------
+
+preds=[groups[-w] for w in windows]
+
+vote=max(set(preds),key=preds.count)
+
+vote_count=preds.count(vote)
+
+next_group=vote if vote_count>=2 else None
+
+# ---------- METRICS ----------
+
+trades=len([h for h in hits if h is not None])
+wins=hits.count(1)
+
+wr=wins/trades if trades else 0
+
+# ---------- DASHBOARD ----------
+
+st.title("Adaptive Multi-Window Engine")
+
+c1,c2,c3=st.columns(3)
+
+c1.metric("Profit",round(profit,2))
+c2.metric("Trades",trades)
+c3.metric("Winrate %",round(wr*100,2))
+
+st.write("Active Windows:",windows)
+
+# ---------- NEXT SIGNAL ----------
+
+st.subheader("Next Bet")
+
+if next_group:
+    st.success(f"BET GROUP → {next_group}")
+else:
+    st.info("Waiting signal")
+
+# ---------- EQUITY ----------
+
+st.subheader("Equity Curve")
+
+st.line_chart(pd.DataFrame({"profit":equity}))
+
+# ---------- HISTORY ----------
+
+st.subheader("History")
+
+st.dataframe(pd.DataFrame(history).iloc[::-1],use_container_width=True)
