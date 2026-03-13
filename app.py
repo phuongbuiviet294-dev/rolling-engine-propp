@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
-from collections import Counter, defaultdict
-
-# ================= CONFIG =================
+from collections import Counter,defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -10,17 +8,18 @@ WINDOW_RANGE=range(8,18)
 SCAN_ROUNDS=200
 
 LOOKBACK_STABILITY=26
+
 PATTERN_MIN=2
 PATTERN_MAX=4
 
-PROB_THRESHOLD=0.35
+CONF_THRESHOLD=0.55
 
 WIN=2.5
 LOSS=1
 
 st.set_page_config(layout="wide")
 
-# ================= GROUP =================
+# ---------------- GROUP ----------------
 
 def group(n):
 
@@ -30,13 +29,13 @@ def group(n):
     return 4
 
 
-# ================= LOAD DATA =================
+# ---------------- LOAD ----------------
 
 @st.cache_data(ttl=10)
 def load():
 
     df=pd.read_csv(DATA_URL)
-    df.columns=[c.strip().lower() for c in df.columns]
+    df.columns=[c.lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
 
@@ -44,7 +43,7 @@ numbers=load()
 
 groups=[group(n) for n in numbers]
 
-# ================= PREDICT =================
+# ---------------- PREDICT ----------------
 
 def predict_freq(data,window):
 
@@ -55,7 +54,7 @@ def predict_freq(data,window):
 
     return max(c,key=c.get)
 
-# ================= WINDOW EVAL =================
+# ---------------- WINDOW SCAN ----------------
 
 def eval_window(data,window):
 
@@ -70,11 +69,8 @@ def eval_window(data,window):
         actual=data[i]
 
         if pred==actual:
-
             profit+=WIN
-
         else:
-
             profit-=LOSS
 
         peak=max(peak,profit)
@@ -84,7 +80,6 @@ def eval_window(data,window):
 
     return profit,dd,score
 
-# ================= WINDOW SCAN =================
 
 def scan_windows(data):
 
@@ -102,116 +97,113 @@ def scan_windows(data):
 
     return int(best.window),df
 
+best_window,window_table=scan_windows(groups[:SCAN_ROUNDS])
 
-# ================= PATTERN SCAN =================
+window=best_window
 
-def scan_patterns(hits):
+# ---------------- ENGINE ----------------
 
-    table=[]
+hits=[]
+equity=[]
+profit=0
 
-    best_pattern=None
-    best_prob=0
+trades=0
+wins=0
 
-    for L in range(PATTERN_MIN,PATTERN_MAX+1):
+pattern_prob=0
+markov_prob=0
+hit_rate_26=0
+
+best_pattern=None
+
+history=[]
+
+for i in range(SCAN_ROUNDS,len(groups)-1):
+
+    pred=predict_freq(groups[:i],window)
+
+    actual=groups[i]
+
+    hit=None
+
+    if pred!=None:
+
+        hit=1 if pred==actual else 0
+        hits.append(hit)
+
+    # -------- pattern scan --------
+
+    if len(hits)>50:
 
         counts=defaultdict(int)
         success=defaultdict(int)
 
-        for i in range(len(hits)-L-1):
+        for L in range(PATTERN_MIN,PATTERN_MAX+1):
 
-            pat=tuple(hits[i:i+L])
+            for j in range(len(hits)-L-1):
 
-            nxt=hits[i+L]
+                pat=tuple(hits[j:j+L])
+                nxt=hits[j+L]
 
-            counts[pat]+=1
+                counts[pat]+=1
 
-            if nxt==1:
-                success[pat]+=1
+                if nxt==1:
+                    success[pat]+=1
+
+        best_prob=0
 
         for pat in counts:
 
             prob=success[pat]/counts[pat]
-
-            table.append([pat,counts[pat],prob])
 
             if prob>best_prob and counts[pat]>10:
 
                 best_prob=prob
                 best_pattern=pat
 
-    df=pd.DataFrame(table,columns=["pattern","count","probability"])
+        pattern_prob=best_prob
 
-    return best_pattern,best_prob,df
+    # -------- markov --------
 
+    if len(hits)>20:
 
-# ================= INITIAL WINDOW =================
+        last=hits[-1]
 
-best_window,window_table=scan_windows(groups[:SCAN_ROUNDS])
+        total=0
+        succ=0
 
-current_window=best_window
+        for j in range(len(hits)-1):
 
-# ================= ENGINE =================
+            if hits[j]==last:
 
-profit=0
-hits=[]
-equity=[]
-history=[]
+                total+=1
 
-trades=0
-wins=0
+                if hits[j+1]==1:
+                    succ+=1
 
-best_pattern=None
-best_prob=0
+        if total>0:
 
-for i in range(SCAN_ROUNDS,len(groups)-1):
+            markov_prob=succ/total
 
-    pred=predict_freq(groups[:i],current_window)
-
-    actual=groups[i]
-
-    hit=None
-    state="SCAN"
-
-    if pred is not None:
-
-        hit=1 if pred==actual else 0
-
-        hits.append(hit)
-
-    # ===== PATTERN UPDATE =====
-
-    if len(hits)>50:
-
-        best_pattern,best_prob,_=scan_patterns(hits)
-
-    # ===== STABILITY =====
-
-    stability=False
+    # -------- momentum --------
 
     if len(hits)>=LOOKBACK_STABILITY:
 
-        hr=sum(hits[-LOOKBACK_STABILITY:])/LOOKBACK_STABILITY
+        hit_rate_26=sum(hits[-LOOKBACK_STABILITY:])/LOOKBACK_STABILITY
 
-        if hr>=0.5:
-            stability=True
+    # -------- confidence --------
 
-    # ===== PATTERN MATCH =====
+    confidence=0.5*pattern_prob+0.3*markov_prob+0.2*hit_rate_26
 
-    pattern_match=False
+    trade=False
 
-    if best_pattern and len(hits)>=len(best_pattern):
+    if confidence>=CONF_THRESHOLD:
 
-        if tuple(hits[-len(best_pattern):])==best_pattern:
-
-            pattern_match=True
-
-    # ===== TRADE =====
-
-    if pattern_match and best_prob>=PROB_THRESHOLD and stability:
+        trade=True
 
         trades+=1
 
-        if pred==actual:
+        if hit==1:
 
             profit+=WIN
             wins+=1
@@ -220,23 +212,20 @@ for i in range(SCAN_ROUNDS,len(groups)-1):
 
             profit-=LOSS
 
-        state="TRADE"
-
     equity.append(profit)
 
     history.append({
 
         "round":i,
+        "pred":pred,
         "actual":actual,
-        "predicted":pred,
         "hit":hit,
+        "confidence":confidence,
         "profit":profit,
-        "state":state,
-        "window":current_window
+        "trade":trade
 
     })
 
-# ================= METRICS =================
 
 wr=wins/trades if trades else 0
 
@@ -245,25 +234,19 @@ dd=max(peak-x for x in equity) if equity else 0
 
 hist_df=pd.DataFrame(history)
 
-# ================= NEXT SIGNAL =================
+# ---------------- NEXT SIGNAL ----------------
 
-next_pred=predict_freq(groups,current_window)
+next_pred=predict_freq(groups,window)
 
-signal=False
+confidence=0.5*pattern_prob+0.3*markov_prob+0.2*hit_rate_26
 
-if best_pattern and len(hits)>=len(best_pattern):
+# ---------------- UI ----------------
 
-    if tuple(hits[-len(best_pattern):])==best_pattern and best_prob>=PROB_THRESHOLD:
-
-        signal=True
-
-# ================= UI =================
-
-st.title("⚡ V66 Momentum Pattern Optimizer")
+st.title("⚡ V67 Hybrid Edge Engine")
 
 col1,col2,col3=st.columns(3)
 
-col1.metric("Best Window",current_window)
+col1.metric("Best Window",window)
 col2.metric("Trades",trades)
 col3.metric("Winrate %",round(wr*100,2))
 
@@ -272,38 +255,31 @@ col4,col5=st.columns(2)
 col4.metric("Profit",round(profit,2))
 col5.metric("Drawdown",round(dd,2))
 
-st.subheader("Best Pattern")
+st.subheader("Edge Metrics")
 
-st.write(best_pattern)
-
-st.write("Probability:",round(best_prob,3))
-
-# ================= NEXT GROUP =================
+st.write("Pattern Prob:",round(pattern_prob,3))
+st.write("Markov Prob:",round(markov_prob,3))
+st.write("Momentum:",round(hit_rate_26,3))
+st.write("Confidence:",round(confidence,3))
 
 st.subheader("Next Group")
 
-if signal:
+if confidence>=CONF_THRESHOLD:
 
     st.success(f"TRADE → Group {next_pred}")
 
 else:
 
-    st.info("SKIP")
-
-# ================= EQUITY =================
+    st.info(f"SKIP → Next Group {next_pred}")
 
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
-# ================= WINDOW TABLE =================
-
-st.subheader("Initial Window Scan")
+st.subheader("Window Scan")
 
 st.dataframe(window_table)
 
-# ================= HISTORY =================
-
 st.subheader("History")
 
-st.dataframe(hist_df.tail(50),use_container_width=True)
+st.dataframe(hist_df.tail(50))
