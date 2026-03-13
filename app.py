@@ -2,70 +2,94 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE=2000
-RETRAIN=200
+TRAIN_SIZE = 2000
+RETRAIN_OPTIONS = [50,100,150,200]
+WINDOW_RANGE = range(6,19)
 
-WIN=2.5
-LOSS=1
+WIN = 2.5
+LOSS = 1
 
-WINDOW_RANGE=range(6,19)
-
-LOOKBACK=26
-
-# -------- group --------
+# ---------------- group ----------------
 
 def get_group(n):
-
     if n<=3: return 1
     if n<=6: return 2
     if n<=9: return 3
     return 4
 
-
-# -------- load --------
+# ---------------- load ----------------
 
 @st.cache_data(ttl=5)
 def load():
-
-    df=pd.read_csv(DATA_URL)
+    df = pd.read_csv(DATA_URL)
     df.columns=[c.strip().lower() for c in df.columns]
-
     return df["number"].dropna().astype(int).tolist()
 
+numbers = load()
+groups = [get_group(n) for n in numbers]
 
-numbers=load()
-groups=[get_group(n) for n in numbers]
+# ---------------- window evaluation ----------------
 
+def window_profit(data, window):
+    p=0
+    for i in range(window,len(data)):
+        pred=data[i-window]
+        actual=data[i]
+        p += WIN if pred==actual else -LOSS
+    return p
 
-# -------- train window --------
+# ---------------- optimize retrain strategy ----------------
 
-def train_window(data):
+def optimize_strategy(train_groups):
 
-    best=None
     best_profit=-999
+    best_retrain=None
 
-    for w in WINDOW_RANGE:
+    for retrain in RETRAIN_OPTIONS:
 
-        p=0
+        profit=0
+        window=None
 
-        for i in range(w,len(data)):
+        for i in range(TRAIN_SIZE):
 
-            pred=data[i-w]
-            actual=data[i]
+            if i<max(WINDOW_RANGE):
+                continue
 
-            p += WIN if pred==actual else -LOSS
+            if i % retrain == 0:
 
-        if p>best_profit:
+                best_w=None
+                best_p=-999
 
-            best_profit=p
-            best=w
+                for w in WINDOW_RANGE:
+                    p=window_profit(train_groups[:i],w)
 
-    return best
+                    if p>best_p:
+                        best_p=p
+                        best_w=w
 
+                window=best_w
 
-window=train_window(groups[:TRAIN_SIZE])
+            pred=train_groups[i-window]
+            actual=train_groups[i]
+
+            profit += WIN if pred==actual else -LOSS
+
+        if profit>best_profit:
+            best_profit=profit
+            best_retrain=retrain
+
+    return best_retrain
+
+# ---------------- training ----------------
+
+train_groups = groups[:TRAIN_SIZE]
+
+best_retrain = optimize_strategy(train_groups)
+
+# initial window
+window = max(WINDOW_RANGE)
 
 profit=0
 hits=[]
@@ -76,8 +100,7 @@ pending_signal=None
 
 last_retrain=TRAIN_SIZE
 
-
-# -------- engine --------
+# ---------------- forward engine ----------------
 
 for i in range(TRAIN_SIZE,len(groups)):
 
@@ -86,12 +109,12 @@ for i in range(TRAIN_SIZE,len(groups)):
     predicted=None
     hit=None
 
-    # ---- execute trade ----
+    # execute trade
 
     if pending_signal is not None:
 
         predicted=pending_signal
-        hit = 1 if predicted==g else 0
+        hit=1 if predicted==g else 0
 
         profit += WIN if hit else -LOSS
 
@@ -99,70 +122,37 @@ for i in range(TRAIN_SIZE,len(groups)):
 
         pending_signal=None
 
+    # retrain window
 
-    # ---- compute hits ----
+    if i-last_retrain>=best_retrain:
 
-    if i>=window:
+        best_p=-999
+        best_w=None
 
-        rec=[]
+        for w in WINDOW_RANGE:
 
-        for j in range(i-LOOKBACK,i):
+            p=window_profit(groups[i-TRAIN_SIZE:i],w)
 
-            if j>=window:
+            if p>best_p:
+                best_p=p
+                best_w=w
 
-                rec.append(
-                    1 if groups[j]==groups[j-window] else 0
-                )
-
-
-        # ---- detect streak ----
-
-        streak=0
-
-        for x in reversed(rec):
-
-            if x==0:
-                streak+=1
-            else:
-                break
-
-
-        # ---- trend pattern ----
-
-        h1 = rec[-1] if len(rec)>1 else 0
-        h2 = rec[-2] if len(rec)>2 else 0
-
-
-        trend_signal=False
-        reversion_signal=False
-
-
-        if h1==1 and h2==1:
-            trend_signal=True
-
-
-        if streak>=4:
-            reversion_signal=True
-
-
-        if trend_signal or reversion_signal:
-
-            pending_signal=groups[i-window]
-
-
-    # ---- retrain ----
-
-    if i-last_retrain>=RETRAIN:
-
-        window=train_window(groups[:i])
+        window=best_w
         last_retrain=i
 
+    # signal
+
+    if i>=window+2:
+
+        h1 = 1 if groups[i-1]==groups[i-1-window] else 0
+        h2 = 1 if groups[i-2]==groups[i-2-window] else 0
+
+        if h1==1 and h2==1:
+            pending_signal=groups[i-window]
 
     equity.append(profit)
 
-
     history.append({
-
         "round":i+1,
         "number":numbers[i],
         "group":g,
@@ -170,11 +160,9 @@ for i in range(TRAIN_SIZE,len(groups)):
         "hit":hit,
         "window":window,
         "profit":profit
-
     })
 
-
-# -------- stats --------
+# ---------------- stats ----------------
 
 wr=np.mean(hits) if hits else 0
 
@@ -183,24 +171,21 @@ loss=hits.count(0)*LOSS
 
 pf=wins/loss if loss else 0
 
+# ---------------- UI ----------------
 
-# -------- UI --------
-
-st.title("🚀 V105 HYBRID ENGINE")
+st.title("🚀 V300 Walk-Forward Engine")
 
 c1,c2,c3,c4=st.columns(4)
 
 c1.metric("Profit",round(profit,2))
 c2.metric("Winrate %",round(wr*100,2))
 c3.metric("Profit Factor",round(pf,2))
-c4.metric("Active Window",window)
+c4.metric("Retrain Interval",best_retrain)
 
-st.caption("Train=2000 | Retrain every 200 rounds")
-
+st.caption("Train=2000 | Walk-Forward Test")
 
 st.subheader("Equity Curve")
 st.line_chart(pd.DataFrame({"equity":equity}))
-
 
 st.subheader("Next Signal")
 
@@ -208,7 +193,6 @@ if pending_signal:
     st.success(f"TRADE NEXT → Group {pending_signal}")
 else:
     st.info("WAIT SIGNAL")
-
 
 st.subheader("History")
 
