@@ -28,7 +28,7 @@ groups=[group(n) for n in numbers]
 
 ROUNDS=len(groups)
 
-# ---------- prediction ----------
+# ---------- predict ----------
 def predict(g,window):
 
     if len(g)<window:
@@ -41,7 +41,7 @@ def predict(g,window):
     return max(c,key=c.get)
 
 # ---------- streak probability ----------
-def streak_probability(hits):
+def streak_prob(hits):
 
     total=0
     win=0
@@ -55,16 +55,25 @@ def streak_probability(hits):
             if hits[i+2]==1:
                 win+=1
 
-    if total==0:
-        return 0
+    if total<20:
+        return None
 
     return win/total
 
-results=[]
+# ---------- momentum ----------
+def momentum(profit_history):
 
-THRESHOLD=0.35
+    if len(profit_history)<40:
+        return 0
+
+    p20=profit_history[-20]
+    p40=profit_history[-40]
+
+    return 1 if p20>p40 else 0
 
 # ---------- backtest ----------
+results=[]
+
 for window in range(8,18):
 
     profit=0
@@ -75,17 +84,27 @@ for window in range(8,18):
     wins=0
 
     hits=[]
+    profit_hist=[]
+
     history=[]
 
     for i in range(window,ROUNDS-1):
 
-        prob=streak_probability(hits)
+        prob=streak_prob(hits)
+
+        mom=momentum(profit_hist)
 
         trade=False
 
-        if len(hits)>=2 and hits[-2:]==[1,1] and prob>THRESHOLD:
+        confidence=0
 
-            trade=True
+        if len(hits)>=2 and hits[-2:]==[1,1] and prob:
+
+            confidence=0.4*prob + 0.3*mom + 0.3*0.25
+
+            if confidence>0.4:
+
+                trade=True
 
         pred=predict(groups[:i],window)
 
@@ -111,6 +130,8 @@ for window in range(8,18):
 
         hits.append(hit)
 
+        profit_hist.append(profit)
+
         peak=max(peak,profit)
 
         dd=max(dd,peak-profit)
@@ -122,7 +143,8 @@ for window in range(8,18):
             "actual":actual,
             "hit":hit,
             "trade":trade,
-            "profit":profit
+            "profit":profit,
+            "confidence":confidence
         })
 
     wr=wins/trades if trades else 0
@@ -151,8 +173,7 @@ hist_df=pd.DataFrame(hist)
 live_pred=predict(groups,best_window)
 
 # ---------- UI ----------
-
-st.title("⚡ V50 Streak Probability Engine")
+st.title("⚡ V51 Momentum Adaptive Engine")
 
 c1,c2,c3=st.columns(3)
 
