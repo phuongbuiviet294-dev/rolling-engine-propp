@@ -14,10 +14,14 @@ GAP_RANGE = range(1,8)
 
 # ================= LOAD DATA =================
 
+print("Loading data...")
+
 df = pd.read_csv(DATA_URL)
 df.columns=[c.strip().lower() for c in df.columns]
 
 numbers=df["number"].dropna().astype(int).tolist()
+
+print("Rounds:",len(numbers))
 
 # ================= GROUP =================
 
@@ -93,8 +97,8 @@ for WINDOW in WINDOW_RANGE:
                     "lookback":LOOKBACK,
                     "gap":GAP,
                     "trades":trades,
-                    "winrate":winrate,
-                    "profit":profit
+                    "winrate":round(winrate,4),
+                    "profit":round(profit,2)
                 })
 
 # ================= RESULT =================
@@ -103,11 +107,31 @@ res=pd.DataFrame(results)
 
 res=res.sort_values("profit",ascending=False)
 
-print("\nTOP 20 STRATEGIES\n")
+print("\n==============================")
+print("TOP 20 STRATEGIES")
+print("==============================")
+
 print(res.head(20))
 
-print("\nBEST STRATEGY\n")
-print(res.iloc[0])
+print("\n==============================")
+print("BEST STRATEGY")
+print("==============================")
 
-print("\nWINRATE CHECK")
+best=res.iloc[0]
+
+print(best)
+
+print("\n==============================")
+print("WINRATE CHECK")
+print("==============================")
+
 print("Required winrate > 0.286 to beat game")
+print("Best winrate:",best["winrate"])
+
+if best["winrate"]>0.286:
+
+    print("\nPossible edge detected")
+
+else:
+
+    print("\nNo statistical edge found")
