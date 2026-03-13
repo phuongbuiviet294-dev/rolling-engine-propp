@@ -4,13 +4,13 @@ import numpy as np
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
+TRAIN_SIZE = 2000
 WINDOW_RANGE = range(6,19)
 MAX_STREAK = 10
 
 WIN = 2.5
 LOSS = 1
 
-# -------- group --------
 
 def get_group(n):
     if n<=3: return 1
@@ -18,7 +18,6 @@ def get_group(n):
     if n<=9: return 3
     return 4
 
-# -------- load --------
 
 @st.cache_data(ttl=5)
 def load():
@@ -26,24 +25,29 @@ def load():
     df.columns=[c.strip().lower() for c in df.columns]
     return df["number"].dropna().astype(int).tolist()
 
+
 numbers = load()
 groups = [get_group(n) for n in numbers]
 
-st.title("🔎 V400 Pattern Scanner Engine")
+st.title("🚀 V410 Walk-Forward Edge Test")
 
-results = []
 
-# -------- scan windows --------
+# -------------------
+# TRAIN PHASE
+# -------------------
+
+train_groups = groups[:TRAIN_SIZE]
+
+patterns = []
 
 for window in WINDOW_RANGE:
 
     hits = []
 
-    for i in range(window, len(groups)):
-        hit = 1 if groups[i] == groups[i-window] else 0
+    for i in range(window, len(train_groups)):
+        hit = 1 if train_groups[i] == train_groups[i-window] else 0
         hits.append(hit)
 
-    # compute streaks
     streak = 0
 
     for i in range(len(hits)-1):
@@ -53,19 +57,18 @@ for window in WINDOW_RANGE:
         else:
             streak = 0
 
-        if streak > 0 and streak <= MAX_STREAK:
+        if streak>0 and streak<=MAX_STREAK:
 
             next_hit = hits[i+1]
 
-            results.append({
+            patterns.append({
                 "window":window,
                 "streak":streak,
                 "hit":next_hit
             })
 
-# -------- dataframe --------
 
-df = pd.DataFrame(results)
+df = pd.DataFrame(patterns)
 
 summary = []
 
@@ -80,32 +83,57 @@ for (window, streak), g in df.groupby(["window","streak"]):
         "window":window,
         "streak":streak,
         "trades":trades,
-        "winrate":round(winrate*100,2),
-        "EV":round(ev,3)
+        "winrate":winrate,
+        "EV":ev
     })
 
 summary_df = pd.DataFrame(summary)
 
-summary_df = summary_df.sort_values("EV", ascending=False)
+best = summary_df.sort_values("EV", ascending=False).iloc[0]
 
-st.subheader("Pattern Edge Ranking")
+best_window = int(best.window)
+best_streak = int(best.streak)
 
-st.dataframe(summary_df, use_container_width=True)
+st.subheader("Best Pattern (TRAIN 2000)")
+st.success(f"window={best_window} | streak={best_streak} | winrate={round(best.winrate*100,2)}%")
 
-# -------- best pattern --------
 
-best = summary_df.iloc[0]
+# -------------------
+# FORWARD TEST
+# -------------------
 
-st.subheader("Best Pattern Found")
+equity = 0
+curve = []
+streak = 0
+trades = 0
+wins = 0
 
-st.success(
-    f"""
-window = {best.window}
+for i in range(TRAIN_SIZE, len(groups)):
 
-streak = {best.streak}
+    if groups[i] != groups[i-best_window]:
+        streak += 1
+    else:
+        streak = 0
 
-winrate = {best.winrate}%
+    if streak == best_streak:
 
-EV = {best.EV}
-"""
-)
+        trades += 1
+
+        if groups[i] == groups[i-best_window]:
+            equity += WIN
+            wins += 1
+        else:
+            equity -= LOSS
+
+        streak = 0
+
+    curve.append(equity)
+
+
+winrate = wins/trades if trades>0 else 0
+
+st.metric("Forward Profit", round(equity,2))
+st.metric("Trades", trades)
+st.metric("Winrate", round(winrate*100,2))
+
+st.line_chart(curve)
