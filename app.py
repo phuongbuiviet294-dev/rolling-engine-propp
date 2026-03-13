@@ -2,16 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from math import gcd
-from collections import defaultdict
+from scipy.stats import entropy
 
-st.set_page_config(page_title="V9000 RNG Exploit Scanner",layout="wide")
+st.set_page_config(page_title="V10000 RNG Deep Forensics",layout="wide")
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-# -----------------------
+# --------------------
 # LOAD DATA
-# -----------------------
+# --------------------
 
 @st.cache_data
 def load():
@@ -23,157 +22,163 @@ def load():
 numbers=load().values
 n=len(numbers)
 
-st.title("🧠 V9000 RNG Exploit Scanner")
+st.title("🔬 V10000 RNG Deep Forensics")
 
 st.write("Total outputs:",n)
 
-# -----------------------
-# LCG MODULUS TEST
-# -----------------------
+# --------------------
+# ENTROPY TEST
+# --------------------
 
-st.header("LCG Modulus Detection")
+st.header("Global Entropy Test")
 
-mods=[]
+counts=np.bincount(numbers)[1:]
+probs=counts/np.sum(counts)
 
-for i in range(n-4):
+H=entropy(probs,base=2)
 
-    x0=numbers[i]
-    x1=numbers[i+1]
-    x2=numbers[i+2]
-    x3=numbers[i+3]
+st.metric("Entropy",round(H,4))
 
-    t1=(x2-x1)*(x0-x1)
-    t2=(x1-x0)*(x3-x2)
+theoretical=np.log2(12)
 
-    val=abs(t1-t2)
+st.write("Theoretical entropy:",round(theoretical,4))
 
-    if val>0:
-        mods.append(val)
-
-if len(mods)>0:
+if H<theoretical*0.95:
     
-    m=mods[0]
+    st.error("Entropy too low")
     
-    for v in mods[1:50]:
-        m=gcd(m,v)
-
-    st.write("Estimated modulus candidate:",m)
-
-    if m>1e6:
-        st.warning("Possible LCG modulus found")
-    else:
-        st.success("No clear LCG modulus")
-
-# -----------------------
-# TRANSITION MATRIX
-# -----------------------
-
-st.header("Markov Transition Bias")
-
-matrix=defaultdict(lambda:defaultdict(int))
-
-for i in range(n-1):
+else:
     
-    a=numbers[i]
-    b=numbers[i+1]
+    st.success("Entropy looks normal")
+
+# --------------------
+# SLIDING ENTROPY
+# --------------------
+
+st.header("Sliding Window Entropy")
+
+window=200
+
+Hs=[]
+xs=[]
+
+for i in range(0,n-window):
+
+    chunk=numbers[i:i+window]
+
+    c=np.bincount(chunk)[1:]
     
-    matrix[a][b]+=1
+    p=c/np.sum(c)
 
-rows=[]
+    Hs.append(entropy(p,base=2))
+    
+    xs.append(i)
 
-for a in matrix:
+df=pd.DataFrame({
+    
+    "round":xs,
+    "entropy":Hs
+    
+})
 
-    total=sum(matrix[a].values())
-
-    for b in matrix[a]:
-        
-        rows.append({
-            "from":a,
-            "to":b,
-            "prob":matrix[a][b]/total
-        })
-
-df=pd.DataFrame(rows)
-
-fig=px.scatter(df,x="from",y="to",size="prob",color="prob")
+fig=px.line(df,x="round",y="entropy")
 
 st.plotly_chart(fig,use_container_width=True)
 
-max_prob=df["prob"].max()
+# --------------------
+# SEGMENT DISTRIBUTION
+# --------------------
 
-st.write("Max transition probability:",max_prob)
+st.header("Segment Distribution Drift")
 
-if max_prob>0.2:
-    st.warning("Transition bias detected")
-else:
-    st.success("No transition bias")
+segments=5
 
-# -----------------------
-# PREDICTOR TEST
-# -----------------------
+size=n//segments
 
-st.header("Predictor Simulation")
+rows=[]
 
-wins=0
-bets=0
+for i in range(segments):
 
-for i in range(n-1000,n-1):
+    seg=numbers[i*size:(i+1)*size]
 
-    current=numbers[i]
+    counts=np.bincount(seg)[1:]
+    
+    probs=counts/np.sum(counts)
 
-    probs=df[df["from"]==current]
+    for num,p in enumerate(probs,1):
+        
+        rows.append({
+            
+            "segment":i,
+            "number":num,
+            "prob":p
+            
+        })
 
-    if len(probs)==0:
-        continue
+df2=pd.DataFrame(rows)
 
-    guess=probs.sort_values("prob",ascending=False).iloc[0]["to"]
+fig2=px.bar(df2,x="number",y="prob",color="segment",barmode="group")
 
-    actual=numbers[i+1]
+st.plotly_chart(fig2,use_container_width=True)
 
-    bets+=1
+# --------------------
+# LONG RUN DETECTION
+# --------------------
 
-    if guess==actual:
-        wins+=1
+st.header("Long Run Detection")
 
-if bets>0:
+runs=[]
 
-    winrate=wins/bets
+run_len=1
 
-    st.metric("Predictor winrate",round(winrate,4))
+for i in range(1,n):
 
-    random_rate=1/12
-
-    st.write("Random baseline:",random_rate)
-
-    if winrate>random_rate+0.02:
-        st.error("Predictable RNG detected")
+    if numbers[i]==numbers[i-1]:
+        
+        run_len+=1
+        
     else:
-        st.success("Predictor performs like random")
+        
+        runs.append(run_len)
+        
+        run_len=1
 
-# -----------------------
-# EXPLOIT SCORE
-# -----------------------
+max_run=max(runs)
 
-st.header("Exploitability Score")
+st.metric("Max identical run",max_run)
 
-score=0
-
-if max_prob>0.2:
-    score+=40
-
-if winrate>0.1:
-    score+=40
-
-if 'm' in locals() and m>1e6:
-    score+=20
-
-st.metric("Exploit score",score)
-
-if score<30:
-    st.success("RNG likely secure")
-
-elif score<60:
-    st.warning("Weak RNG signals")
+if max_run>10:
+    
+    st.warning("Suspicious long run")
 
 else:
-    st.error("RNG may be exploitable")
+    
+    st.success("Runs look normal")
+
+# --------------------
+# FORENSICS SCORE
+# --------------------
+
+st.header("Forensics Score")
+
+score=100
+
+score-=abs(theoretical-H)*20
+
+score-=max_run
+
+score=max(score,0)
+
+st.metric("RNG Integrity Score",round(score,2))
+
+if score>90:
+    
+    st.success("RNG appears cryptographically strong")
+
+elif score>70:
+    
+    st.warning("Possible RNG weakness")
+
+else:
+    
+    st.error("RNG integrity compromised")
