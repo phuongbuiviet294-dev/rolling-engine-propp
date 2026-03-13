@@ -7,19 +7,18 @@ from collections import Counter, defaultdict
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 WINDOW_RANGE=range(8,18)
-
-TRAIN_SIZE=2000
 LOOKBACK=26
-RECALIBRATE=200
+TRAIN_TARGET=2000
 
 WIN=2.5
 LOSS=1
 
-SIGNAL_THRESHOLD=0.42
+SIGNAL_THRESHOLD=0.45
 
 st.set_page_config(layout="wide")
 
-# ---------- group ----------
+
+# ---------- group mapping ----------
 
 def group(n):
 
@@ -63,6 +62,8 @@ numbers=load()
 
 groups=[group(n) for n in numbers]
 
+TRAIN_SIZE=min(TRAIN_TARGET,len(groups)//2)
+
 
 # ---------- window scan ----------
 
@@ -101,8 +102,6 @@ def scan_windows(data):
     return best
 
 
-TRAIN_SIZE=min(TRAIN_SIZE,len(groups)//2)
-
 best_window=scan_windows(groups[:TRAIN_SIZE])
 
 
@@ -123,11 +122,6 @@ trade_history=[]
 
 
 for i in range(TRAIN_SIZE,len(groups)-1):
-
-
-    if (i-TRAIN_SIZE)%RECALIBRATE==0 and i>TRAIN_SIZE:
-
-        best_window=scan_windows(groups[i-400:i])
 
 
     pred=predict(groups[:i],best_window)
@@ -203,10 +197,10 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
     regime="break"
 
-    if momentum>=0.45:
+    if stability>=0.42:
         regime="trend"
 
-    elif momentum>=0.30:
+    elif stability>=0.30:
         regime="random"
 
 
@@ -223,7 +217,7 @@ for i in range(TRAIN_SIZE,len(groups)-1):
     if len(hits)>=5 and hits[-5:].count(1)>=3:
         signal=True
 
-    if momentum>0.35:
+    if momentum>0.38:
         signal=True
 
 
@@ -254,6 +248,13 @@ for i in range(TRAIN_SIZE,len(groups)-1):
             profit-=LOSS
 
 
+    # ---------- window relearn ----------
+
+    if regime=="break":
+
+        best_window=scan_windows(groups[i-400:i])
+
+
     equity.append(profit)
 
 
@@ -278,8 +279,7 @@ next_pred=predict(groups,best_window)
 
 # ---------- UI ----------
 
-st.title("⚡ V73 Adaptive Regime Engine")
-
+st.title("⚡ V74 Self-Learning Window Engine")
 
 col1,col2,col3=st.columns(3)
 
