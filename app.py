@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from collections import defaultdict
 
 URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -7,7 +8,6 @@ df = pd.read_csv(URL)
 
 numbers = df["number"].dropna().astype(int).values
 
-# group function giống code cũ
 def group(n):
     if n<=3: return 1
     if n<=6: return 2
@@ -30,28 +30,34 @@ for i in range(WINDOW,len(groups)):
 
 hits = np.array(hits)
 
-# winrate chung
-base_winrate = hits.mean()
+results = []
 
-# test pattern 1-1
-total = 0
-wins = 0
+for w in range(6,51):
 
-for i in range(2,len(hits)):
-    
-    if hits[i-2]==1 and hits[i-1]==1:
-        
-        total+=1
-        
-        if hits[i]==1:
-            wins+=1
+    patterns = defaultdict(lambda:[0,0])
 
-if total>0:
-    pattern_wr = wins/total
-else:
-    pattern_wr = 0
+    for i in range(w,len(hits)-1):
 
-print("Base winrate:",base_winrate)
-print("1-1 cases:",total)
-print("Wins after 1-1:",wins)
-print("Winrate after 1-1:",pattern_wr)
+        pattern = tuple(hits[i-w:i])
+
+        next_hit = hits[i]
+
+        patterns[pattern][0]+=1
+        patterns[pattern][1]+=next_hit
+
+    for p,v in patterns.items():
+
+        count = v[0]
+        wins = v[1]
+
+        if count>20:
+
+            wr = wins/count
+
+            results.append((w,p,count,wr))
+
+results = sorted(results,key=lambda x:x[3],reverse=True)
+
+for r in results[:20]:
+
+    print(r)
