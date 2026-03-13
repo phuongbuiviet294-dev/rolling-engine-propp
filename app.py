@@ -1,177 +1,244 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import Counter
 
 # ================= CONFIG =================
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WIN=2.5
-LOSS=1
+TRAIN_SIZE = 2000
+RETRAIN_INTERVAL = 200
 
-BACKTEST_ROUNDS=2000
+WINDOW_RANGE = range(6,19)
 
-WINDOW_POOL=range(8,21)
-TOP_WINDOWS=3
+LOOKBACK = 26
+GAP = 4
 
-AUTO_REFRESH=5
+WIN = 2.5
+LOSS = 1
 
 st.set_page_config(layout="wide")
 
 # ================= GROUP =================
 
 def get_group(n):
+    if n <= 3: return 1
+    if n <= 6: return 2
+    if n <= 9: return 3
+    return 4
 
-    if 1<=n<=3:return 1
-    if 4<=n<=6:return 2
-    if 7<=n<=9:return 3
-    if 10<=n<=12:return 4
+# ================= LOAD =================
 
-# ================= LOAD DATA =================
-
-@st.cache_data(ttl=AUTO_REFRESH)
+@st.cache_data(ttl=5)
 def load():
-
-    df=pd.read_csv(DATA_URL)
-
+    df = pd.read_csv(DATA_URL)
     df.columns=[c.strip().lower() for c in df.columns]
+    return df["number"].dropna().astype(int).tolist()
 
-    nums=df["number"].dropna().astype(int)
+numbers = load()
+groups = [get_group(n) for n in numbers]
 
-    return nums.tolist()
+# ================= OPTIMIZER =================
 
-numbers=load()
+def find_best_window(data):
 
-groups=[get_group(n) for n in numbers if get_group(n)]
+    best_profit=-999
+    best_window=None
 
-st.write("Total rounds:",len(groups))
+    for W in WINDOW_RANGE:
 
-# ================= WINDOW SCORE =================
+        profit=0
+        next_signal=None
+        last_trade=-999
 
-def window_score(data,w):
+        for i in range(len(data)):
 
-    profit=0
-    peak=0
-    dd=0
+            g=data[i]
 
-    for i in range(w,len(data)-1):
+            if next_signal is not None:
 
-        seq=data[i-w:i]
+                hit = 1 if next_signal==g else 0
+                profit += WIN if hit else -LOSS
 
-        pred=Counter(seq).most_common(1)[0][0]
+                next_signal=None
+                last_trade=i
 
-        if pred==data[i]:
+            if i-last_trade>GAP and i>LOOKBACK:
 
-            profit+=WIN
-        else:
+                rec=[]
 
-            profit-=LOSS
+                for j in range(max(W,i-LOOKBACK),i):
 
-        peak=max(peak,profit)
+                    if j>=W:
+                        rec.append(
+                            1 if data[j]==data[j-W] else 0
+                        )
 
-        dd=max(dd,peak-profit)
+                if len(rec)>15:
 
-    return profit-dd
+                    wr=np.mean(rec)
+                    ev=wr*WIN-(1-wr)*LOSS
 
-# ================= BACKTEST =================
+                    if ev>0:
 
-train_data=groups[:BACKTEST_ROUNDS]
+                        g1=data[i-W]
 
-scores={w:window_score(train_data,w) for w in WINDOW_POOL}
+                        if data[i-1]!=g1:
 
-top_windows=sorted(scores,key=scores.get,reverse=True)[:TOP_WINDOWS]
+                            next_signal=g1
 
-# ================= LIVE ENGINE =================
+        if profit>best_profit:
+            best_profit=profit
+            best_window=W
+
+    return best_window,best_profit
+
+# ================= TRAIN =================
+
+train_groups = groups[:TRAIN_SIZE]
+
+best_window,train_profit = find_best_window(train_groups)
+
+# ================= LIVE =================
 
 profit=0
 equity=[]
+hits=[]
 
-trades=0
-wins=0
+next_signal=None
+last_trade=-999
 
-trade_log=[]
+history=[]
 
-for i in range(BACKTEST_ROUNDS,len(groups)-1):
+current_window=best_window
+last_retrain=TRAIN_SIZE
 
-    vote={}
+for i in range(TRAIN_SIZE,len(groups)):
 
-    for w in top_windows:
+    g=groups[i]
 
-        seq=groups[i-w:i]
+    predicted=None
+    hit=None
+    state="SCAN"
 
-        pred=Counter(seq).most_common(1)[0][0]
+    # ===== EXECUTE =====
 
-        vote[pred]=vote.get(pred,0)+1
+    if next_signal is not None:
 
-    pred=max(vote,key=vote.get)
+        predicted=next_signal
 
-    actual=groups[i]
+        hit = 1 if predicted==g else 0
 
-    hit=1 if pred==actual else 0
+        profit += WIN if hit else -LOSS
 
-    trades+=1
+        hits.append(hit)
 
-    if hit:
+        next_signal=None
+        last_trade=i
+        state="TRADE"
 
-        profit+=WIN
-        wins+=1
-    else:
+    # ===== RETRAIN =====
 
-        profit-=LOSS
+    if i-last_retrain>=RETRAIN_INTERVAL:
+
+        train_slice = groups[:i]
+
+        current_window,_ = find_best_window(train_slice)
+
+        last_retrain=i
+
+    # ===== SIGNAL =====
+
+    if i-last_trade>GAP and i>LOOKBACK:
+
+        rec=[]
+
+        for j in range(max(current_window,i-LOOKBACK),i):
+
+            if j>=current_window:
+
+                rec.append(
+                    1 if groups[j]==groups[j-current_window] else 0
+                )
+
+        if len(rec)>15:
+
+            wr=np.mean(rec)
+            ev=wr*WIN-(1-wr)*LOSS
+
+            if ev>0:
+
+                g1=groups[i-current_window]
+
+                if groups[i-1]!=g1:
+
+                    next_signal=g1
+                    state="SIGNAL"
 
     equity.append(profit)
 
-    trade_log.append({
+    history.append({
 
-        "round":i,
-        "pred":pred,
-        "actual":actual,
+        "round":i+1,
+        "number":numbers[i],
+        "group":g,
+        "predicted":predicted,
         "hit":hit,
+        "window":current_window,
+        "state":state,
         "profit":profit
 
     })
 
-wr=wins/trades if trades else 0
+# ================= METRICS =================
 
-# ================= NEXT SIGNAL =================
+wr=np.mean(hits) if hits else 0
 
-i=len(groups)-1
+wins=hits.count(1)*WIN
+loss=hits.count(0)*LOSS
 
-vote={}
-
-for w in top_windows:
-
-    seq=groups[i-w:i]
-
-    p=Counter(seq).most_common(1)[0][0]
-
-    vote[p]=vote.get(p,0)+1
-
-next_pred=max(vote,key=vote.get)
+pf=wins/loss if loss else 0
 
 # ================= UI =================
 
-st.title("⚡ V82 Walk-Forward Engine")
+st.title("🚀 V100 SELF ADAPTIVE ENGINE")
 
-c1,c2,c3=st.columns(3)
+c1,c2,c3,c4=st.columns(4)
 
-c1.metric("Active Window",top_windows[0])
-c2.metric("Trades",trades)
-c3.metric("Winrate %",round(wr*100,2))
+c1.metric("Profit",round(profit,2))
+c2.metric("Winrate %",round(wr*100,2))
+c3.metric("Profit Factor",round(pf,2))
+c4.metric("Active Window",current_window)
 
-st.write("Top Windows:",top_windows)
+st.caption(f"Train size = {TRAIN_SIZE} | Retrain every {RETRAIN_INTERVAL} rounds")
 
-st.metric("Live Profit",round(profit,2))
-
-st.subheader("Next Signal")
-
-st.success(f"PREDICT → Group {next_pred}")
+# ================= EQUITY =================
 
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
-st.subheader("Recent Trades")
+# ================= NEXT GROUP =================
 
-st.dataframe(pd.DataFrame(trade_log).iloc[::-1].head(50))
+st.subheader("Next Group")
+
+if next_signal:
+
+    st.markdown(f"""
+    <div style='padding:20px;background:#c62828;color:white;
+    border-radius:10px;text-align:center;font-size:28px'>
+    NEXT GROUP → {next_signal}
+    </div>
+    """,unsafe_allow_html=True)
+
+else:
+
+    st.info("Scanning...")
+
+# ================= HISTORY =================
+
+st.subheader("History")
+
+hist_df=pd.DataFrame(history)
+
+st.dataframe(hist_df.iloc[::-1],use_container_width=True)
