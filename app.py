@@ -1,8 +1,12 @@
 import streamlit as st
 import pandas as pd
-from collections import Counter,defaultdict
+import requests
+import io
+from collections import Counter, defaultdict
 
-DATA_URL="YOUR_GOOGLE_SHEET"
+# ================= CONFIG =================
+
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 TRAIN_SIZE=200
 WINDOW_RANGE=range(8,18)
@@ -14,7 +18,11 @@ LOSS=1
 
 CONF_THRESHOLD=0.34
 
-# ---------------- GROUP ----------------
+# ================= PAGE =================
+
+st.set_page_config(layout="wide")
+
+# ================= GROUP =================
 
 def group(n):
 
@@ -23,20 +31,36 @@ def group(n):
     if n<=9:return 3
     return 4
 
-# ---------------- LOAD ----------------
+# ================= LOAD DATA =================
 
 @st.cache_data(ttl=5)
-def load():
+def load_data():
 
-    df=pd.read_csv(DATA_URL)
+    try:
 
-    return df["number"].dropna().astype(int).tolist()
+        r=requests.get(DATA_URL)
 
-numbers=load()
+        df=pd.read_csv(io.StringIO(r.text))
+
+        nums=df["number"].dropna().astype(int).tolist()
+
+        return nums
+
+    except Exception as e:
+
+        st.error("DATA LOAD ERROR")
+
+        return []
+
+numbers=load_data()
+
+if len(numbers)==0:
+
+    st.stop()
 
 groups=[group(n) for n in numbers]
 
-# ---------------- PREDICT ----------------
+# ================= PREDICT =================
 
 def predict(data,window):
 
@@ -46,44 +70,45 @@ def predict(data,window):
 
     return max(c,key=c.get)
 
-# ---------------- WINDOW TRAIN ----------------
+# ================= WINDOW TRAIN =================
 
-def eval_window(data,window):
+def train_window(data):
 
-    profit=0
+    best_window=None
+    best_profit=-999
 
-    for i in range(window,len(data)-1):
+    for w in WINDOW_RANGE:
 
-        pred=predict(data[:i],window)
+        profit=0
 
-        actual=data[i]
+        for i in range(w,len(data)-1):
 
-        if pred==actual:
-            profit+=WIN
-        else:
-            profit-=LOSS
+            pred=predict(data[:i],w)
 
-    return profit
+            actual=data[i]
 
-best_window=None
-best_profit=-999
+            if pred==actual:
 
-for w in WINDOW_RANGE:
+                profit+=WIN
 
-    p=eval_window(groups[:TRAIN_SIZE],w)
+            else:
 
-    if p>best_profit:
+                profit-=LOSS
 
-        best_profit=p
-        best_window=w
+        if profit>best_profit:
 
-window=best_window
+            best_profit=profit
+            best_window=w
 
-# ---------------- LIVE ENGINE ----------------
+    return best_window
+
+window=train_window(groups[:TRAIN_SIZE])
+
+# ================= LIVE ENGINE =================
 
 hits=[]
-profit=0
 equity=[]
+profit=0
 
 trades=0
 wins=0
@@ -150,6 +175,7 @@ for i in range(TRAIN_SIZE,len(groups)-1):
                 total+=1
 
                 if hits[j+1]==1:
+
                     succ+=1
 
         if total>0:
@@ -162,13 +188,14 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
         momentum=sum(hits[-LOOKBACK:])/LOOKBACK
 
-    confidence=0.55*pattern_prob+0.3*markov_prob+0.15*momentum
+    confidence=0.55*pattern_prob+0.30*markov_prob+0.15*momentum
 
     trade=False
 
     if confidence>=CONF_THRESHOLD and pattern_prob>=0.30:
 
         trade=True
+
         trades+=1
 
         if hit==1:
@@ -183,42 +210,53 @@ for i in range(TRAIN_SIZE,len(groups)-1):
     equity.append(profit)
 
     history.append({
+
         "round":i,
         "pred":pred,
         "actual":actual,
-        "confidence":confidence,
+        "hit":hit,
+        "confidence":round(confidence,3),
         "trade":trade,
         "profit":profit
+
     })
 
 wr=wins/trades if trades else 0
 
-# ---------------- NEXT SIGNAL ----------------
+peak=max(equity) if equity else 0
+dd=max(peak-x for x in equity) if equity else 0
+
+hist_df=pd.DataFrame(history)
+
+# ================= NEXT SIGNAL =================
 
 next_pred=predict(groups,window)
 
-confidence=0.55*pattern_prob+0.3*markov_prob+0.15*momentum
+confidence=0.55*pattern_prob+0.30*markov_prob+0.15*momentum
 
-# ---------------- UI ----------------
+# ================= UI =================
 
-st.title("⚡ V68 Adaptive Live Engine")
-
-st.metric("Best Window",window)
+st.title("⚡ V68.1 Adaptive Live Engine")
 
 col1,col2,col3=st.columns(3)
 
-col1.metric("Trades",trades)
-col2.metric("Winrate %",round(wr*100,2))
-col3.metric("Profit",round(profit,2))
+col1.metric("Best Window",window)
+col2.metric("Trades",trades)
+col3.metric("Winrate %",round(wr*100,2))
+
+col4,col5=st.columns(2)
+
+col4.metric("Profit",round(profit,2))
+col5.metric("Drawdown",round(dd,2))
 
 st.subheader("Edge Metrics")
 
-st.write("Pattern",round(pattern_prob,3))
-st.write("Markov",round(markov_prob,3))
-st.write("Momentum",round(momentum,3))
-st.write("Confidence",round(confidence,3))
+st.write("Pattern Prob:",round(pattern_prob,3))
+st.write("Markov Prob:",round(markov_prob,3))
+st.write("Momentum:",round(momentum,3))
+st.write("Confidence:",round(confidence,3))
 
-st.subheader("Next Group")
+st.subheader("Next Group Signal")
 
 if confidence>=CONF_THRESHOLD:
 
@@ -232,6 +270,6 @@ st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
-st.subheader("History")
+st.subheader("Recent History")
 
-st.dataframe(pd.DataFrame(history).tail(50))
+st.dataframe(hist_df.tail(30),use_container_width=True)
