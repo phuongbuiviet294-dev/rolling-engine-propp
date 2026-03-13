@@ -1,69 +1,58 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import random
+from sklearn.cluster import KMeans
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 df = pd.read_csv(DATA_URL)
-
 numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("V820 Permutation Test")
+st.title("V900 State Space Clustering")
 
+# parameters
+lookback = 5
+clusters = 6
 
-# ===== Strategy logic =====
-def run_strategy(data):
+# build state vectors
+X = []
+y = []
 
-    profit = 0
+for i in range(lookback, len(numbers)-1):
+    state = numbers[i-lookback:i]
+    X.append(state)
+    y.append(numbers[i+1])
 
-    for i in range(30, len(data)-1):
+X = np.array(X)
+y = np.array(y)
 
-        # ví dụ signal giống logic cũ
-        if data[i-1] == data[i-5]:
+# clustering
+kmeans = KMeans(n_clusters=clusters, random_state=0)
+labels = kmeans.fit_predict(X)
 
-            pred = data[i-9]
+# analyze clusters
+results = []
 
-            if data[i+1] == pred:
-                profit += 1
-            else:
-                profit -= 1
+for c in range(clusters):
 
-    return profit
+    idx = np.where(labels == c)[0]
 
+    next_nums = y[idx]
 
-# real profit
-real_profit = run_strategy(numbers)
+    counts = pd.Series(next_nums).value_counts(normalize=True)
 
-st.write("Real dataset profit:", real_profit)
+    max_prob = counts.max()
 
+    results.append({
+        "cluster": c,
+        "samples": len(idx),
+        "max_next_prob": max_prob
+    })
 
-# ===== permutation test =====
-N = 200
+df_res = pd.DataFrame(results)
 
-profits = []
+st.subheader("Cluster Bias")
 
-for _ in range(N):
+st.dataframe(df_res)
 
-    shuffled = numbers.copy()
-
-    random.shuffle(shuffled)
-
-    p = run_strategy(shuffled)
-
-    profits.append(p)
-
-
-st.subheader("Shuffle profits")
-
-st.line_chart(profits)
-
-avg_profit = np.mean(profits)
-
-st.write("Average shuffle profit:", avg_profit)
-
-better = sum(1 for p in profits if p >= real_profit)
-
-p_value = better / N
-
-st.write("p-value:", p_value)
+st.bar_chart(df_res.set_index("cluster")["max_next_prob"])
