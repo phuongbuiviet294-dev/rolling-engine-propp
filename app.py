@@ -7,7 +7,7 @@ DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_V
 
 st.set_page_config(layout="wide")
 
-# ---------- group ----------
+# ---------- group mapping ----------
 def group(n):
 
     if n<=3:return 1
@@ -15,7 +15,7 @@ def group(n):
     if n<=9:return 3
     return 4
 
-# ---------- load ----------
+# ---------- load data ----------
 @st.cache_data(ttl=5)
 def load():
 
@@ -25,11 +25,12 @@ def load():
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
+
 groups=[group(n) for n in numbers]
 
 ROUNDS=len(groups)
 
-# ---------- window prediction ----------
+# ---------- prediction ----------
 def predict(g,window):
 
     if len(g)<window:
@@ -49,15 +50,18 @@ for window in range(8,18):
     profit=0
     peak=0
     dd=0
-    hits=[]
+
     trades=0
+    wins=0
+
+    hits=[]
+    history=[]
 
     for i in range(window,ROUNDS-1):
 
         pred=predict(groups[:i],window)
 
         if pred is None:
-            hits.append(0)
             continue
 
         actual=groups[i]
@@ -79,6 +83,7 @@ for window in range(8,18):
             if hit:
 
                 profit+=2.5
+                wins+=1
 
             else:
 
@@ -88,7 +93,17 @@ for window in range(8,18):
 
         dd=max(dd,peak-profit)
 
-    wr=sum(hits)/len(hits) if hits else 0
+        history.append({
+
+            "round":i,
+            "pred":pred,
+            "actual":actual,
+            "hit":hit,
+            "trade":trade,
+            "profit":profit
+        })
+
+    wr=wins/trades if trades else 0
 
     results.append({
 
@@ -96,21 +111,27 @@ for window in range(8,18):
         "profit":profit,
         "trades":trades,
         "winrate":wr,
-        "drawdown":dd
+        "drawdown":dd,
+        "history":history
     })
 
-perf=pd.DataFrame(results)
+perf=pd.DataFrame(results).drop(columns=["history"])
 
 best=perf.sort_values("profit",ascending=False).iloc[0]
 
 best_window=int(best.window)
+
+# ---------- history best window ----------
+best_hist=[r["history"] for r in results if r["window"]==best_window][0]
+
+hist_df=pd.DataFrame(best_hist)
 
 # ---------- live prediction ----------
 pred=predict(groups,best_window)
 
 # ---------- UI ----------
 
-st.title("⚡ V49 Adaptive Window Streak Engine")
+st.title("⚡ V49.1 Window Streak Engine (Fixed Backtest)")
 
 c1,c2,c3=st.columns(3)
 
@@ -136,39 +157,20 @@ else:
 
     st.info("SKIP")
 
+# ---------- equity curve ----------
+
+st.subheader("Equity Curve")
+
+st.line_chart(hist_df["profit"])
+
 # ---------- window performance ----------
 
 st.subheader("Window Performance")
 
 st.dataframe(perf)
 
-# ---------- equity curve (best window) ----------
+# ---------- history ----------
 
-profits=[]
-profit=0
+st.subheader("Trade History")
 
-for i in range(best_window,ROUNDS-1):
-
-    pred=predict(groups[:i],best_window)
-
-    if pred is None:
-        profits.append(profit)
-        continue
-
-    actual=groups[i]
-
-    hit=pred==actual
-
-    if hit:
-
-        profit+=2.5
-
-    else:
-
-        profit-=1
-
-    profits.append(profit)
-
-st.subheader("Equity Curve")
-
-st.line_chart(profits)
+st.dataframe(hist_df.tail(100))
