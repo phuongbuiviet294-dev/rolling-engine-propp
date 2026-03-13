@@ -9,116 +9,51 @@ DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi
 df = pd.read_csv(DATA_URL)
 numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("🔬 V1200 Hidden Bias Detector")
+st.title("🔎 V1300 Regime Detector")
 
-# ---------------------------
-# 1 Distribution test
-# ---------------------------
+block = 200
 
-counts = Counter(numbers)
+entropy_list = []
+kl_list = []
+maxprob_list = []
+start_round = []
 
-dist = pd.DataFrame({
-    "number": list(range(1,11)),
-    "count": [counts.get(i,0) for i in range(1,11)]
+for i in range(0, len(numbers)-block, block):
+
+    segment = numbers[i:i+block]
+
+    counts = Counter(segment)
+
+    probs = [counts.get(n,0)/block for n in range(1,11)]
+
+    # entropy
+    entropy = -sum(p*log2(p) for p in probs if p>0)
+
+    # KL divergence
+    uniform = 1/10
+    kl = sum(p*log2(p/uniform) for p in probs if p>0)
+
+    entropy_list.append(entropy)
+    kl_list.append(kl)
+    maxprob_list.append(max(probs))
+    start_round.append(i)
+
+res = pd.DataFrame({
+    "start_round":start_round,
+    "entropy":entropy_list,
+    "kl":kl_list,
+    "max_prob":maxprob_list
 })
 
-dist["prob"] = dist["count"] / len(numbers)
+st.subheader("Block statistics")
 
-st.subheader("Distribution")
+st.dataframe(res)
 
-st.dataframe(dist)
+st.subheader("Entropy over time")
+st.line_chart(res.set_index("start_round")["entropy"])
 
-st.bar_chart(dist.set_index("number")["prob"])
+st.subheader("KL divergence over time")
+st.line_chart(res.set_index("start_round")["kl"])
 
-# ---------------------------
-# 2 Conditional probabilities
-# ---------------------------
-
-def conditional_prob(k):
-
-    states = {}
-    nexts = {}
-
-    for i in range(k, len(numbers)-1):
-
-        state = tuple(numbers[i-k:i])
-        nxt = numbers[i]
-
-        states.setdefault(state, 0)
-        nexts.setdefault(state, [])
-
-        states[state] += 1
-        nexts[state].append(nxt)
-
-    rows = []
-
-    for s in states:
-
-        if states[s] < 30:
-            continue
-
-        counts = Counter(nexts[s])
-        probs = {n:counts[n]/states[s] for n in counts}
-
-        rows.append({
-            "state": s,
-            "samples": states[s],
-            "max_prob": max(probs.values())
-        })
-
-    return pd.DataFrame(rows)
-
-st.subheader("Conditional Bias")
-
-for k in [1,2,3]:
-
-    res = conditional_prob(k)
-
-    if res.empty:
-        st.write(f"k={k}: no states")
-        continue
-
-    res = res.sort_values("max_prob", ascending=False)
-
-    st.write(f"k={k} top states")
-
-    st.dataframe(res.head(10))
-
-# ---------------------------
-# 3 Mutual Information
-# ---------------------------
-
-pairs = Counter(zip(numbers[:-1], numbers[1:]))
-
-p_xy = {k:v/(len(numbers)-1) for k,v in pairs.items()}
-
-p_x = Counter(numbers[:-1])
-p_y = Counter(numbers[1:])
-
-for k in p_x:
-    p_x[k] /= len(numbers)
-
-for k in p_y:
-    p_y[k] /= len(numbers)
-
-mi = 0
-
-for (x,y),p in p_xy.items():
-
-    mi += p * log2(p / (p_x[x]*p_y[y]))
-
-st.subheader("Mutual Information")
-
-st.write(mi)
-
-# ---------------------------
-# 4 KL divergence
-# ---------------------------
-
-uniform = 1/10
-
-kl = sum(p*log2(p/uniform) for p in dist["prob"])
-
-st.subheader("KL divergence from uniform")
-
-st.write(kl)
+st.subheader("Max number probability")
+st.line_chart(res.set_index("start_round")["max_prob"])
