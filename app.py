@@ -1,125 +1,124 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+from collections import Counter
+from math import log2
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 df = pd.read_csv(DATA_URL)
 numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("🚀 V1100 Walk-Forward Reality Engine")
+st.title("🔬 V1200 Hidden Bias Detector")
 
-train_data = numbers[:2000]
-test_data  = numbers[2000:4000]
+# ---------------------------
+# 1 Distribution test
+# ---------------------------
 
-results = []
+counts = Counter(numbers)
 
-# SEARCH BEST CONFIG ON TRAIN
-for lookback in range(2,5):
-    for gap in range(0,6):
-        for window in range(3,15):
+dist = pd.DataFrame({
+    "number": list(range(1,11)),
+    "count": [counts.get(i,0) for i in range(1,11)]
+})
 
-            trades = 0
-            wins = 0
+dist["prob"] = dist["count"] / len(numbers)
 
-            for i in range(lookback + gap + window, len(train_data)-1):
+st.subheader("Distribution")
 
-                pattern = train_data[i-gap-lookback:i-gap]
+st.dataframe(dist)
 
-                history = []
+st.bar_chart(dist.set_index("number")["prob"])
 
-                for j in range(i-gap-window, i-gap):
+# ---------------------------
+# 2 Conditional probabilities
+# ---------------------------
 
-                    if j-lookback < 0:
-                        continue
+def conditional_prob(k):
 
-                    if train_data[j-lookback:j] == pattern:
-                        history.append(train_data[j])
+    states = {}
+    nexts = {}
 
-                if len(history) < 5:
-                    continue
+    for i in range(k, len(numbers)-1):
 
-                pred = pd.Series(history).value_counts().idxmax()
+        state = tuple(numbers[i-k:i])
+        nxt = numbers[i]
 
-                trades += 1
+        states.setdefault(state, 0)
+        nexts.setdefault(state, [])
 
-                if train_data[i+1] == pred:
-                    wins += 1
+        states[state] += 1
+        nexts[state].append(nxt)
 
-            if trades < 20:
-                continue
+    rows = []
 
-            winrate = wins / trades
-            ev = winrate * 9 - (1-winrate)
+    for s in states:
 
-            results.append({
-                "lookback": lookback,
-                "gap": gap,
-                "window": window,
-                "trades": trades,
-                "wins": wins,
-                "winrate": winrate,
-                "EV": ev
-            })
-
-df_train = pd.DataFrame(results)
-
-if df_train.empty:
-    st.error("No strategy found in training set")
-    st.stop()
-
-df_train = df_train.sort_values("EV", ascending=False)
-
-best = df_train.iloc[0]
-
-st.subheader("Best strategy from TRAIN")
-
-st.write(best)
-
-# TEST PHASE
-
-lookback = int(best.lookback)
-gap = int(best.gap)
-window = int(best.window)
-
-trades = 0
-wins = 0
-
-for i in range(lookback + gap + window, len(test_data)-1):
-
-    pattern = test_data[i-gap-lookback:i-gap]
-
-    history = []
-
-    for j in range(i-gap-window, i-gap):
-
-        if j-lookback < 0:
+        if states[s] < 30:
             continue
 
-        if test_data[j-lookback:j] == pattern:
-            history.append(test_data[j])
+        counts = Counter(nexts[s])
+        probs = {n:counts[n]/states[s] for n in counts}
 
-    if len(history) < 5:
+        rows.append({
+            "state": s,
+            "samples": states[s],
+            "max_prob": max(probs.values())
+        })
+
+    return pd.DataFrame(rows)
+
+st.subheader("Conditional Bias")
+
+for k in [1,2,3]:
+
+    res = conditional_prob(k)
+
+    if res.empty:
+        st.write(f"k={k}: no states")
         continue
 
-    pred = pd.Series(history).value_counts().idxmax()
+    res = res.sort_values("max_prob", ascending=False)
 
-    trades += 1
+    st.write(f"k={k} top states")
 
-    if test_data[i+1] == pred:
-        wins += 1
+    st.dataframe(res.head(10))
 
-if trades == 0:
-    st.error("No trades in test set")
-else:
+# ---------------------------
+# 3 Mutual Information
+# ---------------------------
 
-    winrate = wins / trades
-    ev = winrate * 9 - (1-winrate)
+pairs = Counter(zip(numbers[:-1], numbers[1:]))
 
-    st.subheader("Test result (Out-of-sample)")
+p_xy = {k:v/(len(numbers)-1) for k,v in pairs.items()}
 
-    st.write({
-        "trades": trades,
-        "wins": wins,
-        "winrate": winrate,
-        "EV": ev
-    })
+p_x = Counter(numbers[:-1])
+p_y = Counter(numbers[1:])
+
+for k in p_x:
+    p_x[k] /= len(numbers)
+
+for k in p_y:
+    p_y[k] /= len(numbers)
+
+mi = 0
+
+for (x,y),p in p_xy.items():
+
+    mi += p * log2(p / (p_x[x]*p_y[y]))
+
+st.subheader("Mutual Information")
+
+st.write(mi)
+
+# ---------------------------
+# 4 KL divergence
+# ---------------------------
+
+uniform = 1/10
+
+kl = sum(p*log2(p/uniform) for p in dist["prob"])
+
+st.subheader("KL divergence from uniform")
+
+st.write(kl)
