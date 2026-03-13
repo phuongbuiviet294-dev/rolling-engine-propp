@@ -1,73 +1,113 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import Counter
+
+# ================= CONFIG =================
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
+WIN_PROFIT = 2.5
+LOSE_LOSS = 1
+
+WINDOW_RANGE = range(2,10)
+LOOKBACK_RANGE = range(10,60)
+GAP_RANGE = range(1,8)
+
+# ================= LOAD DATA =================
+
 df = pd.read_csv(DATA_URL)
+df.columns=[c.strip().lower() for c in df.columns]
 
-numbers = df["number"].dropna().astype(int).tolist()
+numbers=df["number"].dropna().astype(int).tolist()
 
-st.title("V1600 RNG Weakness Scanner")
+# ================= GROUP =================
 
-n = len(numbers)
+def get_group(n):
 
-# ---------- 1 Markov test ----------
+    if 1<=n<=3:
+        return 1
+    if 4<=n<=6:
+        return 2
+    if 7<=n<=9:
+        return 3
+    if 10<=n<=12:
+        return 4
 
-matrix = np.zeros((10,10))
+groups=[get_group(n) for n in numbers]
 
-for i in range(n-1):
-    a = numbers[i]-1
-    b = numbers[i+1]-1
-    matrix[a][b]+=1
+# ================= BACKTEST =================
 
-matrix = matrix / matrix.sum(axis=1, keepdims=True)
+results=[]
 
-st.subheader("Markov transition matrix")
+for WINDOW in WINDOW_RANGE:
 
-st.dataframe(pd.DataFrame(matrix))
+    for LOOKBACK in LOOKBACK_RANGE:
 
-# ---------- 2 Predictability ----------
+        for GAP in GAP_RANGE:
 
-correct = 0
-total = 0
+            profit=0
+            trades=0
+            wins=0
 
-for i in range(5,n-1):
+            last_trade=-999
 
-    hist = numbers[i-5:i]
+            for i in range(LOOKBACK,len(groups)-1):
 
-    most_common = Counter(hist).most_common(1)[0][0]
+                if i-last_trade<=GAP:
+                    continue
 
-    if numbers[i]==most_common:
-        correct+=1
+                hist=groups[i-LOOKBACK:i]
 
-    total+=1
+                hits=[]
 
-accuracy = correct/total
+                for j in range(WINDOW,len(hist)):
 
-st.subheader("Simple predictor accuracy")
+                    if hist[j]==hist[j-WINDOW]:
+                        hits.append(1)
+                    else:
+                        hits.append(0)
 
-st.write(accuracy)
+                if len(hits)<10:
+                    continue
 
-# ---------- 3 Cycle detection ----------
+                wr=np.mean(hits)
 
-cycles = {}
+                if wr>0.28:
 
-for window in range(5,50):
+                    g=groups[i-WINDOW]
 
-    patterns = {}
+                    trades+=1
+                    last_trade=i
 
-    for i in range(n-window):
+                    if groups[i]==g:
+                        profit+=WIN_PROFIT
+                        wins+=1
+                    else:
+                        profit-=LOSE_LOSS
 
-        seq = tuple(numbers[i:i+window])
+            if trades>0:
 
-        if seq in patterns:
-            cycles[window]=True
-            break
-        else:
-            patterns[seq]=1
+                winrate=wins/trades
 
-st.subheader("Cycle detection")
+                results.append({
+                    "window":WINDOW,
+                    "lookback":LOOKBACK,
+                    "gap":GAP,
+                    "trades":trades,
+                    "winrate":winrate,
+                    "profit":profit
+                })
 
-st.write(cycles)
+# ================= RESULT =================
+
+res=pd.DataFrame(results)
+
+res=res.sort_values("profit",ascending=False)
+
+print("\nTOP 20 STRATEGIES\n")
+print(res.head(20))
+
+print("\nBEST STRATEGY\n")
+print(res.iloc[0])
+
+print("\nWINRATE CHECK")
+print("Required winrate > 0.286 to beat game")
