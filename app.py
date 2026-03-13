@@ -1,209 +1,112 @@
 import streamlit as st
 import pandas as pd
-import requests
-import io
-from collections import Counter, defaultdict
+import numpy as np
+from collections import Counter
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+# ================= CONFIG =================
 
-TRAIN_ROUNDS=2000
-WINDOW_RANGE=range(8,19)
+GOOGLE_SHEET_CSV="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WIN=2.5
-LOSS=1
+AUTO_REFRESH=5
+
+WIN_PROFIT=2.5
+LOSE_LOSS=1
+
+WINDOW_POOL=range(8,18)
+
+LOOKBACK=26
 
 SIGNAL_THRESHOLD=0.45
-LOOKBACK=26
+
+LOCK_ROUND=3662
+STOPLOSS_STREAK=5
+PAUSE_AFTER_SL=3
 
 st.set_page_config(layout="wide")
 
-# -------- group --------
+# ================= GROUP =================
 
-def group(n):
+def get_group(n):
 
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
-    return 4
+    if 1<=n<=3: return 1
+    if 4<=n<=6: return 2
+    if 7<=n<=9: return 3
+    if 10<=n<=12: return 4
 
-
-# -------- predict --------
-
-def predict(data,w):
-
-    if len(data)<w:
-        return None
-
-    seq=data[-w:]
-
-    c=Counter(seq)
-
-    return max(c,key=c.get)
+    return None
 
 
-# -------- load --------
+# ================= LOAD =================
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=AUTO_REFRESH)
 def load():
 
-    r=requests.get(DATA_URL)
+    df=pd.read_csv(GOOGLE_SHEET_CSV)
 
-    df=pd.read_csv(io.StringIO(r.text))
+    df.columns=[c.strip().lower() for c in df.columns]
 
-    nums=df["Number"].dropna().astype(int)
+    numbers=df["number"].dropna().astype(int).tolist()
 
-    return nums.tolist()
+    return numbers
 
 
 numbers=load()
 
-groups=[group(n) for n in numbers]
+groups=[get_group(n) for n in numbers]
 
 st.write("Total rounds:",len(groups))
 
-# -------- window training --------
 
-def train_windows(data):
+# ================= WINDOW SCORE =================
 
-    scores={}
+def window_score(data,w):
 
-    for w in WINDOW_RANGE:
+    profit=0
 
-        profit=0
-        peak=0
-        dd=0
+    for i in range(w,len(data)-1):
 
-        for i in range(w,len(data)-1):
+        seq=data[i-w:i]
 
-            pred=predict(data[:i],w)
+        pred=Counter(seq).most_common(1)[0][0]
 
-            actual=data[i]
+        if pred==data[i]:
 
-            if pred==actual:
-                profit+=WIN
-            else:
-                profit-=LOSS
+            profit+=WIN_PROFIT
 
-            peak=max(peak,profit)
-            dd=max(dd,peak-profit)
+        else:
 
-        score=profit-dd*0.5
+            profit-=LOSE_LOSS
 
-        scores[w]=score
-
-    best=sorted(scores,key=scores.get,reverse=True)[:5]
-
-    return best
+    return profit
 
 
-best_windows=train_windows(groups[:TRAIN_ROUNDS])
+# chọn window tốt nhất
 
-# -------- live simulation --------
+scores={w:window_score(groups[-500:],w) for w in WINDOW_POOL}
+
+best_window=max(scores,key=scores.get)
+
+
+# ================= ENGINE =================
 
 profit=0
 equity=[]
 
 hits=[]
+
 trades=0
 wins=0
 
-trade_history=[]
+loss_streak=0
+pause=0
 
-for i in range(TRAIN_ROUNDS,len(groups)-1):
+trade_log=[]
 
-    strengths={}
-    preds={}
+for i in range(best_window,len(groups)-1):
 
-    for w in best_windows:
+    seq=groups[i-best_window:i]
 
-        pred=predict(groups[:i],w)
-
-        if pred is None:
-            continue
-
-        preds[w]=pred
-
-        # pattern
-        pattern=0
-        if len(hits)>50:
-
-            counts=defaultdict(int)
-            winp=defaultdict(int)
-
-            for j in range(len(hits)-3):
-
-                p=tuple(hits[j:j+3])
-                nxt=hits[j+3]
-
-                counts[p]+=1
-
-                if nxt==1:
-                    winp[p]+=1
-
-            for p in counts:
-
-                prob=winp[p]/counts[p]
-
-                pattern=max(pattern,prob)
-
-        # markov
-        markov=0
-        if len(hits)>5:
-
-            last=hits[-1]
-
-            total=0
-            win=0
-
-            for j in range(len(hits)-1):
-
-                if hits[j]==last:
-
-                    total+=1
-
-                    if hits[j+1]==1:
-                        win+=1
-
-            if total>0:
-                markov=win/total
-
-        # momentum
-        momentum=0
-        if len(hits)>=LOOKBACK:
-
-            momentum=sum(hits[-LOOKBACK:])/LOOKBACK
-
-        stability=momentum
-
-        cluster=0
-
-        if len(hits)>=2 and hits[-2:]==[1,1]:
-            cluster+=0.3
-
-        if len(hits)>=3 and hits[-3:]==[1,0,1]:
-            cluster+=0.25
-
-        if len(hits)>=5 and hits[-5:].count(1)>=3:
-            cluster+=0.25
-
-        strength=(
-            0.30*pattern+
-            0.20*markov+
-            0.25*momentum+
-            0.15*stability+
-            0.10*cluster
-        )
-
-        strengths[w]=strength
-
-    if not strengths:
-        continue
-
-    best_window=max(strengths,key=strengths.get)
-
-    strength=strengths[best_window]
-
-    pred=preds[best_window]
+    pred=Counter(seq).most_common(1)[0][0]
 
     actual=groups[i]
 
@@ -211,24 +114,106 @@ for i in range(TRAIN_ROUNDS,len(groups)-1):
 
     hits.append(hit)
 
-    if strength>=SIGNAL_THRESHOLD:
+    # -------- momentum --------
+
+    momentum=0
+
+    if len(hits)>=LOOKBACK:
+
+        momentum=sum(hits[-LOOKBACK:])/LOOKBACK
+
+
+    # -------- regime --------
+
+    regime="break"
+
+    if momentum>=0.48:
+
+        regime="trend"
+
+    elif momentum>=0.33:
+
+        regime="random"
+
+
+    # -------- pattern --------
+
+    pattern=0
+
+    if len(hits)>30:
+
+        pattern=sum(hits[-30:])/30
+
+
+    # -------- markov --------
+
+    markov=0
+
+    if len(hits)>5:
+
+        last=hits[-1]
+
+        trans=[hits[j+1] for j in range(len(hits)-1) if hits[j]==last]
+
+        if trans:
+
+            markov=sum(trans)/len(trans)
+
+
+    stability=momentum
+
+
+    strength=(
+
+        0.35*pattern+
+        0.25*momentum+
+        0.20*markov+
+        0.20*stability
+
+    )
+
+
+    trade=False
+
+    if pause>0:
+
+        pause-=1
+
+    else:
+
+        if strength>=SIGNAL_THRESHOLD and regime!="break":
+
+            trade=True
+
+
+    if trade:
 
         trades+=1
 
         if hit:
 
             wins+=1
-            profit+=WIN
+            profit+=WIN_PROFIT
+            loss_streak=0
 
         else:
 
-            profit-=LOSS
+            profit-=LOSE_LOSS
+            loss_streak+=1
+
+
+    if loss_streak>=STOPLOSS_STREAK:
+
+        pause=PAUSE_AFTER_SL
+        loss_streak=0
+
 
     equity.append(profit)
 
-    trade_history.append({
+
+    trade_log.append({
+
         "round":i,
-        "window":best_window,
         "pred":pred,
         "actual":actual,
         "hit":hit,
@@ -239,40 +224,30 @@ for i in range(TRAIN_ROUNDS,len(groups)-1):
 
 wr=wins/trades if trades else 0
 
-# -------- next prediction --------
 
-next_preds={}
-next_strength={}
+# ================= NEXT SIGNAL =================
 
-for w in best_windows:
+next_seq=groups[-best_window:]
 
-    pred=predict(groups,w)
+next_pred=Counter(next_seq).most_common(1)[0][0]
 
-    if pred is None:
-        continue
 
-    next_preds[w]=pred
-    next_strength[w]=0.5
+# ================= UI =================
 
-best_window=max(next_strength,key=next_strength.get)
+st.title("⚡ V77 Stable Regime Engine")
 
-next_pred=next_preds[best_window]
+c1,c2,c3=st.columns(3)
 
-# -------- UI --------
-
-st.title("⚡ V76 Adaptive Engine")
-
-col1,col2,col3=st.columns(3)
-
-col1.metric("Best Window",best_window)
-col2.metric("Trades",trades)
-col3.metric("Winrate %",round(wr*100,2))
+c1.metric("Best Window",best_window)
+c2.metric("Trades",trades)
+c3.metric("Winrate %",round(wr*100,2))
 
 st.metric("Live Profit",round(profit,2))
 
+
 st.subheader("Next Signal")
 
-if next_strength[best_window]>=SIGNAL_THRESHOLD:
+if strength>=SIGNAL_THRESHOLD:
 
     st.success(f"TRADE → Group {next_pred}")
 
@@ -280,10 +255,12 @@ else:
 
     st.info(f"WAIT → Group {next_pred}")
 
+
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
+
 st.subheader("Recent Trades")
 
-st.dataframe(pd.DataFrame(trade_history).iloc[::-1].head(50))
+st.dataframe(pd.DataFrame(trade_log).iloc[::-1].head(50))
