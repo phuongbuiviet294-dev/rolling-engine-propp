@@ -4,9 +4,11 @@ import numpy as np
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOW = 16
+WINDOW = 50
+
 
 def get_group(n):
+
     if n <= 3:
         return 1
     elif n <= 6:
@@ -23,84 +25,51 @@ numbers = df["number"].dropna().astype(int).tolist()
 
 groups = [get_group(n) for n in numbers]
 
+st.title("🚀 V700 Regime Detection Engine")
 
-st.title("📊 V610 Streak Probability Engine")
+entropy_series = []
+imbalance_series = []
 
-
-# ====================
-# MODEL PREDICTION
-# ====================
-
-predictions = []
 
 for i in range(WINDOW, len(groups)):
-    pred = groups[i-WINDOW]
-    predictions.append(pred)
 
-real = groups[WINDOW:]
+    window = groups[i-WINDOW:i]
 
+    counts = [window.count(g) for g in range(1,5)]
 
-# ====================
-# HIT SERIES
-# ====================
+    probs = [c/WINDOW for c in counts]
 
-hits = []
+    entropy = -sum([p*np.log(p) for p in probs if p>0])
 
-for p, r in zip(predictions, real):
-    if p == r:
-        hits.append(1)
-    else:
-        hits.append(0)
+    entropy_series.append(entropy)
+
+    imbalance = max(probs)
+
+    imbalance_series.append(imbalance)
 
 
-# ====================
-# STREAK PROBABILITY
-# ====================
-
-max_streak = 10
-
-rows = []
-
-for k in range(1, max_streak+1):
-
-    next_hit = 0
-    next_miss = 0
-
-    for i in range(len(hits)-k):
-
-        if hits[i:i+k] == [1]*k:
-
-            nxt = hits[i+k]
-
-            if nxt == 1:
-                next_hit += 1
-            else:
-                next_miss += 1
-
-    total = next_hit + next_miss
-
-    if total == 0:
-        continue
-
-    prob = next_hit / total
-
-    rows.append({
-        "streak": k,
-        "next_hit": next_hit,
-        "next_miss": next_miss,
-        "probability": round(prob,3)
-    })
+df_regime = pd.DataFrame({
+    "entropy": entropy_series,
+    "max_group_prob": imbalance_series
+})
 
 
-result = pd.DataFrame(rows)
+st.subheader("Entropy (randomness level)")
 
-st.subheader("P(next_hit | streak=k)")
-
-st.dataframe(result)
+st.line_chart(df_regime["entropy"])
 
 
-# ====================
-# PLOT
-# ====================
+st.subheader("Group Imbalance")
 
-st.line_chart(result.set_index("streak")["probability"])
+st.line_chart(df_regime["max_group_prob"])
+
+
+# detect strong regimes
+
+threshold = 0.35
+
+regimes = df_regime[df_regime["max_group_prob"] > threshold]
+
+st.subheader("Detected Regimes")
+
+st.dataframe(regimes.head(50))
