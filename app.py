@@ -1,44 +1,48 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from math import log
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 df = pd.read_csv(DATA_URL)
 
-numbers = df["number"].dropna().astype(int)
+numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("V800 RNG Bias Detector")
+st.title("V810 RNG Reseed Timing Detector")
 
-# Number distribution
-st.subheader("Number Distribution")
+# block size
+block_size = 200
 
-counts = numbers.value_counts().sort_index()
+blocks = []
 
-st.dataframe(counts)
+for i in range(0, len(numbers), block_size):
 
-expected = len(numbers)/len(counts)
+    block = numbers[i:i+block_size]
 
-chi = ((counts - expected)**2 / expected).sum()
+    if len(block) < block_size:
+        continue
 
-st.write("Chi-square score:", chi)
+    counts = pd.Series(block).value_counts()
 
-# Autocorrelation
-st.subheader("Autocorrelation")
+    probs = counts / counts.sum()
 
-series = pd.Series(numbers)
+    entropy = -(probs * np.log(probs)).sum()
 
-lags = []
+    blocks.append({
+        "start_round": i,
+        "entropy": entropy,
+        "max_prob": probs.max()
+    })
 
-for i in range(1,10):
+df_blocks = pd.DataFrame(blocks)
 
-    lags.append(series.autocorr(i))
+st.subheader("Block Entropy")
 
-df_auto = pd.DataFrame({
-    "lag":range(1,10),
-    "correlation":lags
-})
+st.dataframe(df_blocks)
 
-st.dataframe(df_auto)
+st.line_chart(df_blocks["entropy"])
 
-st.line_chart(df_auto.set_index("lag"))
+st.subheader("Max number probability")
+
+st.line_chart(df_blocks["max_prob"])
