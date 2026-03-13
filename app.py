@@ -1,6 +1,8 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import defaultdict
+
+st.title("Pattern Probability Scanner")
 
 URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -30,34 +32,44 @@ for i in range(WINDOW,len(groups)):
 
 hits = np.array(hits)
 
+base_wr = hits.mean()
+
+st.write("Base winrate:",base_wr)
+
+patterns = {
+    "1-1":[1,1],
+    "1-0-1":[1,0,1],
+    "0-1-1":[0,1,1],
+    "1-1-1":[1,1,1],
+    "0-0-1":[0,0,1],
+}
+
 results = []
 
-for w in range(6,51):
+for name,p in patterns.items():
 
-    patterns = defaultdict(lambda:[0,0])
+    w = len(p)
 
-    for i in range(w,len(hits)-1):
+    total = 0
+    wins = 0
 
-        pattern = tuple(hits[i-w:i])
+    for i in range(w,len(hits)):
 
-        next_hit = hits[i]
+        if list(hits[i-w:i]) == p:
 
-        patterns[pattern][0]+=1
-        patterns[pattern][1]+=next_hit
+            total += 1
 
-    for p,v in patterns.items():
+            if hits[i]==1:
+                wins += 1
 
-        count = v[0]
-        wins = v[1]
+    if total>0:
 
-        if count>20:
+        wr = wins/total
 
-            wr = wins/count
+        results.append((name,total,wr))
 
-            results.append((w,p,count,wr))
+st.subheader("Pattern Results")
 
-results = sorted(results,key=lambda x:x[3],reverse=True)
+for r in results:
 
-for r in results[:20]:
-
-    print(r)
+    st.write(r)
