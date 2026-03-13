@@ -6,9 +6,10 @@ from collections import Counter, defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE=200
+TRAIN_SIZE=2000
 WINDOW_RANGE=range(8,18)
 LOOKBACK=26
+RECALIBRATE=200
 
 WIN=2.5
 LOSS=1
@@ -17,12 +18,16 @@ CONF_THRESHOLD=0.38
 
 st.set_page_config(layout="wide")
 
+# ---------- group ----------
+
 def group(n):
 
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
     return 4
+
+# ---------- load data ----------
 
 @st.cache_data(ttl=5)
 def load():
@@ -37,6 +42,8 @@ numbers=load()
 
 groups=[group(n) for n in numbers]
 
+# ---------- predictor ----------
+
 def predict(data,window):
 
     seq=data[-window:]
@@ -44,6 +51,8 @@ def predict(data,window):
     c=Counter(seq)
 
     return max(c,key=c.get)
+
+# ---------- window scan ----------
 
 def scan_windows(data):
 
@@ -63,15 +72,11 @@ def scan_windows(data):
             actual=data[i]
 
             if pred==actual:
-
                 equity+=WIN
-
             else:
-
                 equity-=LOSS
 
             peak=max(peak,equity)
-
             dd=max(dd,peak-equity)
 
         score=equity-dd*0.5
@@ -83,7 +88,11 @@ def scan_windows(data):
 
     return best
 
+# ---------- TRAIN ----------
+
 best_window=scan_windows(groups[:TRAIN_SIZE])
+
+# ---------- LIVE ENGINE ----------
 
 hits=[]
 profit=0
@@ -92,15 +101,18 @@ equity=[]
 trades=0
 wins=0
 
-history=[]
-
 pattern_prob=0
 markov_prob=0
 momentum=0
 
-trade_profits=[]
+trade_history=[]
 
 for i in range(TRAIN_SIZE,len(groups)-1):
+
+    # recalibrate window
+    if (i-TRAIN_SIZE)%RECALIBRATE==0 and i>TRAIN_SIZE:
+
+        best_window=scan_windows(groups[i-400:i])
 
     pred=predict(groups[:i],best_window)
 
@@ -109,6 +121,8 @@ for i in range(TRAIN_SIZE,len(groups)-1):
     hit=1 if pred==actual else 0
 
     hits.append(hit)
+
+    # pattern probability
 
     if len(hits)>50:
 
@@ -139,6 +153,8 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
         pattern_prob=best
 
+    # markov
+
     if len(hits)>20:
 
         last=hits[-1]
@@ -160,9 +176,13 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
             markov_prob=s/total
 
+    # momentum
+
     if len(hits)>=LOOKBACK:
 
         momentum=sum(hits[-LOOKBACK:])/LOOKBACK
+
+    # signal
 
     signal=False
 
@@ -174,18 +194,14 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
         signal=True
 
-    if len(hits)>=4 and hits[-4:]==[0,1,1]:
-
-        signal=True
-
     if len(hits)>=5 and hits[-5:].count(1)>=3:
 
         signal=True
 
     confidence=(
-        0.4*pattern_prob
-        +0.3*markov_prob
-        +0.3*momentum
+        0.4*pattern_prob+
+        0.3*markov_prob+
+        0.3*momentum
     )
 
     trade=False
@@ -193,37 +209,25 @@ for i in range(TRAIN_SIZE,len(groups)-1):
     if signal and confidence>=CONF_THRESHOLD:
 
         trade=True
-
         trades+=1
 
         if hit==1:
 
             profit+=WIN
             wins+=1
-            trade_profits.append(WIN)
 
         else:
 
             profit-=LOSS
-            trade_profits.append(-LOSS)
-
-    if len(trade_profits)>=30:
-
-        if sum(trade_profits[-30:])<-5:
-
-            best_window=scan_windows(groups[i-400:i])
-
-            trade_profits=[]
 
     equity.append(profit)
 
-    history.append({
+    trade_history.append({
 
         "round":i,
         "pred":pred,
         "actual":actual,
         "hit":hit,
-        "confidence":round(confidence,3),
         "trade":trade,
         "profit":profit
 
@@ -233,7 +237,9 @@ wr=wins/trades if trades else 0
 
 next_pred=predict(groups,best_window)
 
-st.title("⚡ V71 Adaptive Signal Engine")
+# ---------- UI ----------
+
+st.title("⚡ V71.5 Walk-Forward Engine")
 
 col1,col2,col3=st.columns(3)
 
@@ -241,7 +247,7 @@ col1.metric("Best Window",best_window)
 col2.metric("Trades",trades)
 col3.metric("Winrate %",round(wr*100,2))
 
-st.metric("Profit",round(profit,2))
+st.metric("Live Profit",round(profit,2))
 
 st.subheader("Edge Metrics")
 
@@ -260,10 +266,10 @@ else:
 
     st.info(f"WAIT → Group {next_pred}")
 
-st.subheader("Equity Curve")
+st.subheader("Equity Curve (LIVE ZONE)")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
 
-st.subheader("History")
+st.subheader("Recent Trades")
 
-st.dataframe(pd.DataFrame(history).tail(50))
+st.dataframe(pd.DataFrame(trade_history).tail(50))
