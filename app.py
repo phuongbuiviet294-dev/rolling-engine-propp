@@ -1,58 +1,52 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.cluster import KMeans
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 df = pd.read_csv(DATA_URL)
 numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("V900 State Space Clustering")
+st.title("V900 State Pattern Scan")
 
-# parameters
 lookback = 5
-clusters = 6
 
-# build state vectors
-X = []
-y = []
+states = {}
+next_vals = {}
 
 for i in range(lookback, len(numbers)-1):
-    state = numbers[i-lookback:i]
-    X.append(state)
-    y.append(numbers[i+1])
 
-X = np.array(X)
-y = np.array(y)
+    state = tuple(numbers[i-lookback:i])
+    nxt = numbers[i+1]
 
-# clustering
-kmeans = KMeans(n_clusters=clusters, random_state=0)
-labels = kmeans.fit_predict(X)
+    if state not in states:
+        states[state] = 0
+        next_vals[state] = []
 
-# analyze clusters
+    states[state] += 1
+    next_vals[state].append(nxt)
+
 results = []
 
-for c in range(clusters):
+for state in states:
 
-    idx = np.where(labels == c)[0]
+    if states[state] < 20:
+        continue
 
-    next_nums = y[idx]
-
-    counts = pd.Series(next_nums).value_counts(normalize=True)
+    counts = pd.Series(next_vals[state]).value_counts(normalize=True)
 
     max_prob = counts.max()
 
     results.append({
-        "cluster": c,
-        "samples": len(idx),
+        "state": state,
+        "samples": states[state],
         "max_next_prob": max_prob
     })
 
 df_res = pd.DataFrame(results)
 
-st.subheader("Cluster Bias")
+df_res = df_res.sort_values("max_next_prob", ascending=False)
 
-st.dataframe(df_res)
+st.dataframe(df_res.head(20))
 
-st.bar_chart(df_res.set_index("cluster")["max_next_prob"])
+st.bar_chart(df_res.head(20).set_index("state")["max_next_prob"])
