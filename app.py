@@ -3,9 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 
-st.set_page_config(page_title="RNG Analyzer",layout="wide")
-
-# ================= CONFIG =================
+st.set_page_config(page_title="RNG V3000 Analyzer",layout="wide")
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -24,7 +22,7 @@ def load_data():
 
 numbers=load_data()
 
-st.title("🎲 RNG Dataset Analyzer")
+st.title("🎲 RNG V3000 Regime Detector")
 
 st.write("Total rounds:",len(numbers))
 
@@ -39,9 +37,11 @@ def group(n):
 
 groups=numbers.apply(group)
 
-# ================= GROUP DISTRIBUTION =================
+g=groups.tolist()
 
-st.header("Group Distribution")
+# ================= GLOBAL DISTRIBUTION =================
+
+st.header("Global Distribution")
 
 freq=groups.value_counts().sort_index()
 
@@ -57,104 +57,80 @@ fig=px.bar(df_freq,x="group",y="prob")
 
 st.plotly_chart(fig,use_container_width=True)
 
-# ================= ENTROPY =================
+# ================= BLOCK ANALYSIS =================
 
-st.header("Entropy")
+st.header("Regime Detection")
 
-p=df_freq["prob"].values
+block_sizes=[100,200,300,500]
 
-entropy=-np.sum(p*np.log2(p))
+results=[]
 
-st.metric("Entropy",round(entropy,4))
+for block in block_sizes:
 
-# ================= CHI SQUARE =================
+    for i in range(0,len(g)-block,block):
 
-st.header("Chi-square randomness test")
+        segment=g[i:i+block]
 
-expected=len(groups)/4
+        counts=pd.Series(segment).value_counts()
 
-chi=((freq-expected)**2/expected).sum()
+        probs=counts/block
 
-st.metric("Chi-square",round(chi,4))
+        max_prob=probs.max()
 
-# ================= TRANSITION MATRIX =================
+        bias_group=probs.idxmax()
 
-st.header("Transition Matrix")
+        entropy=-np.sum(probs*np.log2(probs))
 
-matrix=np.zeros((4,4))
+        results.append({
 
-g=groups.tolist()
+            "start":i,
+            "block":block,
+            "bias_group":bias_group,
+            "max_prob":max_prob,
+            "entropy":entropy
+        })
 
-for i in range(1,len(g)):
+df_regime=pd.DataFrame(results)
 
-    a=g[i-1]-1
-    b=g[i]-1
+st.dataframe(df_regime.sort_values("max_prob",ascending=False).head(20))
 
-    matrix[a][b]+=1
+# ================= REGIME CHART =================
 
-df_matrix=pd.DataFrame(matrix,
-columns=["1","2","3","4"],
-index=["1","2","3","4"])
+st.header("Bias over time")
 
-st.dataframe(df_matrix)
-
-fig2=px.imshow(matrix,
-labels=dict(x="Next",y="Current",color="Count"))
+fig2=px.line(df_regime,x="start",y="max_prob",color="block")
 
 st.plotly_chart(fig2,use_container_width=True)
 
-# ================= REPEAT PROBABILITY =================
+# ================= TRADE SIGNAL =================
 
-st.header("Repeat Probability")
+st.header("Trade Signal")
 
-repeat=0
+recent=df_regime[df_regime["start"]>len(g)-500]
 
-for i in range(1,len(g)):
+best=recent.sort_values("max_prob",ascending=False).iloc[0]
 
-    if g[i]==g[i-1]:
+edge=best["max_prob"]
 
-        repeat+=1
+st.write("Best recent bias:",best["bias_group"])
+st.write("Edge probability:",round(edge,4))
 
-repeat_prob=repeat/(len(g)-1)
+if edge>0.286:
 
-st.metric("P(same group again)",round(repeat_prob,4))
+    st.success("TRADE SIGNAL")
+
+    st.write("Bet group:",best["bias_group"])
+
+else:
+
+    st.warning("NO EDGE")
 
 # ================= NEXT SIGNAL =================
-
-st.header("Next Signal")
 
 WINDOW=9
 
 next_group=g[-WINDOW]
 
-st.metric("Next group signal",next_group)
+st.header("Next Signal")
 
-# ================= RUN STATS =================
-
-st.header("Run statistics")
-
-runs=[]
-
-current=1
-
-for i in range(1,len(g)):
-
-    if g[i]==g[i-1]:
-
-        current+=1
-
-    else:
-
-        runs.append(current)
-
-        current=1
-
-runs.append(current)
-
-st.metric("Average streak",round(np.mean(runs),2))
-
-fig3=px.histogram(runs,nbins=10)
-
-st.plotly_chart(fig3,use_container_width=True)
-
-st.success("Analysis complete")
+st.metric("Next group",next_group)
