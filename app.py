@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from math import log
+import random
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -9,40 +9,61 @@ df = pd.read_csv(DATA_URL)
 
 numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("V810 RNG Reseed Timing Detector")
+st.title("V820 Permutation Test")
 
-# block size
-block_size = 200
 
-blocks = []
+# ===== Strategy logic =====
+def run_strategy(data):
 
-for i in range(0, len(numbers), block_size):
+    profit = 0
 
-    block = numbers[i:i+block_size]
+    for i in range(30, len(data)-1):
 
-    if len(block) < block_size:
-        continue
+        # ví dụ signal giống logic cũ
+        if data[i-1] == data[i-5]:
 
-    counts = pd.Series(block).value_counts()
+            pred = data[i-9]
 
-    probs = counts / counts.sum()
+            if data[i+1] == pred:
+                profit += 1
+            else:
+                profit -= 1
 
-    entropy = -(probs * np.log(probs)).sum()
+    return profit
 
-    blocks.append({
-        "start_round": i,
-        "entropy": entropy,
-        "max_prob": probs.max()
-    })
 
-df_blocks = pd.DataFrame(blocks)
+# real profit
+real_profit = run_strategy(numbers)
 
-st.subheader("Block Entropy")
+st.write("Real dataset profit:", real_profit)
 
-st.dataframe(df_blocks)
 
-st.line_chart(df_blocks["entropy"])
+# ===== permutation test =====
+N = 200
 
-st.subheader("Max number probability")
+profits = []
 
-st.line_chart(df_blocks["max_prob"])
+for _ in range(N):
+
+    shuffled = numbers.copy()
+
+    random.shuffle(shuffled)
+
+    p = run_strategy(shuffled)
+
+    profits.append(p)
+
+
+st.subheader("Shuffle profits")
+
+st.line_chart(profits)
+
+avg_profit = np.mean(profits)
+
+st.write("Average shuffle profit:", avg_profit)
+
+better = sum(1 for p in profits if p >= real_profit)
+
+p_value = better / N
+
+st.write("p-value:", p_value)
