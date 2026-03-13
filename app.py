@@ -2,15 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from collections import defaultdict
+from math import gcd
 
-st.set_page_config(page_title="V6000 AI Betting Lab",layout="wide")
+st.set_page_config(page_title="V7000 RNG State Analyzer",layout="wide")
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-# ----------------
+# --------------------
 # LOAD DATA
-# ----------------
+# --------------------
 
 @st.cache_data
 def load():
@@ -19,189 +19,121 @@ def load():
     nums=df["number"].dropna().astype(int)
     return nums
 
-numbers=load()
+numbers=load().values
 n=len(numbers)
 
-st.title("🧠 V6000 AI Betting Lab")
+st.title("🔬 V7000 RNG State Analyzer")
 
-st.write("Total rounds:",n)
+st.write("Total outputs:",n)
 
-# ----------------
-# PARAMETERS
-# ----------------
+# --------------------
+# LCG TEST
+# --------------------
 
-lookback=st.slider("Lookback window",3,15,5)
+st.header("LCG Pattern Test")
 
-threshold=st.slider("Confidence threshold",0.08,0.30,0.15)
+if n>5:
 
-payout=11
+    x0,x1,x2 = numbers[0],numbers[1],numbers[2]
 
-# ----------------
-# TRAIN MODEL
-# ----------------
+    d1 = x1-x0
+    d2 = x2-x1
 
-model=defaultdict(lambda:defaultdict(int))
+    g = gcd(abs(d1),abs(d2))
 
-for i in range(lookback,n-1):
+    st.write("Difference GCD:",g)
 
-    seq=tuple(numbers[i-lookback:i])
-    nxt=numbers[i]
-
-    model[seq][nxt]+=1
-
-# convert to probability
-
-model_prob={}
-
-for seq,counts in model.items():
-
-    total=sum(counts.values())
-
-    probs={k:v/total for k,v in counts.items()}
-
-    model_prob[seq]=probs
-
-# ----------------
-# PREDICTION
-# ----------------
-
-predictions=[]
-confidences=[]
-actuals=[]
-bets=[]
-
-for i in range(lookback,n-1):
-
-    seq=tuple(numbers[i-lookback:i])
-    actual=numbers[i]
-
-    if seq in model_prob:
-
-        probs=model_prob[seq]
-
-        pred=max(probs,key=probs.get)
-
-        conf=probs[pred]
-
+    if g>1:
+        st.warning("Possible modulus relation detected")
     else:
+        st.success("No obvious LCG pattern")
 
-        pred=np.random.choice(numbers.unique())
-        conf=0
+# --------------------
+# SEED PATTERN TEST
+# --------------------
 
-    predictions.append(pred)
-    confidences.append(conf)
-    actuals.append(actual)
+st.header("Seed Pattern Test")
 
-    if conf>threshold:
-        bets.append(pred)
-    else:
-        bets.append(None)
+diffs=np.diff(numbers)
 
-# ----------------
-# SIMULATE BETTING
-# ----------------
-
-profit=0
-equity=[0]
-bet_count=0
-wins=0
-
-for bet,actual in zip(bets,actuals):
-
-    if bet is None:
-        equity.append(profit)
-        continue
-
-    bet_count+=1
-
-    if bet==actual:
-
-        profit+=payout
-        wins+=1
-
-    else:
-
-        profit-=1
-
-    equity.append(profit)
-
-# ----------------
-# RESULTS
-# ----------------
-
-st.header("AI Betting Result")
-
-st.metric("Total bets",bet_count)
-
-if bet_count>0:
-
-    win_rate=wins/bet_count
-
-    st.metric("Win rate",round(win_rate,3))
-
-st.metric("Final profit",profit)
-
-# ----------------
-# EQUITY CURVE
-# ----------------
-
-eq_df=pd.DataFrame({
-
-    "round":range(len(equity)),
-    "profit":equity
-
+diff_df=pd.DataFrame({
+    
+    "diff":diffs
+    
 })
 
-fig=px.line(eq_df,x="round",y="profit")
+fig=px.histogram(diff_df,x="diff",nbins=30)
 
 st.plotly_chart(fig,use_container_width=True)
 
-# ----------------
-# CONFIDENCE DISTRIBUTION
-# ----------------
+# --------------------
+# SPECTRAL TEST
+# --------------------
 
-conf_df=pd.DataFrame({
+st.header("Spectral Test")
 
-    "confidence":confidences
+x=numbers[:-1]
+y=numbers[1:]
 
+spec_df=pd.DataFrame({
+    
+    "x":x,
+    "y":y
+    
 })
 
-fig2=px.histogram(conf_df,x="confidence",nbins=30)
+fig2=px.scatter(spec_df,x="x",y="y")
 
 st.plotly_chart(fig2,use_container_width=True)
 
-# ----------------
-# RANDOM BENCHMARK
-# ----------------
+# --------------------
+# AUTOCORRELATION
+# --------------------
 
-st.header("Random Betting Benchmark")
+st.header("Autocorrelation")
 
-rand_profit=0
-rand_eq=[0]
+lags=20
 
-for actual in actuals:
+corrs=[]
 
-    bet=np.random.choice(numbers.unique())
+for lag in range(1,lags):
 
-    if bet==actual:
+    corr=np.corrcoef(numbers[:-lag],numbers[lag:])[0,1]
+    corrs.append(corr)
 
-        rand_profit+=payout
-
-    else:
-
-        rand_profit-=1
-
-    rand_eq.append(rand_profit)
-
-rand_df=pd.DataFrame({
-
-    "round":range(len(rand_eq)),
-    "profit":rand_eq
-
+corr_df=pd.DataFrame({
+    
+    "lag":range(1,lags),
+    "corr":corrs
+    
 })
 
-fig3=px.line(rand_df,x="round",y="profit")
+fig3=px.line(corr_df,x="lag",y="corr")
 
 st.plotly_chart(fig3,use_container_width=True)
 
-st.metric("Random profit",rand_profit)
+# --------------------
+# PREDICTABILITY SCORE
+# --------------------
+
+st.header("Predictability Score")
+
+score=100
+
+score-=abs(np.mean(corrs))*500
+
+score=max(score,0)
+
+st.metric("Predictability score",round(score,2))
+
+if score>90:
+    
+    st.success("RNG appears strong")
+
+elif score>70:
+    
+    st.warning("Possible weak RNG")
+
+else:
+    
+    st.error("RNG may be predictable")
