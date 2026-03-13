@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from collections import Counter,defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
@@ -28,21 +29,38 @@ groups=[group(n) for n in numbers]
 
 ROUNDS=len(groups)
 
-# ---------- window predictor ----------
-def window_pred(g,window):
+# ---------- entropy ----------
+def entropy(g):
 
-    if len(g)<window:
-        return None
+    c=Counter(g)
 
-    c=Counter(g[-window:])
+    total=len(g)
 
-    return max(c,key=c.get)
+    e=0
 
-# ---------- markov predictor ----------
-def markov_pred(g):
+    for v in c.values():
 
-    if len(g)<2:
-        return None
+        p=v/total
+
+        e-=p*np.log2(p)
+
+    return e
+
+# ---------- distribution bias ----------
+def distribution_bias(g):
+
+    c=Counter(g)
+
+    total=len(g)
+
+    p=max(c.values())/total
+
+    return p
+
+# ---------- transition anomaly ----------
+def transition_bias(g):
+
+    if len(g)<2:return 0
 
     trans=defaultdict(list)
 
@@ -52,61 +70,22 @@ def markov_pred(g):
 
     last=g[-1]
 
-    if last not in trans:
-        return None
+    if last not in trans:return 0
 
     c=Counter(trans[last])
 
-    return max(c,key=c.get)
+    total=sum(c.values())
 
-# ---------- pattern predictor ----------
-def pattern_pred(g):
+    p=max(c.values())/total
 
-    if len(g)<4:
-        return None
+    return p
 
-    pattern=tuple(g[-3:])
+# ---------- predictor ----------
+def predict(g):
 
-    matches=[]
-
-    for i in range(len(g)-3):
-
-        if tuple(g[i:i+3])==pattern:
-
-            matches.append(g[i+3])
-
-    if not matches:
-        return None
-
-    c=Counter(matches)
+    c=Counter(g[-30:])
 
     return max(c,key=c.get)
-
-# ---------- frequency predictor ----------
-def freq_pred(g):
-
-    if len(g)<50:
-        return None
-
-    c=Counter(g[-50:])
-
-    return max(c,key=c.get)
-
-# ---------- voting ----------
-def vote(preds):
-
-    preds=[p for p in preds if p]
-
-    if len(preds)==0:
-        return None,0
-
-    c=Counter(preds)
-
-    group=c.most_common(1)[0][0]
-
-    votes=c.most_common(1)[0][1]
-
-    return group,votes
 
 # ---------- backtest ----------
 profit=0
@@ -122,20 +101,25 @@ for i in range(60,ROUNDS-1):
 
     g=groups[:i]
 
-    p1=window_pred(g,12)
-    p2=markov_pred(g)
-    p3=pattern_pred(g)
-    p4=freq_pred(g)
+    e=entropy(g[-30:])
 
-    preds=[p1,p2,p3,p4]
+    bias=distribution_bias(g[-30:])
 
-    pred,votes=vote(preds)
+    trans=transition_bias(g)
+
+    edge=0
+
+    if e<1.85: edge+=1
+    if bias>0.35: edge+=1
+    if trans>0.45: edge+=1
 
     trade=False
 
-    if votes>=3:
+    if edge>=2:
 
         trade=True
+
+    pred=predict(g)
 
     actual=groups[i]
 
@@ -161,11 +145,11 @@ for i in range(60,ROUNDS-1):
     history.append({
 
         "round":i,
+        "edge":edge,
         "pred":pred,
         "actual":actual,
-        "votes":votes,
-        "hit":hit,
         "trade":trade,
+        "hit":hit,
         "profit":profit
     })
 
@@ -174,17 +158,18 @@ wr=wins/trades if trades else 0
 hist_df=pd.DataFrame(history)
 
 # ---------- live ----------
-live_preds=[
-window_pred(groups,12),
-markov_pred(groups),
-pattern_pred(groups),
-freq_pred(groups)
-]
+g=groups
 
-live_pred,votes=vote(live_preds)
+edge=0
+
+if entropy(g[-30:])<1.85: edge+=1
+if distribution_bias(g[-30:])>0.35: edge+=1
+if transition_bias(g)>0.45: edge+=1
+
+live_pred=predict(g)
 
 # ---------- UI ----------
-st.title("🤖 V52 Hybrid AI Engine")
+st.title("🧠 V53 Edge Detection AI")
 
 c1,c2,c3=st.columns(3)
 
@@ -199,9 +184,9 @@ c5.metric("Drawdown",dd)
 
 st.subheader("Next Group")
 
-if live_pred and votes>=3:
+if edge>=2:
 
-    st.success(f"TRADE → Group {live_pred} (votes {votes})")
+    st.success(f"TRADE → Group {live_pred} (edge {edge})")
 
 else:
 
@@ -211,6 +196,6 @@ st.subheader("Equity Curve")
 
 st.line_chart(hist_df["profit"])
 
-st.subheader("Trade History")
+st.subheader("History")
 
 st.dataframe(hist_df.tail(100))
