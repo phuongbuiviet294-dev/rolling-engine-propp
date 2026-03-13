@@ -4,6 +4,9 @@ import numpy as np
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
+TRAIN_SIZE = 2000
+WINDOW = 16
+
 def get_group(n):
     if n <= 3:
         return 1
@@ -17,69 +20,95 @@ def get_group(n):
 
 df = pd.read_csv(DATA_URL)
 numbers = df["number"].dropna().astype(int).tolist()
-
 groups = [get_group(n) for n in numbers]
 
-st.title("V450 Transition Matrix Engine")
+st.title("🚀 V600 Hit-Streak Engine")
+
 
 # =====================
-# FIRST ORDER
+# SIMPLE WINDOW MODEL
 # =====================
 
-matrix = np.zeros((4,4))
+predictions = []
 
-for i in range(len(groups)-1):
-    g1 = groups[i]-1
-    g2 = groups[i+1]-1
-    matrix[g1,g2] += 1
+for i in range(WINDOW, len(groups)):
+    pred = groups[i-WINDOW]
+    predictions.append(pred)
 
-prob_matrix = matrix / matrix.sum(axis=1, keepdims=True)
+real = groups[WINDOW:]
 
-st.subheader("First Order Transition Probability")
-
-st.dataframe(
-    pd.DataFrame(
-        prob_matrix,
-        columns=["next=1","next=2","next=3","next=4"],
-        index=["curr=1","curr=2","curr=3","curr=4"]
-    )
-)
 
 # =====================
-# SECOND ORDER
+# HIT / MISS SERIES
 # =====================
 
-rows = []
+hits = []
 
-for g1 in range(1,5):
-    for g2 in range(1,5):
+for p,r in zip(predictions, real):
+    if p == r:
+        hits.append(1)
+    else:
+        hits.append(0)
 
-        counts = [0,0,0,0]
 
-        for i in range(len(groups)-2):
+# =====================
+# STREAK ANALYSIS
+# =====================
 
-            if groups[i]==g1 and groups[i+1]==g2:
+streaks=[]
+current=0
 
-                nxt = groups[i+2]-1
-                counts[nxt]+=1
+for h in hits:
 
-        total = sum(counts)
+    if h==1:
+        current+=1
+    else:
+        if current>0:
+            streaks.append(current)
+        current=0
 
-        if total > 20:
+if current>0:
+    streaks.append(current)
 
-            probs = [c/total for c in counts]
 
-            rows.append({
-                "pattern":f"{g1}-{g2}",
-                "next1":round(probs[0],3),
-                "next2":round(probs[1],3),
-                "next3":round(probs[2],3),
-                "next4":round(probs[3],3),
-                "samples":total
-            })
+st.subheader("Hit Streak Distribution")
 
-df2 = pd.DataFrame(rows)
+dist=pd.Series(streaks).value_counts().sort_index()
 
-st.subheader("Second Order Markov")
+st.dataframe(dist)
 
-st.dataframe(df2.sort_values("samples",ascending=False))
+
+# =====================
+# TRADING SIMULATION
+# =====================
+
+profit=0
+equity=[]
+
+in_trade=False
+
+for h in hits:
+
+    if not in_trade:
+
+        if h==1:
+            in_trade=True
+            profit+=1
+
+    else:
+
+        if h==1:
+            profit+=1
+
+        else:
+            profit-=1
+            in_trade=False
+
+    equity.append(profit)
+
+
+st.subheader("Trading Result")
+
+st.metric("Total Profit", profit)
+
+st.line_chart(equity)
