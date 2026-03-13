@@ -3,134 +3,184 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 
-st.set_page_config(page_title="RNG V3000 Analyzer",layout="wide")
+st.set_page_config(page_title="V4000 RNG Analyzer", layout="wide")
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-# ================= LOAD DATA =================
+# -----------------------
+# Load Data
+# -----------------------
 
 @st.cache_data
 def load_data():
-
-    df=pd.read_csv(DATA_URL)
-
-    df.columns=[c.strip().lower() for c in df.columns]
-
-    numbers=df["number"].dropna().astype(int)
-
+    df = pd.read_csv(DATA_URL)
+    df.columns = [c.strip().lower() for c in df.columns]
+    numbers = df["number"].dropna().astype(int)
     return numbers
 
-numbers=load_data()
+numbers = load_data()
 
-st.title("🎲 RNG V3000 Regime Detector")
+st.title("🎲 V4000 Advanced RNG Analyzer")
 
-st.write("Total rounds:",len(numbers))
+st.write("Total rounds:", len(numbers))
 
-# ================= GROUP =================
+# -----------------------
+# Convert to groups
+# -----------------------
 
 def group(n):
+    if n <= 3:
+        return 1
+    elif n <= 6:
+        return 2
+    elif n <= 9:
+        return 3
+    else:
+        return 4
 
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
-    return 4
+groups = numbers.apply(group)
+g = groups.values
 
-groups=numbers.apply(group)
+# -----------------------
+# Global distribution
+# -----------------------
 
-g=groups.tolist()
+st.header("Distribution")
 
-# ================= GLOBAL DISTRIBUTION =================
+freq = groups.value_counts().sort_index()
+prob = freq / len(groups)
 
-st.header("Global Distribution")
-
-freq=groups.value_counts().sort_index()
-
-df_freq=pd.DataFrame({
-    "group":freq.index,
-    "count":freq.values,
-    "prob":freq.values/len(groups)
+dist_df = pd.DataFrame({
+    "group": freq.index,
+    "count": freq.values,
+    "prob": prob.values
 })
 
-st.dataframe(df_freq)
+st.dataframe(dist_df)
 
-fig=px.bar(df_freq,x="group",y="prob")
+fig = px.bar(dist_df, x="group", y="prob")
+st.plotly_chart(fig, use_container_width=True)
 
-st.plotly_chart(fig,use_container_width=True)
+# -----------------------
+# Lag correlation
+# -----------------------
 
-# ================= BLOCK ANALYSIS =================
+st.header("Lag Correlation")
 
-st.header("Regime Detection")
+lags = 10
+corr = []
 
-block_sizes=[100,200,300,500]
+for lag in range(1, lags+1):
+    c = np.corrcoef(g[:-lag], g[lag:])[0,1]
+    corr.append(c)
 
-results=[]
+corr_df = pd.DataFrame({
+    "lag": range(1,lags+1),
+    "correlation": corr
+})
 
-for block in block_sizes:
+st.dataframe(corr_df)
 
-    for i in range(0,len(g)-block,block):
+fig2 = px.line(corr_df, x="lag", y="correlation")
+st.plotly_chart(fig2, use_container_width=True)
 
-        segment=g[i:i+block]
+# -----------------------
+# Entropy over time
+# -----------------------
 
-        counts=pd.Series(segment).value_counts()
+st.header("Entropy Drift")
 
-        probs=counts/block
+window = 200
+entropy_vals = []
+pos = []
 
-        max_prob=probs.max()
+for i in range(0, len(g)-window):
+    seg = g[i:i+window]
+    counts = np.bincount(seg)[1:]
+    probs = counts / window
+    ent = -np.sum(probs * np.log2(probs + 1e-9))
+    entropy_vals.append(ent)
+    pos.append(i)
 
-        bias_group=probs.idxmax()
+entropy_df = pd.DataFrame({
+    "round": pos,
+    "entropy": entropy_vals
+})
 
-        entropy=-np.sum(probs*np.log2(probs))
+fig3 = px.line(entropy_df, x="round", y="entropy")
+st.plotly_chart(fig3, use_container_width=True)
 
-        results.append({
+# -----------------------
+# Transition matrix
+# -----------------------
 
-            "start":i,
-            "block":block,
-            "bias_group":bias_group,
-            "max_prob":max_prob,
-            "entropy":entropy
-        })
+st.header("Markov Transition")
 
-df_regime=pd.DataFrame(results)
+matrix = np.zeros((4,4))
 
-st.dataframe(df_regime.sort_values("max_prob",ascending=False).head(20))
+for i in range(len(g)-1):
+    a = g[i]-1
+    b = g[i+1]-1
+    matrix[a][b] += 1
 
-# ================= REGIME CHART =================
+matrix_df = pd.DataFrame(matrix,
+                         index=["1","2","3","4"],
+                         columns=["1","2","3","4"])
 
-st.header("Bias over time")
+st.dataframe(matrix_df)
 
-fig2=px.line(df_regime,x="start",y="max_prob",color="block")
+fig4 = px.imshow(matrix,
+                 labels=dict(x="Next", y="Current", color="Count"))
+st.plotly_chart(fig4, use_container_width=True)
 
-st.plotly_chart(fig2,use_container_width=True)
+# -----------------------
+# Markov probability
+# -----------------------
 
-# ================= TRADE SIGNAL =================
+prob_matrix = matrix / matrix.sum(axis=1, keepdims=True)
 
-st.header("Trade Signal")
+prob_df = pd.DataFrame(prob_matrix,
+                       index=["1","2","3","4"],
+                       columns=["1","2","3","4"])
 
-recent=df_regime[df_regime["start"]>len(g)-500]
+st.header("Transition Probability")
 
-best=recent.sort_values("max_prob",ascending=False).iloc[0]
+st.dataframe(prob_df)
 
-edge=best["max_prob"]
+# -----------------------
+# Detect edge
+# -----------------------
 
-st.write("Best recent bias:",best["bias_group"])
-st.write("Edge probability:",round(edge,4))
+edge_group = None
+edge_prob = 0
 
-if edge>0.286:
+for i in range(4):
+    m = prob_matrix[i].max()
+    if m > edge_prob:
+        edge_prob = m
+        edge_group = np.argmax(prob_matrix[i]) + 1
 
+st.header("Edge Detection")
+
+st.write("Max transition probability:", round(edge_prob,4))
+st.write("Edge group:", edge_group)
+
+if edge_prob > 0.32:
     st.success("TRADE SIGNAL")
-
-    st.write("Bet group:",best["bias_group"])
-
+    st.write("Bet group:", edge_group)
 else:
-
     st.warning("NO EDGE")
 
-# ================= NEXT SIGNAL =================
+# -----------------------
+# Next signal
+# -----------------------
 
-WINDOW=9
+current = g[-1]
 
-next_group=g[-WINDOW]
+next_prob = prob_matrix[current-1]
+next_group = np.argmax(next_prob)+1
 
 st.header("Next Signal")
 
-st.metric("Next group",next_group)
+st.write("Current group:", current)
+st.write("Best next group:", next_group)
