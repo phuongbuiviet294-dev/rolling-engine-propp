@@ -1,65 +1,73 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from collections import Counter
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 df = pd.read_csv(DATA_URL)
 
-numbers = df["number"].dropna().astype(int)
+numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("V1400 Momentum Detector")
+st.title("V1600 RNG Weakness Scanner")
 
-# group mapping
-groups = numbers % 4
+n = len(numbers)
 
-groups = groups.tolist()
+# ---------- 1 Markov test ----------
 
-n = len(groups)
-
-repeat = 0
+matrix = np.zeros((10,10))
 
 for i in range(n-1):
-    if groups[i] == groups[i+1]:
-        repeat += 1
-
-repeat_prob = repeat/(n-1)
-
-st.subheader("Repeat probability")
-
-st.write(repeat_prob)
-
-# conditional matrix
-
-matrix = np.zeros((4,4))
-
-for i in range(n-1):
-    g = groups[i]
-    g2 = groups[i+1]
-    matrix[g][g2]+=1
+    a = numbers[i]-1
+    b = numbers[i+1]-1
+    matrix[a][b]+=1
 
 matrix = matrix / matrix.sum(axis=1, keepdims=True)
 
-st.subheader("Transition matrix")
+st.subheader("Markov transition matrix")
 
 st.dataframe(pd.DataFrame(matrix))
 
-# streak test
+# ---------- 2 Predictability ----------
 
-streak2 = 0
-streak3 = 0
+correct = 0
+total = 0
 
-for i in range(n-2):
-    if groups[i]==groups[i+1]:
-        streak2+=1
-        if groups[i]==groups[i+2]:
-            streak3+=1
+for i in range(5,n-1):
 
-if streak2>0:
-    p3 = streak3/streak2
-else:
-    p3 = 0
+    hist = numbers[i-5:i]
 
-st.subheader("P(streak3 | streak2)")
+    most_common = Counter(hist).most_common(1)[0][0]
 
-st.write(p3)
+    if numbers[i]==most_common:
+        correct+=1
+
+    total+=1
+
+accuracy = correct/total
+
+st.subheader("Simple predictor accuracy")
+
+st.write(accuracy)
+
+# ---------- 3 Cycle detection ----------
+
+cycles = {}
+
+for window in range(5,50):
+
+    patterns = {}
+
+    for i in range(n-window):
+
+        seq = tuple(numbers[i:i+window])
+
+        if seq in patterns:
+            cycles[window]=True
+            break
+        else:
+            patterns[seq]=1
+
+st.subheader("Cycle detection")
+
+st.write(cycles)
