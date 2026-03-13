@@ -6,19 +6,20 @@ from collections import Counter, defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE=2000
 WINDOW_RANGE=range(8,18)
+
+TRAIN_SIZE=2000
 LOOKBACK=26
 RECALIBRATE=200
 
 WIN=2.5
 LOSS=1
 
-SIGNAL_THRESHOLD=0.40
+SIGNAL_THRESHOLD=0.42
 
 st.set_page_config(layout="wide")
 
-# ---------- group mapping ----------
+# ---------- group ----------
 
 def group(n):
 
@@ -100,12 +101,10 @@ def scan_windows(data):
     return best
 
 
-# ---------- TRAIN ----------
+TRAIN_SIZE=min(TRAIN_SIZE,len(groups)//2)
 
 best_window=scan_windows(groups[:TRAIN_SIZE])
 
-
-# ---------- LIVE ENGINE ----------
 
 hits=[]
 equity=[]
@@ -118,14 +117,13 @@ pattern_prob=0
 markov_prob=0
 momentum=0
 stability=0
+strength=0
 
 trade_history=[]
 
 
 for i in range(TRAIN_SIZE,len(groups)-1):
 
-
-    # recalibrate window
 
     if (i-TRAIN_SIZE)%RECALIBRATE==0 and i>TRAIN_SIZE:
 
@@ -201,7 +199,18 @@ for i in range(TRAIN_SIZE,len(groups)-1):
         stability=momentum
 
 
-    # ---------- signal detect ----------
+    # ---------- regime ----------
+
+    regime="break"
+
+    if momentum>=0.45:
+        regime="trend"
+
+    elif momentum>=0.30:
+        regime="random"
+
+
+    # ---------- signal ----------
 
     signal=False
 
@@ -218,12 +227,10 @@ for i in range(TRAIN_SIZE,len(groups)-1):
         signal=True
 
 
-    # ---------- strength ----------
-
     strength=(
-        0.35*pattern_prob+
+        0.30*pattern_prob+
         0.25*markov_prob+
-        0.20*momentum+
+        0.25*momentum+
         0.20*stability
     )
 
@@ -231,7 +238,7 @@ for i in range(TRAIN_SIZE,len(groups)-1):
     trade=False
 
 
-    if signal and strength>=SIGNAL_THRESHOLD:
+    if signal and strength>=SIGNAL_THRESHOLD and regime!="break":
 
         trade=True
 
@@ -256,6 +263,7 @@ for i in range(TRAIN_SIZE,len(groups)-1):
         "pred":pred,
         "actual":actual,
         "hit":hit,
+        "regime":regime,
         "strength":round(strength,3),
         "trade":trade,
         "profit":profit
@@ -270,7 +278,7 @@ next_pred=predict(groups,best_window)
 
 # ---------- UI ----------
 
-st.title("⚡ V72.2 Stable Signal Engine")
+st.title("⚡ V73 Adaptive Regime Engine")
 
 
 col1,col2,col3=st.columns(3)
@@ -278,7 +286,6 @@ col1,col2,col3=st.columns(3)
 col1.metric("Best Window",best_window)
 col2.metric("Trades",trades)
 col3.metric("Winrate %",round(wr*100,2))
-
 
 st.metric("Live Profit",round(profit,2))
 
