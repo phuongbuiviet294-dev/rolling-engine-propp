@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 st.set_page_config(layout="wide")
 
-# ---------- group mapping ----------
+# ---------- group ----------
 def group(n):
 
     if n<=3:return 1
@@ -15,12 +14,11 @@ def group(n):
     if n<=9:return 3
     return 4
 
-# ---------- load data ----------
+# ---------- load ----------
 @st.cache_data(ttl=5)
 def load():
 
     df=pd.read_csv(DATA_URL)
-    df.columns=[c.lower() for c in df.columns]
 
     return df["number"].dropna().astype(int).tolist()
 
@@ -42,9 +40,31 @@ def predict(g,window):
 
     return max(c,key=c.get)
 
-# ---------- backtest ----------
+# ---------- streak probability ----------
+def streak_probability(hits):
+
+    total=0
+    win=0
+
+    for i in range(len(hits)-2):
+
+        if hits[i]==1 and hits[i+1]==1:
+
+            total+=1
+
+            if hits[i+2]==1:
+                win+=1
+
+    if total==0:
+        return 0
+
+    return win/total
+
 results=[]
 
+THRESHOLD=0.35
+
+# ---------- backtest ----------
 for window in range(8,18):
 
     profit=0
@@ -59,6 +79,14 @@ for window in range(8,18):
 
     for i in range(window,ROUNDS-1):
 
+        prob=streak_probability(hits)
+
+        trade=False
+
+        if len(hits)>=2 and hits[-2:]==[1,1] and prob>THRESHOLD:
+
+            trade=True
+
         pred=predict(groups[:i],window)
 
         if pred is None:
@@ -67,14 +95,6 @@ for window in range(8,18):
         actual=groups[i]
 
         hit=1 if pred==actual else 0
-
-        hits.append(hit)
-
-        trade=False
-
-        if len(hits)>=2 and hits[-2:]==[1,1]:
-
-            trade=True
 
         if trade:
 
@@ -88,6 +108,8 @@ for window in range(8,18):
             else:
 
                 profit-=1
+
+        hits.append(hit)
 
         peak=max(peak,profit)
 
@@ -121,17 +143,16 @@ best=perf.sort_values("profit",ascending=False).iloc[0]
 
 best_window=int(best.window)
 
-# ---------- history best window ----------
-best_hist=[r["history"] for r in results if r["window"]==best_window][0]
+hist=[r["history"] for r in results if r["window"]==best_window][0]
 
-hist_df=pd.DataFrame(best_hist)
+hist_df=pd.DataFrame(hist)
 
-# ---------- live prediction ----------
-pred=predict(groups,best_window)
+# ---------- live ----------
+live_pred=predict(groups,best_window)
 
 # ---------- UI ----------
 
-st.title("⚡ V49.1 Window Streak Engine (Fixed Backtest)")
+st.title("⚡ V50 Streak Probability Engine")
 
 c1,c2,c3=st.columns(3)
 
@@ -145,31 +166,23 @@ c4.metric("Winrate",round(best.winrate*100,2))
 c5.metric("Profit",round(best.profit,2))
 c6.metric("Drawdown",round(best.drawdown,2))
 
-# ---------- next group ----------
-
 st.subheader("Next Group")
 
-if pred:
+if live_pred:
 
-    st.success(f"PREDICT → Group {pred}")
+    st.success(f"PREDICT → Group {live_pred}")
 
 else:
 
     st.info("SKIP")
 
-# ---------- equity curve ----------
-
 st.subheader("Equity Curve")
 
 st.line_chart(hist_df["profit"])
 
-# ---------- window performance ----------
-
 st.subheader("Window Performance")
 
 st.dataframe(perf)
-
-# ---------- history ----------
 
 st.subheader("Trade History")
 
