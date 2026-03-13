@@ -3,14 +3,15 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from math import gcd
+from collections import defaultdict
 
-st.set_page_config(page_title="V7000 RNG State Analyzer",layout="wide")
+st.set_page_config(page_title="V9000 RNG Exploit Scanner",layout="wide")
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-# --------------------
+# -----------------------
 # LOAD DATA
-# --------------------
+# -----------------------
 
 @st.cache_data
 def load():
@@ -22,118 +23,157 @@ def load():
 numbers=load().values
 n=len(numbers)
 
-st.title("🔬 V7000 RNG State Analyzer")
+st.title("🧠 V9000 RNG Exploit Scanner")
 
 st.write("Total outputs:",n)
 
-# --------------------
-# LCG TEST
-# --------------------
+# -----------------------
+# LCG MODULUS TEST
+# -----------------------
 
-st.header("LCG Pattern Test")
+st.header("LCG Modulus Detection")
 
-if n>5:
+mods=[]
 
-    x0,x1,x2 = numbers[0],numbers[1],numbers[2]
+for i in range(n-4):
 
-    d1 = x1-x0
-    d2 = x2-x1
+    x0=numbers[i]
+    x1=numbers[i+1]
+    x2=numbers[i+2]
+    x3=numbers[i+3]
 
-    g = gcd(abs(d1),abs(d2))
+    t1=(x2-x1)*(x0-x1)
+    t2=(x1-x0)*(x3-x2)
 
-    st.write("Difference GCD:",g)
+    val=abs(t1-t2)
 
-    if g>1:
-        st.warning("Possible modulus relation detected")
+    if val>0:
+        mods.append(val)
+
+if len(mods)>0:
+    
+    m=mods[0]
+    
+    for v in mods[1:50]:
+        m=gcd(m,v)
+
+    st.write("Estimated modulus candidate:",m)
+
+    if m>1e6:
+        st.warning("Possible LCG modulus found")
     else:
-        st.success("No obvious LCG pattern")
+        st.success("No clear LCG modulus")
 
-# --------------------
-# SEED PATTERN TEST
-# --------------------
+# -----------------------
+# TRANSITION MATRIX
+# -----------------------
 
-st.header("Seed Pattern Test")
+st.header("Markov Transition Bias")
 
-diffs=np.diff(numbers)
+matrix=defaultdict(lambda:defaultdict(int))
 
-diff_df=pd.DataFrame({
+for i in range(n-1):
     
-    "diff":diffs
+    a=numbers[i]
+    b=numbers[i+1]
     
-})
+    matrix[a][b]+=1
 
-fig=px.histogram(diff_df,x="diff",nbins=30)
+rows=[]
+
+for a in matrix:
+
+    total=sum(matrix[a].values())
+
+    for b in matrix[a]:
+        
+        rows.append({
+            "from":a,
+            "to":b,
+            "prob":matrix[a][b]/total
+        })
+
+df=pd.DataFrame(rows)
+
+fig=px.scatter(df,x="from",y="to",size="prob",color="prob")
 
 st.plotly_chart(fig,use_container_width=True)
 
-# --------------------
-# SPECTRAL TEST
-# --------------------
+max_prob=df["prob"].max()
 
-st.header("Spectral Test")
+st.write("Max transition probability:",max_prob)
 
-x=numbers[:-1]
-y=numbers[1:]
+if max_prob>0.2:
+    st.warning("Transition bias detected")
+else:
+    st.success("No transition bias")
 
-spec_df=pd.DataFrame({
-    
-    "x":x,
-    "y":y
-    
-})
+# -----------------------
+# PREDICTOR TEST
+# -----------------------
 
-fig2=px.scatter(spec_df,x="x",y="y")
+st.header("Predictor Simulation")
 
-st.plotly_chart(fig2,use_container_width=True)
+wins=0
+bets=0
 
-# --------------------
-# AUTOCORRELATION
-# --------------------
+for i in range(n-1000,n-1):
 
-st.header("Autocorrelation")
+    current=numbers[i]
 
-lags=20
+    probs=df[df["from"]==current]
 
-corrs=[]
+    if len(probs)==0:
+        continue
 
-for lag in range(1,lags):
+    guess=probs.sort_values("prob",ascending=False).iloc[0]["to"]
 
-    corr=np.corrcoef(numbers[:-lag],numbers[lag:])[0,1]
-    corrs.append(corr)
+    actual=numbers[i+1]
 
-corr_df=pd.DataFrame({
-    
-    "lag":range(1,lags),
-    "corr":corrs
-    
-})
+    bets+=1
 
-fig3=px.line(corr_df,x="lag",y="corr")
+    if guess==actual:
+        wins+=1
 
-st.plotly_chart(fig3,use_container_width=True)
+if bets>0:
 
-# --------------------
-# PREDICTABILITY SCORE
-# --------------------
+    winrate=wins/bets
 
-st.header("Predictability Score")
+    st.metric("Predictor winrate",round(winrate,4))
 
-score=100
+    random_rate=1/12
 
-score-=abs(np.mean(corrs))*500
+    st.write("Random baseline:",random_rate)
 
-score=max(score,0)
+    if winrate>random_rate+0.02:
+        st.error("Predictable RNG detected")
+    else:
+        st.success("Predictor performs like random")
 
-st.metric("Predictability score",round(score,2))
+# -----------------------
+# EXPLOIT SCORE
+# -----------------------
 
-if score>90:
-    
-    st.success("RNG appears strong")
+st.header("Exploitability Score")
 
-elif score>70:
-    
-    st.warning("Possible weak RNG")
+score=0
+
+if max_prob>0.2:
+    score+=40
+
+if winrate>0.1:
+    score+=40
+
+if 'm' in locals() and m>1e6:
+    score+=20
+
+st.metric("Exploit score",score)
+
+if score<30:
+    st.success("RNG likely secure")
+
+elif score<60:
+    st.warning("Weak RNG signals")
 
 else:
-    
-    st.error("RNG may be predictable")
+    st.error("RNG may be exploitable")
