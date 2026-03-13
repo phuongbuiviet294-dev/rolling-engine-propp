@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-from collections import Counter,defaultdict
+from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-st.set_page_config(layout="wide")
+SCAN_ROUNDS = 200
+LOCK_ROUNDS = 200
 
-# ---------- group ----------
+# ---------- group mapping ----------
 def group(n):
 
     if n<=3:return 1
@@ -24,104 +24,89 @@ def load():
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
-
 groups=[group(n) for n in numbers]
 
-ROUNDS=len(groups)
-
-# ---------- entropy ----------
-def entropy(g):
-
-    c=Counter(g)
-
-    total=len(g)
-
-    e=0
-
-    for v in c.values():
-
-        p=v/total
-
-        e-=p*np.log2(p)
-
-    return e
-
-# ---------- distribution bias ----------
-def distribution_bias(g):
-
-    c=Counter(g)
-
-    total=len(g)
-
-    p=max(c.values())/total
-
-    return p
-
-# ---------- transition anomaly ----------
-def transition_bias(g):
-
-    if len(g)<2:return 0
-
-    trans=defaultdict(list)
-
-    for i in range(len(g)-1):
-
-        trans[g[i]].append(g[i+1])
-
-    last=g[-1]
-
-    if last not in trans:return 0
-
-    c=Counter(trans[last])
-
-    total=sum(c.values())
-
-    p=max(c.values())/total
-
-    return p
-
 # ---------- predictor ----------
-def predict(g):
+def predict(g,window):
 
-    c=Counter(g[-30:])
+    if len(g)<window:
+        return None
 
+    c=Counter(g[-window:])
     return max(c,key=c.get)
 
-# ---------- backtest ----------
+# ---------- evaluate window ----------
+def evaluate_window(data,window):
+
+    profit=0
+    peak=0
+    dd=0
+    trades=0
+
+    for i in range(window,len(data)-1):
+
+        pred=predict(data[:i],window)
+        actual=data[i]
+
+        if pred is None:
+            continue
+
+        trades+=1
+
+        if pred==actual:
+            profit+=2.5
+        else:
+            profit-=1
+
+        peak=max(peak,profit)
+        dd=max(dd,peak-profit)
+
+    score = profit - 0.5*dd
+
+    return profit,trades,dd,score
+
+# ---------- find best window ----------
+def find_best_window(data):
+
+    results=[]
+
+    for w in range(8,18):
+
+        p,t,d,s = evaluate_window(data,w)
+
+        results.append((w,p,t,d,s))
+
+    df=pd.DataFrame(results,columns=["window","profit","trades","drawdown","score"])
+
+    best=df.sort_values("score",ascending=False).iloc[0]
+
+    return int(best.window),df
+
+# ---------- main ----------
+best_window,table = find_best_window(groups[-SCAN_ROUNDS:])
+
 profit=0
 peak=0
 dd=0
-
 trades=0
 wins=0
 
 history=[]
 
-for i in range(60,ROUNDS-1):
+lock_counter=0
 
-    g=groups[:i]
+for i in range(SCAN_ROUNDS,len(groups)-1):
 
-    e=entropy(g[-30:])
+    if lock_counter>=LOCK_ROUNDS:
 
-    bias=distribution_bias(g[-30:])
+        best_window,_ = find_best_window(groups[i-SCAN_ROUNDS:i])
 
-    trans=transition_bias(g)
+        lock_counter=0
 
-    edge=0
-
-    if e<1.85: edge+=1
-    if bias>0.35: edge+=1
-    if trans>0.45: edge+=1
-
-    trade=False
-
-    if edge>=2:
-
-        trade=True
-
-    pred=predict(g)
-
+    pred=predict(groups[:i],best_window)
     actual=groups[i]
+
+    trade=True
 
     hit=1 if pred==actual else 0
 
@@ -130,72 +115,36 @@ for i in range(60,ROUNDS-1):
         trades+=1
 
         if hit:
-
             profit+=2.5
             wins+=1
-
         else:
-
             profit-=1
 
     peak=max(peak,profit)
-
     dd=max(dd,peak-profit)
 
-    history.append({
+    history.append(profit)
 
-        "round":i,
-        "edge":edge,
-        "pred":pred,
-        "actual":actual,
-        "trade":trade,
-        "hit":hit,
-        "profit":profit
-    })
+    lock_counter+=1
 
-wr=wins/trades if trades else 0
-
-hist_df=pd.DataFrame(history)
-
-# ---------- live ----------
-g=groups
-
-edge=0
-
-if entropy(g[-30:])<1.85: edge+=1
-if distribution_bias(g[-30:])>0.35: edge+=1
-if transition_bias(g)>0.45: edge+=1
-
-live_pred=predict(g)
+winrate = wins/trades if trades else 0
 
 # ---------- UI ----------
-st.title("🧠 V53 Edge Detection AI")
+st.title("⚡ V54 Window Calibration Engine")
 
 c1,c2,c3=st.columns(3)
 
-c1.metric("Rounds",ROUNDS)
+c1.metric("Best Window",best_window)
 c2.metric("Trades",trades)
-c3.metric("Winrate",round(wr*100,2))
+c3.metric("Winrate",round(winrate*100,2))
 
 c4,c5=st.columns(2)
 
 c4.metric("Profit",profit)
 c5.metric("Drawdown",dd)
 
-st.subheader("Next Group")
-
-if edge>=2:
-
-    st.success(f"TRADE → Group {live_pred} (edge {edge})")
-
-else:
-
-    st.info("SKIP")
-
 st.subheader("Equity Curve")
+st.line_chart(history)
 
-st.line_chart(hist_df["profit"])
-
-st.subheader("History")
-
-st.dataframe(hist_df.tail(100))
+st.subheader("Window Scan Result")
+st.dataframe(table)
