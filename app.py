@@ -1,100 +1,85 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOW_RANGE = range(6,20)
-
-WIN = 2.5
-LOSS = 1
-
-
 def get_group(n):
-    if n<=3: return 1
-    if n<=6: return 2
-    if n<=9: return 3
-    return 4
+    if n <= 3:
+        return 1
+    elif n <= 6:
+        return 2
+    elif n <= 9:
+        return 3
+    else:
+        return 4
 
 
 df = pd.read_csv(DATA_URL)
-
 numbers = df["number"].dropna().astype(int).tolist()
 
 groups = [get_group(n) for n in numbers]
 
+st.title("V450 Transition Matrix Engine")
 
-patterns = {
-"1-1":[1,1],
-"1-1-1":[1,1,1],
-"0-0":[0,0],
-"0-0-0":[0,0,0],
-"0-1-0":[0,1,0],
-"1-0-1":[1,0,1]
-}
+# =====================
+# FIRST ORDER
+# =====================
 
+matrix = np.zeros((4,4))
+
+for i in range(len(groups)-1):
+    g1 = groups[i]-1
+    g2 = groups[i+1]-1
+    matrix[g1,g2] += 1
+
+prob_matrix = matrix / matrix.sum(axis=1, keepdims=True)
+
+st.subheader("First Order Transition Probability")
+
+st.dataframe(
+    pd.DataFrame(
+        prob_matrix,
+        columns=["next=1","next=2","next=3","next=4"],
+        index=["curr=1","curr=2","curr=3","curr=4"]
+    )
+)
+
+# =====================
+# SECOND ORDER
+# =====================
 
 rows = []
 
-for window in WINDOW_RANGE:
+for g1 in range(1,5):
+    for g2 in range(1,5):
 
-    hits = []
+        counts = [0,0,0,0]
 
-    for i in range(window,len(groups)):
-        hits.append(1 if groups[i]==groups[i-window] else 0)
+        for i in range(len(groups)-2):
 
-    for name,p in patterns.items():
+            if groups[i]==g1 and groups[i+1]==g2:
 
-        L = len(p)
+                nxt = groups[i+2]-1
+                counts[nxt]+=1
 
-        trades = 0
-        win_hit = 0
-        win_miss = 0
+        total = sum(counts)
 
-        for i in range(len(hits)-L):
+        if total > 20:
 
-            if hits[i:i+L]==p:
-
-                trades += 1
-
-                if hits[i+L]==1:
-                    win_hit += 1
-                else:
-                    win_miss += 1
-
-
-        if trades>0:
-
-            wr_hit = win_hit/trades
-            wr_miss = win_miss/trades
-
-            ev_hit = wr_hit*WIN - (1-wr_hit)*LOSS
-            ev_miss = wr_miss*WIN - (1-wr_miss)*LOSS
+            probs = [c/total for c in counts]
 
             rows.append({
-                "window":window,
-                "pattern":name,
-                "direction":"HIT",
-                "trades":trades,
-                "wins":win_hit,
-                "winrate":round(wr_hit*100,2),
-                "EV":round(ev_hit,3)
+                "pattern":f"{g1}-{g2}",
+                "next1":round(probs[0],3),
+                "next2":round(probs[1],3),
+                "next3":round(probs[2],3),
+                "next4":round(probs[3],3),
+                "samples":total
             })
 
-            rows.append({
-                "window":window,
-                "pattern":name,
-                "direction":"MISS",
-                "trades":trades,
-                "wins":win_miss,
-                "winrate":round(wr_miss*100,2),
-                "EV":round(ev_miss,3)
-            })
+df2 = pd.DataFrame(rows)
 
+st.subheader("Second Order Markov")
 
-result = pd.DataFrame(rows)
-
-result = result.sort_values("EV",ascending=False)
-
-st.title("V440 Dual Edge Engine")
-
-st.dataframe(result,use_container_width=True)
+st.dataframe(df2.sort_values("samples",ascending=False))
