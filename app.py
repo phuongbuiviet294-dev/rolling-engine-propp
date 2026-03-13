@@ -17,6 +17,7 @@ def get_group(n):
 
 
 df = pd.read_csv(DATA_URL)
+
 numbers = df["number"].dropna().astype(int).tolist()
 
 groups = [get_group(n) for n in numbers]
@@ -46,7 +47,8 @@ for window in WINDOW_RANGE:
         L = len(p)
 
         trades = 0
-        wins = 0
+        win_hit = 0
+        win_miss = 0
 
         for i in range(len(hits)-L):
 
@@ -55,21 +57,37 @@ for window in WINDOW_RANGE:
                 trades += 1
 
                 if hits[i+L]==1:
-                    wins += 1
+                    win_hit += 1
+                else:
+                    win_miss += 1
+
 
         if trades>0:
 
-            winrate = wins/trades
+            wr_hit = win_hit/trades
+            wr_miss = win_miss/trades
 
-            ev = winrate*WIN - (1-winrate)*LOSS
+            ev_hit = wr_hit*WIN - (1-wr_hit)*LOSS
+            ev_miss = wr_miss*WIN - (1-wr_miss)*LOSS
 
             rows.append({
                 "window":window,
                 "pattern":name,
+                "direction":"HIT",
                 "trades":trades,
-                "wins":wins,
-                "winrate":round(winrate*100,2),
-                "EV":round(ev,3)
+                "wins":win_hit,
+                "winrate":round(wr_hit*100,2),
+                "EV":round(ev_hit,3)
+            })
+
+            rows.append({
+                "window":window,
+                "pattern":name,
+                "direction":"MISS",
+                "trades":trades,
+                "wins":win_miss,
+                "winrate":round(wr_miss*100,2),
+                "EV":round(ev_miss,3)
             })
 
 
@@ -77,6 +95,6 @@ result = pd.DataFrame(rows)
 
 result = result.sort_values("EV",ascending=False)
 
-st.title("V430 Pattern Matrix Engine")
+st.title("V440 Dual Edge Engine")
 
 st.dataframe(result,use_container_width=True)
