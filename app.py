@@ -1,195 +1,266 @@
 import streamlit as st
 import pandas as pd
 from collections import Counter
+import numpy as np
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-SCAN=200
-LOCK=200
+SCAN_ROUNDS = 200
+LOCK_ROUNDS = 200
 
-# ---------- group ----------
+# ---------- GROUP ----------
 def group(n):
-
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
+    if n <= 3: return 1
+    if n <= 6: return 2
+    if n <= 9: return 3
     return 4
 
 
-# ---------- load ----------
+# ---------- LOAD ----------
 @st.cache_data(ttl=5)
 def load():
-
-    df=pd.read_csv(DATA_URL)
-
+    df = pd.read_csv(DATA_URL)
     return df["number"].dropna().astype(int).tolist()
 
-
-numbers=load()
-groups=[group(n) for n in numbers]
-
-
-# ---------- predictor ----------
-def predict(g,window):
-
-    if len(g)<window:
-        return None
-
-    c=Counter(g[-window:])
-    return max(c,key=c.get)
+numbers = load()
+groups = [group(n) for n in numbers]
 
 
-# ---------- evaluate window ----------
-def evaluate_window(data,window):
+# ---------- PREDICT ----------
+def predict(g, window):
 
-    profit=0
-    peak=0
-    dd=0
-    trades=0
+    if len(g) < window:
+        return None, 0
 
-    for i in range(window,len(data)-1):
+    c = Counter(g[-window:])
+    pred = max(c, key=c.get)
 
-        pred=predict(data[:i],window)
-        actual=data[i]
+    confidence = c[pred] / window
 
-        if pred is None:
-            continue
+    return pred, confidence
 
-        trades+=1
 
-        if pred==actual:
-            profit+=2.5
+# ---------- WINDOW EVALUATION ----------
+def evaluate_window(data, window):
+
+    profit = 0
+    peak = 0
+    dd = 0
+
+    for i in range(window, len(data)-1):
+
+        pred,_ = predict(data[:i], window)
+
+        actual = data[i]
+
+        if pred == actual:
+            profit += 2.5
         else:
-            profit-=1
+            profit -= 1
 
-        peak=max(peak,profit)
-        dd=max(dd,peak-profit)
+        peak = max(peak, profit)
+        dd = max(dd, peak-profit)
 
-    score=profit-0.5*dd
+    score = profit - 0.5*dd
 
-    return profit,trades,dd,score
+    return profit, dd, score
 
 
-# ---------- find best window ----------
+# ---------- FIND BEST WINDOW ----------
 def find_best_window(data):
 
-    results=[]
+    results = []
 
     for w in range(8,18):
 
-        p,t,d,s=evaluate_window(data,w)
+        p, d, s = evaluate_window(data, w)
 
-        results.append((w,p,t,d,s))
+        results.append((w,p,d,s))
 
-    df=pd.DataFrame(results,
-        columns=["window","profit","trades","drawdown","score"])
+    df = pd.DataFrame(results, columns=["window","profit","drawdown","score"])
 
-    best=df.sort_values("score",ascending=False).iloc[0]
+    best = df.sort_values("score", ascending=False).iloc[0]
 
-    return int(best.window),df
-
-
-# ---------- backtest ----------
-profit=0
-peak=0
-dd=0
-
-trades=0
-wins=0
-
-history=[]
-
-hits=[]
-
-best_window,scan_table=find_best_window(groups[:SCAN])
-
-lock_counter=0
+    return int(best.window), df
 
 
-for i in range(SCAN,len(groups)-1):
+# ---------- MARKOV PROB ----------
+def markov_prob(hits):
 
-    if lock_counter>=LOCK:
+    count11 = 0
+    count111 = 0
 
-        best_window,_=find_best_window(groups[i-SCAN:i])
+    for i in range(2, len(hits)):
 
-        lock_counter=0
+        if hits[i-2] == 1 and hits[i-1] == 1:
 
+            count11 += 1
 
-    pred=predict(groups[:i],best_window)
-    actual=groups[i]
+            if hits[i] == 1:
+                count111 += 1
 
+    if count11 == 0:
+        return 0
 
-    allow_trade=False
-
-    if len(hits)>=2:
-
-        if hits[-1]==1 and hits[-2]==1:
-
-            allow_trade=True
+    return count111 / count11
 
 
-    hit=0
+# ---------- BACKTEST ----------
 
-    if allow_trade:
+hits = []
+history = []
 
-        trades+=1
+profit = 0
+peak = 0
+dd = 0
 
-        if pred==actual:
+trades = 0
+wins = 0
 
-            profit+=2.5
-            hit=1
-            wins+=1
+best_window, scan_table = find_best_window(groups[:SCAN_ROUNDS])
 
-        else:
+lock_counter = 0
 
-            profit-=1
+records = []
 
+for i in range(SCAN_ROUNDS, len(groups)-1):
+
+    if lock_counter >= LOCK_ROUNDS:
+
+        best_window,_ = find_best_window(groups[i-SCAN_ROUNDS:i])
+
+        lock_counter = 0
+
+
+    pred, conf = predict(groups[:i], best_window)
+
+    actual = groups[i]
+
+    hit = 1 if pred == actual else 0
 
     hits.append(hit)
 
-    peak=max(peak,profit)
-    dd=max(dd,peak-profit)
+    prob = markov_prob(hits)
+
+    signal = False
+
+    if len(hits) >= 2:
+
+        if hits[-1] == 1 and hits[-2] == 1:
+
+            if prob > 0.5 and conf > 0.30:
+
+                signal = True
+
+
+    if signal:
+
+        trades += 1
+
+        if pred == actual:
+
+            profit += 2.5
+            wins += 1
+
+        else:
+
+            profit -= 1
+
+
+    peak = max(peak, profit)
+
+    dd = max(dd, peak-profit)
 
     history.append(profit)
 
-    lock_counter+=1
+    records.append({
+        "round": i,
+        "actual": actual,
+        "prediction": pred,
+        "confidence": conf,
+        "hit": hit,
+        "profit": profit,
+        "signal": signal,
+        "window": best_window
+    })
+
+    lock_counter += 1
 
 
 wr = wins/trades if trades else 0
 
+hist_df = pd.DataFrame(records)
+
+
+# ---------- NEXT GROUP ----------
+next_pred, next_conf = predict(groups, best_window)
+
+prob = markov_prob(hits)
+
+signal = False
+
+if len(hits) >= 2:
+
+    if hits[-1] == 1 and hits[-2] == 1:
+
+        if prob > 0.5 and next_conf > 0.30:
+
+            signal = True
+
 
 # ---------- UI ----------
-st.title("⚡ V55 Regime Detection Engine")
+
+st.title("⚡ V60 Markov Momentum Engine")
+
+c1,c2,c3 = st.columns(3)
+
+c1.metric("Best Window", best_window)
+c2.metric("Trades", trades)
+c3.metric("Winrate", round(wr*100,2))
 
 
-c1,c2,c3=st.columns(3)
+c4,c5 = st.columns(2)
 
-c1.metric("Best Window",best_window)
-c2.metric("Trades",trades)
-c3.metric("Winrate",round(wr*100,2))
-
-
-c4,c5=st.columns(2)
-
-c4.metric("Profit",profit)
-c5.metric("Drawdown",dd)
+c4.metric("Profit", profit)
+c5.metric("Drawdown", dd)
 
 
-# ---------- next group ----------
-next_pred=predict(groups,best_window)
+# ---------- NEXT GROUP ----------
 
 st.subheader("Next Group")
 
-st.success(f"PREDICT GROUP {next_pred}")
+if signal:
+
+    st.success(f"TRADE → Group {next_pred} (conf {round(next_conf,2)})")
+
+else:
+
+    st.info("SKIP")
 
 
-# ---------- equity ----------
+# ---------- MARKOV ----------
+
+st.subheader("Markov Probability")
+
+st.write(f"P(hit_next | 1-1) = {round(prob,3)}")
+
+
+# ---------- EQUITY ----------
+
 st.subheader("Equity Curve")
 
 st.line_chart(history)
 
 
-# ---------- window scan ----------
+# ---------- WINDOW SCAN ----------
+
 st.subheader("Window Scan Result")
 
 st.dataframe(scan_table)
+
+
+# ---------- HISTORY ----------
+
+st.subheader("Trade History")
+
+st.dataframe(hist_df.tail(50))
