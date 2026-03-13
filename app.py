@@ -1,118 +1,213 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from collections import Counter, defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 st.set_page_config(layout="wide")
 
-# ---------- group ----------
+# -------- GROUP --------
 def group(n):
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
     return 4
 
-# ---------- load ----------
+# -------- LOAD DATA --------
 @st.cache_data(ttl=5)
 def load():
+
     df=pd.read_csv(DATA_URL)
     df.columns=[c.lower() for c in df.columns]
+
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
+
 groups=[group(n) for n in numbers]
 
-WINDOW=1200
+ROUNDS=len(groups)
+
+WINDOW=900
+
 seq=groups[-WINDOW:]
 
-# ---------- pattern scan ----------
-patterns=defaultdict(Counter)
+# -------- PATTERN FUNCTION --------
+def pattern_stats(data,L):
 
-for L in [3,4,5,6]:
+    patterns=defaultdict(Counter)
 
-    for i in range(len(seq)-L):
+    for i in range(len(data)-L):
 
-        key=tuple(seq[i:i+L])
-        nxt=seq[i+L]
+        key=tuple(data[i:i+L])
+        nxt=data[i+L]
 
-        patterns[(L,key)][nxt]+=1
+        patterns[key][nxt]+=1
 
-best_pattern=None
-best_strength=0
-best_pred=None
-best_prob=0
+    stats={}
 
-for (L,key),counts in patterns.items():
+    for key,count in patterns.items():
 
-    total=sum(counts.values())
+        total=sum(count.values())
 
-    if total<20:
-        continue
+        if total<20:
+            continue
 
-    pred=max(counts,key=counts.get)
+        pred=max(count,key=count.get)
 
-    prob=counts[pred]/total
+        prob=count[pred]/total
 
-    strength=prob/0.25
+        strength=prob/0.25
 
-    if strength>best_strength:
+        stats[key]=(pred,prob,strength)
 
-        best_strength=strength
-        best_pattern=(L,key)
-        best_pred=pred
-        best_prob=prob
+    return stats
 
-# ---------- UI ----------
-st.title("🔎 V45 Deep Pattern Hunter")
+# -------- STABILITY TEST --------
 
-if best_pattern:
+seg=len(seq)//3
 
-    L,key=best_pattern
+seg1=seq[:seg]
+seg2=seq[seg:2*seg]
+seg3=seq[2*seg:]
 
-    c1,c2,c3=st.columns(3)
+best=None
+best_score=0
 
-    c1.metric("Pattern Length",L)
-    c2.metric("Prediction",best_pred)
-    c3.metric("Probability",round(best_prob,3))
+for L in [3,4,5]:
 
-    st.metric("Pattern Strength",round(best_strength,3))
+    s1=pattern_stats(seg1,L)
+    s2=pattern_stats(seg2,L)
+    s3=pattern_stats(seg3,L)
 
-    st.write("Pattern:",key)
+    keys=set(s1)&set(s2)&set(s3)
+
+    for k in keys:
+
+        p1=s1[k]
+        p2=s2[k]
+        p3=s3[k]
+
+        strength=min(p1[2],p2[2],p3[2])
+
+        prob=(p1[1]+p2[1]+p3[1])/3
+
+        if strength>best_score:
+
+            best_score=strength
+            best=(L,k,p1[0],prob,strength)
+
+# -------- PREDICT --------
+prediction=None
+confidence=0
+pattern=None
+strength=0
+
+if best:
+
+    L,k,pred,prob,stren=best
+
+    if tuple(groups[-L:])==k:
+
+        prediction=pred
+        confidence=prob
+        pattern=k
+        strength=stren
+
+# -------- BACKTEST --------
+
+profit=0
+peak=0
+dd=0
+history=[]
+
+for i in range(50,len(groups)-1):
+
+    pred=None
+    hit=False
+
+    if prediction:
+
+        pred=prediction
+
+        if groups[i]==pred:
+
+            profit+=2.5
+            hit=True
+
+        else:
+
+            profit-=1
+
+    peak=max(peak,profit)
+
+    dd=max(dd,peak-profit)
+
+    history.append({
+        "round":i,
+        "actual":groups[i],
+        "pred":pred,
+        "hit":hit,
+        "profit":profit
+    })
+
+hist=pd.DataFrame(history)
+
+trades=len(hist[hist.pred.notna()])
+
+wins=len(hist[hist.hit==True])
+
+wr=wins/trades if trades else 0
+
+entropy=-sum((groups.count(i)/len(groups))*np.log2(groups.count(i)/len(groups)) for i in [1,2,3,4])
+
+# -------- UI --------
+
+st.title("🤖 V46 Live Pattern Stability Engine")
+
+c1,c2,c3=st.columns(3)
+
+c1.metric("Rounds",ROUNDS)
+c2.metric("Trades",trades)
+c3.metric("Winrate",round(wr*100,2))
+
+c4,c5,c6=st.columns(3)
+
+c4.metric("Profit",profit)
+c5.metric("Drawdown",dd)
+c6.metric("Entropy",round(entropy,3))
+
+# -------- PATTERN --------
+
+st.subheader("Pattern Analysis")
+
+if pattern:
+
+    st.write("Pattern:",pattern)
+    st.write("Strength:",round(strength,3))
+    st.write("Probability:",round(confidence,3))
+
+# -------- NEXT GROUP --------
+
+st.subheader("Next Group")
+
+if prediction and strength>1.6 and confidence>0.40:
+
+    st.success(f"TRADE → Group {prediction}")
 
 else:
 
-    st.write("No strong pattern detected")
+    st.info("SKIP")
 
-# ---------- trade signal ----------
-if best_strength>=1.5:
+# -------- EQUITY --------
 
-    st.success(f"TRADE Group {best_pred}")
+st.subheader("Equity Curve")
 
-else:
+st.line_chart(hist.profit)
 
-    st.info("SKIP – Pattern not strong enough")
+# -------- HISTORY --------
 
-# ---------- pattern frequency ----------
-rows=[]
+st.subheader("Trade History")
 
-for (L,key),counts in patterns.items():
-
-    total=sum(counts.values())
-
-    if total<20:
-        continue
-
-    pred=max(counts,key=counts.get)
-
-    prob=counts[pred]/total
-
-    strength=prob/0.25
-
-    rows.append([L,str(key),pred,prob,strength])
-
-df=pd.DataFrame(rows,columns=["Length","Pattern","Prediction","Prob","Strength"])
-
-st.subheader("Top Patterns")
-
-st.dataframe(df.sort_values("Strength",ascending=False).head(20))
+st.dataframe(hist.tail(100))
