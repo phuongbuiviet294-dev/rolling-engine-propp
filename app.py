@@ -4,20 +4,19 @@ from collections import Counter
 
 # ================= CONFIG =================
 
-GOOGLE_SHEET_CSV="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 AUTO_REFRESH=5
 
-WIN_PROFIT=2.5
-LOSE_LOSS=1
+WIN=2.5
+LOSS=1
 
 WINDOW_POOL=range(8,18)
-
 TOP_WINDOWS=3
 
-LOOKBACK=26
+LOOKBACK=30
 
-SIGNAL_THRESHOLD=0.28
+CONF_THRESHOLD=0.34
 
 LOCK_ROUND=3662
 
@@ -25,31 +24,29 @@ st.set_page_config(layout="wide")
 
 # ================= GROUP =================
 
-def get_group(n):
+def group(n):
 
-    if 1<=n<=3: return 1
-    if 4<=n<=6: return 2
-    if 7<=n<=9: return 3
-    if 10<=n<=12: return 4
-
+    if 1<=n<=3:return 1
+    if 4<=n<=6:return 2
+    if 7<=n<=9:return 3
+    if 10<=n<=12:return 4
 
 # ================= LOAD =================
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
 
-    df=pd.read_csv(GOOGLE_SHEET_CSV)
+    df=pd.read_csv(DATA_URL)
 
     df.columns=[c.strip().lower() for c in df.columns]
 
-    numbers=df["number"].dropna().astype(int).tolist()
+    nums=df["number"].dropna().astype(int)
 
-    return numbers
-
+    return nums.tolist()
 
 numbers=load()
 
-groups=[get_group(n) for n in numbers]
+groups=[group(n) for n in numbers]
 
 st.write("Total rounds:",len(groups))
 
@@ -58,6 +55,8 @@ st.write("Total rounds:",len(groups))
 def window_score(data,w):
 
     profit=0
+    peak=0
+    dd=0
 
     for i in range(w,len(data)-1):
 
@@ -67,14 +66,17 @@ def window_score(data,w):
 
         if pred==data[i]:
 
-            profit+=WIN_PROFIT
+            profit+=WIN
 
         else:
 
-            profit-=LOSE_LOSS
+            profit-=LOSS
 
-    return profit
+        peak=max(peak,profit)
 
+        dd=max(dd,peak-profit)
+
+    return profit-dd*0.6
 
 scores={w:window_score(groups[:LOCK_ROUND],w) for w in WINDOW_POOL}
 
@@ -104,6 +106,9 @@ equity=[]
 trades=0
 wins=0
 
+loss_streak=0
+pause=0
+
 trade_log=[]
 
 for i in range(LOCK_ROUND,len(groups)-1):
@@ -119,11 +124,12 @@ for i in range(LOCK_ROUND,len(groups)-1):
 
         preds[w]=pred
 
-        pattern=sum(hits[-30:])/30 if len(hits)>=30 else 0
+        pattern=sum(hits[-40:])/40 if len(hits)>=40 else 0
 
         momentum=sum(hits[-LOOKBACK:])/LOOKBACK if len(hits)>=LOOKBACK else 0
 
         markov=0
+
         if len(hits)>5:
 
             last=hits[-1]
@@ -150,20 +156,21 @@ for i in range(LOCK_ROUND,len(groups)-1):
 
             cluster+=0.25
 
-        strength=(
+        confidence=(
 
-            0.30*pattern+
-            0.25*momentum+
-            0.20*markov+
-            0.15*stability+
+            0.35*pattern+
+            0.25*markov+
+            0.20*momentum+
+            0.10*stability+
             0.10*cluster
 
         )
 
-        strengths[w]=strength
-
+        strengths[w]=confidence
 
     best_window=max(strengths,key=strengths.get)
+
+    confidence=strengths[best_window]
 
     pred=preds[best_window]
 
@@ -171,20 +178,53 @@ for i in range(LOCK_ROUND,len(groups)-1):
 
     hit=1 if pred==actual else 0
 
-    strength=strengths[best_window]
+    # ===== regime =====
 
-    if strength>=SIGNAL_THRESHOLD:
+    momentum=sum(hits[-LOOKBACK:])/LOOKBACK if len(hits)>=LOOKBACK else 0
+
+    regime="random"
+
+    if momentum>=0.52:
+
+        regime="trend"
+
+    elif momentum>=0.40:
+
+        regime="neutral"
+
+    # ===== trade decision =====
+
+    trade=False
+
+    if pause>0:
+
+        pause-=1
+
+    else:
+
+        if confidence>=CONF_THRESHOLD and regime!="random":
+
+            trade=True
+
+    if trade:
 
         trades+=1
 
         if hit:
 
             wins+=1
-            profit+=WIN_PROFIT
+            profit+=WIN
+            loss_streak=0
 
         else:
 
-            profit-=LOSE_LOSS
+            profit-=LOSS
+            loss_streak+=1
+
+    if loss_streak>=3:
+
+        pause=5
+        loss_streak=0
 
     hits.append(hit)
 
@@ -197,23 +237,20 @@ for i in range(LOCK_ROUND,len(groups)-1):
         "pred":pred,
         "actual":actual,
         "hit":hit,
-        "strength":round(strength,3),
+        "confidence":round(confidence,3),
         "profit":profit
 
     })
-
 
 wr=wins/trades if trades else 0
 
 # ================= NEXT SIGNAL =================
 
-next_strength=max(strengths.values())
-
 next_pred=preds[best_window]
 
 # ================= UI =================
 
-st.title("⚡ V78 Adaptive AI Engine")
+st.title("⚡ V79 Quant Regime Engine")
 
 c1,c2,c3=st.columns(3)
 
@@ -225,7 +262,7 @@ st.metric("Live Profit",round(profit,2))
 
 st.subheader("Next Signal")
 
-if next_strength>=SIGNAL_THRESHOLD:
+if confidence>=CONF_THRESHOLD:
 
     st.success(f"TRADE → Group {next_pred}")
 
