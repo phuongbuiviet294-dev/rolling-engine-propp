@@ -1,59 +1,65 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import Counter
-from math import log2
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 df = pd.read_csv(DATA_URL)
-numbers = df["number"].dropna().astype(int).tolist()
 
-st.title("🔎 V1300 Regime Detector")
+numbers = df["number"].dropna().astype(int)
 
-block = 200
+st.title("V1400 Momentum Detector")
 
-entropy_list = []
-kl_list = []
-maxprob_list = []
-start_round = []
+# group mapping
+groups = numbers % 4
 
-for i in range(0, len(numbers)-block, block):
+groups = groups.tolist()
 
-    segment = numbers[i:i+block]
+n = len(groups)
 
-    counts = Counter(segment)
+repeat = 0
 
-    probs = [counts.get(n,0)/block for n in range(1,11)]
+for i in range(n-1):
+    if groups[i] == groups[i+1]:
+        repeat += 1
 
-    # entropy
-    entropy = -sum(p*log2(p) for p in probs if p>0)
+repeat_prob = repeat/(n-1)
 
-    # KL divergence
-    uniform = 1/10
-    kl = sum(p*log2(p/uniform) for p in probs if p>0)
+st.subheader("Repeat probability")
 
-    entropy_list.append(entropy)
-    kl_list.append(kl)
-    maxprob_list.append(max(probs))
-    start_round.append(i)
+st.write(repeat_prob)
 
-res = pd.DataFrame({
-    "start_round":start_round,
-    "entropy":entropy_list,
-    "kl":kl_list,
-    "max_prob":maxprob_list
-})
+# conditional matrix
 
-st.subheader("Block statistics")
+matrix = np.zeros((4,4))
 
-st.dataframe(res)
+for i in range(n-1):
+    g = groups[i]
+    g2 = groups[i+1]
+    matrix[g][g2]+=1
 
-st.subheader("Entropy over time")
-st.line_chart(res.set_index("start_round")["entropy"])
+matrix = matrix / matrix.sum(axis=1, keepdims=True)
 
-st.subheader("KL divergence over time")
-st.line_chart(res.set_index("start_round")["kl"])
+st.subheader("Transition matrix")
 
-st.subheader("Max number probability")
-st.line_chart(res.set_index("start_round")["max_prob"])
+st.dataframe(pd.DataFrame(matrix))
+
+# streak test
+
+streak2 = 0
+streak3 = 0
+
+for i in range(n-2):
+    if groups[i]==groups[i+1]:
+        streak2+=1
+        if groups[i]==groups[i+2]:
+            streak3+=1
+
+if streak2>0:
+    p3 = streak3/streak2
+else:
+    p3 = 0
+
+st.subheader("P(streak3 | streak2)")
+
+st.write(p3)
