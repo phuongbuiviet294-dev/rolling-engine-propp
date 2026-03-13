@@ -7,18 +7,18 @@ from collections import Counter, defaultdict
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 WINDOW_RANGE=range(8,18)
-LOOKBACK=26
+
 TRAIN_TARGET=2000
+LOOKBACK=26
 
 WIN=2.5
 LOSS=1
 
-SIGNAL_THRESHOLD=0.45
+SIGNAL_THRESHOLD=0.47
 
 st.set_page_config(layout="wide")
 
-
-# ---------- group mapping ----------
+# ---------- group ----------
 
 def group(n):
 
@@ -44,7 +44,7 @@ def predict(data,window):
     return max(c,key=c.get)
 
 
-# ---------- load data ----------
+# ---------- load ----------
 
 @st.cache_data(ttl=5)
 def load():
@@ -63,7 +63,6 @@ numbers=load()
 groups=[group(n) for n in numbers]
 
 TRAIN_SIZE=min(TRAIN_TARGET,len(groups)//2)
-
 
 # ---------- window scan ----------
 
@@ -104,7 +103,6 @@ def scan_windows(data):
 
 best_window=scan_windows(groups[:TRAIN_SIZE])
 
-
 hits=[]
 equity=[]
 profit=0
@@ -116,13 +114,13 @@ pattern_prob=0
 markov_prob=0
 momentum=0
 stability=0
+cluster_score=0
 strength=0
 
 trade_history=[]
 
 
 for i in range(TRAIN_SIZE,len(groups)-1):
-
 
     pred=predict(groups[:i],best_window)
 
@@ -132,13 +130,12 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
     hits.append(hit)
 
-
     # ---------- pattern ----------
 
-    if len(hits)>40:
+    if len(hits)>50:
 
         counts=defaultdict(int)
-        succ=defaultdict(int)
+        wins_p=defaultdict(int)
 
         for j in range(len(hits)-3):
 
@@ -149,18 +146,17 @@ for i in range(TRAIN_SIZE,len(groups)-1):
             counts[pat]+=1
 
             if nxt==1:
-                succ[pat]+=1
+                wins_p[pat]+=1
 
         best=0
 
         for pat in counts:
 
-            prob=succ[pat]/counts[pat]
+            prob=wins_p[pat]/counts[pat]
 
             best=max(best,prob)
 
         pattern_prob=best
-
 
     # ---------- markov ----------
 
@@ -183,7 +179,6 @@ for i in range(TRAIN_SIZE,len(groups)-1):
         if total>0:
             markov_prob=s/total
 
-
     # ---------- momentum ----------
 
     if len(hits)>=LOOKBACK:
@@ -192,47 +187,45 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
         stability=momentum
 
-
     # ---------- regime ----------
 
     regime="break"
 
-    if stability>=0.42:
+    if momentum>=0.48:
         regime="trend"
 
-    elif stability>=0.30:
+    elif momentum>=0.33:
         regime="random"
 
+    # ---------- signal cluster ----------
 
-    # ---------- signal ----------
-
-    signal=False
+    cluster_score=0
 
     if len(hits)>=2 and hits[-2:]==[1,1]:
-        signal=True
+        cluster_score+=0.3
 
     if len(hits)>=3 and hits[-3:]==[1,0,1]:
-        signal=True
+        cluster_score+=0.25
 
     if len(hits)>=5 and hits[-5:].count(1)>=3:
-        signal=True
+        cluster_score+=0.25
 
-    if momentum>0.38:
-        signal=True
+    if momentum>0.4:
+        cluster_score+=0.2
 
+    # ---------- strength ----------
 
     strength=(
-        0.30*pattern_prob+
-        0.25*markov_prob+
+        0.28*pattern_prob+
+        0.22*markov_prob+
         0.25*momentum+
-        0.20*stability
+        0.15*stability+
+        0.10*cluster_score
     )
-
 
     trade=False
 
-
-    if signal and strength>=SIGNAL_THRESHOLD and regime!="break":
+    if strength>=SIGNAL_THRESHOLD and regime!="break":
 
         trade=True
 
@@ -247,16 +240,7 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
             profit-=LOSS
 
-
-    # ---------- window relearn ----------
-
-    if regime=="break":
-
-        best_window=scan_windows(groups[i-400:i])
-
-
     equity.append(profit)
-
 
     trade_history.append({
 
@@ -266,7 +250,6 @@ for i in range(TRAIN_SIZE,len(groups)-1):
         "hit":hit,
         "regime":regime,
         "strength":round(strength,3),
-        "trade":trade,
         "profit":profit
 
     })
@@ -276,10 +259,9 @@ wr=wins/trades if trades else 0
 
 next_pred=predict(groups,best_window)
 
-
 # ---------- UI ----------
 
-st.title("⚡ V74 Self-Learning Window Engine")
+st.title("⚡ V75 AI Regime Engine")
 
 col1,col2,col3=st.columns(3)
 
@@ -289,15 +271,14 @@ col3.metric("Winrate %",round(wr*100,2))
 
 st.metric("Live Profit",round(profit,2))
 
-
 st.subheader("Edge Metrics")
 
 st.write("Pattern",round(pattern_prob,3))
 st.write("Markov",round(markov_prob,3))
 st.write("Momentum",round(momentum,3))
 st.write("Stability",round(stability,3))
+st.write("Cluster",round(cluster_score,3))
 st.write("Strength",round(strength,3))
-
 
 st.subheader("Next Signal")
 
@@ -309,11 +290,9 @@ else:
 
     st.info(f"WAIT → Group {next_pred}")
 
-
 st.subheader("Equity Curve")
 
 st.line_chart(pd.DataFrame({"equity":equity}))
-
 
 st.subheader("Recent Trades")
 
