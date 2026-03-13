@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from collections import Counter
+import math
 
 # ================= CONFIG =================
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
-
-AUTO_REFRESH=5
 
 WIN=2.5
 LOSS=1
@@ -15,23 +15,23 @@ WINDOW_POOL=range(8,18)
 TOP_WINDOWS=3
 
 LOOKBACK=30
-
-CONF_THRESHOLD=0.34
-
 LOCK_ROUND=3662
+
+AUTO_REFRESH=5
 
 st.set_page_config(layout="wide")
 
 # ================= GROUP =================
 
-def group(n):
+def get_group(n):
 
-    if 1<=n<=3:return 1
-    if 4<=n<=6:return 2
-    if 7<=n<=9:return 3
-    if 10<=n<=12:return 4
+    if 1<=n<=3: return 1
+    if 4<=n<=6: return 2
+    if 7<=n<=9: return 3
+    if 10<=n<=12: return 4
+    return None
 
-# ================= LOAD =================
+# ================= LOAD DATA =================
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def load():
@@ -46,11 +46,27 @@ def load():
 
 numbers=load()
 
-groups=[group(n) for n in numbers]
+groups=[get_group(n) for n in numbers if get_group(n) is not None]
 
 st.write("Total rounds:",len(groups))
 
-# ================= WINDOW TRAIN =================
+# ================= ENTROPY =================
+
+def entropy(seq):
+
+    c=Counter(seq)
+    total=len(seq)
+
+    e=0
+
+    for v in c.values():
+
+        p=v/total
+        e-=p*math.log(p)
+
+    return e
+
+# ================= WINDOW SCORE =================
 
 def window_score(data,w):
 
@@ -67,7 +83,6 @@ def window_score(data,w):
         if pred==data[i]:
 
             profit+=WIN
-
         else:
 
             profit-=LOSS
@@ -76,45 +91,33 @@ def window_score(data,w):
 
         dd=max(dd,peak-profit)
 
-    return profit-dd*0.6
+    return profit-dd
+
+# ================= TRAIN WINDOWS =================
 
 scores={w:window_score(groups[:LOCK_ROUND],w) for w in WINDOW_POOL}
 
 top_windows=sorted(scores,key=scores.get,reverse=True)[:TOP_WINDOWS]
 
-# ================= TRAIN HISTORY =================
-
-hits=[]
-
-for i in range(max(top_windows),LOCK_ROUND):
-
-    w=top_windows[0]
-
-    seq=groups[i-w:i]
-
-    pred=Counter(seq).most_common(1)[0][0]
-
-    hit=1 if pred==groups[i] else 0
-
-    hits.append(hit)
-
-# ================= LIVE ENGINE =================
+# ================= ENGINE =================
 
 profit=0
 equity=[]
 
+hits=[]
+confidence_hist=[]
+
 trades=0
 wins=0
 
-loss_streak=0
-pause=0
-
 trade_log=[]
+
+# ================= MAIN LOOP =================
 
 for i in range(LOCK_ROUND,len(groups)-1):
 
-    strengths={}
     preds={}
+    strengths={}
 
     for w in top_windows:
 
@@ -142,69 +145,66 @@ for i in range(LOCK_ROUND,len(groups)-1):
 
         stability=momentum
 
-        cluster=0
-
-        if hits[-2:]==[1,1]:
-
-            cluster+=0.3
-
-        if hits[-3:]==[1,0,1]:
-
-            cluster+=0.25
-
-        if hits[-5:].count(1)>=3:
-
-            cluster+=0.25
-
-        confidence=(
+        strength=(
 
             0.35*pattern+
             0.25*markov+
-            0.20*momentum+
-            0.10*stability+
-            0.10*cluster
+            0.25*momentum+
+            0.15*stability
 
         )
 
-        strengths[w]=confidence
+        strengths[w]=strength
 
-    best_window=max(strengths,key=strengths.get)
+    # ================= ENSEMBLE =================
 
-    confidence=strengths[best_window]
+    vote={}
 
-    pred=preds[best_window]
+    for w in strengths:
+
+        g=preds[w]
+
+        vote[g]=vote.get(g,0)+strengths[w]
+
+    pred=max(vote,key=vote.get)
+
+    confidence=max(vote.values())
+
+    confidence_hist.append(confidence)
+
+    # ================= DYNAMIC THRESHOLD =================
+
+    if len(confidence_hist)>200:
+
+        base=np.median(confidence_hist[-200:])
+
+    else:
+
+        base=0.30
+
+    threshold=base+0.02
+
+    # ================= REGIME =================
+
+    momentum=sum(hits[-LOOKBACK:])/LOOKBACK if len(hits)>=LOOKBACK else 0
+
+    ent=entropy(groups[i-30:i]) if i>30 else 0
+
+    # ================= TRADE DECISION =================
+
+    trade=False
+
+    if confidence>=threshold:
+
+        if momentum>0.40:
+
+            if ent<1.36:
+
+                trade=True
 
     actual=groups[i]
 
     hit=1 if pred==actual else 0
-
-    # ===== regime =====
-
-    momentum=sum(hits[-LOOKBACK:])/LOOKBACK if len(hits)>=LOOKBACK else 0
-
-    regime="random"
-
-    if momentum>=0.52:
-
-        regime="trend"
-
-    elif momentum>=0.40:
-
-        regime="neutral"
-
-    # ===== trade decision =====
-
-    trade=False
-
-    if pause>0:
-
-        pause-=1
-
-    else:
-
-        if confidence>=CONF_THRESHOLD and regime!="random":
-
-            trade=True
 
     if trade:
 
@@ -212,19 +212,12 @@ for i in range(LOCK_ROUND,len(groups)-1):
 
         if hit:
 
-            wins+=1
             profit+=WIN
-            loss_streak=0
+            wins+=1
 
         else:
 
             profit-=LOSS
-            loss_streak+=1
-
-    if loss_streak>=3:
-
-        pause=5
-        loss_streak=0
 
     hits.append(hit)
 
@@ -233,7 +226,6 @@ for i in range(LOCK_ROUND,len(groups)-1):
     trade_log.append({
 
         "round":i,
-        "window":best_window,
         "pred":pred,
         "actual":actual,
         "hit":hit,
@@ -242,19 +234,44 @@ for i in range(LOCK_ROUND,len(groups)-1):
 
     })
 
+# ================= METRICS =================
+
 wr=wins/trades if trades else 0
 
 # ================= NEXT SIGNAL =================
 
-next_pred=preds[best_window]
+last_strengths={}
+last_preds={}
+
+i=len(groups)-1
+
+for w in top_windows:
+
+    seq=groups[i-w:i]
+
+    p=Counter(seq).most_common(1)[0][0]
+
+    last_preds[w]=p
+
+    last_strengths[w]=1
+
+vote={}
+
+for w in last_preds:
+
+    g=last_preds[w]
+
+    vote[g]=vote.get(g,0)+1
+
+next_pred=max(vote,key=vote.get)
 
 # ================= UI =================
 
-st.title("⚡ V79 Quant Regime Engine")
+st.title("⚡ V80 Adaptive Quant Engine")
 
 c1,c2,c3=st.columns(3)
 
-c1.metric("Active Window",best_window)
+c1.metric("Active Windows",top_windows)
 c2.metric("Trades",trades)
 c3.metric("Winrate %",round(wr*100,2))
 
@@ -262,7 +279,7 @@ st.metric("Live Profit",round(profit,2))
 
 st.subheader("Next Signal")
 
-if confidence>=CONF_THRESHOLD:
+if confidence>=threshold:
 
     st.success(f"TRADE → Group {next_pred}")
 
