@@ -4,7 +4,6 @@ import numpy as np
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE = 2000
 WINDOW = 16
 
 def get_group(n):
@@ -19,15 +18,18 @@ def get_group(n):
 
 
 df = pd.read_csv(DATA_URL)
+
 numbers = df["number"].dropna().astype(int).tolist()
+
 groups = [get_group(n) for n in numbers]
 
-st.title("🚀 V600 Hit-Streak Engine")
+
+st.title("📊 V610 Streak Probability Engine")
 
 
-# =====================
-# SIMPLE WINDOW MODEL
-# =====================
+# ====================
+# MODEL PREDICTION
+# ====================
 
 predictions = []
 
@@ -38,77 +40,67 @@ for i in range(WINDOW, len(groups)):
 real = groups[WINDOW:]
 
 
-# =====================
-# HIT / MISS SERIES
-# =====================
+# ====================
+# HIT SERIES
+# ====================
 
 hits = []
 
-for p,r in zip(predictions, real):
+for p, r in zip(predictions, real):
     if p == r:
         hits.append(1)
     else:
         hits.append(0)
 
 
-# =====================
-# STREAK ANALYSIS
-# =====================
+# ====================
+# STREAK PROBABILITY
+# ====================
 
-streaks=[]
-current=0
+max_streak = 10
 
-for h in hits:
+rows = []
 
-    if h==1:
-        current+=1
-    else:
-        if current>0:
-            streaks.append(current)
-        current=0
+for k in range(1, max_streak+1):
 
-if current>0:
-    streaks.append(current)
+    next_hit = 0
+    next_miss = 0
 
+    for i in range(len(hits)-k):
 
-st.subheader("Hit Streak Distribution")
+        if hits[i:i+k] == [1]*k:
 
-dist=pd.Series(streaks).value_counts().sort_index()
+            nxt = hits[i+k]
 
-st.dataframe(dist)
+            if nxt == 1:
+                next_hit += 1
+            else:
+                next_miss += 1
 
+    total = next_hit + next_miss
 
-# =====================
-# TRADING SIMULATION
-# =====================
+    if total == 0:
+        continue
 
-profit=0
-equity=[]
+    prob = next_hit / total
 
-in_trade=False
-
-for h in hits:
-
-    if not in_trade:
-
-        if h==1:
-            in_trade=True
-            profit+=1
-
-    else:
-
-        if h==1:
-            profit+=1
-
-        else:
-            profit-=1
-            in_trade=False
-
-    equity.append(profit)
+    rows.append({
+        "streak": k,
+        "next_hit": next_hit,
+        "next_miss": next_miss,
+        "probability": round(prob,3)
+    })
 
 
-st.subheader("Trading Result")
+result = pd.DataFrame(rows)
 
-st.metric("Total Profit", profit)
+st.subheader("P(next_hit | streak=k)")
 
-st.line_chart(equity)
+st.dataframe(result)
+
+
+# ====================
+# PLOT
+# ====================
+
+st.line_chart(result.set_index("streak")["probability"])
