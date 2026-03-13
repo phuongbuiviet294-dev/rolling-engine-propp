@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from collections import Counter
+from collections import Counter,defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -28,170 +28,180 @@ groups=[group(n) for n in numbers]
 
 ROUNDS=len(groups)
 
-# ---------- predict ----------
-def predict(g,window):
+# ---------- window predictor ----------
+def window_pred(g,window):
 
     if len(g)<window:
         return None
 
-    w=g[-window:]
-
-    c=Counter(w)
+    c=Counter(g[-window:])
 
     return max(c,key=c.get)
 
-# ---------- streak probability ----------
-def streak_prob(hits):
+# ---------- markov predictor ----------
+def markov_pred(g):
 
-    total=0
-    win=0
-
-    for i in range(len(hits)-2):
-
-        if hits[i]==1 and hits[i+1]==1:
-
-            total+=1
-
-            if hits[i+2]==1:
-                win+=1
-
-    if total<20:
+    if len(g)<2:
         return None
 
-    return win/total
+    trans=defaultdict(list)
 
-# ---------- momentum ----------
-def momentum(profit_history):
+    for i in range(len(g)-1):
 
-    if len(profit_history)<40:
-        return 0
+        trans[g[i]].append(g[i+1])
 
-    p20=profit_history[-20]
-    p40=profit_history[-40]
+    last=g[-1]
 
-    return 1 if p20>p40 else 0
+    if last not in trans:
+        return None
+
+    c=Counter(trans[last])
+
+    return max(c,key=c.get)
+
+# ---------- pattern predictor ----------
+def pattern_pred(g):
+
+    if len(g)<4:
+        return None
+
+    pattern=tuple(g[-3:])
+
+    matches=[]
+
+    for i in range(len(g)-3):
+
+        if tuple(g[i:i+3])==pattern:
+
+            matches.append(g[i+3])
+
+    if not matches:
+        return None
+
+    c=Counter(matches)
+
+    return max(c,key=c.get)
+
+# ---------- frequency predictor ----------
+def freq_pred(g):
+
+    if len(g)<50:
+        return None
+
+    c=Counter(g[-50:])
+
+    return max(c,key=c.get)
+
+# ---------- voting ----------
+def vote(preds):
+
+    preds=[p for p in preds if p]
+
+    if len(preds)==0:
+        return None,0
+
+    c=Counter(preds)
+
+    group=c.most_common(1)[0][0]
+
+    votes=c.most_common(1)[0][1]
+
+    return group,votes
 
 # ---------- backtest ----------
-results=[]
+profit=0
+peak=0
+dd=0
 
-for window in range(8,18):
+trades=0
+wins=0
 
-    profit=0
-    peak=0
-    dd=0
+history=[]
 
-    trades=0
-    wins=0
+for i in range(60,ROUNDS-1):
 
-    hits=[]
-    profit_hist=[]
+    g=groups[:i]
 
-    history=[]
+    p1=window_pred(g,12)
+    p2=markov_pred(g)
+    p3=pattern_pred(g)
+    p4=freq_pred(g)
 
-    for i in range(window,ROUNDS-1):
+    preds=[p1,p2,p3,p4]
 
-        prob=streak_prob(hits)
+    pred,votes=vote(preds)
 
-        mom=momentum(profit_hist)
+    trade=False
 
-        trade=False
+    if votes>=3:
 
-        confidence=0
+        trade=True
 
-        if len(hits)>=2 and hits[-2:]==[1,1] and prob:
+    actual=groups[i]
 
-            confidence=0.4*prob + 0.3*mom + 0.3*0.25
+    hit=1 if pred==actual else 0
 
-            if confidence>0.4:
+    if trade:
 
-                trade=True
+        trades+=1
 
-        pred=predict(groups[:i],window)
+        if hit:
 
-        if pred is None:
-            continue
+            profit+=2.5
+            wins+=1
 
-        actual=groups[i]
+        else:
 
-        hit=1 if pred==actual else 0
+            profit-=1
 
-        if trade:
+    peak=max(peak,profit)
 
-            trades+=1
+    dd=max(dd,peak-profit)
 
-            if hit:
+    history.append({
 
-                profit+=2.5
-                wins+=1
-
-            else:
-
-                profit-=1
-
-        hits.append(hit)
-
-        profit_hist.append(profit)
-
-        peak=max(peak,profit)
-
-        dd=max(dd,peak-profit)
-
-        history.append({
-
-            "round":i,
-            "pred":pred,
-            "actual":actual,
-            "hit":hit,
-            "trade":trade,
-            "profit":profit,
-            "confidence":confidence
-        })
-
-    wr=wins/trades if trades else 0
-
-    results.append({
-
-        "window":window,
-        "profit":profit,
-        "trades":trades,
-        "winrate":wr,
-        "drawdown":dd,
-        "history":history
+        "round":i,
+        "pred":pred,
+        "actual":actual,
+        "votes":votes,
+        "hit":hit,
+        "trade":trade,
+        "profit":profit
     })
 
-perf=pd.DataFrame(results).drop(columns=["history"])
+wr=wins/trades if trades else 0
 
-best=perf.sort_values("profit",ascending=False).iloc[0]
-
-best_window=int(best.window)
-
-hist=[r["history"] for r in results if r["window"]==best_window][0]
-
-hist_df=pd.DataFrame(hist)
+hist_df=pd.DataFrame(history)
 
 # ---------- live ----------
-live_pred=predict(groups,best_window)
+live_preds=[
+window_pred(groups,12),
+markov_pred(groups),
+pattern_pred(groups),
+freq_pred(groups)
+]
+
+live_pred,votes=vote(live_preds)
 
 # ---------- UI ----------
-st.title("⚡ V51 Momentum Adaptive Engine")
+st.title("🤖 V52 Hybrid AI Engine")
 
 c1,c2,c3=st.columns(3)
 
 c1.metric("Rounds",ROUNDS)
-c2.metric("Best Window",best_window)
-c3.metric("Trades",int(best.trades))
+c2.metric("Trades",trades)
+c3.metric("Winrate",round(wr*100,2))
 
-c4,c5,c6=st.columns(3)
+c4,c5=st.columns(2)
 
-c4.metric("Winrate",round(best.winrate*100,2))
-c5.metric("Profit",round(best.profit,2))
-c6.metric("Drawdown",round(best.drawdown,2))
+c4.metric("Profit",profit)
+c5.metric("Drawdown",dd)
 
 st.subheader("Next Group")
 
-if live_pred:
+if live_pred and votes>=3:
 
-    st.success(f"PREDICT → Group {live_pred}")
+    st.success(f"TRADE → Group {live_pred} (votes {votes})")
 
 else:
 
@@ -200,10 +210,6 @@ else:
 st.subheader("Equity Curve")
 
 st.line_chart(hist_df["profit"])
-
-st.subheader("Window Performance")
-
-st.dataframe(perf)
 
 st.subheader("Trade History")
 
