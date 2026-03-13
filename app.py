@@ -1,18 +1,15 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 WIN=2.5
 LOSS=1
 
-BACKTEST_SIZE=2000
+BACKTEST_SPLIT=2000
 
-st.set_page_config(layout="wide")
 
 # ---------- GROUP ----------
-
 def group(n):
 
     if n<=3:return 1
@@ -22,8 +19,7 @@ def group(n):
 
 
 # ---------- LOAD ----------
-
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=10)
 def load():
 
     df=pd.read_csv(DATA_URL)
@@ -35,21 +31,19 @@ def load():
 numbers=load()
 groups=[group(n) for n in numbers]
 
+
 # ---------- ENGINE ----------
 
 hits=[]
 profit=0
-history=[]
 equity=[]
+history=[]
+trades=0
+wins=0
 
-for i in range(9,len(groups)-1):
+for i in range(9,len(groups)):
 
-    pred=groups[i-9]
-    actual=groups[i]
-
-    hit=1 if pred==actual else 0
-    hits.append(hit)
-
+    # 1 detect signal from past hits
     signal=False
 
     if len(hits)>=2 and hits[-2:]==[1,1]:
@@ -58,37 +52,56 @@ for i in range(9,len(groups)-1):
     if len(hits)>=3 and hits[-3:]==[0,1,1]:
         signal=True
 
-    state="SCAN"
 
+    # 2 prediction
+    pred=groups[i-9]
+
+    # 3 actual result
+    actual=groups[i]
+
+    hit=1 if pred==actual else 0
+
+
+    # 4 trade only if signal
     if signal:
+
+        trades+=1
 
         if hit:
             profit+=WIN
+            wins+=1
         else:
             profit-=LOSS
 
-        state="TRADE"
+
+    hits.append(hit)
 
     equity.append(profit)
 
     history.append({
         "round":i,
         "number":numbers[i],
-        "group":groups[i],
+        "predicted":pred,
+        "actual":actual,
         "hit":hit,
-        "state":state,
+        "trade":signal,
         "profit":profit
     })
 
+
 df_hist=pd.DataFrame(history)
 
-# ---------- BACKTEST / LIVE ----------
 
-backtest=df_hist[df_hist["round"]<=BACKTEST_SIZE]
-live=df_hist[df_hist["round"]>BACKTEST_SIZE]
+# ---------- METRICS ----------
+
+winrate=(wins/trades*100) if trades>0 else 0
+
+backtest=df_hist[df_hist["round"]<=BACKTEST_SPLIT]
+live=df_hist[df_hist["round"]>BACKTEST_SPLIT]
 
 profit_backtest=backtest["profit"].iloc[-1] if len(backtest)>0 else 0
 profit_live=live["profit"].iloc[-1]-profit_backtest if len(live)>0 else 0
+
 
 # ---------- NEXT SIGNAL ----------
 
@@ -102,32 +115,37 @@ if len(hits)>=3 and hits[-3:]==[0,1,1]:
 
 next_group=groups[-9]
 
-# ---------- DASHBOARD ----------
 
-st.title("Pattern Engine Backtest + Live")
+# ---------- UI ----------
 
-c1,c2,c3=st.columns(3)
+st.title("Pattern Engine Walk-Forward")
+
+c1,c2,c3,c4=st.columns(4)
 
 c1.metric("Backtest Profit",round(profit_backtest,2))
 c2.metric("Live Profit",round(profit_live,2))
 c3.metric("Total Profit",round(profit,2))
+c4.metric("Winrate %",round(winrate,2))
 
-# ---------- SIGNAL ----------
 
 st.subheader("Next Signal")
 
 if next_signal:
-    st.success(f"BET GROUP → {next_group}")
+    st.success(f"BET GROUP {next_group}")
 else:
     st.info("WAIT")
 
-# ---------- EQUITY ----------
 
 st.subheader("Equity Curve")
 
-st.line_chart(df_hist["profit"])
+st.line_chart(equity)
 
-# ---------- HISTORY ----------
+
+st.subheader("Trade Stats")
+
+st.write("Trades:",trades)
+st.write("Wins:",wins)
+
 
 st.subheader("History")
 
