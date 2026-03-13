@@ -6,19 +6,18 @@ from collections import Counter, defaultdict
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOW_RANGE=range(8,18)
-
-TRAIN_TARGET=2000
-LOOKBACK=26
+TRAIN_ROUNDS=2000
+WINDOW_RANGE=range(8,19)
 
 WIN=2.5
 LOSS=1
 
-SIGNAL_THRESHOLD=0.47
+SIGNAL_THRESHOLD=0.45
+LOOKBACK=26
 
 st.set_page_config(layout="wide")
 
-# ---------- group ----------
+# -------- group --------
 
 def group(n):
 
@@ -28,23 +27,21 @@ def group(n):
     return 4
 
 
-# ---------- safe predict ----------
+# -------- predict --------
 
-def predict(data,window):
+def predict(data,w):
 
-    if not data:
-        return 1
+    if len(data)<w:
+        return None
 
-    window=min(window,len(data))
-
-    seq=data[-window:]
+    seq=data[-w:]
 
     c=Counter(seq)
 
     return max(c,key=c.get)
 
 
-# ---------- load ----------
+# -------- load --------
 
 @st.cache_data(ttl=5)
 def load():
@@ -53,7 +50,7 @@ def load():
 
     df=pd.read_csv(io.StringIO(r.text))
 
-    nums=df.iloc[:,0].dropna().astype(int)
+    nums=df["Number"].dropna().astype(int)
 
     return nums.tolist()
 
@@ -62,14 +59,13 @@ numbers=load()
 
 groups=[group(n) for n in numbers]
 
-TRAIN_SIZE=min(TRAIN_TARGET,len(groups)//2)
+st.write("Total rounds:",len(groups))
 
-# ---------- window scan ----------
+# -------- window training --------
 
-def scan_windows(data):
+def train_windows(data):
 
-    best=None
-    best_score=-9999
+    scores={}
 
     for w in WINDOW_RANGE:
 
@@ -93,36 +89,121 @@ def scan_windows(data):
 
         score=profit-dd*0.5
 
-        if score>best_score:
+        scores[w]=score
 
-            best_score=score
-            best=w
+    best=sorted(scores,key=scores.get,reverse=True)[:5]
 
     return best
 
 
-best_window=scan_windows(groups[:TRAIN_SIZE])
+best_windows=train_windows(groups[:TRAIN_ROUNDS])
+
+# -------- live simulation --------
+
+profit=0
+equity=[]
 
 hits=[]
-equity=[]
-profit=0
-
 trades=0
 wins=0
 
-pattern_prob=0
-markov_prob=0
-momentum=0
-stability=0
-cluster_score=0
-strength=0
-
 trade_history=[]
 
+for i in range(TRAIN_ROUNDS,len(groups)-1):
 
-for i in range(TRAIN_SIZE,len(groups)-1):
+    strengths={}
+    preds={}
 
-    pred=predict(groups[:i],best_window)
+    for w in best_windows:
+
+        pred=predict(groups[:i],w)
+
+        if pred is None:
+            continue
+
+        preds[w]=pred
+
+        # pattern
+        pattern=0
+        if len(hits)>50:
+
+            counts=defaultdict(int)
+            winp=defaultdict(int)
+
+            for j in range(len(hits)-3):
+
+                p=tuple(hits[j:j+3])
+                nxt=hits[j+3]
+
+                counts[p]+=1
+
+                if nxt==1:
+                    winp[p]+=1
+
+            for p in counts:
+
+                prob=winp[p]/counts[p]
+
+                pattern=max(pattern,prob)
+
+        # markov
+        markov=0
+        if len(hits)>5:
+
+            last=hits[-1]
+
+            total=0
+            win=0
+
+            for j in range(len(hits)-1):
+
+                if hits[j]==last:
+
+                    total+=1
+
+                    if hits[j+1]==1:
+                        win+=1
+
+            if total>0:
+                markov=win/total
+
+        # momentum
+        momentum=0
+        if len(hits)>=LOOKBACK:
+
+            momentum=sum(hits[-LOOKBACK:])/LOOKBACK
+
+        stability=momentum
+
+        cluster=0
+
+        if len(hits)>=2 and hits[-2:]==[1,1]:
+            cluster+=0.3
+
+        if len(hits)>=3 and hits[-3:]==[1,0,1]:
+            cluster+=0.25
+
+        if len(hits)>=5 and hits[-5:].count(1)>=3:
+            cluster+=0.25
+
+        strength=(
+            0.30*pattern+
+            0.20*markov+
+            0.25*momentum+
+            0.15*stability+
+            0.10*cluster
+        )
+
+        strengths[w]=strength
+
+    if not strengths:
+        continue
+
+    best_window=max(strengths,key=strengths.get)
+
+    strength=strengths[best_window]
+
+    pred=preds[best_window]
 
     actual=groups[i]
 
@@ -130,108 +211,11 @@ for i in range(TRAIN_SIZE,len(groups)-1):
 
     hits.append(hit)
 
-    # ---------- pattern ----------
-
-    if len(hits)>50:
-
-        counts=defaultdict(int)
-        wins_p=defaultdict(int)
-
-        for j in range(len(hits)-3):
-
-            pat=tuple(hits[j:j+3])
-
-            nxt=hits[j+3]
-
-            counts[pat]+=1
-
-            if nxt==1:
-                wins_p[pat]+=1
-
-        best=0
-
-        for pat in counts:
-
-            prob=wins_p[pat]/counts[pat]
-
-            best=max(best,prob)
-
-        pattern_prob=best
-
-    # ---------- markov ----------
-
-    if len(hits)>10:
-
-        last=hits[-1]
-
-        total=0
-        s=0
-
-        for j in range(len(hits)-1):
-
-            if hits[j]==last:
-
-                total+=1
-
-                if hits[j+1]==1:
-                    s+=1
-
-        if total>0:
-            markov_prob=s/total
-
-    # ---------- momentum ----------
-
-    if len(hits)>=LOOKBACK:
-
-        momentum=sum(hits[-LOOKBACK:])/LOOKBACK
-
-        stability=momentum
-
-    # ---------- regime ----------
-
-    regime="break"
-
-    if momentum>=0.48:
-        regime="trend"
-
-    elif momentum>=0.33:
-        regime="random"
-
-    # ---------- signal cluster ----------
-
-    cluster_score=0
-
-    if len(hits)>=2 and hits[-2:]==[1,1]:
-        cluster_score+=0.3
-
-    if len(hits)>=3 and hits[-3:]==[1,0,1]:
-        cluster_score+=0.25
-
-    if len(hits)>=5 and hits[-5:].count(1)>=3:
-        cluster_score+=0.25
-
-    if momentum>0.4:
-        cluster_score+=0.2
-
-    # ---------- strength ----------
-
-    strength=(
-        0.28*pattern_prob+
-        0.22*markov_prob+
-        0.25*momentum+
-        0.15*stability+
-        0.10*cluster_score
-    )
-
-    trade=False
-
-    if strength>=SIGNAL_THRESHOLD and regime!="break":
-
-        trade=True
+    if strength>=SIGNAL_THRESHOLD:
 
         trades+=1
 
-        if hit==1:
+        if hit:
 
             wins+=1
             profit+=WIN
@@ -243,25 +227,40 @@ for i in range(TRAIN_SIZE,len(groups)-1):
     equity.append(profit)
 
     trade_history.append({
-
         "round":i,
+        "window":best_window,
         "pred":pred,
         "actual":actual,
         "hit":hit,
-        "regime":regime,
         "strength":round(strength,3),
         "profit":profit
-
     })
 
 
 wr=wins/trades if trades else 0
 
-next_pred=predict(groups,best_window)
+# -------- next prediction --------
 
-# ---------- UI ----------
+next_preds={}
+next_strength={}
 
-st.title("⚡ V75 AI Regime Engine")
+for w in best_windows:
+
+    pred=predict(groups,w)
+
+    if pred is None:
+        continue
+
+    next_preds[w]=pred
+    next_strength[w]=0.5
+
+best_window=max(next_strength,key=next_strength.get)
+
+next_pred=next_preds[best_window]
+
+# -------- UI --------
+
+st.title("⚡ V76 Adaptive Engine")
 
 col1,col2,col3=st.columns(3)
 
@@ -271,18 +270,9 @@ col3.metric("Winrate %",round(wr*100,2))
 
 st.metric("Live Profit",round(profit,2))
 
-st.subheader("Edge Metrics")
-
-st.write("Pattern",round(pattern_prob,3))
-st.write("Markov",round(markov_prob,3))
-st.write("Momentum",round(momentum,3))
-st.write("Stability",round(stability,3))
-st.write("Cluster",round(cluster_score,3))
-st.write("Strength",round(strength,3))
-
 st.subheader("Next Signal")
 
-if strength>=SIGNAL_THRESHOLD:
+if next_strength[best_window]>=SIGNAL_THRESHOLD:
 
     st.success(f"TRADE → Group {next_pred}")
 
