@@ -11,6 +11,9 @@ MAX_STREAK = 10
 WIN = 2.5
 LOSS = 1
 
+TOP_K = 5
+MIN_TRADES = 30
+
 
 def get_group(n):
     if n<=3: return 1
@@ -29,14 +32,13 @@ def load():
 numbers = load()
 groups = [get_group(n) for n in numbers]
 
-st.title("🚀 V410 Walk-Forward Edge Test")
+st.title("🚀 V420 Ensemble Edge Engine")
 
-
-# -------------------
+# =====================
 # TRAIN PHASE
-# -------------------
+# =====================
 
-train_groups = groups[:TRAIN_SIZE]
+train = groups[:TRAIN_SIZE]
 
 patterns = []
 
@@ -44,22 +46,22 @@ for window in WINDOW_RANGE:
 
     hits = []
 
-    for i in range(window, len(train_groups)):
-        hit = 1 if train_groups[i] == train_groups[i-window] else 0
+    for i in range(window,len(train)):
+        hit = 1 if train[i]==train[i-window] else 0
         hits.append(hit)
 
-    streak = 0
+    streak=0
 
     for i in range(len(hits)-1):
 
-        if hits[i] == 0:
-            streak += 1
+        if hits[i]==0:
+            streak+=1
         else:
-            streak = 0
+            streak=0
 
         if streak>0 and streak<=MAX_STREAK:
 
-            next_hit = hits[i+1]
+            next_hit=hits[i+1]
 
             patterns.append({
                 "window":window,
@@ -67,17 +69,20 @@ for window in WINDOW_RANGE:
                 "hit":next_hit
             })
 
+df=pd.DataFrame(patterns)
 
-df = pd.DataFrame(patterns)
+summary=[]
 
-summary = []
+for (window,streak),g in df.groupby(["window","streak"]):
 
-for (window, streak), g in df.groupby(["window","streak"]):
+    trades=len(g)
 
-    trades = len(g)
-    winrate = g["hit"].mean()
+    if trades<MIN_TRADES:
+        continue
 
-    ev = winrate*WIN - (1-winrate)*LOSS
+    winrate=g["hit"].mean()
+
+    ev=winrate*WIN-(1-winrate)*LOSS
 
     summary.append({
         "window":window,
@@ -87,53 +92,67 @@ for (window, streak), g in df.groupby(["window","streak"]):
         "EV":ev
     })
 
-summary_df = pd.DataFrame(summary)
+summary_df=pd.DataFrame(summary)
 
-best = summary_df.sort_values("EV", ascending=False).iloc[0]
+summary_df=summary_df.sort_values("EV",ascending=False)
 
-best_window = int(best.window)
-best_streak = int(best.streak)
+top_patterns=summary_df.head(TOP_K)
 
-st.subheader("Best Pattern (TRAIN 2000)")
-st.success(f"window={best_window} | streak={best_streak} | winrate={round(best.winrate*100,2)}%")
+st.subheader("Top Patterns (Train)")
+st.dataframe(top_patterns)
 
-
-# -------------------
+# =====================
 # FORWARD TEST
-# -------------------
+# =====================
 
-equity = 0
-curve = []
-streak = 0
-trades = 0
-wins = 0
+equity=0
+curve=[]
 
-for i in range(TRAIN_SIZE, len(groups)):
+streaks={w:0 for w in WINDOW_RANGE}
 
-    if groups[i] != groups[i-best_window]:
-        streak += 1
-    else:
-        streak = 0
+trades=0
+wins=0
+losses=0
 
-    if streak == best_streak:
+for i in range(TRAIN_SIZE,len(groups)):
 
-        trades += 1
+    trade=False
 
-        if groups[i] == groups[i-best_window]:
-            equity += WIN
-            wins += 1
+    for window in WINDOW_RANGE:
+
+        if groups[i]!=groups[i-window]:
+            streaks[window]+=1
         else:
-            equity -= LOSS
+            streaks[window]=0
 
-        streak = 0
+        for _,row in top_patterns.iterrows():
+
+            if window==row.window and streaks[window]>=row.streak:
+                trade=True
+
+    if trade:
+
+        trades+=1
+
+        if groups[i]==groups[i-int(row.window)]:
+            equity+=WIN
+            wins+=1
+        else:
+            equity-=LOSS
+            losses+=1
+
+        for w in streaks:
+            streaks[w]=0
 
     curve.append(equity)
 
 
-winrate = wins/trades if trades>0 else 0
+winrate=wins/trades if trades>0 else 0
+pf=(wins*WIN)/(losses*LOSS) if losses>0 else 0
 
-st.metric("Forward Profit", round(equity,2))
-st.metric("Trades", trades)
-st.metric("Winrate", round(winrate*100,2))
+st.metric("Forward Profit",round(equity,2))
+st.metric("Trades",trades)
+st.metric("Winrate",round(winrate*100,2))
+st.metric("Profit Factor",round(pf,2))
 
 st.line_chart(curve)
