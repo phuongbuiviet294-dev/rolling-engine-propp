@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from scipy.stats import chisquare
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WINDOW = 50
-
-
 def get_group(n):
-
     if n <= 3:
         return 1
     elif n <= 6:
@@ -25,51 +22,73 @@ numbers = df["number"].dropna().astype(int).tolist()
 
 groups = [get_group(n) for n in numbers]
 
-st.title("🚀 V700 Regime Detection Engine")
-
-entropy_series = []
-imbalance_series = []
+st.title("🔬 V800 RNG Bias Detector")
 
 
-for i in range(WINDOW, len(groups)):
+# =========================
+# NUMBER DISTRIBUTION
+# =========================
 
-    window = groups[i-WINDOW:i]
+st.subheader("Number Distribution")
 
-    counts = [window.count(g) for g in range(1,5)]
+num_counts = pd.Series(numbers).value_counts().sort_index()
 
-    probs = [c/WINDOW for c in counts]
+expected = [len(numbers)/len(num_counts)] * len(num_counts)
 
-    entropy = -sum([p*np.log(p) for p in probs if p>0])
+chi_stat, p_val = chisquare(num_counts, expected)
 
-    entropy_series.append(entropy)
+st.dataframe(num_counts)
 
-    imbalance = max(probs)
+st.write("Chi-square statistic:", chi_stat)
+st.write("p-value:", p_val)
 
-    imbalance_series.append(imbalance)
+if p_val < 0.05:
+    st.error("Distribution NOT random (bias detected)")
+else:
+    st.success("Distribution looks random")
 
 
-df_regime = pd.DataFrame({
-    "entropy": entropy_series,
-    "max_group_prob": imbalance_series
+# =========================
+# GROUP DISTRIBUTION
+# =========================
+
+st.subheader("Group Distribution")
+
+group_counts = pd.Series(groups).value_counts().sort_index()
+
+expected_g = [len(groups)/4] * 4
+
+chi_stat_g, p_val_g = chisquare(group_counts, expected_g)
+
+st.dataframe(group_counts)
+
+st.write("Chi-square statistic:", chi_stat_g)
+st.write("p-value:", p_val_g)
+
+
+# =========================
+# AUTOCORRELATION
+# =========================
+
+st.subheader("Autocorrelation Test")
+
+lags = 10
+
+autocorr = []
+
+series = pd.Series(numbers)
+
+for lag in range(1, lags+1):
+
+    corr = series.autocorr(lag)
+
+    autocorr.append(corr)
+
+df_auto = pd.DataFrame({
+    "lag": range(1,lags+1),
+    "correlation": autocorr
 })
 
+st.dataframe(df_auto)
 
-st.subheader("Entropy (randomness level)")
-
-st.line_chart(df_regime["entropy"])
-
-
-st.subheader("Group Imbalance")
-
-st.line_chart(df_regime["max_group_prob"])
-
-
-# detect strong regimes
-
-threshold = 0.35
-
-regimes = df_regime[df_regime["max_group_prob"] > threshold]
-
-st.subheader("Detected Regimes")
-
-st.dataframe(regimes.head(50))
+st.line_chart(df_auto.set_index("lag")["correlation"])
