@@ -1,39 +1,58 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from collections import Counter
+import math
 
 # ================= CONFIG =================
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-TRAIN_SIZE=2000
-RETRAIN_INTERVAL=200
+TRAIN_SIZE = 2000
+RETRAIN_INTERVAL = 200
 
-WINDOW_RANGE=range(6,19)
+WINDOW_RANGE = range(6,19)
 
-WIN=2.5
-LOSS=1
+LOOKBACK = 26
+CLUSTER_LOOKBACK = 10
+
+WIN = 2.5
+LOSS = 1
+
+HIT_THRESHOLD = 0.33
+ENTROPY_THRESHOLD = 1.35
 
 st.set_page_config(layout="wide")
 
 # ================= GROUP =================
 
 def get_group(n):
-    if n<=3:return 1
-    if n<=6:return 2
-    if n<=9:return 3
+    if n<=3: return 1
+    if n<=6: return 2
+    if n<=9: return 3
     return 4
 
 # ================= LOAD =================
 
 @st.cache_data(ttl=5)
 def load():
-    df=pd.read_csv(DATA_URL)
+    df = pd.read_csv(DATA_URL)
     df.columns=[c.strip().lower() for c in df.columns]
     return df["number"].dropna().astype(int).tolist()
 
-numbers=load()
-groups=[get_group(n) for n in numbers]
+numbers = load()
+groups = [get_group(n) for n in numbers]
+
+# ================= ENTROPY =================
+
+def entropy(seq):
+    c = Counter(seq)
+    total = len(seq)
+    e = 0
+    for v in c.values():
+        p = v/total
+        e -= p*math.log(p)
+    return e
 
 # ================= TRAIN WINDOW =================
 
@@ -51,10 +70,7 @@ def train_window(data):
             pred=data[i-w]
             actual=data[i]
 
-            if pred==actual:
-                profit+=WIN
-            else:
-                profit-=LOSS
+            profit += WIN if pred==actual else -LOSS
 
         if profit>best_profit:
             best_profit=profit
@@ -64,8 +80,8 @@ def train_window(data):
 
 # ================= TRAIN =================
 
-train_groups=groups[:TRAIN_SIZE]
-window=train_window(train_groups)
+train_groups = groups[:TRAIN_SIZE]
+window = train_window(train_groups)
 
 # ================= ENGINE =================
 
@@ -81,12 +97,12 @@ last_retrain=TRAIN_SIZE
 
 for i in range(TRAIN_SIZE,len(groups)):
 
-    g=groups[i]
+    g = groups[i]
 
     predicted=None
     hit=None
 
-    # ===== EXECUTE TRADE =====
+    # ===== TRADE =====
 
     if state=="TRADE":
 
@@ -101,7 +117,7 @@ for i in range(TRAIN_SIZE,len(groups)):
         state="SCAN"
         signal=None
 
-    # ===== PATTERN DETECTION =====
+    # ===== PATTERN =====
 
     if state=="SCAN" and i>=window+3:
 
@@ -109,29 +125,51 @@ for i in range(TRAIN_SIZE,len(groups)):
         h2 = 1 if groups[i-2]==groups[i-2-window] else 0
         h3 = 1 if groups[i-3]==groups[i-3-window] else 0
 
-        # 1-1 continuation
+        pattern=False
+
         if h1==1 and h2==1:
+            pattern=True
 
-            signal=groups[i-window]
-            state="TRADE"
+        if h1==0 and h2==0 and h3==0:
+            pattern=True
 
-        # 0-0-0 rebound
-        elif h1==0 and h2==0 and h3==0:
+        if pattern:
 
-            signal=groups[i-window]
-            state="TRADE"
+            # ===== HIT RATE FILTER =====
 
-    # ===== RETRAIN WINDOW =====
+            rec=[]
+
+            for j in range(max(window,i-LOOKBACK),i):
+
+                if j>=window:
+                    rec.append(1 if groups[j]==groups[j-window] else 0)
+
+            hit_rate=np.mean(rec) if rec else 0
+
+            # ===== CLUSTER FILTER =====
+
+            cluster_hits = hits[-CLUSTER_LOOKBACK:].count(1)
+
+            # ===== ENTROPY FILTER =====
+
+            seq = groups[i-20:i]
+            ent = entropy(seq) if len(seq)>5 else 0
+
+            if hit_rate>=HIT_THRESHOLD and cluster_hits>=4 and ent<ENTROPY_THRESHOLD:
+
+                signal = groups[i-window]
+                state="TRADE"
+
+    # ===== RETRAIN =====
 
     if i-last_retrain>=RETRAIN_INTERVAL:
 
-        window=train_window(groups[:i])
+        window = train_window(groups[:i])
         last_retrain=i
 
     equity.append(profit)
 
     history.append({
-
         "round":i+1,
         "number":numbers[i],
         "group":g,
@@ -140,7 +178,6 @@ for i in range(TRAIN_SIZE,len(groups)):
         "state":state,
         "window":window,
         "profit":profit
-
     })
 
 # ================= METRICS =================
@@ -154,7 +191,7 @@ pf=wins/loss if loss else 0
 
 # ================= UI =================
 
-st.title("⚡ V101.1 CORE SIGNAL ENGINE")
+st.title("🚀 V103 EDGE DETECTION ENGINE")
 
 c1,c2,c3,c4=st.columns(4)
 
@@ -184,5 +221,4 @@ else:
 st.subheader("History")
 
 hist_df=pd.DataFrame(history)
-
 st.dataframe(hist_df.iloc[::-1],use_container_width=True)
