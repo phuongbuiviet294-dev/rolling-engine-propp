@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from collections import Counter
 
 # ================= CONFIG =================
@@ -16,7 +15,7 @@ WINDOW_POOL=range(8,18)
 
 LOOKBACK=26
 
-SIGNAL_THRESHOLD=0.45
+SIGNAL_THRESHOLD=0.32
 
 LOCK_ROUND=3662
 STOPLOSS_STREAK=5
@@ -57,7 +56,7 @@ groups=[get_group(n) for n in numbers]
 st.write("Total rounds:",len(groups))
 
 
-# ================= WINDOW SCORE =================
+# ================= WINDOW SCAN =================
 
 def window_score(data,w):
 
@@ -70,29 +69,37 @@ def window_score(data,w):
         pred=Counter(seq).most_common(1)[0][0]
 
         if pred==data[i]:
-
             profit+=WIN_PROFIT
-
         else:
-
             profit-=LOSE_LOSS
 
     return profit
 
 
-# chọn window tốt nhất
-
-scores={w:window_score(groups[-500:],w) for w in WINDOW_POOL}
+scores={w:window_score(groups[:LOCK_ROUND],w) for w in WINDOW_POOL}
 
 best_window=max(scores,key=scores.get)
 
 
-# ================= ENGINE =================
+# ================= TRAIN HISTORY =================
+
+hits=[]
+
+for i in range(best_window,LOCK_ROUND):
+
+    seq=groups[i-best_window:i]
+
+    pred=Counter(seq).most_common(1)[0][0]
+
+    hit=1 if pred==groups[i] else 0
+
+    hits.append(hit)
+
+
+# ================= LIVE ENGINE =================
 
 profit=0
 equity=[]
-
-hits=[]
 
 trades=0
 wins=0
@@ -102,7 +109,7 @@ pause=0
 
 trade_log=[]
 
-for i in range(best_window,len(groups)-1):
+for i in range(LOCK_ROUND,len(groups)-1):
 
     seq=groups[i-best_window:i]
 
@@ -112,43 +119,13 @@ for i in range(best_window,len(groups)-1):
 
     hit=1 if pred==actual else 0
 
-    hits.append(hit)
+    # ===== metrics =====
 
-    # -------- momentum --------
+    pattern=sum(hits[-30:])/30 if len(hits)>=30 else 0
 
-    momentum=0
-
-    if len(hits)>=LOOKBACK:
-
-        momentum=sum(hits[-LOOKBACK:])/LOOKBACK
-
-
-    # -------- regime --------
-
-    regime="break"
-
-    if momentum>=0.48:
-
-        regime="trend"
-
-    elif momentum>=0.33:
-
-        regime="random"
-
-
-    # -------- pattern --------
-
-    pattern=0
-
-    if len(hits)>30:
-
-        pattern=sum(hits[-30:])/30
-
-
-    # -------- markov --------
+    momentum=sum(hits[-LOOKBACK:])/LOOKBACK if len(hits)>=LOOKBACK else 0
 
     markov=0
-
     if len(hits)>5:
 
         last=hits[-1]
@@ -156,33 +133,36 @@ for i in range(best_window,len(groups)-1):
         trans=[hits[j+1] for j in range(len(hits)-1) if hits[j]==last]
 
         if trans:
-
             markov=sum(trans)/len(trans)
-
 
     stability=momentum
 
-
     strength=(
-
         0.35*pattern+
         0.25*momentum+
         0.20*markov+
         0.20*stability
-
     )
+
+    # ===== regime =====
+
+    regime="break"
+
+    if momentum>=0.48:
+        regime="trend"
+
+    elif momentum>=0.33:
+        regime="random"
 
 
     trade=False
 
     if pause>0:
-
         pause-=1
 
     else:
 
         if strength>=SIGNAL_THRESHOLD and regime!="break":
-
             trade=True
 
 
@@ -208,6 +188,8 @@ for i in range(best_window,len(groups)-1):
         loss_streak=0
 
 
+    hits.append(hit)
+
     equity.append(profit)
 
 
@@ -219,6 +201,7 @@ for i in range(best_window,len(groups)-1):
         "hit":hit,
         "strength":round(strength,3),
         "profit":profit
+
     })
 
 
@@ -234,7 +217,7 @@ next_pred=Counter(next_seq).most_common(1)[0][0]
 
 # ================= UI =================
 
-st.title("⚡ V77 Stable Regime Engine")
+st.title("⚡ V77.5 Walk-Forward Engine")
 
 c1,c2,c3=st.columns(3)
 
