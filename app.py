@@ -1,122 +1,140 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import Counter, defaultdict
+from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 st.set_page_config(layout="wide")
 
-# -------- GROUP --------
+# ---------- group ----------
 def group(n):
     if n<=3:return 1
     if n<=6:return 2
     if n<=9:return 3
     return 4
 
-# -------- LOAD DATA --------
+# ---------- load ----------
 @st.cache_data(ttl=5)
 def load():
-
     df=pd.read_csv(DATA_URL)
     df.columns=[c.lower() for c in df.columns]
-
     return df["number"].dropna().astype(int).tolist()
 
 numbers=load()
-
 groups=[group(n) for n in numbers]
 
 ROUNDS=len(groups)
 
-WINDOW=900
+# ---------- MARKOV ----------
+def markov_pred(g):
 
-seq=groups[-WINDOW:]
+    if len(g)<2:return None
 
-# -------- PATTERN FUNCTION --------
-def pattern_stats(data,L):
+    last=g[-1]
 
-    patterns=defaultdict(Counter)
+    trans={1:Counter(),2:Counter(),3:Counter(),4:Counter()}
 
-    for i in range(len(data)-L):
+    for i in range(len(g)-1):
 
-        key=tuple(data[i:i+L])
-        nxt=data[i+L]
+        trans[g[i]][g[i+1]]+=1
 
-        patterns[key][nxt]+=1
+    if not trans[last]:
 
-    stats={}
+        return None
 
-    for key,count in patterns.items():
+    return max(trans[last],key=trans[last].get)
 
-        total=sum(count.values())
+# ---------- PATTERN ----------
+def pattern_pred(g,L=3):
 
-        if total<20:
-            continue
+    if len(g)<L+1:return None
 
-        pred=max(count,key=count.get)
+    key=tuple(g[-L:])
 
-        prob=count[pred]/total
+    counts=Counter()
 
-        strength=prob/0.25
+    for i in range(len(g)-L):
 
-        stats[key]=(pred,prob,strength)
+        if tuple(g[i:i+L])==key:
 
-    return stats
+            counts[g[i+L]]+=1
 
-# -------- STABILITY TEST --------
+    if not counts:return None
 
-seg=len(seq)//3
+    return max(counts,key=counts.get)
 
-seg1=seq[:seg]
-seg2=seq[seg:2*seg]
-seg3=seq[2*seg:]
+# ---------- TRANSITION ----------
+def transition_pred(g):
 
-best=None
-best_score=0
+    if len(g)<30:return None
 
-for L in [3,4,5]:
+    last=g[-1]
 
-    s1=pattern_stats(seg1,L)
-    s2=pattern_stats(seg2,L)
-    s3=pattern_stats(seg3,L)
+    nxt=g[-30:]
 
-    keys=set(s1)&set(s2)&set(s3)
+    c=Counter()
 
-    for k in keys:
+    for i in range(len(nxt)-1):
 
-        p1=s1[k]
-        p2=s2[k]
-        p3=s3[k]
+        if nxt[i]==last:
 
-        strength=min(p1[2],p2[2],p3[2])
+            c[nxt[i+1]]+=1
 
-        prob=(p1[1]+p2[1]+p3[1])/3
+    if not c:return None
 
-        if strength>best_score:
+    return max(c,key=c.get)
 
-            best_score=strength
-            best=(L,k,p1[0],prob,strength)
+# ---------- DISTRIBUTION ----------
+def distribution_pred(g):
 
-# -------- PREDICT --------
+    w=g[-200:]
+
+    c=Counter(w)
+
+    expected=len(w)/4
+
+    diff={k:expected-c[k] for k in [1,2,3,4]}
+
+    return max(diff,key=diff.get)
+
+# ---------- RUNS ----------
+def runs_pred(g):
+
+    if len(g)<3:return None
+
+    if g[-1]==g[-2]:
+
+        return np.random.choice([x for x in [1,2,3,4] if x!=g[-1]])
+
+    return None
+
+# ---------- VOTE ----------
+engines={}
+
+engines["markov"]=markov_pred(groups)
+engines["pattern"]=pattern_pred(groups)
+engines["transition"]=transition_pred(groups)
+engines["distribution"]=distribution_pred(groups)
+engines["runs"]=runs_pred(groups)
+
+votes=Counter()
+
+for e in engines.values():
+
+    if e:
+
+        votes[e]+=1
+
 prediction=None
 confidence=0
-pattern=None
-strength=0
 
-if best:
+if votes:
 
-    L,k,pred,prob,stren=best
+    prediction=max(votes,key=votes.get)
+    confidence=votes[prediction]/5
 
-    if tuple(groups[-L:])==k:
-
-        prediction=pred
-        confidence=prob
-        pattern=k
-        strength=stren
-
-# -------- BACKTEST --------
-
+# ---------- BACKTEST ----------
 profit=0
 peak=0
 dd=0
@@ -124,12 +142,10 @@ history=[]
 
 for i in range(50,len(groups)-1):
 
-    pred=None
+    pred=prediction
     hit=False
 
-    if prediction:
-
-        pred=prediction
+    if pred:
 
         if groups[i]==pred:
 
@@ -141,7 +157,6 @@ for i in range(50,len(groups)-1):
             profit-=1
 
     peak=max(peak,profit)
-
     dd=max(dd,peak-profit)
 
     history.append({
@@ -155,16 +170,14 @@ for i in range(50,len(groups)-1):
 hist=pd.DataFrame(history)
 
 trades=len(hist[hist.pred.notna()])
-
 wins=len(hist[hist.hit==True])
-
 wr=wins/trades if trades else 0
 
 entropy=-sum((groups.count(i)/len(groups))*np.log2(groups.count(i)/len(groups)) for i in [1,2,3,4])
 
-# -------- UI --------
+# ---------- UI ----------
 
-st.title("🤖 V46 Live Pattern Stability Engine")
+st.title("🤖 V47 Hybrid AI Engine")
 
 c1,c2,c3=st.columns(3)
 
@@ -178,35 +191,31 @@ c4.metric("Profit",profit)
 c5.metric("Drawdown",dd)
 c6.metric("Entropy",round(entropy,3))
 
-# -------- PATTERN --------
+# ---------- ENGINE VOTES ----------
 
-st.subheader("Pattern Analysis")
+st.subheader("Engine Predictions")
 
-if pattern:
+st.write(engines)
 
-    st.write("Pattern:",pattern)
-    st.write("Strength:",round(strength,3))
-    st.write("Probability:",round(confidence,3))
-
-# -------- NEXT GROUP --------
+# ---------- NEXT GROUP ----------
 
 st.subheader("Next Group")
 
-if prediction and strength>1.6 and confidence>0.40:
+if prediction and confidence>=0.35:
 
-    st.success(f"TRADE → Group {prediction}")
+    st.success(f"TRADE → Group {prediction} (confidence {confidence:.2f})")
 
 else:
 
     st.info("SKIP")
 
-# -------- EQUITY --------
+# ---------- EQUITY ----------
 
 st.subheader("Equity Curve")
 
 st.line_chart(hist.profit)
 
-# -------- HISTORY --------
+# ---------- HISTORY ----------
 
 st.subheader("Trade History")
 
