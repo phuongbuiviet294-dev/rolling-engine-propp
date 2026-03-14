@@ -10,7 +10,6 @@ WINDOW_MIN=6
 WINDOW_MAX=20
 
 GAP=4
-
 TARGET=10
 STOP=-10
 
@@ -37,7 +36,9 @@ def load():
 
     df.columns=[c.lower() for c in df.columns]
 
-    return df["number"].dropna().astype(int).tolist()
+    numbers=df["number"].dropna().astype(int).tolist()
+
+    return numbers
 
 
 numbers=load()
@@ -66,23 +67,117 @@ for w in range(WINDOW_MIN,WINDOW_MAX+1):
             trades+=1
 
             if scan_groups[i]==pred:
+
                 profit+=WIN
                 wins+=1
+
             else:
+
                 profit+=LOSS
 
     if trades>10:
 
         wr=wins/trades
-
         score=profit*wr*np.log(trades)
 
-        results.append((w,score))
+        results.append({
+            "window":w,
+            "profit":profit,
+            "trades":trades,
+            "winrate":wr,
+            "score":score
+        })
 
 
-results.sort(key=lambda x:x[1],reverse=True)
+scan_df=pd.DataFrame(results).sort_values("score",ascending=False)
 
-top_windows=[x[0] for x in results[:3]]
+TOP=scan_df.head(3)
+
+top_windows=TOP["window"].tolist()
+
+st.subheader("Top Windows")
+
+st.dataframe(TOP)
+
+
+# -------- TRADE ENGINE --------
+
+profit=0
+last_trade=-999
+
+history=[]
+hits=[]
+
+for i in range(SCAN,len(groups)):
+
+    preds=[groups[i-w] for w in top_windows]
+
+    c=Counter(preds)
+
+    vote,confidence=c.most_common(1)[0]
+
+    signal=False
+    hit=None
+
+    if confidence>=2 and groups[i-1]!=vote and (i-last_trade)>=GAP:
+
+        signal=True
+        last_trade=i
+
+        if groups[i]==vote:
+
+            profit+=WIN
+            hit=1
+            hits.append(1)
+
+        else:
+
+            profit+=LOSS
+            hit=0
+            hits.append(0)
+
+    history.append({
+        "round":i,
+        "number":numbers[i],
+        "group":groups[i],
+        "predictions":preds,
+        "vote":vote,
+        "confidence":confidence,
+        "signal":signal,
+        "hit":hit,
+        "profit":profit
+    })
+
+    if profit>=TARGET or profit<=STOP:
+        break
+
+
+hist=pd.DataFrame(history)
+
+
+# -------- RESULT --------
+
+st.subheader("Session Result")
+
+col1,col2,col3=st.columns(3)
+
+col1.metric("Profit",profit)
+
+trades=len(hits)
+
+col2.metric("Trades",trades)
+
+wr=np.mean(hits) if trades>0 else 0
+
+col3.metric("Winrate %",round(wr*100,2))
+
+
+# -------- EQUITY --------
+
+st.subheader("Equity Curve")
+
+st.line_chart(hist.profit)
+
 
 # -------- NEXT SIGNAL --------
 
@@ -92,31 +187,27 @@ c=Counter(preds)
 
 vote,confidence=c.most_common(1)[0]
 
-
-# -------- UI --------
-
-st.title("⚡ Quick Trade Engine")
-
-st.write("Top windows:",top_windows)
+st.subheader("Next Signal")
 
 col1,col2=st.columns(2)
 
-col1.metric("Confidence",confidence)
+col1.metric("Current Number",numbers[-1])
+col2.metric("Current Group",groups[-1])
 
-col2.metric("Last group",groups[-1])
-
+st.write("Predictions:",preds)
+st.write("Confidence:",confidence)
 
 if confidence>=2 and groups[-1]!=vote:
 
-    st.success(f"BET GROUP {vote}")
+    st.success(f"🔥 BET GROUP {vote}")
 
 else:
 
     st.warning("WAIT")
 
 
-# -------- INFO --------
+# -------- HISTORY --------
 
-st.write("Predictions:",preds)
+st.subheader("History")
 
-st.write("Current group:",groups[-1])
+st.dataframe(hist.iloc[::-1])
