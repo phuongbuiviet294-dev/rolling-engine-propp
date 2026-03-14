@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from collections import Counter
 
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
@@ -8,12 +9,12 @@ SCAN = 182
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
-TOP_WINDOWS = 3
+TOP_WINDOWS = 5
 
 GAP = 4
 
 TARGET = 10
-STOP = -10
+STOP = -5
 
 WIN = 2.5
 LOSS = -1
@@ -103,7 +104,6 @@ TOP = scan_df.head(TOP_WINDOWS)
 top_windows = TOP["window"].tolist()
 
 st.subheader("Top Windows")
-
 st.dataframe(TOP)
 
 
@@ -122,14 +122,14 @@ for i in range(SCAN, len(groups)):
 
         preds.append(groups[i-w])
 
-    vote = max(set(preds), key=preds.count)
+    counter = Counter(preds)
 
-    confidence = preds.count(vote)
+    vote, confidence = counter.most_common(1)[0]
 
     signal = False
     hit = None
 
-    if confidence >= 2 and groups[i-1] != vote and (i - last_trade_index) >= GAP:
+    if confidence >= 3 and groups[i-1] != vote and (i - last_trade_index) >= GAP:
 
         signal = True
 
@@ -158,10 +158,7 @@ for i in range(SCAN, len(groups)):
     })
 
 
-    if profit >= TARGET:
-        break
-
-    if profit <= STOP:
+    if profit >= TARGET or profit <= STOP:
         break
 
 
@@ -176,9 +173,11 @@ col1,col2,col3 = st.columns(3)
 
 col1.metric("Profit", profit)
 
-col2.metric("Trades", hist.hit.count())
+trade_count = hist["hit"].count()
 
-wr = hist.hit.mean() if hist.hit.count() > 0 else 0
+col2.metric("Trades", trade_count)
+
+wr = hist["hit"].mean() if trade_count > 0 else 0
 
 col3.metric("Winrate %", round(wr*100,2))
 
@@ -187,7 +186,7 @@ col3.metric("Winrate %", round(wr*100,2))
 
 st.subheader("Equity Curve")
 
-st.line_chart(hist.profit)
+st.line_chart(hist["profit"])
 
 
 # ---------------- NEXT SIGNAL ----------------
@@ -195,16 +194,15 @@ st.line_chart(hist.profit)
 preds = []
 
 for w in top_windows:
-
     preds.append(groups[-w])
 
-vote = max(set(preds), key=preds.count)
+counter = Counter(preds)
 
-confidence = preds.count(vote)
+vote, confidence = counter.most_common(1)[0]
 
 st.subheader("Next Signal")
 
-if confidence >= 2 and groups[-1] != vote:
+if confidence >= 3 and groups[-1] != vote:
 
     st.success(f"BET GROUP {vote}")
 
