@@ -1,10 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 SCAN=182
+WINDOW_MIN=6
+WINDOW_MAX=20
+
+GAP=4
+
 TARGET=10
 STOP=-10
 
@@ -12,7 +18,7 @@ WIN=2.5
 LOSS=-1
 
 
-# ---------------- GROUP ----------------
+# -------- GROUP --------
 
 def group(n):
 
@@ -22,7 +28,7 @@ def group(n):
     return 4
 
 
-# ---------------- LOAD ----------------
+# -------- LOAD DATA --------
 
 @st.cache_data(ttl=5)
 def load():
@@ -31,7 +37,9 @@ def load():
 
     df.columns=[c.lower() for c in df.columns]
 
-    return df["number"].dropna().astype(int).tolist()
+    numbers=df["number"].dropna().astype(int).tolist()
+
+    return numbers
 
 
 numbers=load()
@@ -39,46 +47,87 @@ numbers=load()
 groups=[group(n) for n in numbers]
 
 
-# ---------------- PATTERN ENGINE ----------------
+# -------- WINDOW SCAN --------
+
+scan_groups=groups[:SCAN]
+
+results=[]
+
+for w in range(WINDOW_MIN,WINDOW_MAX+1):
+
+    profit=0
+    trades=0
+    wins=0
+
+    for i in range(w,len(scan_groups)):
+
+        pred=scan_groups[i-w]
+
+        if scan_groups[i-1]!=pred:
+
+            trades+=1
+
+            if scan_groups[i]==pred:
+
+                profit+=WIN
+                wins+=1
+
+            else:
+
+                profit+=LOSS
+
+    if trades>10:
+
+        wr=wins/trades
+
+        score=profit*wr*np.log(trades)
+
+        results.append({
+            "window":w,
+            "profit":profit,
+            "trades":trades,
+            "winrate":wr,
+            "score":score
+        })
+
+
+scan_df=pd.DataFrame(results).sort_values("score",ascending=False)
+
+TOP=scan_df.head(3)
+
+top_windows=TOP["window"].tolist()
+
+st.subheader("Top Windows")
+
+st.dataframe(TOP)
+
+
+# -------- TRADE ENGINE --------
 
 profit=0
 last_trade=-999
-GAP=4
 
 history=[]
 hits=[]
 
 for i in range(SCAN,len(groups)):
 
+    preds=[groups[i-w] for w in top_windows]
+
+    c=Counter(preds)
+
+    vote,confidence=c.most_common(1)[0]
+
     signal=False
-    pred=None
+    hit=None
 
-    # ABAB pattern
-    if groups[i-4]==groups[i-2] and groups[i-3]==groups[i-1]:
+    if confidence>=2 and groups[i-1]!=vote and (i-last_trade)>=GAP:
 
-        pred=groups[i-2]
         signal=True
-
-
-    # run break
-    elif groups[i-3]==groups[i-2]==groups[i-1]:
-
-        pred=None
-        signal=False
-
-
-    # repeat bias
-    elif groups[i-1]==groups[i-2]:
-
-        pred=groups[i-1]
-        signal=True
-
-
-    if signal and (i-last_trade)>=GAP:
 
         last_trade=i
 
-        if groups[i]==pred:
+        if groups[i]==vote:
 
             profit+=WIN
             hit=1
@@ -90,19 +139,16 @@ for i in range(SCAN,len(groups)):
             hit=0
             hits.append(0)
 
-    else:
-
-        hit=None
-
     history.append({
         "round":i,
         "group":groups[i],
-        "pred":pred,
+        "predictions":preds,
+        "vote":vote,
+        "confidence":confidence,
         "signal":signal,
         "hit":hit,
         "profit":profit
     })
-
 
     if profit>=TARGET or profit<=STOP:
         break
@@ -111,15 +157,15 @@ for i in range(SCAN,len(groups)):
 hist=pd.DataFrame(history)
 
 
-# ---------------- RESULT ----------------
+# -------- RESULT --------
 
-st.subheader("Pattern Engine Result")
+st.subheader("Session Result")
 
 col1,col2,col3=st.columns(3)
 
 col1.metric("Profit",profit)
 
-trades=hist.hit.count()
+trades=len(hits)
 
 col2.metric("Trades",trades)
 
@@ -131,6 +177,25 @@ col3.metric("Winrate %",round(wr*100,2))
 st.subheader("Equity Curve")
 
 st.line_chart(hist.profit)
+
+
+# -------- NEXT SIGNAL --------
+
+preds=[groups[-w] for w in top_windows]
+
+c=Counter(preds)
+
+vote,confidence=c.most_common(1)[0]
+
+st.subheader("Next Signal")
+
+if confidence>=2 and groups[-1]!=vote:
+
+    st.success(f"BET GROUP {vote}")
+
+else:
+
+    st.info("WAIT")
 
 
 st.subheader("History")
