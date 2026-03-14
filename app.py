@@ -12,7 +12,7 @@ TOP_WINDOWS = 3
 
 GAP = 4
 
-TARGET = 20
+TARGET = 10
 STOP = -10
 
 WIN = 2.5
