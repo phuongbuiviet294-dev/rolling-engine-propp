@@ -30,25 +30,18 @@ def group(n):
 @st.cache_data(ttl=5)
 def load():
     df = pd.read_csv(DATA_URL)
-
     df.columns = [c.lower() for c in df.columns]
-
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
-
     numbers = df["number"].dropna().astype(int).tolist()
-
     return numbers
 
 
 numbers = load()
-
 groups = [group(n) for n in numbers]
 
 
 # ---------- WINDOW SCAN ----------
-
 scan_groups = groups[:SCAN]
-
 results = []
 
 for w in range(WINDOW_MIN, WINDOW_MAX + 1):
@@ -74,7 +67,6 @@ for w in range(WINDOW_MIN, WINDOW_MAX + 1):
     if trades > 10:
 
         wr = wins / trades
-
         score = profit * wr * np.log(trades)
 
         results.append({
@@ -84,12 +76,10 @@ for w in range(WINDOW_MIN, WINDOW_MAX + 1):
 
 
 scan_df = pd.DataFrame(results).sort_values("score", ascending=False)
-
 top_windows = scan_df.head(3)["window"].tolist()
 
 
 # ---------- TRADE ENGINE ----------
-
 profit = 0
 last_trade = -999
 
@@ -123,14 +113,10 @@ for i in range(SCAN, len(groups)):
             state = "TRADE"
 
             if groups[i] == vote:
-
                 hit = 1
                 profit += WIN
                 hits.append(1)
-                state = "HIT"
-
             else:
-
                 hit = 0
                 profit += LOSS
                 hits.append(0)
@@ -159,8 +145,7 @@ for i in range(SCAN, len(groups)):
 hist = pd.DataFrame(history)
 
 
-# ---------- NEXT GROUP (TRADE ONLY) ----------
-
+# ---------- NEXT TRADE ----------
 i = len(groups)
 
 preds = [groups[i - w] for w in top_windows]
@@ -173,12 +158,10 @@ current_group = groups[-1]
 distance = i - last_trade
 
 signal = confidence >= 2 and current_group != vote
-
 trade = signal and distance >= GAP
 
 
 # ---------- UI ----------
-
 st.title("🎯 NEXT BET")
 
 col1, col2 = st.columns(2)
@@ -212,7 +195,6 @@ else:
 
 
 # ---------- SESSION STATS ----------
-
 st.subheader("Session Statistics")
 
 col1, col2, col3 = st.columns(3)
@@ -227,7 +209,6 @@ col3.metric("Winrate %", round(wr * 100, 2))
 
 
 # ---------- PROFIT CURVE ----------
-
 st.subheader("Profit Curve")
 
 if len(hist) > 0:
@@ -235,7 +216,6 @@ if len(hist) > 0:
 
 
 # ---------- HISTORY ----------
-
 st.subheader("History")
 
 st.dataframe(
@@ -253,5 +233,4 @@ st.dataframe(
         "hit",
         "profit"
     ]]
-
 )
