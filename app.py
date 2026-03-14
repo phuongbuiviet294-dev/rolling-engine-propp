@@ -3,216 +3,175 @@ import pandas as pd
 import numpy as np
 from collections import Counter
 
-DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-SCAN = 182
-WINDOW_MIN = 6
-WINDOW_MAX = 20
+SCAN=182
+WINDOW_MIN=6
+WINDOW_MAX=20
 
-TOP_WINDOWS = 5
-
-GAP = 4
-
-TARGET = 10
-STOP = -5
-
-WIN = 2.5
-LOSS = -1
+WIN=2.5
+LOSS=-1
+GAP=4
 
 
 # ---------------- GROUP ----------------
 
 def group(n):
 
-    if n <= 3:
-        return 1
-    elif n <= 6:
-        return 2
-    elif n <= 9:
-        return 3
-    else:
-        return 4
+    if n<=3: return 1
+    if n<=6: return 2
+    if n<=9: return 3
+    return 4
 
 
 # ---------------- LOAD DATA ----------------
 
 @st.cache_data(ttl=5)
-def load_data():
+def load():
 
-    df = pd.read_csv(DATA_URL)
+    df=pd.read_csv(DATA_URL)
 
-    df.columns = [c.lower() for c in df.columns]
+    df.columns=[c.lower() for c in df.columns]
 
-    numbers = df["number"].dropna().astype(int).tolist()
-
-    return numbers
+    return df["number"].dropna().astype(int).tolist()
 
 
-numbers = load_data()
+numbers=load()
 
-groups = [group(n) for n in numbers]
+groups=[group(n) for n in numbers]
 
 
 # ---------------- WINDOW SCAN ----------------
 
-scan_groups = groups[:SCAN]
+scan_groups=groups[:SCAN]
 
-results = []
+results=[]
 
-for window in range(WINDOW_MIN, WINDOW_MAX + 1):
+for w in range(WINDOW_MIN,WINDOW_MAX+1):
 
-    profit = 0
-    trades = 0
-    wins = 0
+    profit=0
+    trades=0
+    wins=0
 
-    for i in range(window, len(scan_groups)):
+    for i in range(w,len(scan_groups)):
 
-        pred = scan_groups[i-window]
+        pred=scan_groups[i-w]
 
-        if scan_groups[i-1] != pred:
+        if scan_groups[i-1]!=pred:
 
-            trades += 1
+            trades+=1
 
-            if scan_groups[i] == pred:
-
-                profit += WIN
-                wins += 1
-
+            if scan_groups[i]==pred:
+                profit+=WIN
+                wins+=1
             else:
+                profit+=LOSS
 
-                profit += LOSS
+    if trades>10:
 
-    if trades > 10:
-
-        winrate = wins / trades
-
-        score = profit * winrate * np.log(trades)
+        wr=wins/trades
+        score=profit*wr*np.log(trades)
 
         results.append({
-            "window": window,
-            "profit": profit,
-            "trades": trades,
-            "winrate": winrate,
-            "score": score
+            "window":w,
+            "profit":profit,
+            "trades":trades,
+            "winrate":wr,
+            "score":score
         })
 
 
-scan_df = pd.DataFrame(results).sort_values("score", ascending=False)
+scan_df=pd.DataFrame(results).sort_values("score",ascending=False)
 
-TOP = scan_df.head(TOP_WINDOWS)
+top3=scan_df.head(3)["window"].tolist()
+top5=scan_df.head(5)["window"].tolist()
 
-top_windows = TOP["window"].tolist()
-
-st.subheader("Top Windows")
-st.dataframe(TOP)
-
-
-# ---------------- TRADE ENGINE ----------------
-
-profit = 0
-last_trade_index = -999
-
-history = []
-
-for i in range(SCAN, len(groups)):
-
-    preds = []
-
-    for w in top_windows:
-
-        preds.append(groups[i-w])
-
-    counter = Counter(preds)
-
-    vote, confidence = counter.most_common(1)[0]
-
-    signal = False
-    hit = None
-
-    if confidence >= 3 and groups[i-1] != vote and (i - last_trade_index) >= GAP:
-
-        signal = True
-
-        last_trade_index = i
-
-        if groups[i] == vote:
-
-            profit += WIN
-            hit = 1
-
-        else:
-
-            profit += LOSS
-            hit = 0
+st.subheader("Scan Result")
+st.dataframe(scan_df)
 
 
-    history.append({
-        "round": i,
-        "group": groups[i],
-        "predictions": preds,
-        "vote": vote,
-        "confidence": confidence,
-        "signal": signal,
-        "hit": hit,
-        "profit": profit
-    })
+# ---------------- ENGINE FUNCTION ----------------
+
+def run_engine(windows, vote_need):
+
+    profit=0
+    last_trade=-999
+
+    history=[]
+    hits=[]
+
+    for i in range(SCAN,len(groups)):
+
+        preds=[groups[i-w] for w in windows]
+
+        c=Counter(preds)
+
+        vote,conf=c.most_common(1)[0]
+
+        signal=False
+        hit=None
+
+        if conf>=vote_need and groups[i-1]!=vote and (i-last_trade)>=GAP:
+
+            signal=True
+            last_trade=i
+
+            if groups[i]==vote:
+
+                profit+=WIN
+                hit=1
+                hits.append(1)
+
+            else:
+
+                profit+=LOSS
+                hit=0
+                hits.append(0)
+
+        history.append(profit)
+
+    wr=np.mean(hits) if len(hits)>0 else 0
+
+    return profit,len(hits),wr,history
 
 
-    if profit >= TARGET or profit <= STOP:
-        break
+# ---------------- RUN 2 STRATEGIES ----------------
 
+p1,t1,wr1,e1=run_engine(top3,2)
 
-hist = pd.DataFrame(history)
+p2,t2,wr2,e2=run_engine(top5,3)
 
 
 # ---------------- DASHBOARD ----------------
 
-st.subheader("Session Result")
+st.subheader("Strategy Compare")
 
-col1,col2,col3 = st.columns(3)
+col1,col2=st.columns(2)
 
-col1.metric("Profit", profit)
+with col1:
 
-trade_count = hist["hit"].count()
+    st.write("### 3 vote 2")
 
-col2.metric("Trades", trade_count)
+    st.metric("Profit",round(p1,2))
+    st.metric("Trades",t1)
+    st.metric("Winrate",round(wr1*100,2))
 
-wr = hist["hit"].mean() if trade_count > 0 else 0
+with col2:
 
-col3.metric("Winrate %", round(wr*100,2))
+    st.write("### 5 vote 3")
+
+    st.metric("Profit",round(p2,2))
+    st.metric("Trades",t2)
+    st.metric("Winrate",round(wr2*100,2))
 
 
 # ---------------- EQUITY ----------------
 
-st.subheader("Equity Curve")
+st.subheader("Equity Compare")
 
-st.line_chart(hist["profit"])
+df_equity=pd.DataFrame({
+    "3vote2":e1,
+    "5vote3":e2
+})
 
-
-# ---------------- NEXT SIGNAL ----------------
-
-preds = []
-
-for w in top_windows:
-    preds.append(groups[-w])
-
-counter = Counter(preds)
-
-vote, confidence = counter.most_common(1)[0]
-
-st.subheader("Next Signal")
-
-if confidence >= 3 and groups[-1] != vote:
-
-    st.success(f"BET GROUP {vote}")
-
-else:
-
-    st.info("WAIT")
-
-
-# ---------------- HISTORY ----------------
-
-st.subheader("History")
-
-st.dataframe(hist.iloc[::-1])
+st.line_chart(df_equity)
