@@ -11,9 +11,6 @@ WINDOW_MAX=20
 
 GAP=4
 
-TARGET=10
-STOP=-10
-
 WIN=2.5
 LOSS=-1
 
@@ -35,8 +32,6 @@ def load():
 
     df.columns=[c.lower() for c in df.columns]
 
-    df["number"]=df["number"].astype(str).str.strip()
-
     df["number"]=pd.to_numeric(df["number"],errors="coerce")
 
     numbers=df["number"].dropna().astype(int).tolist()
@@ -45,13 +40,6 @@ def load():
 
 
 numbers=load()
-
-if len(numbers)<SCAN+10:
-
-    st.error("Not enough data")
-
-    st.stop()
-
 
 groups=[group(n) for n in numbers]
 
@@ -93,24 +81,18 @@ for w in range(WINDOW_MIN,WINDOW_MAX+1):
 
         results.append({
             "window":w,
-            "profit":profit,
-            "trades":trades,
-            "winrate":wr,
             "score":score
         })
 
 
 scan_df=pd.DataFrame(results).sort_values("score",ascending=False)
 
-TOP=scan_df.head(3)
-
-top_windows=TOP["window"].tolist()
+top_windows=scan_df.head(3)["window"].tolist()
 
 
 # -------- TRADE ENGINE --------
 
 profit=0
-
 last_trade=-999
 
 history=[]
@@ -126,14 +108,23 @@ for i in range(SCAN,len(groups)):
     vote,confidence=c.most_common(1)[0]
 
     signal=False
+    trade=False
     bet_group=None
     hit=None
 
 
-    if confidence>=2 and groups[i-1]!=vote and (i-last_trade)>=GAP:
+    # signal detection
+    if confidence>=2 and groups[i-1]!=vote:
 
         signal=True
+
+
+    # trade condition
+    if signal and (i-last_trade)>=GAP:
+
+        trade=True
         bet_group=vote
+
         last_trade=i
 
         if groups[i]==vote:
@@ -150,53 +141,40 @@ for i in range(SCAN,len(groups)):
 
 
     history.append({
+
         "round":i,
         "number":numbers[i],
         "group":groups[i],
+
         "vote":vote,
         "confidence":confidence,
+
         "signal":signal,
+        "trade":trade,
+
         "bet_group":bet_group,
         "hit":hit,
+
         "profit":profit
     })
-
-
-    if profit>=TARGET or profit<=STOP:
-        break
 
 
 hist=pd.DataFrame(history)
 
 
-# -------- LAST TRADE --------
+# -------- LIVE NEXT SIGNAL --------
 
-if len(hist)>0:
+i=len(groups)
 
-    last_trade_rows=hist[hist["signal"]==True]
-
-    if len(last_trade_rows)>0:
-
-        last_trade=int(last_trade_rows.iloc[-1]["round"])
-
-    else:
-
-        last_trade=-999
-
-
-distance=len(groups)-1-last_trade
-
-
-# -------- LIVE SIGNAL --------
-
-preds=[groups[-w] for w in top_windows]
+preds=[groups[i-w] for w in top_windows]
 
 c=Counter(preds)
 
 vote,confidence=c.most_common(1)[0]
 
-current_number=numbers[-1]
+distance=i-last_trade
 
+current_number=numbers[-1]
 current_group=groups[-1]
 
 
@@ -205,7 +183,6 @@ st.title("🎯 LIVE SIGNAL")
 col1,col2=st.columns(2)
 
 col1.metric("Current Number",current_number)
-
 col2.metric("Current Group",current_group)
 
 st.divider()
@@ -229,14 +206,14 @@ if confidence>=2 and groups[-1]!=vote and distance>=GAP:
         unsafe_allow_html=True
     )
 
-    st.write(f"Confidence {confidence}/3")
+    st.write(f"Next Round Signal | Confidence {confidence}/3")
 
 else:
 
     st.markdown(
         """
         <div style="
-        background-color:#f0f0f0;
+        background-color:#eeeeee;
         padding:20px;
         border-radius:10px;
         text-align:center;
@@ -287,6 +264,7 @@ st.dataframe(
         "vote",
         "confidence",
         "signal",
+        "trade",
         "bet_group",
         "hit",
         "profit"
