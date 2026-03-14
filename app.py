@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 from collections import Counter
 
+st.set_page_config(layout="wide")
+
 DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
 SCAN = 182
@@ -44,7 +46,7 @@ def load_data():
 numbers = load_data()
 
 if len(numbers) < SCAN:
-    st.error("Not enough data yet")
+    st.error("Not enough data")
     st.stop()
 
 groups = [group(n) for n in numbers]
@@ -79,6 +81,7 @@ for window in range(WINDOW_MIN, WINDOW_MAX + 1):
     if trades > 10:
 
         winrate = wins / trades
+
         score = profit * winrate * np.log(trades)
 
         results.append({
@@ -93,7 +96,7 @@ for window in range(WINDOW_MIN, WINDOW_MAX + 1):
 scan_df = pd.DataFrame(results)
 
 if scan_df.empty:
-    st.error("No valid window found")
+    st.error("No valid window")
     st.stop()
 
 scan_df = scan_df.sort_values("score", ascending=False)
@@ -101,6 +104,44 @@ scan_df = scan_df.sort_values("score", ascending=False)
 TOP = scan_df.head(3)
 
 top_windows = TOP["window"].tolist()
+
+
+# ---------------- NEXT SIGNAL (TOP) ----------------
+
+preds = [groups[-w] for w in top_windows]
+
+c = Counter(preds)
+
+vote, confidence = c.most_common(1)[0]
+
+current_group = groups[-1]
+current_number = numbers[-1]
+
+st.title("🎯 LIVE SIGNAL")
+
+col1, col2 = st.columns(2)
+
+col1.metric("Current Number", current_number)
+col2.metric("Current Group", current_group)
+
+st.write("Prediction Windows:", top_windows)
+st.write("Predictions:", preds)
+st.write("Confidence:", confidence)
+
+if confidence >= 2 and current_group != vote:
+
+    st.success(f"""
+🔥 BET GROUP {vote}
+
+Confidence {confidence}/3
+""")
+
+else:
+
+    st.warning("WAIT SIGNAL")
+
+
+# ---------------- WINDOW INFO ----------------
 
 st.subheader("Top Windows")
 
@@ -132,10 +173,13 @@ for i in range(SCAN, len(groups)):
         last_trade = i
 
         if groups[i] == vote:
+
             profit += WIN
             hit = 1
             hits.append(1)
+
         else:
+
             profit += LOSS
             hit = 0
             hits.append(0)
@@ -144,7 +188,6 @@ for i in range(SCAN, len(groups)):
         "round": i,
         "number": numbers[i],
         "group": groups[i],
-        "predictions": preds,
         "vote": vote,
         "confidence": confidence,
         "signal": signal,
@@ -176,38 +219,14 @@ winrate = np.mean(hits) if trades > 0 else 0
 col3.metric("Winrate %", round(winrate * 100, 2))
 
 
-# ---------------- EQUITY CURVE ----------------
+# ---------------- EQUITY ----------------
 
 st.subheader("Equity Curve")
 
-if not hist.empty and "profit" in hist.columns:
+if not hist.empty:
     st.line_chart(hist["profit"])
 else:
     st.info("No trades yet")
-
-
-# ---------------- NEXT SIGNAL ----------------
-
-preds = [groups[-w] for w in top_windows]
-
-c = Counter(preds)
-
-vote, confidence = c.most_common(1)[0]
-
-st.subheader("Next Signal")
-
-col1, col2 = st.columns(2)
-
-col1.metric("Current Number", numbers[-1])
-col2.metric("Current Group", groups[-1])
-
-st.write("Predictions:", preds)
-st.write("Confidence:", confidence)
-
-if confidence >= 2 and groups[-1] != vote:
-    st.success(f"🔥 BET GROUP {vote}")
-else:
-    st.warning("WAIT")
 
 
 # ---------------- HISTORY ----------------
