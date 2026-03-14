@@ -2,174 +2,177 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-SCAN=120
-GAP=4
+SCAN = 150
+WINDOW_MIN = 6
+WINDOW_MAX = 20
 
-TARGET=10
-STOP=-10
+GAP = 4
 
-WIN=2.5
-LOSS=-1
+TARGET = 10
+STOP = -10
 
-WINDOW_RANGE=range(6,20)
+WIN = 2.5
+LOSS = -1
 
 st.set_page_config(layout="wide")
 
 # ---------------- GROUP ----------------
 
 def group(n):
+    if n <= 3:
+        return 1
+    elif n <= 6:
+        return 2
+    elif n <= 9:
+        return 3
+    else:
+        return 4
 
-    if n<=3: return 1
-    if n<=6: return 2
-    if n<=9: return 3
-    return 4
 
-
-# ---------------- LOAD ----------------
+# ---------------- LOAD DATA ----------------
 
 @st.cache_data(ttl=5)
-def load():
+def load_data():
 
-    df=pd.read_csv(DATA_URL)
+    df = pd.read_csv(DATA_URL)
 
-    df.columns=[c.lower() for c in df.columns]
+    df.columns = [c.lower() for c in df.columns]
 
-    return df["number"].dropna().astype(int).tolist()
+    numbers = df["number"].dropna().astype(int).tolist()
 
-
-numbers=load()
-
-groups=[group(n) for n in numbers]
+    return numbers
 
 
-# ---------------- SCAN WINDOW ----------------
+numbers = load_data()
 
-scan_groups=groups[:SCAN]
+groups = [group(n) for n in numbers]
 
-results=[]
 
-for w in WINDOW_RANGE:
+# ---------------- WINDOW SCAN ----------------
 
-    profit=0
-    trades=0
-    wins=0
+scan_groups = groups[:SCAN]
 
-    for i in range(w,len(scan_groups)):
+results = []
 
-        pred=scan_groups[i-w]
+for window in range(WINDOW_MIN, WINDOW_MAX + 1):
 
-        if scan_groups[i-1]!=pred:
+    profit = 0
+    trades = 0
+    wins = 0
 
-            trades+=1
+    for i in range(window, len(scan_groups)):
 
-            if scan_groups[i]==pred:
+        pred = scan_groups[i-window]
 
-                profit+=WIN
-                wins+=1
+        # điều kiện signal
+        if scan_groups[i-1] != pred:
+
+            trades += 1
+
+            if scan_groups[i] == pred:
+
+                profit += WIN
+                wins += 1
 
             else:
 
-                profit+=LOSS
+                profit += LOSS
 
+    if trades > 10:
 
-    if trades>5:
+        winrate = wins / trades
 
-        wr=wins/trades
-
-        score=profit*wr*np.log(trades)
+        score = profit * winrate * np.log(trades)
 
         results.append({
 
-            "window":w,
-            "profit":profit,
-            "trades":trades,
-            "winrate":wr,
-            "score":score
+            "window": window,
+            "profit": profit,
+            "trades": trades,
+            "winrate": round(winrate,4),
+            "score": score
 
         })
 
 
-scan_df=pd.DataFrame(results)
+scan_df = pd.DataFrame(results).sort_values("score", ascending=False)
 
-scan_df=scan_df.sort_values("score",ascending=False)
-
-LOCK_WINDOW=int(scan_df.iloc[0].window)
-
+LOCK_WINDOW = int(scan_df.iloc[0]["window"])
 
 st.subheader("Window Scan Result")
-
 st.dataframe(scan_df)
 
-st.write("LOCK WINDOW:",LOCK_WINDOW)
+st.success(f"LOCK WINDOW: {LOCK_WINDOW}")
 
 
 # ---------------- TRADE ENGINE ----------------
 
-profit=0
-last_trade=-999
+profit = 0
+last_trade_index = -999
 
-history=[]
+history = []
 
-for i in range(SCAN,len(groups)):
+for i in range(SCAN, len(groups)):
 
-    pred=groups[i-LOCK_WINDOW]
+    pred = groups[i-LOCK_WINDOW]
 
-    state="WAIT"
-    hit=None
+    signal = False
+    hit = None
 
-    if i-last_trade>=GAP and groups[i-1]!=pred:
+    # signal condition
+    if groups[i-1] != pred and (i - last_trade_index) >= GAP:
 
-        last_trade=i
-        state="TRADE"
+        signal = True
+        last_trade_index = i
 
-        if groups[i]==pred:
+        if groups[i] == pred:
 
-            profit+=WIN
-            hit=1
+            profit += WIN
+            hit = 1
 
         else:
 
-            profit+=LOSS
-            hit=0
+            profit += LOSS
+            hit = 0
 
 
     history.append({
 
-        "round":i,
-        "group":groups[i],
-        "pred":pred,
-        "hit":hit,
-        "profit":profit,
-        "state":state
+        "round": i,
+        "group": groups[i],
+        "pred": pred,
+        "signal": signal,
+        "hit": hit,
+        "profit": profit
 
     })
 
 
-    if profit>=TARGET:
+    if profit >= TARGET:
         break
 
-    if profit<=STOP:
+    if profit <= STOP:
         break
 
 
-hist=pd.DataFrame(history)
+hist = pd.DataFrame(history)
 
 
 # ---------------- DASHBOARD ----------------
 
 st.subheader("Session Result")
 
-col1,col2,col3=st.columns(3)
+col1,col2,col3 = st.columns(3)
 
-col1.metric("Profit",profit)
+col1.metric("Profit", profit)
 
-col2.metric("Trades",hist.hit.count())
+col2.metric("Trades", hist.hit.count())
 
-wr=hist.hit.mean() if hist.hit.count()>0 else 0
+wr = hist.hit.mean() if hist.hit.count() > 0 else 0
 
-col3.metric("Winrate",round(wr*100,2))
+col3.metric("Winrate %", round(wr*100,2))
 
 
 # ---------------- EQUITY ----------------
@@ -179,13 +182,13 @@ st.subheader("Equity Curve")
 st.line_chart(hist.profit)
 
 
-# ---------------- SIGNAL ----------------
+# ---------------- NEXT SIGNAL ----------------
 
-pred=groups[-LOCK_WINDOW]
+pred = groups[-LOCK_WINDOW]
 
 st.subheader("Next Signal")
 
-if groups[-1]!=pred:
+if groups[-1] != pred:
 
     st.success(f"BET GROUP {pred}")
 
