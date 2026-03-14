@@ -8,6 +8,8 @@ SCAN = 150
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
+TOP_WINDOWS = 3
+
 GAP = 4
 
 TARGET = 10
@@ -16,11 +18,11 @@ STOP = -10
 WIN = 2.5
 LOSS = -1
 
-st.set_page_config(layout="wide")
 
 # ---------------- GROUP ----------------
 
 def group(n):
+
     if n <= 3:
         return 1
     elif n <= 6:
@@ -66,7 +68,6 @@ for window in range(WINDOW_MIN, WINDOW_MAX + 1):
 
         pred = scan_groups[i-window]
 
-        # điều kiện signal
         if scan_groups[i-1] != pred:
 
             trades += 1
@@ -87,24 +88,23 @@ for window in range(WINDOW_MIN, WINDOW_MAX + 1):
         score = profit * winrate * np.log(trades)
 
         results.append({
-
             "window": window,
             "profit": profit,
             "trades": trades,
-            "winrate": round(winrate,4),
+            "winrate": winrate,
             "score": score
-
         })
 
 
 scan_df = pd.DataFrame(results).sort_values("score", ascending=False)
 
-LOCK_WINDOW = int(scan_df.iloc[0]["window"])
+TOP = scan_df.head(TOP_WINDOWS)
 
-st.subheader("Window Scan Result")
-st.dataframe(scan_df)
+top_windows = TOP["window"].tolist()
 
-st.success(f"LOCK WINDOW: {LOCK_WINDOW}")
+st.subheader("Top Windows")
+
+st.dataframe(TOP)
 
 
 # ---------------- TRADE ENGINE ----------------
@@ -116,18 +116,26 @@ history = []
 
 for i in range(SCAN, len(groups)):
 
-    pred = groups[i-LOCK_WINDOW]
+    preds = []
+
+    for w in top_windows:
+
+        preds.append(groups[i-w])
+
+    vote = max(set(preds), key=preds.count)
+
+    confidence = preds.count(vote)
 
     signal = False
     hit = None
 
-    # signal condition
-    if groups[i-1] != pred and (i - last_trade_index) >= GAP:
+    if confidence >= 2 and groups[i-1] != vote and (i - last_trade_index) >= GAP:
 
         signal = True
+
         last_trade_index = i
 
-        if groups[i] == pred:
+        if groups[i] == vote:
 
             profit += WIN
             hit = 1
@@ -139,14 +147,14 @@ for i in range(SCAN, len(groups)):
 
 
     history.append({
-
         "round": i,
         "group": groups[i],
-        "pred": pred,
+        "predictions": preds,
+        "vote": vote,
+        "confidence": confidence,
         "signal": signal,
         "hit": hit,
         "profit": profit
-
     })
 
 
@@ -184,13 +192,21 @@ st.line_chart(hist.profit)
 
 # ---------------- NEXT SIGNAL ----------------
 
-pred = groups[-LOCK_WINDOW]
+preds = []
+
+for w in top_windows:
+
+    preds.append(groups[-w])
+
+vote = max(set(preds), key=preds.count)
+
+confidence = preds.count(vote)
 
 st.subheader("Next Signal")
 
-if groups[-1] != pred:
+if confidence >= 2 and groups[-1] != vote:
 
-    st.success(f"BET GROUP {pred}")
+    st.success(f"BET GROUP {vote}")
 
 else:
 
