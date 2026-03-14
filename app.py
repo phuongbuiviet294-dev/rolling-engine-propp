@@ -15,7 +15,7 @@ WIN=2.5
 LOSS=-1
 
 
-# -------- GROUP --------
+# ---------- GROUP ----------
 def group(n):
 
     if n<=3: return 1
@@ -24,7 +24,7 @@ def group(n):
     return 4
 
 
-# -------- LOAD DATA --------
+# ---------- LOAD ----------
 @st.cache_data(ttl=5)
 def load():
 
@@ -44,7 +44,7 @@ numbers=load()
 groups=[group(n) for n in numbers]
 
 
-# -------- WINDOW SCAN --------
+# ---------- WINDOW SCAN ----------
 
 scan_groups=groups[:SCAN]
 
@@ -65,12 +65,9 @@ for w in range(WINDOW_MIN,WINDOW_MAX+1):
             trades+=1
 
             if scan_groups[i]==pred:
-
                 profit+=WIN
                 wins+=1
-
             else:
-
                 profit+=LOSS
 
     if trades>10:
@@ -90,7 +87,7 @@ scan_df=pd.DataFrame(results).sort_values("score",ascending=False)
 top_windows=scan_df.head(3)["window"].tolist()
 
 
-# -------- TRADE ENGINE --------
+# ---------- ENGINE ----------
 
 profit=0
 last_trade=-999
@@ -103,9 +100,7 @@ for i in range(SCAN,len(groups)):
 
     preds=[groups[i-w] for w in top_windows]
 
-    c=Counter(preds)
-
-    vote,confidence=c.most_common(1)[0]
+    vote,confidence=Counter(preds).most_common(1)[0]
 
     signal=False
     trade=False
@@ -113,31 +108,27 @@ for i in range(SCAN,len(groups)):
     hit=None
 
 
-    # signal detection
     if confidence>=2 and groups[i-1]!=vote:
 
         signal=True
 
+        if (i-last_trade)>=GAP:
 
-    # trade condition
-    if signal and (i-last_trade)>=GAP:
+            trade=True
+            bet_group=vote
+            last_trade=i
 
-        trade=True
-        bet_group=vote
+            if groups[i]==vote:
 
-        last_trade=i
+                profit+=WIN
+                hit=1
+                hits.append(1)
 
-        if groups[i]==vote:
+            else:
 
-            profit+=WIN
-            hit=1
-            hits.append(1)
-
-        else:
-
-            profit+=LOSS
-            hit=0
-            hits.append(0)
+                profit+=LOSS
+                hit=0
+                hits.append(0)
 
 
     history.append({
@@ -162,15 +153,13 @@ for i in range(SCAN,len(groups)):
 hist=pd.DataFrame(history)
 
 
-# -------- LIVE NEXT SIGNAL --------
+# ---------- LIVE NEXT ROUND ----------
 
 i=len(groups)
 
 preds=[groups[i-w] for w in top_windows]
 
-c=Counter(preds)
-
-vote,confidence=c.most_common(1)[0]
+vote,confidence=Counter(preds).most_common(1)[0]
 
 distance=i-last_trade
 
@@ -178,7 +167,7 @@ current_number=numbers[-1]
 current_group=groups[-1]
 
 
-st.title("🎯 LIVE SIGNAL")
+st.title("🎯 LIVE NEXT ROUND")
 
 col1,col2=st.columns(2)
 
@@ -187,18 +176,17 @@ col2.metric("Current Group",current_group)
 
 st.divider()
 
-
-if confidence>=2 and groups[-1]!=vote and distance>=GAP:
+if confidence>=2 and current_group!=vote and distance>=GAP:
 
     st.markdown(
         f"""
         <div style="
-        background-color:#ff4b4b;
+        background:#ff4b4b;
         padding:25px;
-        border-radius:12px;
+        border-radius:10px;
         text-align:center;
-        color:white;
         font-size:32px;
+        color:white;
         font-weight:bold;">
         BET GROUP {vote}
         </div>
@@ -206,26 +194,12 @@ if confidence>=2 and groups[-1]!=vote and distance>=GAP:
         unsafe_allow_html=True
     )
 
-    st.write(f"Next Round Signal | Confidence {confidence}/3")
-
 else:
 
-    st.markdown(
-        """
-        <div style="
-        background-color:#eeeeee;
-        padding:20px;
-        border-radius:10px;
-        text-align:center;
-        font-size:24px;">
-        WAIT SIGNAL
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    st.info("WAIT SIGNAL")
 
 
-# -------- SESSION RESULT --------
+# ---------- RESULT ----------
 
 st.subheader("Session Result")
 
@@ -242,16 +216,14 @@ wr=np.mean(hits) if trades>0 else 0
 col3.metric("Winrate %",round(wr*100,2))
 
 
-# -------- EQUITY --------
+# ---------- EQUITY ----------
 
 st.subheader("Equity Curve")
 
-if len(hist)>0:
-
-    st.line_chart(hist["profit"])
+st.line_chart(hist["profit"])
 
 
-# -------- HISTORY --------
+# ---------- HISTORY ----------
 
 st.subheader("History")
 
