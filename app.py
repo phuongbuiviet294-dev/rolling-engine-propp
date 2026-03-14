@@ -24,7 +24,7 @@ def group(n):
     return 4
 
 
-# ---------- LOAD ----------
+# ---------- LOAD DATA ----------
 @st.cache_data(ttl=5)
 def load():
 
@@ -45,7 +45,6 @@ groups=[group(n) for n in numbers]
 
 
 # ---------- WINDOW SCAN ----------
-
 scan_groups=groups[:SCAN]
 
 results=[]
@@ -73,7 +72,6 @@ for w in range(WINDOW_MIN,WINDOW_MAX+1):
     if trades>10:
 
         wr=wins/trades
-
         score=profit*wr*np.log(trades)
 
         results.append({
@@ -87,87 +85,21 @@ scan_df=pd.DataFrame(results).sort_values("score",ascending=False)
 top_windows=scan_df.head(3)["window"].tolist()
 
 
-# ---------- ENGINE ----------
-
-profit=0
-last_trade=-999
-
-history=[]
-hits=[]
-
-
-for i in range(SCAN,len(groups)):
-
-    preds=[groups[i-w] for w in top_windows]
-
-    vote,confidence=Counter(preds).most_common(1)[0]
-
-    signal=False
-    trade=False
-    bet_group=None
-    hit=None
-
-
-    if confidence>=2 and groups[i-1]!=vote:
-
-        signal=True
-
-        if (i-last_trade)>=GAP:
-
-            trade=True
-            bet_group=vote
-            last_trade=i
-
-            if groups[i]==vote:
-
-                profit+=WIN
-                hit=1
-                hits.append(1)
-
-            else:
-
-                profit+=LOSS
-                hit=0
-                hits.append(0)
-
-
-    history.append({
-
-        "round":i,
-        "number":numbers[i],
-        "group":groups[i],
-
-        "vote":vote,
-        "confidence":confidence,
-
-        "signal":signal,
-        "trade":trade,
-
-        "bet_group":bet_group,
-        "hit":hit,
-
-        "profit":profit
-    })
-
-
-hist=pd.DataFrame(history)
-
-
-# ---------- LIVE NEXT ROUND ----------
-
+# ---------- NEXT GROUP ----------
 i=len(groups)
 
 preds=[groups[i-w] for w in top_windows]
 
 vote,confidence=Counter(preds).most_common(1)[0]
 
-distance=i-last_trade
 
+# ---------- CURRENT ----------
 current_number=numbers[-1]
 current_group=groups[-1]
 
 
-st.title("🎯 LIVE NEXT ROUND")
+# ---------- UI ----------
+st.title("🎯 NEXT BET")
 
 col1,col2=st.columns(2)
 
@@ -176,7 +108,7 @@ col2.metric("Current Group",current_group)
 
 st.divider()
 
-if confidence>=2 and current_group!=vote and distance>=GAP:
+if confidence>=2 and current_group!=vote:
 
     st.markdown(
         f"""
@@ -188,7 +120,7 @@ if confidence>=2 and current_group!=vote and distance>=GAP:
         font-size:32px;
         color:white;
         font-weight:bold;">
-        BET GROUP {vote}
+        NEXT GROUP → {vote}
         </div>
         """,
         unsafe_allow_html=True
@@ -196,50 +128,22 @@ if confidence>=2 and current_group!=vote and distance>=GAP:
 
 else:
 
-    st.info("WAIT SIGNAL")
+    st.markdown(
+        """
+        <div style="
+        background:#eeeeee;
+        padding:20px;
+        border-radius:10px;
+        text-align:center;
+        font-size:24px;">
+        WAIT
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
-# ---------- RESULT ----------
+# ---------- TOP WINDOWS ----------
+st.subheader("Top Windows")
 
-st.subheader("Session Result")
-
-col1,col2,col3=st.columns(3)
-
-col1.metric("Profit",profit)
-
-trades=len(hits)
-
-col2.metric("Trades",trades)
-
-wr=np.mean(hits) if trades>0 else 0
-
-col3.metric("Winrate %",round(wr*100,2))
-
-
-# ---------- EQUITY ----------
-
-st.subheader("Equity Curve")
-
-st.line_chart(hist["profit"])
-
-
-# ---------- HISTORY ----------
-
-st.subheader("History")
-
-st.dataframe(
-
-    hist.iloc[::-1][[
-        "round",
-        "number",
-        "group",
-        "vote",
-        "confidence",
-        "signal",
-        "trade",
-        "bet_group",
-        "hit",
-        "profit"
-    ]]
-
-)
+st.dataframe(scan_df.head(5))
