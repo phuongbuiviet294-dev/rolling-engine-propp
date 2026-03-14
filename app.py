@@ -141,7 +141,6 @@ for i in range(SCAN, len(groups)):
         "round": i,
         "number": numbers[i],
         "group": groups[i],
-        "predictions": preds,
         "vote": vote,
         "confidence": confidence,
         "trade": trade,
@@ -157,7 +156,10 @@ for i in range(SCAN, len(groups)):
 hist = pd.DataFrame(history)
 
 
-# ---------------- NEXT SIGNAL ----------------
+# ---------------- LIVE SIGNAL ----------------
+
+current_number = numbers[-1]
+current_group = groups[-1]
 
 preds = [groups[-w] for w in top_windows]
 
@@ -165,14 +167,11 @@ c = Counter(preds)
 
 vote, confidence = c.most_common(1)[0]
 
-current_group = groups[-1]
-current_number = numbers[-1]
-current_index = len(groups)-1
-
+current_index = len(groups) - 1
 
 st.title("🎯 LIVE SIGNAL")
 
-col1,col2 = st.columns(2)
+col1, col2 = st.columns(2)
 
 col1.metric("Current Number", current_number)
 col2.metric("Current Group", current_group)
@@ -182,17 +181,23 @@ st.write("Predictions:", preds)
 st.write("Confidence:", confidence)
 
 
-if confidence >= 2 and current_group != vote and (current_index-last_trade) >= GAP:
+if confidence >= 2 and groups[-1] != vote and (current_index-last_trade) >= GAP:
 
     st.success(f"""
 🔥 BET GROUP {vote}
 
+FOR NEXT ROUND
 Confidence {confidence}/3
 """)
 
 else:
 
-    st.warning("WAIT SIGNAL")
+    gap_left = GAP - (current_index-last_trade)
+
+    if gap_left > 0:
+        st.warning(f"WAIT GAP {gap_left} ROUNDS")
+    else:
+        st.warning("WAIT SIGNAL")
 
 
 # ---------------- WINDOW INFO ----------------
@@ -206,7 +211,7 @@ st.dataframe(TOP, use_container_width=True)
 
 st.subheader("Session Result")
 
-col1,col2,col3 = st.columns(3)
+col1, col2, col3 = st.columns(3)
 
 col1.metric("Profit", profit)
 
@@ -214,9 +219,9 @@ trades = len(hits)
 
 col2.metric("Trades", trades)
 
-wr = np.mean(hits) if trades>0 else 0
+wr = np.mean(hits) if trades > 0 else 0
 
-col3.metric("Winrate %", round(wr*100,2))
+col3.metric("Winrate %", round(wr * 100, 2))
 
 
 # ---------------- EQUITY CURVE ----------------
