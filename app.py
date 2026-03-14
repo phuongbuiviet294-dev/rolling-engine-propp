@@ -1,12 +1,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-WIN=0.5
-LOSS=-3
+SCAN=120
+GAP=4
+
+TARGET=10
+STOP=-10
+
+WIN=2.5
+LOSS=-1
+
+WINDOW_RANGE=range(6,20)
 
 st.set_page_config(layout="wide")
 
@@ -36,193 +43,159 @@ numbers=load()
 
 groups=[group(n) for n in numbers]
 
-st.title("Advanced Dataset Analyzer")
 
+# ---------------- SCAN WINDOW ----------------
 
-# ---------------- DISTRIBUTION ----------------
-
-st.subheader("Group Distribution")
-
-dist=pd.Series(groups).value_counts().sort_index()
-
-st.write(dist)
-
-st.bar_chart(dist)
-
-
-# ---------------- TRANSITION MATRIX ----------------
-
-st.subheader("Transition Probability")
-
-matrix=np.zeros((4,4))
-
-for i in range(1,len(groups)):
-
-    matrix[groups[i-1]-1][groups[i]-1]+=1
-
-matrix=matrix/matrix.sum(axis=1,keepdims=True)
-
-st.write(pd.DataFrame(matrix,
-columns=["to1","to2","to3","to4"],
-index=["from1","from2","from3","from4"]))
-
-
-# ---------------- STREAK ANALYSIS ----------------
-
-st.subheader("Streak Distribution")
-
-streaks=[]
-
-current=1
-
-for i in range(1,len(groups)):
-
-    if groups[i]==groups[i-1]:
-
-        current+=1
-
-    else:
-
-        streaks.append(current)
-
-        current=1
-
-streaks.append(current)
-
-streak_df=pd.Series(streaks)
-
-st.write(streak_df.describe())
-
-st.bar_chart(streak_df.value_counts().sort_index())
-
-
-# ---------------- PATTERN SCAN ----------------
-
-st.subheader("Pattern Scan")
-
-patterns={}
-
-for i in range(2,len(groups)):
-
-    key=f"{groups[i-2]}{groups[i-1]}"
-
-    nextg=groups[i]
-
-    if key not in patterns:
-
-        patterns[key]=[]
-
-    patterns[key].append(nextg)
-
-pattern_result={}
-
-for k,v in patterns.items():
-
-    counts=Counter(v)
-
-    total=len(v)
-
-    best=max(counts.values())/total
-
-    pattern_result[k]=best
-
-pattern_df=pd.DataFrame.from_dict(pattern_result,orient="index",columns=["max_prob"])
-
-st.write(pattern_df.sort_values("max_prob",ascending=False).head(20))
-
-
-# ---------------- WINDOW SCAN ----------------
-
-st.subheader("Window Scan")
+scan_groups=groups[:SCAN]
 
 results=[]
 
-for w in range(2,50):
+for w in WINDOW_RANGE:
 
     profit=0
     trades=0
+    wins=0
 
-    for i in range(w,len(groups)):
+    for i in range(w,len(scan_groups)):
 
-        g1=groups[i-w]
+        pred=scan_groups[i-w]
 
-        if groups[i-1]!=g1:
+        if scan_groups[i-1]!=pred:
 
             trades+=1
 
-            if groups[i]==g1:
+            if scan_groups[i]==pred:
 
                 profit+=WIN
+                wins+=1
 
             else:
 
                 profit+=LOSS
 
-    results.append((w,profit,trades))
+
+    if trades>5:
+
+        wr=wins/trades
+
+        score=profit*wr*np.log(trades)
+
+        results.append({
+
+            "window":w,
+            "profit":profit,
+            "trades":trades,
+            "winrate":wr,
+            "score":score
+
+        })
 
 
-window_df=pd.DataFrame(results,columns=["window","profit","trades"])
+scan_df=pd.DataFrame(results)
 
-st.write(window_df.sort_values("profit",ascending=False).head(10))
+scan_df=scan_df.sort_values("score",ascending=False)
+
+LOCK_WINDOW=int(scan_df.iloc[0].window)
 
 
-# ---------------- STREAK STRATEGY ----------------
+st.subheader("Window Scan Result")
 
-st.subheader("Strategy: Streak >=4")
+st.dataframe(scan_df)
+
+st.write("LOCK WINDOW:",LOCK_WINDOW)
+
+
+# ---------------- TRADE ENGINE ----------------
 
 profit=0
+last_trade=-999
 
-hits=0
+history=[]
 
-trades=0
+for i in range(SCAN,len(groups)):
 
-equity=[]
+    pred=groups[i-LOCK_WINDOW]
 
-for i in range(4,len(groups)):
+    state="WAIT"
+    hit=None
 
-    last4=groups[i-4:i]
+    if i-last_trade>=GAP and groups[i-1]!=pred:
 
-    if len(set(last4))==1:
+        last_trade=i
+        state="TRADE"
 
-        trades+=1
-
-        if groups[i]!=last4[0]:
+        if groups[i]==pred:
 
             profit+=WIN
-            hits+=1
+            hit=1
 
         else:
 
             profit+=LOSS
-
-    equity.append(profit)
-
-wr=hits/trades if trades else 0
-
-st.write("Trades:",trades)
-
-st.write("Winrate:",wr)
-
-st.write("Profit:",profit)
-
-st.line_chart(pd.DataFrame({"equity":equity}))
+            hit=0
 
 
-# ---------------- DAILY OPPORTUNITY ----------------
+    history.append({
 
-st.subheader("Daily Opportunities")
+        "round":i,
+        "group":groups[i],
+        "pred":pred,
+        "hit":hit,
+        "profit":profit,
+        "state":state
 
-rounds_per_day=288
-
-prob_streak4=(1/4)**3
-
-expected=rounds_per_day*prob_streak4
-
-st.write("Expected trades/day:",expected)
+    })
 
 
-# ---------------- LONGEST STREAK ----------------
+    if profit>=TARGET:
+        break
 
-st.subheader("Longest Streak")
+    if profit<=STOP:
+        break
 
-st.write(max(streaks))
+
+hist=pd.DataFrame(history)
+
+
+# ---------------- DASHBOARD ----------------
+
+st.subheader("Session Result")
+
+col1,col2,col3=st.columns(3)
+
+col1.metric("Profit",profit)
+
+col2.metric("Trades",hist.hit.count())
+
+wr=hist.hit.mean() if hist.hit.count()>0 else 0
+
+col3.metric("Winrate",round(wr*100,2))
+
+
+# ---------------- EQUITY ----------------
+
+st.subheader("Equity Curve")
+
+st.line_chart(hist.profit)
+
+
+# ---------------- SIGNAL ----------------
+
+pred=groups[-LOCK_WINDOW]
+
+st.subheader("Next Signal")
+
+if groups[-1]!=pred:
+
+    st.success(f"BET GROUP {pred}")
+
+else:
+
+    st.info("WAIT")
+
+
+# ---------------- HISTORY ----------------
+
+st.subheader("History")
+
+st.dataframe(hist.iloc[::-1])
