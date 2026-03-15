@@ -5,7 +5,7 @@ from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-SCAN=180
+SCAN=168
 WINDOW_MIN=6
 WINDOW_MAX=20
 GAP=4
