@@ -3,119 +3,228 @@ import pandas as pd
 import numpy as np
 from collections import Counter
 
-DATA_URL = "https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-SCAN = 168
-WINDOW_MIN = 6
-WINDOW_MAX = 20
-GAP = 4
+SCAN=168
+WINDOW_MIN=6
+WINDOW_MAX=20
+GAP=4
 
-WIN = 2.5
-LOSS = -1
+WIN=2.5
+LOSS=-1
 
 
-# ---------- GROUP ----------
+# ---------------- GROUP ----------------
 def group(n):
-    if n <= 3:
-        return 1
-    elif n <= 6:
-        return 2
-    elif n <= 9:
-        return 3
-    else:
-        return 4
+    if n<=3: return 1
+    if n<=6: return 2
+    if n<=9: return 3
+    return 4
 
 
-# ---------- LOAD DATA ----------
+# ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=5)
 def load():
 
-    df = pd.read_csv(DATA_URL)
+    df=pd.read_csv(DATA_URL)
 
-    df.columns = [c.lower() for c in df.columns]
+    df.columns=[c.lower() for c in df.columns]
 
-    df["number"] = pd.to_numeric(df["number"], errors="coerce")
+    df["number"]=pd.to_numeric(df["number"],errors="coerce")
 
-    numbers = df["number"].dropna().astype(int).tolist()
+    numbers=df["number"].dropna().astype(int).tolist()
 
     return numbers
 
 
-numbers = load()
+numbers=load()
 
-groups = [group(n) for n in numbers]
+groups=[group(n) for n in numbers]
 
 
-# ---------- WINDOW SCAN ----------
-scan_groups = groups[:SCAN]
+# ---------------- WINDOW SCAN ----------------
+scan_groups=groups[:SCAN]
 
-results = []
+results=[]
 
-for w in range(WINDOW_MIN, WINDOW_MAX + 1):
+for w in range(WINDOW_MIN,WINDOW_MAX+1):
 
-    profit = 0
-    trades = 0
-    wins = 0
+    profit=0
+    trades=0
+    wins=0
 
-    for i in range(w, len(scan_groups)):
+    for i in range(w,len(scan_groups)):
 
-        pred = scan_groups[i - w]
+        pred=scan_groups[i-w]
 
-        if scan_groups[i - 1] != pred:
+        if scan_groups[i-1]!=pred:
 
-            trades += 1
+            trades+=1
 
-            if scan_groups[i] == pred:
-                profit += WIN
-                wins += 1
+            if scan_groups[i]==pred:
+                profit+=WIN
+                wins+=1
             else:
-                profit += LOSS
+                profit+=LOSS
 
-    if trades > 10:
+    if trades>10:
 
-        wr = wins / trades
+        wr=wins/trades
+        score=profit*wr*np.log(trades)
 
-        score = profit * wr * np.log(trades)
-
-        results.append({
-            "window": w,
-            "score": score
-        })
+        results.append((w,score))
 
 
-scan_df = pd.DataFrame(results).sort_values("score", ascending=False)
+if len(results)==0:
 
-top_windows = scan_df.head(3)["window"].tolist()
+    top_windows=[6,8,10]
+
+else:
+
+    results.sort(key=lambda x:x[1],reverse=True)
+
+    top_windows=[r[0] for r in results[:3]]
 
 
-# ---------- TRADE ENGINE ----------
-profit = 0
+# ---------------- TRADE ENGINE ----------------
+profit=0
+last_trade=-999
 
-last_trade = -999
+history=[]
+hits=[]
 
-history = []
+for i in range(SCAN,len(groups)):
 
-hits = []
+    preds=[groups[i-w] for w in top_windows]
 
-for i in range(SCAN, len(groups)):
+    vote,confidence=Counter(preds).most_common(1)[0]
 
-    preds = [groups[i - w] for w in top_windows]
+    signal=False
+    trade=False
+    bet_group=None
+    hit=None
+    state="WAIT"
 
-    vote, confidence = Counter(preds).most_common(1)[0]
+    if confidence>=2 and groups[i-1]!=vote:
 
-    signal = False
-    trade = False
-    bet_group = None
-    hit = None
-    state = "WAIT"
+        signal=True
+        state="SIGNAL"
 
-    if confidence >= 2 and groups[i - 1] != vote:
+        if (i-last_trade)>=GAP:
 
-        signal = True
-        state = "SIGNAL"
+            trade=True
+            state="TRADE"
+            bet_group=vote
 
-        if (i - last_trade) >= GAP:
+            last_trade=i
 
-            trade = True
-            bet_group = vote
-            last_trade
+            if groups[i]==vote:
+
+                hit=1
+                profit+=WIN
+                hits.append(1)
+
+            else:
+
+                hit=0
+                profit+=LOSS
+                hits.append(0)
+
+    history.append({
+
+        "round":i,
+        "number":numbers[i],
+        "group":groups[i],
+        "vote":vote,
+        "confidence":confidence,
+        "state":state,
+        "signal":signal,
+        "trade":trade,
+        "bet_group":bet_group,
+        "hit":hit,
+        "profit":profit
+
+    })
+
+
+hist=pd.DataFrame(history)
+
+
+# ---------------- NEXT BET ----------------
+i=len(groups)
+
+preds=[groups[i-w] for w in top_windows]
+
+vote,confidence=Counter(preds).most_common(1)[0]
+
+current_number=numbers[-1]
+current_group=groups[-1]
+
+last_trade_rows=hist[hist["trade"]==True]
+
+if len(last_trade_rows)==0:
+    distance=999
+else:
+    distance=i-last_trade_rows["round"].max()
+
+signal=confidence>=2 and current_group!=vote
+
+trade=signal and distance>=GAP
+
+
+# ---------------- UI ----------------
+st.title("🎯 NEXT BET")
+
+col1,col2=st.columns(2)
+
+col1.metric("Current Number",current_number)
+col2.metric("Current Group",current_group)
+
+st.divider()
+
+if trade:
+
+    st.markdown(f"""
+    <div style="background:#ff4b4b;
+    padding:25px;
+    border-radius:10px;
+    text-align:center;
+    font-size:32px;
+    color:white;
+    font-weight:bold;">
+    BET GROUP → {vote}
+    </div>
+    """,unsafe_allow_html=True)
+
+else:
+
+    st.info("WAIT")
+
+
+# ---------------- SESSION STATS ----------------
+st.subheader("Session Statistics")
+
+col1,col2,col3=st.columns(3)
+
+col1.metric("Profit",profit)
+
+trades=len(hits)
+
+col2.metric("Trades",trades)
+
+wr=np.mean(hits) if trades>0 else 0
+
+col3.metric("Winrate %",round(wr*100,2))
+
+
+# ---------------- PROFIT CURVE ----------------
+st.subheader("Profit Curve")
+
+if len(hist)>0:
+    st.line_chart(hist["profit"])
+
+
+# ---------------- HISTORY ----------------
+st.subheader("History")
+
+st.dataframe(hist.iloc[::-1])
