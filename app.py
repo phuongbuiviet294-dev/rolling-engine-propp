@@ -22,7 +22,7 @@ def group(n):
     return 4
 
 # ---------------- LOAD DATA ----------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=50)
 def load_numbers():
     df = pd.read_csv(DATA_URL)
     df.columns = [c.lower() for c in df.columns]
