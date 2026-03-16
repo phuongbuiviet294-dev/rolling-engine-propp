@@ -44,8 +44,6 @@ def group(n):
 groups = [group(n) for n in numbers]
 
 # ---------------- WINDOW SCAN ----------------
-scan_groups = groups[-SCAN:]
-
 def scan_windows(scan_groups):
     results = []
     for w in range(WINDOW_MIN, WINDOW_MAX+1):
@@ -75,7 +73,8 @@ def scan_windows(scan_groups):
     return pd.DataFrame(results).sort_values("score", ascending=False)
 
 # ---------------- LOCK WINDOWS ----------------
-# luôn tạo scan_df để hiển thị bảng
+# Scan 168 round đầu tiên để lock windows
+scan_groups = groups[:SCAN]  # round 0 → 167
 scan_df = scan_windows(scan_groups)
 
 if "top_windows" not in st.session_state:
@@ -94,10 +93,10 @@ last_trade = -999
 history = []
 hits = []
 
-start_index = max(SCAN, WINDOW_MAX)
+start_index = SCAN  # bắt đầu trade từ round 168
 
 for i in range(start_index, len(groups)):
-    preds = [groups[i-w] for w in top_windows]  # luôn dùng windows lock
+    preds = [groups[i-w] for w in top_windows]  # dùng windows đã lock
     vote, confidence = Counter(preds).most_common(1)[0]
 
     signal = confidence >= VOTE_REQUIRED and groups[i-1] != vote
@@ -168,7 +167,7 @@ next_row = {
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine (GAP=1)")
+st.title("🎯 Rolling Prediction Engine (Lock 168 đầu tiên, GAP=1)")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number)
@@ -179,7 +178,7 @@ st.divider()
 st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 
-# hiển thị Next Group prediction luôn (vàng)
+# hiển thị Next Group prediction vàng
 st.markdown(f"""
 <div style="background:#ffd700;
 padding:20px;
