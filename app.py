@@ -153,18 +153,18 @@ next_row = {
     "group": current_group,
     "vote": vote,
     "confidence": confidence,
-    "signal": signal,
+    "signal":signal,
     "trade": trade,
     "bet_group": vote if signal else None,
     "hit": None,
     "state": "NEXT",
-    "profit": profit  # giữ nguyên, không cộng
+    "profit": profit  # giữ nguyên
 }
 
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine")
+st.title("🎯 Rolling Prediction Engine (GAP=1)")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number)
@@ -175,7 +175,20 @@ st.divider()
 st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 
-if signal and distance >= GAP:
+# hiển thị Next Group prediction luôn
+st.markdown(f"""
+<div style="background:#ffd700;
+padding:20px;
+border-radius:10px;
+text-align:center;
+font-size:28px;
+font-weight:bold;">
+NEXT GROUP → {vote} (Vote Strength: {confidence})
+</div>
+""", unsafe_allow_html=True)
+
+# BET đỏ chỉ khi trade thật
+if signal and distance>=GAP:
     st.markdown(f"""
     <div style="background:#ff4b4b;
     padding:25px;
