@@ -129,7 +129,7 @@ for i in range(start_index, len(groups)):
         "bet_group": bet_group,
         "hit": hit,
         "state": state,
-        "profit": profit
+        "profit": profit   # chỉ cộng khi trade thật
     })
 
 hist = pd.DataFrame(history)
@@ -158,7 +158,7 @@ next_row = {
     "bet_group": vote if signal else None,
     "hit": None,
     "state": "NEXT",
-    "profit": profit  # giữ nguyên
+    "profit": profit   # giữ nguyên profit cuối cùng
 }
 
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
@@ -224,10 +224,10 @@ st.dataframe(scan_df, use_container_width=True)
 st.subheader("History")
 
 def highlight_trade(row):
-    if row["state"] == "NEXT":
-        return ['background-color: #ffd700']*len(row)  # Next Group
+    if row["state"]=="NEXT":
+        return ['background-color: #ffd700']*len(row)  # Next Group prediction
     elif row["trade"]:
-        return ['background-color: #ff4b4b; color:white']*len(row)  # Trade thực tế
+        return ['background-color: #ff4b4b; color:white']*len(row)  # Trade thật
     return ['']*len(row)
 
 st.dataframe(hist.iloc[::-1].style.apply(highlight_trade, axis=1), use_container_width=True)
