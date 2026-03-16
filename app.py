@@ -11,7 +11,7 @@ WINDOW_MAX = 20
 GAP = 4
 WIN = 2.5
 LOSS = -1
-TOP_N_WINDOWS = 3     # số window lock
+TOP_N_WINDOWS = 5     # số window lock
 VOTE_REQUIRED = 2     # số vote tối thiểu để đánh (ví dụ 2 hoặc 5)
 
 # ---------------- GROUP FUNCTION ----------------
