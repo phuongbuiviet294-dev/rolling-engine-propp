@@ -1,19 +1,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from collections import Counter
 
 DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-SCAN=182
-WINDOWS=[6,8,10,12,14]
+SCAN=168
+WINDOW_MIN=6
+WINDOW_MAX=20
 
 GAP=4
 
 WIN=2.5
 LOSS=-1
 
-# -------- GROUP --------
+
 def group(n):
 
     if n<=3: return 1
@@ -22,7 +22,6 @@ def group(n):
     return 4
 
 
-# -------- LOAD DATA --------
 @st.cache_data(ttl=5)
 def load():
 
@@ -40,7 +39,49 @@ numbers=load()
 groups=[group(n) for n in numbers]
 
 
-# -------- TRADE ENGINE --------
+# -------- SCAN WINDOW --------
+
+scan_groups=groups[:SCAN]
+
+results=[]
+
+for w in range(WINDOW_MIN,WINDOW_MAX+1):
+
+    profit=0
+    trades=0
+
+    for i in range(w,len(scan_groups)):
+
+        pred=scan_groups[i-w]
+
+        if scan_groups[i-1]!=pred:
+
+            trades+=1
+
+            if scan_groups[i]==pred:
+
+                profit+=WIN
+            else:
+                profit+=LOSS
+
+
+    if trades>10:
+
+        results.append({
+
+            "window":w,
+            "profit":profit,
+            "trades":trades
+        })
+
+
+scan_df=pd.DataFrame(results)
+
+LOCK_WINDOW=scan_df.sort_values("profit",ascending=False).iloc[0]["window"]
+
+
+# -------- TRADE --------
+
 profit=0
 last_trade=-999
 
@@ -50,46 +91,39 @@ hits=[]
 
 for i in range(SCAN,len(groups)):
 
-    preds=[groups[i-w] for w in WINDOWS if i-w>=0]
-
-    c=Counter(preds)
-
-    vote,confidence=c.most_common(1)[0]
+    pred=groups[i-LOCK_WINDOW]
 
     signal=False
     trade=False
     hit=None
 
-    if confidence>=2:
+
+    if pred!=groups[i-1] and (i-last_trade)>=GAP:
 
         signal=True
 
-        if groups[i-1]!=vote and (i-last_trade)>=GAP:
+        trade=True
 
-            trade=True
+        last_trade=i
 
-            last_trade=i
+        if groups[i]==pred:
 
-            if groups[i]==vote:
+            profit+=WIN
+            hit=1
+            hits.append(1)
 
-                profit+=WIN
-                hit=1
-                hits.append(1)
+        else:
 
-            else:
-
-                profit+=LOSS
-                hit=0
-                hits.append(0)
+            profit+=LOSS
+            hit=0
+            hits.append(0)
 
 
     history.append({
 
         "round":i,
-        "number":numbers[i],
         "group":groups[i],
-        "vote":vote,
-        "confidence":confidence,
+        "predict":pred,
         "signal":signal,
         "trade":trade,
         "hit":hit,
@@ -100,67 +134,39 @@ for i in range(SCAN,len(groups)):
 hist=pd.DataFrame(history)
 
 
-# -------- CURRENT --------
-current_number=numbers[-1]
+# -------- NEXT SIGNAL --------
+
 current_group=groups[-1]
 
-
-preds=[groups[-w] for w in WINDOWS]
-
-c=Counter(preds)
-
-vote,confidence=c.most_common(1)[0]
+next_pred=groups[-LOCK_WINDOW]
 
 
-# -------- UI --------
-st.title("NEXT GROUP ENGINE")
+st.title("LOCK WINDOW ENGINE")
 
+st.write("Lock Window:",LOCK_WINDOW)
 
-st.subheader("Current")
+st.write("Current Group:",current_group)
 
-st.write("Number:",current_number)
+if next_pred!=current_group:
 
-st.write("Group:",current_group)
-
-
-if confidence>=2 and current_group!=vote:
-
-    st.markdown(
-    f"<h1 style='color:red'>BET GROUP {vote}</h1>",
-    unsafe_allow_html=True
-    )
+    st.markdown(f"<h1 style='color:red'>BET GROUP {next_pred}</h1>",unsafe_allow_html=True)
 
 else:
 
-    st.markdown(
-    "<h1 style='color:gray'>WAIT</h1>",
-    unsafe_allow_html=True
-    )
+    st.markdown("<h1 style='color:gray'>WAIT</h1>",unsafe_allow_html=True)
 
 
-# -------- RESULT --------
-st.subheader("Session Result")
+# RESULT
 
-col1,col2,col3=st.columns(3)
+st.metric("Profit",profit)
 
-col1.metric("Profit",profit)
+st.metric("Trades",len(hits))
 
-trades=len(hits)
+wr=np.mean(hits) if hits else 0
 
-col2.metric("Trades",trades)
+st.metric("Winrate %",round(wr*100,2))
 
-wr=np.mean(hits) if trades>0 else 0
-
-col3.metric("Winrate %",round(wr*100,2))
-
-
-# -------- EQUITY --------
-st.subheader("Equity Curve")
 
 st.line_chart(hist.profit)
 
-
-# -------- HISTORY --------
-st.subheader("History")
-
-st.dataframe(hist.iloc[::-1],use_container_width=True)
+st.dataframe(hist.iloc[::-1])
