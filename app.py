@@ -6,7 +6,7 @@ import time
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=10000, key="refresh")  # refresh 10s
+st_autorefresh(interval=1000, key="refresh")  # refresh 10s
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -73,7 +73,6 @@ def scan_windows(scan_groups):
     return pd.DataFrame(results).sort_values("score", ascending=False)
 
 # ---------------- LOCK WINDOWS ----------------
-# Scan 168 round đầu tiên để lock windows
 scan_groups = groups[:SCAN]  # round 0 → 167
 scan_df = scan_windows(scan_groups)
 
@@ -96,10 +95,10 @@ hits = []
 start_index = SCAN  # bắt đầu trade từ round 168
 
 for i in range(start_index, len(groups)):
-    preds = [groups[i-w] for w in top_windows]  # dùng windows đã lock
+    preds = [groups[i-w] for w in top_windows]
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = confidence >= VOTE_REQUIRED and groups[i-1] != vote
+    signal = confidence >= VOTE_REQUIRED           # Bỏ check trùng round trước
     distance = i - last_trade
     trade = signal and distance >= GAP
 
@@ -132,7 +131,7 @@ for i in range(start_index, len(groups)):
         "bet_group": bet_group,
         "hit": hit,
         "state": state,
-        "profit": profit   # chỉ cộng khi trade thật
+        "profit": profit
     })
 
 hist = pd.DataFrame(history)
@@ -147,7 +146,7 @@ current_group = groups[-1]
 last_trade_rows = hist[hist["trade"]==True]
 distance = i - last_trade_rows["round"].max() if len(last_trade_rows) > 0 else 999
 
-signal = confidence >= VOTE_REQUIRED and current_group != vote
+signal = confidence >= VOTE_REQUIRED
 trade = False  # prediction row không cộng profit
 
 next_row = {
@@ -161,7 +160,7 @@ next_row = {
     "bet_group": vote if signal else None,
     "hit": None,
     "state": "NEXT",
-    "profit": profit   # giữ nguyên profit cuối cùng
+    "profit": profit
 }
 
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
