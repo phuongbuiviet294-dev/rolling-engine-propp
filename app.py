@@ -11,6 +11,8 @@ WINDOW_MAX = 20
 GAP = 4
 WIN = 2.5
 LOSS = -1
+TOP_N_WINDOWS = 3     # số window lock
+VOTE_REQUIRED = 2     # số vote tối thiểu để đánh (ví dụ 2 hoặc 5)
 
 # ---------------- GROUP FUNCTION ----------------
 def group(n):
@@ -48,7 +50,7 @@ for w in range(WINDOW_MIN, WINDOW_MAX+1):
                 wins += 1
             else:
                 profit += LOSS
-    if trades > 0:  # tính tất cả window, không bỏ qua
+    if trades > 0:
         wr = wins / trades
         score = profit * wr * np.log(trades)
         scan_results.append({
@@ -60,13 +62,13 @@ for w in range(WINDOW_MIN, WINDOW_MAX+1):
             "score": score
         })
 
-# Chọn top 3 window
+# Chọn top N window
 scan_df = pd.DataFrame(scan_results).sort_values("score", ascending=False)
-top_windows = scan_df.head(3)["window"].tolist()
+top_windows = scan_df.head(TOP_N_WINDOWS)["window"].tolist()
 
 st.subheader("Window Scan Results")
 st.dataframe(scan_df.reset_index(drop=True))
-st.markdown(f"**Top 3 windows selected:** {top_windows}")
+st.markdown(f"**Top {TOP_N_WINDOWS} windows selected:** {top_windows}")
 
 # ---------------- TRADE ENGINE ----------------
 profit = 0
@@ -77,7 +79,8 @@ hits = []
 for i in range(SCAN, len(groups)):
     # vote dựa trên top windows
     preds = [groups[i-w] for w in top_windows]
-    vote, confidence = Counter(preds).most_common(1)[0]
+    vote_counts = Counter(preds)
+    vote, confidence = vote_counts.most_common(1)[0]
     
     signal = False
     trade = False
@@ -85,7 +88,7 @@ for i in range(SCAN, len(groups)):
     hit = None
     state = "WAIT"
     
-    if confidence >= 2 and groups[i-1] != vote:
+    if confidence >= VOTE_REQUIRED and groups[i-1] != vote:
         signal = True
         state = "SIGNAL"
         if (i - last_trade) >= GAP:
@@ -102,6 +105,13 @@ for i in range(SCAN, len(groups)):
                 profit += LOSS
                 hits.append(0)
     
+    # Next group dự đoán dựa trên 3 window lock
+    next_preds = [groups[i-w] for w in top_windows if i-w >=0]
+    next_vote = None
+    if next_preds:
+        next_vote_counts = Counter(next_preds)
+        next_vote, next_conf = next_vote_counts.most_common(1)[0]
+    
     history.append({
         "round": i,
         "number": numbers[i],
@@ -113,22 +123,23 @@ for i in range(SCAN, len(groups)):
         "trade": trade,
         "bet_group": bet_group,
         "hit": hit,
-        "profit": profit
+        "profit": profit,
+        "next_group": next_vote
     })
 
 hist = pd.DataFrame(history)
 
 # ---------------- NEXT BET ----------------
 i = len(groups) - 1
-preds = [groups[i-w] for w in top_windows]
-vote, confidence = Counter(preds).most_common(1)[0]
+preds = [groups[i-w] for w in top_windows if i-w >=0]
+vote, confidence = Counter(preds).most_common(1)[0] if preds else (None, 0)
 current_number = numbers[-1]
 current_group = groups[-1]
 
 last_trade_rows = hist[hist["trade"] == True]
 distance = i - last_trade_rows["round"].max() if len(last_trade_rows) > 0 else 999
 
-signal = confidence >= 2 and current_group != vote
+signal = confidence >= VOTE_REQUIRED and current_group != vote
 trade = signal and distance >= GAP
 
 # ---------------- UI ----------------
