@@ -1,135 +1,166 @@
 import streamlit as st
-from collections import Counter
 import pandas as pd
+import numpy as np
+from collections import Counter
 
-st.title("🎯 NEXT BET")
+DATA_URL="https://docs.google.com/spreadsheets/d/18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY/export?format=csv"
 
-# group mapping
-def get_group(n):
-    if n in [1,2,3]:
-        return 1
-    elif n in [4,5,6]:
-        return 2
-    elif n in [7,8]:
-        return 3
-    else:
-        return 4
+SCAN=182
+WINDOWS=[6,8,10,12,14]
 
-# session state
-if "numbers" not in st.session_state:
-    st.session_state.numbers=[]
+GAP=4
 
-if "profit" not in st.session_state:
-    st.session_state.profit=0
+WIN=2.5
+LOSS=-1
 
-# input number
-n=st.number_input("Input Number (1-10)",1,10,step=1)
+# -------- GROUP --------
+def group(n):
 
-if st.button("ADD"):
-    st.session_state.numbers.append(n)
+    if n<=3: return 1
+    if n<=6: return 2
+    if n<=8: return 3
+    return 4
 
-numbers=st.session_state.numbers
-groups=[get_group(x) for x in numbers]
 
-# vote engine
-def predict_next(groups):
+# -------- LOAD DATA --------
+@st.cache_data(ttl=5)
+def load():
 
-    windows=[3,5,8,12,20]
+    df=pd.read_csv(DATA_URL)
 
-    preds=[]
+    df.columns=[c.lower() for c in df.columns]
 
-    for w in windows:
-        if len(groups)>=w:
-            last=groups[-w:]
-            c=Counter(last)
+    numbers=df["number"].dropna().astype(int).tolist()
 
-            pred=min(c,key=c.get)
-            preds.append(pred)
+    return numbers
 
-    if len(preds)==0:
-        return None,0
+
+numbers=load()
+
+groups=[group(n) for n in numbers]
+
+
+# -------- TRADE ENGINE --------
+profit=0
+last_trade=-999
+
+history=[]
+hits=[]
+
+
+for i in range(SCAN,len(groups)):
+
+    preds=[groups[i-w] for w in WINDOWS if i-w>=0]
 
     c=Counter(preds)
+
     vote,confidence=c.most_common(1)[0]
 
-    return vote,confidence
-
-
-# history table
-rows=[]
-
-profit=0
-
-for i in range(len(numbers)):
-
-    sub_groups=groups[:i+1]
-
-    vote,conf=predict_next(sub_groups[:-1])
-
-    state="WAIT"
     signal=False
     trade=False
+    hit=None
 
-    if vote!=None:
+    if confidence>=2:
 
-        if conf>=2 and sub_groups[-1]!=vote:
-            state="TRADE"
-            signal=True
+        signal=True
+
+        if groups[i-1]!=vote and (i-last_trade)>=GAP:
+
             trade=True
 
-            if sub_groups[-1]==vote:
-                profit+=1
-            else:
-                profit-=1
+            last_trade=i
 
-    rows.append({
+            if groups[i]==vote:
+
+                profit+=WIN
+                hit=1
+                hits.append(1)
+
+            else:
+
+                profit+=LOSS
+                hit=0
+                hits.append(0)
+
+
+    history.append({
+
+        "round":i,
         "number":numbers[i],
         "group":groups[i],
         "vote":vote,
-        "confidence":conf,
-        "state":state,
+        "confidence":confidence,
         "signal":signal,
-        "trade":trade
+        "trade":trade,
+        "hit":hit,
+        "profit":profit
     })
 
 
-df=pd.DataFrame(rows)
+hist=pd.DataFrame(history)
 
+
+# -------- CURRENT --------
+current_number=numbers[-1]
+current_group=groups[-1]
+
+
+preds=[groups[-w] for w in WINDOWS]
+
+c=Counter(preds)
+
+vote,confidence=c.most_common(1)[0]
+
+
+# -------- UI --------
+st.title("NEXT GROUP ENGINE")
+
+
+st.subheader("Current")
+
+st.write("Number:",current_number)
+
+st.write("Group:",current_group)
+
+
+if confidence>=2 and current_group!=vote:
+
+    st.markdown(
+    f"<h1 style='color:red'>BET GROUP {vote}</h1>",
+    unsafe_allow_html=True
+    )
+
+else:
+
+    st.markdown(
+    "<h1 style='color:gray'>WAIT</h1>",
+    unsafe_allow_html=True
+    )
+
+
+# -------- RESULT --------
+st.subheader("Session Result")
+
+col1,col2,col3=st.columns(3)
+
+col1.metric("Profit",profit)
+
+trades=len(hits)
+
+col2.metric("Trades",trades)
+
+wr=np.mean(hits) if trades>0 else 0
+
+col3.metric("Winrate %",round(wr*100,2))
+
+
+# -------- EQUITY --------
+st.subheader("Equity Curve")
+
+st.line_chart(hist.profit)
+
+
+# -------- HISTORY --------
 st.subheader("History")
-st.dataframe(df)
 
-# next prediction
-vote,conf=predict_next(groups)
-
-st.divider()
-
-if len(numbers)>0:
-
-    current_number=numbers[-1]
-    current_group=groups[-1]
-
-    st.write("Current Number:",current_number)
-    st.write("Current Group:",current_group)
-
-    if vote!=None and conf>=2 and current_group!=vote:
-
-        st.markdown(
-        f"""
-        <div style="background:#ff4b4b;padding:20px;border-radius:10px;text-align:center;font-size:28px;color:white">
-        BET GROUP → {vote}
-        </div>
-        """,unsafe_allow_html=True)
-
-    else:
-
-        st.markdown(
-        """
-        <div style="background:#999;padding:20px;border-radius:10px;text-align:center;font-size:28px;color:white">
-        WAIT
-        </div>
-        """,unsafe_allow_html=True)
-
-st.subheader("Session Statistics")
-
-st.write("Profit:",profit)
-st.write("Trades:",len(df[df.trade==True]))
+st.dataframe(hist.iloc[::-1],use_container_width=True)
