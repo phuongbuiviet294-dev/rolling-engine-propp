@@ -11,8 +11,8 @@ WINDOW_MAX = 20
 GAP = 4
 WIN = 2.5
 LOSS = -1
-TOP_N_WINDOWS = 6     # số window lock
-VOTE_REQUIRED = 3  # số vote tối thiểu để đánh (ví dụ 2 hoặc 5)
+TOP_N_WINDOWS = 7     # số window lock
+VOTE_REQUIRED = 4  # số vote tối thiểu để đánh (ví dụ 2 hoặc 5)
 
 # ---------------- GROUP FUNCTION ----------------
 def group(n):
