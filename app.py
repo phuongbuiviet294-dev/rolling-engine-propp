@@ -75,8 +75,10 @@ def scan_windows(scan_groups):
     return pd.DataFrame(results).sort_values("score", ascending=False)
 
 # ---------------- LOCK WINDOWS ----------------
+# luôn tạo scan_df để hiển thị bảng
+scan_df = scan_windows(scan_groups)
+
 if "top_windows" not in st.session_state:
-    scan_df = scan_windows(scan_groups)
     st.session_state.top_windows = scan_df.head(TOP_WINDOWS)["window"].tolist()
 
 top_windows = st.session_state.top_windows
