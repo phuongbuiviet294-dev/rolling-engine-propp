@@ -46,41 +46,43 @@ groups = [group(n) for n in numbers]
 # ---------------- WINDOW SCAN ----------------
 scan_groups = groups[-SCAN:]
 
-scan_results = []
-for w in range(WINDOW_MIN, WINDOW_MAX+1):
-    profit = 0
-    trades = 0
-    wins = 0
-    for i in range(w, len(scan_groups)):
-        pred = scan_groups[i-w]
-        if scan_groups[i-1] != pred:
-            trades += 1
-            if scan_groups[i] == pred:
-                profit += WIN
-                wins += 1
-            else:
-                profit += LOSS
-    if trades > 0:
-        wr = wins/trades
-        score = profit * wr * np.log(trades)
-        scan_results.append({
-            "window": w,
-            "trades": trades,
-            "wins": wins,
-            "profit": profit,
-            "winrate": wr,
-            "score": score
-        })
-
-scan_df = pd.DataFrame(scan_results).sort_values("score", ascending=False)
+def scan_windows(scan_groups):
+    results = []
+    for w in range(WINDOW_MIN, WINDOW_MAX+1):
+        profit = 0
+        trades = 0
+        wins = 0
+        for i in range(w, len(scan_groups)):
+            pred = scan_groups[i-w]
+            if scan_groups[i-1] != pred:
+                trades += 1
+                if scan_groups[i] == pred:
+                    profit += WIN
+                    wins += 1
+                else:
+                    profit += LOSS
+        if trades > 0:
+            wr = wins / trades
+            score = profit * wr * np.log(trades)
+            results.append({
+                "window": w,
+                "trades": trades,
+                "wins": wins,
+                "profit": profit,
+                "winrate": wr,
+                "score": score
+            })
+    return pd.DataFrame(results).sort_values("score", ascending=False)
 
 # ---------------- LOCK WINDOWS ----------------
 if "top_windows" not in st.session_state:
+    scan_df = scan_windows(scan_groups)
     st.session_state.top_windows = scan_df.head(TOP_WINDOWS)["window"].tolist()
 
 top_windows = st.session_state.top_windows
 
 if st.button("🔄 Re-scan Windows"):
+    scan_df = scan_windows(scan_groups)
     st.session_state.top_windows = scan_df.head(TOP_WINDOWS)["window"].tolist()
     st.rerun()
 
@@ -93,7 +95,7 @@ hits = []
 start_index = max(SCAN, WINDOW_MAX)
 
 for i in range(start_index, len(groups)):
-    preds = [groups[i-w] for w in top_windows]
+    preds = [groups[i-w] for w in top_windows]  # luôn dùng windows lock
     vote, confidence = Counter(preds).most_common(1)[0]
 
     signal = confidence >= VOTE_REQUIRED and groups[i-1] != vote
@@ -153,7 +155,7 @@ next_row = {
     "group": current_group,
     "vote": vote,
     "confidence": confidence,
-    "signal":signal,
+    "signal": signal,
     "trade": trade,
     "bet_group": vote if signal else None,
     "hit": None,
@@ -175,7 +177,7 @@ st.divider()
 st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 
-# hiển thị Next Group prediction luôn
+# hiển thị Next Group prediction luôn (vàng)
 st.markdown(f"""
 <div style="background:#ffd700;
 padding:20px;
