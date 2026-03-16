@@ -21,7 +21,7 @@ LOSS=-1
 
 # ---------------- AUTO REFRESH ----------------
 
-st.autorefresh(interval=10000,key="refresh")
+st.autorefresh(interval=1000,key="refresh")
 
 # ---------------- LOAD DATA ----------------
 
