@@ -11,7 +11,7 @@ st_autorefresh(interval=1000, key="refresh")  # refresh 10s
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-SCAN = 174
+SCAN = 168
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
