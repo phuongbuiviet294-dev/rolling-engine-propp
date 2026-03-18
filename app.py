@@ -15,8 +15,8 @@ SCAN = 180
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
-TOP_WINDOWS = 7   # số window lock
-VOTE_REQUIRED = 4   # vote cần để trade
+TOP_WINDOWS = 8  # số window lock
+VOTE_REQUIRED = 5  # vote cần để trade
 GAP = 1               # khoảng cách trade tối thiểu
 
 WIN = 2.5
