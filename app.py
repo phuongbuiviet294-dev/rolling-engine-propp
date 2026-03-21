@@ -6,7 +6,7 @@ import time
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=1000, key="refresh")  # refresh 10s
+st_autorefresh(interval=1000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -15,12 +15,14 @@ SCAN = 168
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
-TOP_WINDOWS = 8  # số window lock
-VOTE_REQUIRED = 5  # vote cần để trade
-GAP = 1               # khoảng cách trade tối thiểu
+TOP_WINDOWS = 8
+VOTE_REQUIRED = 5
+GAP = 1
 
 WIN = 2.5
 LOSS = -1
+
+SCAN_LIST = [120,130,140,150,160,168,174,180]
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -29,8 +31,7 @@ def load_numbers():
     df = pd.read_csv(url)
     df.columns = [c.lower() for c in df.columns]
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
-    numbers = df["number"].dropna().astype(int).tolist()
-    return numbers
+    return df["number"].dropna().astype(int).tolist()
 
 numbers = load_numbers()
 
@@ -72,18 +73,60 @@ def scan_windows(scan_groups):
             })
     return pd.DataFrame(results).sort_values("score", ascending=False)
 
+# ---------------- AUTO WINDOW SELECT ----------------
+def auto_select_windows(groups):
+    window_counter = Counter()
+    window_scores = {}
+
+    for scan in SCAN_LIST:
+        if len(groups) < scan:
+            continue
+
+        scan_groups = groups[:scan]
+        scan_df = scan_windows(scan_groups)
+
+        if scan_df is None or len(scan_df) == 0:
+            continue
+
+        top_ws = scan_df.head(TOP_WINDOWS)
+
+        for _, row in top_ws.iterrows():
+            w = int(row["window"])
+            score = float(row["score"])
+
+            window_counter[w] += 1
+
+            if w not in window_scores:
+                window_scores[w] = []
+            window_scores[w].append(score)
+
+    final_windows = []
+
+    for w in window_counter:
+        count = window_counter[w]
+        avg_score = np.mean(window_scores[w])
+        stability_score = count * avg_score
+        final_windows.append((w, stability_score, count, avg_score))
+
+    final_windows.sort(key=lambda x: x[1], reverse=True)
+
+    return final_windows
+
 # ---------------- LOCK WINDOWS ----------------
-scan_groups = groups[:SCAN]  # round 0 → 167
+scan_groups = groups[:SCAN]
 scan_df = scan_windows(scan_groups)
 
 if "top_windows" not in st.session_state:
-    st.session_state.top_windows = scan_df.head(TOP_WINDOWS)["window"].tolist()
+    result = auto_select_windows(groups)
+    st.session_state.top_windows = [r[0] for r in result[:TOP_WINDOWS]]
+    st.session_state.window_debug = result
 
 top_windows = st.session_state.top_windows
 
-if st.button("🔄 Re-scan Windows"):
-    scan_df = scan_windows(scan_groups)
-    st.session_state.top_windows = scan_df.head(TOP_WINDOWS)["window"].tolist()
+if st.button("🔄 Re-optimize Windows"):
+    result = auto_select_windows(groups)
+    st.session_state.top_windows = [r[0] for r in result[:TOP_WINDOWS]]
+    st.session_state.window_debug = result
     st.rerun()
 
 # ---------------- TRADE ENGINE ----------------
@@ -92,13 +135,13 @@ last_trade = -999
 history = []
 hits = []
 
-start_index = SCAN  # bắt đầu trade từ round 168
+start_index = SCAN
 
 for i in range(start_index, len(groups)):
     preds = [groups[i-w] for w in top_windows]
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = confidence >= VOTE_REQUIRED           # Bỏ check trùng round trước
+    signal = confidence >= VOTE_REQUIRED
     distance = i - last_trade
     trade = signal and distance >= GAP
 
@@ -136,18 +179,18 @@ for i in range(start_index, len(groups)):
 
 hist = pd.DataFrame(history)
 
-# ---------------- NEXT BET (prediction) ----------------
+# ---------------- NEXT BET ----------------
 i = len(groups)
 preds = [groups[i-w] for w in top_windows]
 vote, confidence = Counter(preds).most_common(1)[0]
+
 current_number = numbers[-1]
 current_group = groups[-1]
 
 last_trade_rows = hist[hist["trade"]==True]
-distance = i - last_trade_rows["round"].max() if len(last_trade_rows) > 0 else 999
+distance = i - last_trade_rows["round"].max() if len(last_trade_rows)>0 else 999
 
 signal = confidence >= VOTE_REQUIRED
-trade = False  # prediction row không cộng profit
 
 next_row = {
     "round": i,
@@ -156,7 +199,7 @@ next_row = {
     "vote": vote,
     "confidence": confidence,
     "signal": signal,
-    "trade": trade,
+    "trade": False,
     "bet_group": vote if signal else None,
     "hit": None,
     "state": "NEXT",
@@ -166,74 +209,65 @@ next_row = {
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine (Lock 168 đầu tiên, GAP=1)")
+st.title("🎯 Rolling Engine - Auto Window Optimization")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number)
 col2.metric("Current Group", current_group)
 col3.metric("Next Group", vote)
 
-st.divider()
 st.write("Vote Strength:", confidence)
-st.write("Distance From Last Trade:", distance)
+st.write("Distance:", distance)
 
-# hiển thị Next Group prediction vàng
+# Next group
 st.markdown(f"""
-<div style="background:#ffd700;
-padding:20px;
-border-radius:10px;
-text-align:center;
-font-size:28px;
-font-weight:bold;">
-NEXT GROUP → {vote} (Vote Strength: {confidence})
+<div style="background:#ffd700;padding:20px;border-radius:10px;text-align:center;font-size:28px;font-weight:bold;">
+NEXT GROUP → {vote}
 </div>
 """, unsafe_allow_html=True)
 
-# BET đỏ chỉ khi trade thật
-if signal and distance>=GAP:
+# Trade
+if signal and distance >= GAP:
     st.markdown(f"""
-    <div style="background:#ff4b4b;
-    padding:25px;
-    border-radius:10px;
-    text-align:center;
-    font-size:32px;
-    color:white;
-    font-weight:bold;">
+    <div style="background:#ff4b4b;padding:25px;border-radius:10px;text-align:center;font-size:32px;color:white;font-weight:bold;">
     BET GROUP → {vote}
     </div>
     """, unsafe_allow_html=True)
 else:
-    st.info("WAIT (conditions not met)")
+    st.info("WAIT")
 
-# ---------------- SESSION STATS ----------------
-st.subheader("Session Statistics")
+# Stats
+st.subheader("Stats")
 col1, col2, col3 = st.columns(3)
 col1.metric("Profit", profit)
-trades = len(hits)
-col2.metric("Trades", trades)
-wr = np.mean(hits) if trades > 0 else 0
-col3.metric("Winrate %", round(wr*100,2))
+col2.metric("Trades", len(hits))
+col3.metric("Winrate", round(np.mean(hits)*100,2) if hits else 0)
 
-# ---------------- PROFIT CURVE ----------------
-st.subheader("Profit Curve")
+# Chart
 st.line_chart(hist["profit"])
 
-# ---------------- WINDOW SCAN ----------------
-st.subheader("Window Scan")
-st.dataframe(scan_df, use_container_width=True)
+# Scan table
+st.subheader("Window Scan (168 đầu)")
+st.dataframe(scan_df)
 
-# ---------------- HISTORY ----------------
-st.subheader("History")
+# Debug auto window
+st.subheader("Auto Window Debug")
+if "window_debug" in st.session_state:
+    debug_df = pd.DataFrame(
+        st.session_state.window_debug,
+        columns=["window","stability_score","count","avg_score"]
+    )
+    st.dataframe(debug_df)
 
-def highlight_trade(row):
+st.write("Final Windows:", top_windows)
+
+# History
+def highlight(row):
     if row["state"]=="NEXT":
-        return ['background-color: #ffd700']*len(row)  # Next Group prediction
+        return ['background-color: #ffd700']*len(row)
     elif row["trade"]:
-        return ['background-color: #ff4b4b; color:white']*len(row)  # Trade thật
+        return ['background-color: #ff4b4b; color:white']*len(row)
     return ['']*len(row)
 
-st.dataframe(hist.iloc[::-1].style.apply(highlight_trade, axis=1), use_container_width=True)
-
-# ---------------- DEBUG ----------------
-st.write("Top Windows (locked):", top_windows)
-st.write("Total Rows:", len(numbers))
+st.subheader("History")
+st.dataframe(hist.iloc[::-1].style.apply(highlight, axis=1))
