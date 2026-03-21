@@ -13,7 +13,7 @@ st_autorefresh(interval=10000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 TRAIN_SCAN = 168
-RELOCK_EVERY = 50
+RELOCK_EVERY = 30
 
 WINDOW_MIN = 6
 WINDOW_MAX = 20
