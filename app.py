@@ -25,7 +25,7 @@ GAP = 1
 WIN = 2.5
 LOSS = -1
 
-PROFIT_TARGET = 3.5
+PROFIT_TARGET = 4.5
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
