@@ -107,7 +107,6 @@ def select_windows_from_train(train_groups):
 
     return selected, df
 
-
 # ---------------- BUILD HISTORY WITH PERIODIC RE-LOCK ----------------
 profit = 0
 last_trade = -999
@@ -148,10 +147,12 @@ for i in range(start_index, len(groups)):
     if profit >= PROFIT_TARGET:
         signal = False
         trade = False
+        can_bet = False
     else:
         trade = signal and distance >= GAP
+        can_bet = trade
 
-    bet_group = vote if trade else None
+    bet_group = vote if can_bet else None
     hit = None
     state = "WAIT"
 
@@ -193,7 +194,7 @@ hist = pd.DataFrame(history)
 relock_df = pd.DataFrame(relock_log)
 
 # ---------------- NEXT BET ----------------
-# Dùng đúng bộ window cuối cùng của history, KHÔNG scan lại riêng
+# Dùng đúng bộ window cuối cùng đang chạy trong history
 top_windows_now = current_top_windows
 scan_df_now = current_scan_df
 
@@ -208,16 +209,22 @@ else:
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
 
-if not hist.empty:
-    last_trade_rows = hist[hist["trade"] == True]
-    distance = i - last_trade_rows["round"].max() if len(last_trade_rows) > 0 else 999
-else:
-    distance = 999
+last_trade_rows = hist[hist["trade"] == True]
+distance = i - last_trade_rows["round"].max() if len(last_trade_rows) > 0 else 999
+
+# Logic NEXT phải khớp đúng bản cũ:
+# signal = đủ vote
+# can_bet = signal + đủ GAP + chưa stop
+raw_signal = confidence >= VOTE_REQUIRED if vote is not None else False
 
 if profit >= PROFIT_TARGET:
     signal = False
+    can_bet = False
+    next_state = "STOP"
 else:
-    signal = confidence >= VOTE_REQUIRED if vote is not None else False
+    signal = raw_signal
+    can_bet = signal and distance >= GAP
+    next_state = "NEXT"
 
 next_row = {
     "round": i,
@@ -226,10 +233,10 @@ next_row = {
     "vote": vote,
     "confidence": confidence,
     "signal": signal,
-    "trade": False,
-    "bet_group": vote if signal else None,
+    "trade": False,  # prediction row, không phải trade đã xảy ra
+    "bet_group": vote if can_bet else None,
     "hit": None,
-    "state": "NEXT" if profit < PROFIT_TARGET else "STOP",
+    "state": next_state,
     "profit": profit,
     "locked_windows": ", ".join(map(str, top_windows_now))
 }
@@ -237,74 +244,26 @@ next_row = {
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Engine - Periodic Re-lock + Profit Target")
+st.title("🎯 Rolling Prediction Engine - Re-lock + Profit Target")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Current Number", current_number if current_number is not None else "-")
-c2.metric("Current Group", current_group if current_group is not None else "-")
-c3.metric("Next Group", vote if vote is not None else "-")
+col1, col2, col3 = st.columns(3)
+col1.metric("Current Number", current_number if current_number is not None else "-")
+col2.metric("Current Group", current_group if current_group is not None else "-")
+col3.metric("Next Group", vote if vote is not None else "-")
 
+st.divider()
 st.write("Vote Strength:", confidence)
-st.write("Distance:", distance)
+st.write("Distance From Last Trade:", distance)
 st.write("Current Locked Windows:", top_windows_now)
 st.write("Re-lock Every:", RELOCK_EVERY)
 st.write("Profit Target:", PROFIT_TARGET)
 
 st.markdown(
     f"""
-    <div style="background:#ffd700;padding:20px;border-radius:10px;text-align:center;font-size:28px;font-weight:bold;">
-    NEXT GROUP → {vote if vote is not None else "-"}
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-if profit >= PROFIT_TARGET:
-    st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
-elif signal and distance >= GAP and vote is not None:
-    st.markdown(
-        f"""
-        <div style="background:#ff4b4b;padding:25px;border-radius:10px;text-align:center;font-size:32px;color:white;font-weight:bold;">
-        BET GROUP → {vote}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-else:
-    st.info("WAIT")
-
-# ---------------- STATS ----------------
-st.subheader("Session Statistics")
-s1, s2, s3 = st.columns(3)
-s1.metric("Profit", profit)
-s2.metric("Trades", len(hits))
-s3.metric("Winrate %", round(np.mean(hits) * 100, 2) if hits else 0)
-
-# ---------------- PROFIT CURVE ----------------
-st.subheader("Profit Curve")
-if not hist.empty:
-    st.line_chart(hist["profit"])
-
-# ---------------- CURRENT WINDOW SCAN ----------------
-st.subheader("Current Window Scan (same lock as current history block)")
-st.dataframe(scan_df_now, use_container_width=True)
-
-# ---------------- RE-LOCK LOG ----------------
-st.subheader("Re-lock Log")
-st.dataframe(relock_df, use_container_width=True)
-
-# ---------------- HISTORY ----------------
-def highlight_trade(row):
-    if row["state"] == "NEXT":
-        return ["background-color: #ffd700"] * len(row)
-    if row["state"] == "STOP":
-        return ["background-color: #d9534f; color:white"] * len(row)
-    if row["trade"]:
-        return ["background-color: #ff4b4b; color:white"] * len(row)
-    return [""] * len(row)
-
-st.subheader("History")
-st.dataframe(
-    hist.iloc[::-1].style.apply(highlight_trade, axis=1),
-    use_container_width=True,
-)
+    <div style="background:#ffd700;
+    padding:20px;
+    border-radius:10px;
+    text-align:center;
+    font-size:28px;
+    font-weight:bold;">
+    NEXT GROUP → {vote if vote is not
