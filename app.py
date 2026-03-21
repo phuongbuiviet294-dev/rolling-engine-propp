@@ -6,7 +6,6 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-
 # ---------------- AUTO REFRESH ----------------
 st_autorefresh(interval=10000, key="refresh")
 
@@ -14,7 +13,7 @@ st_autorefresh(interval=10000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 TRAIN_SCAN = 168
-TEST_SCAN = 40
+RELOCK_EVERY = 50
 
 WINDOW_MIN = 6
 WINDOW_MAX = 20
@@ -25,7 +24,6 @@ GAP = 1
 
 WIN = 2.5
 LOSS = -1
-
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -39,9 +37,7 @@ def load_numbers():
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
-
 numbers = load_numbers()
-
 
 # ---------------- GROUP ----------------
 def group(n: int) -> int:
@@ -53,11 +49,9 @@ def group(n: int) -> int:
         return 3
     return 4
 
-
 groups = [group(n) for n in numbers]
 
-
-# ---------------- SINGLE WINDOW BACKTEST ----------------
+# ---------------- WINDOW EVAL ----------------
 def evaluate_window(seq_groups, w):
     profit = 0
     trades = 0
@@ -75,102 +69,64 @@ def evaluate_window(seq_groups, w):
                 profit += LOSS
 
     winrate = wins / trades if trades > 0 else 0
+    score = profit * winrate * np.log(trades) if trades > 0 else -999999
     return {
         "window": w,
         "trades": trades,
         "wins": wins,
         "profit": profit,
         "winrate": winrate,
+        "score": score,
     }
 
-
-# ---------------- WALK-FORWARD WINDOW SELECT ----------------
-def walkforward_select_windows(groups):
+def select_windows_from_train(train_groups):
     rows = []
-
-    if len(groups) < TRAIN_SCAN + TEST_SCAN:
-        return pd.DataFrame(columns=[
-            "window", "train_profit", "train_winrate", "train_trades",
-            "test_profit", "test_winrate", "test_trades", "wf_score"
-        ])
-
-    train_groups = groups[:TRAIN_SCAN]
-    test_groups = groups[TRAIN_SCAN:TRAIN_SCAN + TEST_SCAN]
-
     for w in range(WINDOW_MIN, WINDOW_MAX + 1):
-        train_res = evaluate_window(train_groups, w)
-        test_res = evaluate_window(test_groups, w)
+        rows.append(evaluate_window(train_groups, w))
 
-        train_profit = train_res["profit"]
-        test_profit = test_res["profit"]
-        train_trades = train_res["trades"]
-        test_trades = test_res["trades"]
-        train_wr = train_res["winrate"]
-        test_wr = test_res["winrate"]
+    df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
 
-        # Chấm điểm ưu tiên:
-        # - train dương
-        # - test không gãy
-        # - có đủ trades
-        # - winrate test không quá thấp
-        wf_score = (
-            train_profit * 0.6
-            + test_profit * 1.2
-            + np.log(max(train_trades, 1)) * train_wr * 4
-            + np.log(max(test_trades, 1)) * test_wr * 6
-        )
-
-        rows.append({
-            "window": w,
-            "train_profit": train_profit,
-            "train_winrate": round(train_wr, 4),
-            "train_trades": train_trades,
-            "test_profit": test_profit,
-            "test_winrate": round(test_wr, 4),
-            "test_trades": test_trades,
-            "wf_score": round(wf_score, 4),
-        })
-
-    df = pd.DataFrame(rows).sort_values("wf_score", ascending=False).reset_index(drop=True)
-    return df
-
-
-# ---------------- SELECT + LOCK WINDOWS ----------------
-wf_df = walkforward_select_windows(groups)
-
-if "top_windows" not in st.session_state:
-    if not wf_df.empty:
-        # ưu tiên window test không âm
-        filtered = wf_df[wf_df["test_profit"] >= 0].copy()
-        if len(filtered) >= TOP_WINDOWS:
-            st.session_state.top_windows = filtered.head(TOP_WINDOWS)["window"].astype(int).tolist()
-        else:
-            st.session_state.top_windows = wf_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
+    positive_df = df[df["profit"] > 0].copy()
+    if len(positive_df) >= TOP_WINDOWS:
+        selected = positive_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
     else:
-        st.session_state.top_windows = list(range(WINDOW_MIN, WINDOW_MIN + TOP_WINDOWS))
+        selected = df.head(TOP_WINDOWS)["window"].astype(int).tolist()
 
-top_windows = st.session_state.top_windows
+    return selected, df
 
-if st.button("🔄 Re-select Windows"):
-    if not wf_df.empty:
-        filtered = wf_df[wf_df["test_profit"] >= 0].copy()
-        if len(filtered) >= TOP_WINDOWS:
-            st.session_state.top_windows = filtered.head(TOP_WINDOWS)["window"].astype(int).tolist()
-        else:
-            st.session_state.top_windows = wf_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
-    st.rerun()
-
-
-# ---------------- TRADE ENGINE ----------------
+# ---------------- BUILD HISTORY WITH RE-LOCK ----------------
 profit = 0
 last_trade = -999
 history = []
 hits = []
+relock_log = []
 
-start_index = TRAIN_SCAN
+if len(groups) >= TRAIN_SCAN:
+    start_index = TRAIN_SCAN
+else:
+    start_index = len(groups)
+
+current_top_windows = []
+current_scan_df = pd.DataFrame()
 
 for i in range(start_index, len(groups)):
-    preds = [groups[i - w] for w in top_windows if i - w >= 0]
+    # re-lock tại round đầu tiên của live trading hoặc mỗi RELOCK_EVERY round
+    if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
+        train_start = i - TRAIN_SCAN
+        train_end = i
+        train_groups = groups[train_start:train_end]
+
+        current_top_windows, current_scan_df = select_windows_from_train(train_groups)
+
+        relock_log.append({
+            "relock_round": i,
+            "train_from": train_start,
+            "train_to": train_end - 1,
+            "top_windows": ", ".join(map(str, current_top_windows))
+        })
+
+    preds = [groups[i - w] for w in current_top_windows if i - w >= 0]
+
     if not preds:
         continue
 
@@ -212,14 +168,22 @@ for i in range(start_index, len(groups)):
         "hit": hit,
         "state": state,
         "profit": profit,
+        "locked_windows": ", ".join(map(str, current_top_windows))
     })
 
 hist = pd.DataFrame(history)
+relock_df = pd.DataFrame(relock_log)
 
+# ---------------- CURRENT LOCK FOR NEXT BET ----------------
+if len(groups) >= TRAIN_SCAN:
+    train_groups_now = groups[-TRAIN_SCAN:]
+    top_windows_now, scan_df_now = select_windows_from_train(train_groups_now)
+else:
+    top_windows_now, scan_df_now = [], pd.DataFrame()
 
 # ---------------- NEXT BET ----------------
 i = len(groups)
-preds = [groups[i - w] for w in top_windows if i - w >= 0]
+preds = [groups[i - w] for w in top_windows_now if i - w >= 0]
 
 if preds:
     vote, confidence = Counter(preds).most_common(1)[0]
@@ -249,21 +213,22 @@ next_row = {
     "hit": None,
     "state": "NEXT",
     "profit": profit,
+    "locked_windows": ", ".join(map(str, top_windows_now))
 }
 
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-
 # ---------------- UI ----------------
-st.title("🎯 Rolling Engine - Walk Forward Test")
+st.title("🎯 Rolling Engine - Re-lock Every 50 Rounds")
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Current Number", current_number if current_number is not None else "-")
-col2.metric("Current Group", current_group if current_group is not None else "-")
-col3.metric("Next Group", vote if vote is not None else "-")
+c1, c2, c3 = st.columns(3)
+c1.metric("Current Number", current_number if current_number is not None else "-")
+c2.metric("Current Group", current_group if current_group is not None else "-")
+c3.metric("Next Group", vote if vote is not None else "-")
 
 st.write("Vote Strength:", confidence)
 st.write("Distance:", distance)
+st.write("Current Locked Windows:", top_windows_now)
 
 st.markdown(
     f"""
@@ -286,27 +251,25 @@ if signal and distance >= GAP and vote is not None:
 else:
     st.info("WAIT")
 
-
 # ---------------- STATS ----------------
 st.subheader("Session Statistics")
-c1, c2, c3 = st.columns(3)
-c1.metric("Profit", profit)
-c2.metric("Trades", len(hits))
-c3.metric("Winrate %", round(np.mean(hits) * 100, 2) if hits else 0)
-
+s1, s2, s3 = st.columns(3)
+s1.metric("Profit", profit)
+s2.metric("Trades", len(hits))
+s3.metric("Winrate %", round(np.mean(hits) * 100, 2) if hits else 0)
 
 # ---------------- PROFIT CURVE ----------------
 st.subheader("Profit Curve")
 if not hist.empty:
     st.line_chart(hist["profit"])
 
+# ---------------- CURRENT WINDOW SCAN ----------------
+st.subheader("Current Window Scan (last 168 for next bet)")
+st.dataframe(scan_df_now, use_container_width=True)
 
-# ---------------- WALK FORWARD TABLE ----------------
-st.subheader("Walk Forward Window Score")
-st.dataframe(wf_df, use_container_width=True)
-
-st.write("Top Windows (locked):", top_windows)
-
+# ---------------- RE-LOCK LOG ----------------
+st.subheader("Re-lock Log")
+st.dataframe(relock_df, use_container_width=True)
 
 # ---------------- HISTORY ----------------
 def highlight_trade(row):
