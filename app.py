@@ -12,7 +12,7 @@ st_autorefresh(interval=10000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-TRAIN_SCAN = 180
+TRAIN_SCAN = 168
 RELOCK_EVERY = 50
 
 WINDOW_MIN = 6
@@ -70,6 +70,7 @@ def evaluate_window(seq_groups, w):
 
     winrate = wins / trades if trades > 0 else 0
     score = profit * winrate * np.log(trades) if trades > 0 else -999999
+
     return {
         "window": w,
         "trades": trades,
@@ -81,12 +82,14 @@ def evaluate_window(seq_groups, w):
 
 def select_windows_from_train(train_groups):
     rows = []
+
     for w in range(WINDOW_MIN, WINDOW_MAX + 1):
         rows.append(evaluate_window(train_groups, w))
 
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
 
     positive_df = df[df["profit"] > 0].copy()
+
     if len(positive_df) >= TOP_WINDOWS:
         selected = positive_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
     else:
@@ -94,7 +97,7 @@ def select_windows_from_train(train_groups):
 
     return selected, df
 
-# ---------------- BUILD HISTORY WITH RE-LOCK ----------------
+# ---------------- BUILD HISTORY WITH PERIODIC RE-LOCK ----------------
 profit = 0
 last_trade = -999
 history = []
@@ -110,9 +113,9 @@ current_top_windows = []
 current_scan_df = pd.DataFrame()
 
 for i in range(start_index, len(groups)):
-    # re-lock tại round đầu tiên của live trading hoặc mỗi RELOCK_EVERY round
+    # Re-lock lần đầu và mỗi RELOCK_EVERY round
     if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
-        train_start = i - TRAIN_SCAN
+        train_start = max(0, i - TRAIN_SCAN)
         train_end = i
         train_groups = groups[train_start:train_end]
 
@@ -219,7 +222,7 @@ next_row = {
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Engine - Re-lock Every 50 Rounds")
+st.title("🎯 Rolling Engine - Periodic Re-lock")
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -229,6 +232,7 @@ c3.metric("Next Group", vote if vote is not None else "-")
 st.write("Vote Strength:", confidence)
 st.write("Distance:", distance)
 st.write("Current Locked Windows:", top_windows_now)
+st.write("Re-lock Every:", RELOCK_EVERY)
 
 st.markdown(
     f"""
@@ -264,7 +268,7 @@ if not hist.empty:
     st.line_chart(hist["profit"])
 
 # ---------------- CURRENT WINDOW SCAN ----------------
-st.subheader("Current Window Scan (last 168 for next bet)")
+st.subheader("Current Window Scan (last 168 rounds for next bet)")
 st.dataframe(scan_df_now, use_container_width=True)
 
 # ---------------- RE-LOCK LOG ----------------
