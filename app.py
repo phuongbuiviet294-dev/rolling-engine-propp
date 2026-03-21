@@ -55,6 +55,11 @@ def group(n: int) -> int:
 
 groups = [group(n) for n in numbers]
 
+# ---------------- GUARD ----------------
+if len(groups) < TRAIN_SCAN:
+    st.error(f"Chưa đủ dữ liệu để chạy. Cần ít nhất {TRAIN_SCAN} rounds, hiện có {len(groups)}.")
+    st.stop()
+
 # ---------------- WINDOW EVAL ----------------
 def evaluate_window(seq_groups, w):
     profit = 0
@@ -110,15 +115,13 @@ history = []
 hits = []
 relock_log = []
 
-if len(groups) >= TRAIN_SCAN:
-    start_index = TRAIN_SCAN
-else:
-    start_index = len(groups)
+start_index = TRAIN_SCAN
 
 current_top_windows = []
 current_scan_df = pd.DataFrame()
 
 for i in range(start_index, len(groups)):
+    # Re-lock lần đầu và mỗi RELOCK_EVERY rounds
     if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
         train_start = max(0, i - TRAIN_SCAN)
         train_end = i
@@ -134,7 +137,6 @@ for i in range(start_index, len(groups)):
         })
 
     preds = [groups[i - w] for w in current_top_windows if i - w >= 0]
-
     if not preds:
         continue
 
@@ -190,14 +192,11 @@ for i in range(start_index, len(groups)):
 hist = pd.DataFrame(history)
 relock_df = pd.DataFrame(relock_log)
 
-# ---------------- CURRENT LOCK FOR NEXT BET ----------------
-if len(groups) >= TRAIN_SCAN:
-    train_groups_now = groups[-TRAIN_SCAN:]
-    top_windows_now, scan_df_now = select_windows_from_train(train_groups_now)
-else:
-    top_windows_now, scan_df_now = [], pd.DataFrame()
-
 # ---------------- NEXT BET ----------------
+# Dùng đúng bộ window cuối cùng của history, KHÔNG scan lại riêng
+top_windows_now = current_top_windows
+scan_df_now = current_scan_df
+
 i = len(groups)
 preds = [groups[i - w] for w in top_windows_now if i - w >= 0]
 
@@ -287,7 +286,7 @@ if not hist.empty:
     st.line_chart(hist["profit"])
 
 # ---------------- CURRENT WINDOW SCAN ----------------
-st.subheader("Current Window Scan (last 168 rounds for next bet)")
+st.subheader("Current Window Scan (same lock as current history block)")
 st.dataframe(scan_df_now, use_container_width=True)
 
 # ---------------- RE-LOCK LOG ----------------
