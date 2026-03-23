@@ -15,14 +15,14 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 TRAIN_SCAN = 182
 WINDOW_MIN = 6
 WINDOW_MAX = 20
-TOP_WINDOWS = 8
+TOP_WINDOWS = 5
 
 GAP = 1
 WIN = 2.5
 LOSS = -1
 
 PROFIT_TARGET = 3
-MIN_WINDOW_PROFIT = -10  # <-- chỉnh ở đây nếu muốn
+MIN_WINDOW_PROFIT = -20  # <-- chỉnh ở đây nếu muốn
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
