@@ -7,7 +7,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=10000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -24,6 +24,7 @@ WIN = 2.5
 LOSS = -1
 
 PROFIT_TARGET = 7
+MIN_WINDOW_PROFIT = -10  # loại window có profit thấp hơn ngưỡng này
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -37,6 +38,7 @@ def load_numbers():
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
+
 numbers = load_numbers()
 
 # ---------------- GROUP ----------------
@@ -48,6 +50,7 @@ def group(n: int) -> int:
     if n <= 9:
         return 3
     return 4
+
 
 groups = [group(n) for n in numbers]
 
@@ -87,6 +90,7 @@ def evaluate_window(seq_groups, w):
         "score": score,
     }
 
+
 def select_windows_from_train(train_groups):
     rows = []
 
@@ -95,43 +99,41 @@ def select_windows_from_train(train_groups):
 
     df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
 
-    positive_df = df[df["profit"] > 0].copy()
+    # lọc bỏ window âm quá sâu
+    filtered_df = df[df["profit"] >= MIN_WINDOW_PROFIT].copy().reset_index(drop=True)
+
+    # ưu tiên window dương
+    positive_df = filtered_df[filtered_df["profit"] > 0].copy().reset_index(drop=True)
 
     if len(positive_df) >= TOP_WINDOWS:
         selected = positive_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
+    elif len(filtered_df) > 0:
+        selected = filtered_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
     else:
+        # fallback cuối cùng nếu lọc sạch hết
         selected = df.head(TOP_WINDOWS)["window"].astype(int).tolist()
 
-    return selected, df
+    return selected, df, filtered_df
+
 
 # ---------------- STATE INIT ----------------
 def init_state():
-    if "live_initialized" not in st.session_state:
-        st.session_state.live_initialized = False
+    defaults = {
+        "live_initialized": False,
+        "processed_until": None,
+        "profit": 0.0,
+        "last_trade": -999,
+        "hits": [],
+        "history_rows": [],
+        "locked_windows": [],
+        "scan_df_locked": pd.DataFrame(),
+        "scan_df_filtered": pd.DataFrame(),
+        "base_data_len": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    if "processed_until" not in st.session_state:
-        st.session_state.processed_until = None
-
-    if "profit" not in st.session_state:
-        st.session_state.profit = 0.0
-
-    if "last_trade" not in st.session_state:
-        st.session_state.last_trade = -999
-
-    if "hits" not in st.session_state:
-        st.session_state.hits = []
-
-    if "history_rows" not in st.session_state:
-        st.session_state.history_rows = []
-
-    if "locked_windows" not in st.session_state:
-        st.session_state.locked_windows = []
-
-    if "scan_df_locked" not in st.session_state:
-        st.session_state.scan_df_locked = pd.DataFrame()
-
-    if "base_data_len" not in st.session_state:
-        st.session_state.base_data_len = None
 
 init_state()
 
@@ -146,6 +148,7 @@ if st.button("🔄 Reset Session"):
         "history_rows",
         "locked_windows",
         "scan_df_locked",
+        "scan_df_filtered",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -153,7 +156,7 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# Nếu dữ liệu bị giảm thì reset để tránh lệch state
+# nếu dữ liệu giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -167,6 +170,7 @@ if (
         "history_rows",
         "locked_windows",
         "scan_df_locked",
+        "scan_df_filtered",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -179,10 +183,11 @@ start_index = TRAIN_SCAN
 
 if not st.session_state.live_initialized:
     train_groups = groups[:TRAIN_SCAN]
-    locked_windows, scan_df_locked = select_windows_from_train(train_groups)
+    locked_windows, scan_df_locked, scan_df_filtered = select_windows_from_train(train_groups)
 
     st.session_state.locked_windows = locked_windows
     st.session_state.scan_df_locked = scan_df_locked
+    st.session_state.scan_df_filtered = scan_df_filtered
     st.session_state.processed_until = TRAIN_SCAN - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
@@ -194,7 +199,11 @@ hits = st.session_state.hits
 history_rows = st.session_state.history_rows
 locked_windows = st.session_state.locked_windows
 scan_df_locked = st.session_state.scan_df_locked
+scan_df_filtered = st.session_state.scan_df_filtered
 processed_until = st.session_state.processed_until
+
+# vote yêu cầu thực tế: giữ cứng 5 nếu còn >=5 window, nếu ít hơn thì hạ theo số window còn lại
+effective_vote_required = VOTE_REQUIRED if len(locked_windows) >= VOTE_REQUIRED else len(locked_windows)
 
 for i in range(processed_until + 1, len(groups)):
     if i < start_index:
@@ -207,7 +216,7 @@ for i in range(processed_until + 1, len(groups)):
 
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = confidence >= VOTE_REQUIRED
+    signal = confidence >= effective_vote_required
     distance = i - last_trade
 
     if profit >= PROFIT_TARGET:
@@ -260,6 +269,7 @@ st.session_state.hits = hits
 st.session_state.history_rows = history_rows
 st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_locked = scan_df_locked
+st.session_state.scan_df_filtered = scan_df_filtered
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 
@@ -283,7 +293,7 @@ if not hist.empty:
 else:
     distance = 999
 
-raw_signal = confidence >= VOTE_REQUIRED if vote is not None else False
+raw_signal = confidence >= effective_vote_required if vote is not None else False
 
 if profit >= PROFIT_TARGET:
     signal = False
@@ -312,7 +322,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - Fixed Lock + Profit Target")
+st.title("🎯 Rolling Prediction Engine - Fixed Lock 182 + Profit Filter")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -325,6 +335,9 @@ st.write("Distance From Last Trade:", distance)
 st.write("Locked Windows:", locked_windows)
 st.write("Train Scan:", TRAIN_SCAN)
 st.write("Profit Target:", PROFIT_TARGET)
+st.write("Min Window Profit:", MIN_WINDOW_PROFIT)
+st.write("Vote Required (config):", VOTE_REQUIRED)
+st.write("Vote Required (effective):", effective_vote_required)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
@@ -373,9 +386,12 @@ st.subheader("Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["profit"])
 
-# ---------------- LOCKED WINDOW SCAN ----------------
-st.subheader("Initial Window Scan (locked once)")
+# ---------------- WINDOW SCAN ----------------
+st.subheader("Initial Window Scan (all windows)")
 st.dataframe(scan_df_locked, use_container_width=True)
+
+st.subheader(f"Filtered Window Scan (profit >= {MIN_WINDOW_PROFIT})")
+st.dataframe(scan_df_filtered, use_container_width=True)
 
 # ---------------- HISTORY ----------------
 st.subheader("History")
