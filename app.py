@@ -7,7 +7,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=10000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -17,8 +17,8 @@ RELOCK_EVERY = 26
 
 WINDOW_MIN = 6
 WINDOW_MAX = 20
-
 TOP_WINDOWS = 8
+
 VOTE_REQUIRED = 5
 GAP = 1
 
@@ -42,7 +42,6 @@ def load_numbers():
 
 numbers = load_numbers()
 
-
 # ---------------- GROUP ----------------
 def group(n: int) -> int:
     if n <= 3:
@@ -56,12 +55,12 @@ def group(n: int) -> int:
 
 groups = [group(n) for n in numbers]
 
-
 # ---------------- GUARD ----------------
-if len(groups) < TRAIN_SCAN:
-    st.error(f"Chưa đủ dữ liệu để chạy. Cần ít nhất {TRAIN_SCAN} rounds, hiện có {len(groups)}.")
+if len(groups) <= TRAIN_SCAN:
+    st.error(
+        f"Chưa đủ dữ liệu để chạy trade. Cần nhiều hơn {TRAIN_SCAN} rounds, hiện có {len(groups)}."
+    )
     st.stop()
-
 
 # ---------------- WINDOW EVAL ----------------
 def evaluate_window(seq_groups, w):
@@ -124,6 +123,7 @@ current_top_windows = []
 current_scan_df = pd.DataFrame()
 
 for i in range(start_index, len(groups)):
+    # Re-lock lần đầu và mỗi RELOCK_EVERY rounds
     if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
         train_start = max(0, i - TRAIN_SCAN)
         train_end = i
@@ -201,10 +201,18 @@ hist = pd.DataFrame(history)
 relock_df = pd.DataFrame(relock_log)
 
 # ---------------- NEXT BET ----------------
-top_windows_now = current_top_windows
-scan_df_now = current_scan_df
-
 i = len(groups)
+
+# FIX: nếu round kế tiếp đúng mốc re-lock thì phải scan lại trước khi predict
+if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
+    train_start = max(0, i - TRAIN_SCAN)
+    train_end = i
+    train_groups = groups[train_start:train_end]
+    top_windows_now, scan_df_now = select_windows_from_train(train_groups)
+else:
+    top_windows_now = current_top_windows
+    scan_df_now = current_scan_df
+
 preds = [groups[i - w] for w in top_windows_now if i - w >= 0]
 
 if preds:
