@@ -21,7 +21,7 @@ GAP = 1
 WIN = 2.5
 LOSS = -1
 
-PROFIT_TARGET = 7
+PROFIT_TARGET = 3
 MIN_WINDOW_PROFIT = -10  # <-- chỉnh ở đây nếu muốn
 
 # ---------------- LOAD DATA ----------------
