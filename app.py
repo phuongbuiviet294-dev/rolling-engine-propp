@@ -12,9 +12,7 @@ st_autorefresh(interval=1000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-TRAIN_SCAN = 180
-RELOCK_EVERY = 30
-
+TRAIN_SCAN = 192
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 TOP_WINDOWS = 8
@@ -126,22 +124,19 @@ def init_state():
     if "history_rows" not in st.session_state:
         st.session_state.history_rows = []
 
-    if "relock_log" not in st.session_state:
-        st.session_state.relock_log = []
+    if "locked_windows" not in st.session_state:
+        st.session_state.locked_windows = []
 
-    if "current_top_windows" not in st.session_state:
-        st.session_state.current_top_windows = []
-
-    if "current_scan_df" not in st.session_state:
-        st.session_state.current_scan_df = pd.DataFrame()
+    if "scan_df_locked" not in st.session_state:
+        st.session_state.scan_df_locked = pd.DataFrame()
 
     if "base_data_len" not in st.session_state:
         st.session_state.base_data_len = None
 
 init_state()
 
-# ---------------- RESET IF DATA SHRINKS / MANUAL ----------------
-if st.button("🔄 Reset Live State"):
+# ---------------- RESET ----------------
+if st.button("🔄 Reset Session"):
     keys_to_clear = [
         "live_initialized",
         "processed_until",
@@ -149,9 +144,8 @@ if st.button("🔄 Reset Live State"):
         "last_trade",
         "hits",
         "history_rows",
-        "relock_log",
-        "current_top_windows",
-        "current_scan_df",
+        "locked_windows",
+        "scan_df_locked",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -159,7 +153,7 @@ if st.button("🔄 Reset Live State"):
             del st.session_state[k]
     st.rerun()
 
-# Nếu sheet bị sửa/giảm số dòng thì reset để tránh lệch
+# Nếu dữ liệu bị giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -171,9 +165,8 @@ if (
         "last_trade",
         "hits",
         "history_rows",
-        "relock_log",
-        "current_top_windows",
-        "current_scan_df",
+        "locked_windows",
+        "scan_df_locked",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -181,29 +174,15 @@ if (
             del st.session_state[k]
     st.rerun()
 
-# ---------------- LIVE ENGINE INIT ----------------
+# ---------------- INITIAL LOCK ONLY ONCE ----------------
 start_index = TRAIN_SCAN
 
 if not st.session_state.live_initialized:
-    # Re-lock đầu tiên tại round TRAIN_SCAN
-    train_start = 0
-    train_end = TRAIN_SCAN
-    train_groups = groups[train_start:train_end]
+    train_groups = groups[:TRAIN_SCAN]
+    locked_windows, scan_df_locked = select_windows_from_train(train_groups)
 
-    current_top_windows, current_scan_df = select_windows_from_train(train_groups)
-
-    st.session_state.current_top_windows = current_top_windows
-    st.session_state.current_scan_df = current_scan_df
-    st.session_state.relock_log = [
-        {
-            "relock_round": TRAIN_SCAN,
-            "train_from": train_start,
-            "train_to": train_end - 1,
-            "top_windows": ", ".join(map(str, current_top_windows)),
-        }
-    ]
-
-    # round cuối đã xử lý = TRAIN_SCAN - 1
+    st.session_state.locked_windows = locked_windows
+    st.session_state.scan_df_locked = scan_df_locked
     st.session_state.processed_until = TRAIN_SCAN - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
@@ -213,33 +192,15 @@ profit = st.session_state.profit
 last_trade = st.session_state.last_trade
 hits = st.session_state.hits
 history_rows = st.session_state.history_rows
-relock_log = st.session_state.relock_log
-current_top_windows = st.session_state.current_top_windows
-current_scan_df = st.session_state.current_scan_df
+locked_windows = st.session_state.locked_windows
+scan_df_locked = st.session_state.scan_df_locked
 processed_until = st.session_state.processed_until
 
 for i in range(processed_until + 1, len(groups)):
     if i < start_index:
         continue
 
-    # re-lock tại round đầu block mới
-    if ((i - start_index) % RELOCK_EVERY == 0) and (i != start_index):
-        train_start = max(0, i - TRAIN_SCAN)
-        train_end = i
-        train_groups = groups[train_start:train_end]
-
-        current_top_windows, current_scan_df = select_windows_from_train(train_groups)
-
-        relock_log.append(
-            {
-                "relock_round": i,
-                "train_from": train_start,
-                "train_to": train_end - 1,
-                "top_windows": ", ".join(map(str, current_top_windows)),
-            }
-        )
-
-    preds = [groups[i - w] for w in current_top_windows if i - w >= 0]
+    preds = [groups[i - w] for w in locked_windows if i - w >= 0]
     if not preds:
         processed_until = i
         continue
@@ -253,22 +214,16 @@ for i in range(processed_until + 1, len(groups)):
         signal = False
         trade = False
         can_bet = False
+        state = "STOP"
     else:
         trade = signal and distance >= GAP
         can_bet = trade
+        state = "TRADE" if trade else ("SIGNAL" if signal else "WAIT")
 
     bet_group = vote if can_bet else None
     hit = None
-    state = "WAIT"
-
-    if signal:
-        state = "SIGNAL"
-
-    if profit >= PROFIT_TARGET:
-        state = "STOP"
 
     if trade:
-        state = "TRADE"
         last_trade = i
 
         if groups[i] == vote:
@@ -293,45 +248,26 @@ for i in range(processed_until + 1, len(groups)):
             "hit": hit,
             "state": state,
             "profit": profit,
-            "locked_windows": ", ".join(map(str, current_top_windows)),
+            "locked_windows": ", ".join(map(str, locked_windows)),
         }
     )
 
     processed_until = i
 
-# save state back
 st.session_state.profit = profit
 st.session_state.last_trade = last_trade
 st.session_state.hits = hits
 st.session_state.history_rows = history_rows
-st.session_state.relock_log = relock_log
-st.session_state.current_top_windows = current_top_windows
-st.session_state.current_scan_df = current_scan_df
+st.session_state.locked_windows = locked_windows
+st.session_state.scan_df_locked = scan_df_locked
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 
 hist = pd.DataFrame(history_rows)
-relock_df = pd.DataFrame(relock_log)
-scan_df_now = current_scan_df
-top_windows_now = current_top_windows
 
 # ---------------- NEXT BET ----------------
 next_round = len(groups)
-
-# nếu round kế tiếp đúng mốc re-lock thì phải scan lại trước khi predict
-if (
-    next_round >= start_index
-    and (next_round - start_index) % RELOCK_EVERY == 0
-):
-    train_start = max(0, next_round - TRAIN_SCAN)
-    train_end = next_round
-    train_groups = groups[train_start:train_end]
-    top_windows_pred, scan_df_pred = select_windows_from_train(train_groups)
-else:
-    top_windows_pred = top_windows_now
-    scan_df_pred = scan_df_now
-
-preds = [groups[next_round - w] for w in top_windows_pred if next_round - w >= 0]
+preds = [groups[next_round - w] for w in locked_windows if next_round - w >= 0]
 
 if preds:
     vote, confidence = Counter(preds).most_common(1)[0]
@@ -370,10 +306,63 @@ next_row = {
     "hit": None,
     "state": next_state,
     "profit": profit,
-    "locked_windows": ", ".join(map(str, top_windows_pred)),
+    "locked_windows": ", ".join(map(str, locked_windows)),
 }
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - LIVE Incremental")
+st.title("🎯 Rolling Prediction Engine - Fixed Lock + Profit Target")
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Current Number", current_number if current_number is not None else "-")
+col2.metric("Current Group", current_group if current_group is not None else "-")
+col3.metric("Next Group", vote if vote is not None else "-")
+
+st.divider()
+st.write("Vote Strength:", confidence)
+st.write("Distance From Last Trade:", distance)
+st.write("Locked Windows:", locked_windows)
+st.write("Train Scan:", TRAIN_SCAN)
+st.write("Profit Target:", PROFIT_TARGET)
+st.write("Processed Until Round:", processed_until)
+
+st.markdown(
+    f"""
+    <div style="background:#ffd700;
+    padding:20px;
+    border-radius:10px;
+    text-align:center;
+    font-size:28px;
+    font-weight:bold;">
+    NEXT GROUP → {vote if vote is not None else "-"} (Vote Strength: {confidence})
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if profit >= PROFIT_TARGET:
+    st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
+elif can_bet and vote is not None:
+    st.markdown(
+        f"""
+        <div style="background:#ff4b4b;
+        padding:25px;
+        border-radius:10px;
+        text-align:center;
+        font-size:32px;
+        color:white;
+        font-weight:bold;">
+        BET GROUP → {vote}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    st.info("WAIT (conditions not met)")
+
+# ---------------- SESSION STATS ----------------
+st.subheader("Session Statistics")
+s1, s2, s3 = st.columns(3)
+s1.metric("Profit", profit)
+s2.metric("Trades", len(hits
