@@ -365,4 +365,35 @@ else:
 st.subheader("Session Statistics")
 s1, s2, s3 = st.columns(3)
 s1.metric("Profit", profit)
-s2.metric("Trades", len(hits
+s2.metric("Trades", len(hits))
+s3.metric("Winrate %", round(np.mean(hits) * 100, 2) if hits else 0)
+
+# ---------------- PROFIT CURVE ----------------
+st.subheader("Profit Curve")
+if not hist_display.empty:
+    st.line_chart(hist_display["profit"])
+
+# ---------------- LOCKED WINDOW SCAN ----------------
+st.subheader("Initial Window Scan (locked once)")
+st.dataframe(scan_df_locked, use_container_width=True)
+
+# ---------------- HISTORY ----------------
+st.subheader("History")
+
+def highlight_trade(row):
+    if row["state"] == "NEXT":
+        return ["background-color: #ffd700"] * len(row)
+    if row["state"] == "STOP":
+        return ["background-color: #d9534f; color:white"] * len(row)
+    if row["trade"]:
+        return ["background-color: #ff4b4b; color:white"] * len(row)
+    return [""] * len(row)
+
+st.dataframe(
+    hist_display.iloc[::-1].style.apply(highlight_trade, axis=1),
+    use_container_width=True,
+)
+
+# ---------------- DEBUG ----------------
+st.write("Locked Windows (fixed):", locked_windows)
+st.write("Total Rows:", len(numbers))
