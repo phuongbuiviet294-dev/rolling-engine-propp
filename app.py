@@ -12,7 +12,7 @@ st_autorefresh(interval=1000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-TRAIN_SCAN = 182
+TRAIN_SCAN = 175
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 TOP_WINDOWS = 8
