@@ -7,13 +7,10 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=10000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
-
-TRAIN_SCAN = 168
-RELOCK_EVERY = 26
 
 WINDOW_MIN = 6
 WINDOW_MAX = 20
@@ -25,7 +22,10 @@ GAP = 1
 WIN = 2.5
 LOSS = -1
 
-PROFIT_TARGET = 7
+RELOCK_EVERY = 30
+PROFIT_TARGET = 999999  # đổi nếu muốn stop profit
+
+MODE_OPTIONS = ["ROLLING_168", "ROLLING_180", "FULL_HISTORY"]
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -39,7 +39,6 @@ def load_numbers():
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
-
 numbers = load_numbers()
 
 # ---------------- GROUP ----------------
@@ -52,14 +51,27 @@ def group(n: int) -> int:
         return 3
     return 4
 
-
 groups = [group(n) for n in numbers]
 
+# ---------------- UI MODE ----------------
+st.title("🎯 Rolling Engine Compare Scan Modes")
+
+mode = st.selectbox("Chọn kiểu scan", MODE_OPTIONS, index=0)
+
+if mode == "ROLLING_168":
+    TRAIN_SCAN = 168
+elif mode == "ROLLING_180":
+    TRAIN_SCAN = 180
+else:
+    TRAIN_SCAN = None  # FULL_HISTORY
+
 # ---------------- GUARD ----------------
-if len(groups) <= TRAIN_SCAN:
-    st.error(
-        f"Chưa đủ dữ liệu để chạy trade. Cần nhiều hơn {TRAIN_SCAN} rounds, hiện có {len(groups)}."
-    )
+if mode != "FULL_HISTORY" and len(groups) <= TRAIN_SCAN:
+    st.error(f"Chưa đủ dữ liệu để chạy mode {mode}. Cần nhiều hơn {TRAIN_SCAN} rounds, hiện có {len(groups)}.")
+    st.stop()
+
+if mode == "FULL_HISTORY" and len(groups) <= WINDOW_MAX + 5:
+    st.error(f"Chưa đủ dữ liệu để chạy mode FULL_HISTORY. Hiện có {len(groups)}.")
     st.stop()
 
 # ---------------- WINDOW EVAL ----------------
@@ -91,7 +103,6 @@ def evaluate_window(seq_groups, w):
         "score": score,
     }
 
-
 def select_windows_from_train(train_groups):
     rows = []
 
@@ -109,6 +120,19 @@ def select_windows_from_train(train_groups):
 
     return selected, df
 
+def get_train_slice(groups, i, mode_name):
+    if mode_name == "ROLLING_168":
+        train_start = max(0, i - 168)
+        train_end = i
+        return groups[train_start:train_end], train_start, train_end
+    if mode_name == "ROLLING_180":
+        train_start = max(0, i - 180)
+        train_end = i
+        return groups[train_start:train_end], train_start, train_end
+    # FULL_HISTORY
+    train_start = 0
+    train_end = i
+    return groups[train_start:train_end], train_start, train_end
 
 # ---------------- BUILD HISTORY WITH PERIODIC RE-LOCK ----------------
 profit = 0
@@ -117,18 +141,17 @@ history = []
 hits = []
 relock_log = []
 
-start_index = TRAIN_SCAN
+if mode == "FULL_HISTORY":
+    start_index = max(WINDOW_MAX + 1, 50)
+else:
+    start_index = TRAIN_SCAN
 
 current_top_windows = []
 current_scan_df = pd.DataFrame()
 
 for i in range(start_index, len(groups)):
-    # Re-lock lần đầu và mỗi RELOCK_EVERY rounds
     if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
-        train_start = max(0, i - TRAIN_SCAN)
-        train_end = i
-        train_groups = groups[train_start:train_end]
-
+        train_groups, train_start, train_end = get_train_slice(groups, i, mode)
         current_top_windows, current_scan_df = select_windows_from_train(train_groups)
 
         relock_log.append(
@@ -136,6 +159,7 @@ for i in range(start_index, len(groups)):
                 "relock_round": i,
                 "train_from": train_start,
                 "train_to": train_end - 1,
+                "train_len": len(train_groups),
                 "top_windows": ", ".join(map(str, current_top_windows)),
             }
         )
@@ -203,12 +227,9 @@ relock_df = pd.DataFrame(relock_log)
 # ---------------- NEXT BET ----------------
 i = len(groups)
 
-# FIX: nếu round kế tiếp đúng mốc re-lock thì phải scan lại trước khi predict
 if (i == start_index) or ((i - start_index) % RELOCK_EVERY == 0):
-    train_start = max(0, i - TRAIN_SCAN)
-    train_end = i
-    train_groups = groups[train_start:train_end]
-    top_windows_now, scan_df_now = select_windows_from_train(train_groups)
+    train_groups_now, train_start_now, train_end_now = get_train_slice(groups, i, mode)
+    top_windows_now, scan_df_now = select_windows_from_train(train_groups_now)
 else:
     top_windows_now = current_top_windows
     scan_df_now = current_scan_df
@@ -255,19 +276,17 @@ next_row = {
 hist = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - Re-lock + Profit Target")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Current Number", current_number if current_number is not None else "-")
-col2.metric("Current Group", current_group if current_group is not None else "-")
-col3.metric("Next Group", vote if vote is not None else "-")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Mode", mode)
+col2.metric("Current Number", current_number if current_number is not None else "-")
+col3.metric("Current Group", current_group if current_group is not None else "-")
+col4.metric("Next Group", vote if vote is not None else "-")
 
 st.divider()
 st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 st.write("Current Locked Windows:", top_windows_now)
 st.write("Re-lock Every:", RELOCK_EVERY)
-st.write("Profit Target:", PROFIT_TARGET)
 
 st.markdown(
     f"""
@@ -301,7 +320,7 @@ elif can_bet and vote is not None:
         unsafe_allow_html=True,
     )
 else:
-    st.info("WAIT (conditions not met)")
+    st.info("WAIT")
 
 # ---------------- SESSION STATS ----------------
 st.subheader("Session Statistics")
@@ -316,7 +335,7 @@ if not hist.empty:
     st.line_chart(hist["profit"])
 
 # ---------------- CURRENT WINDOW SCAN ----------------
-st.subheader("Current Window Scan (same lock as current history block)")
+st.subheader("Current Window Scan")
 st.dataframe(scan_df_now, use_container_width=True)
 
 # ---------------- RE-LOCK LOG ----------------
@@ -326,7 +345,6 @@ st.dataframe(relock_df, use_container_width=True)
 # ---------------- HISTORY ----------------
 st.subheader("History")
 
-
 def highlight_trade(row):
     if row["state"] == "NEXT":
         return ["background-color: #ffd700"] * len(row)
@@ -335,7 +353,6 @@ def highlight_trade(row):
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
-
 
 st.dataframe(
     hist.iloc[::-1].style.apply(highlight_trade, axis=1),
