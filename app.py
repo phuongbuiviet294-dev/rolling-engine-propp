@@ -22,7 +22,7 @@ WIN = 2.5
 LOSS = -1
 
 PROFIT_TARGET = 7
-MIN_WINDOW_PROFIT = -15  # <-- chỉnh ở đây nếu muốn
+MIN_WINDOW_PROFIT = -10  # <-- chỉnh ở đây nếu muốn
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
