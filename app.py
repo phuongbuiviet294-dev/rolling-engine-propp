@@ -21,28 +21,24 @@ ROLLING_SCAN = 168
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
-# chọn tối đa 5 window, nhưng có thể ít hơn
+# luôn lock 5 và vote 4
 TOP_WINDOWS = 5
-MIN_WINDOWS_REQUIRED = 3
-
-# vote động
-DEFAULT_VOTE_RATIO = 0.7   # 5 -> 4, 4 -> 3, 3 -> 2
-
+VOTE_REQUIRED = 4
 GAP = 0
+
 WIN = 2.5
 LOSS = -1
 
-# stop logic
 PROFIT_TARGET = 3
-STOP_LOSS = -5
+STOP_LOSS = -8
+
+# guard gần nhất
 RECENT_TRADE_LOOKBACK = 10
 RECENT_LOSS_LIMIT = -4
 RECENT_WINRATE_MIN = 0.25
 
-# filter window
-MIN_WINDOW_PROFIT = -3
-MIN_WINDOW_EV = -0.05
-MAX_WINDOW_DOWN_STREAK = 8
+# fallback chỉ lấy window không quá xấu
+FALLBACK_MIN_PROFIT = -5
 
 # =========================
 # LOAD DATA
@@ -106,16 +102,15 @@ def evaluate_window(seq_groups, w):
     profit = 0.0
     trades = 0
     wins = 0
-    curve = []
 
     down_streak = 0
     max_down_streak = 0
     prev_profit = 0.0
+    curve = []
 
     for i in range(w, len(seq_groups)):
         pred = seq_groups[i - w]
 
-        # chỉ trade khi round trước khác pred
         if seq_groups[i - 1] != pred:
             trades += 1
 
@@ -138,16 +133,7 @@ def evaluate_window(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0.0
     score = profit * winrate * np.log(trades) if trades > 0 else -999999.0
     ev = winrate * WIN - (1 - winrate) * abs(LOSS) if trades > 0 else -999999.0
-
     curve_std = float(np.std(curve)) if len(curve) > 1 else 0.0
-
-    stability_score = (
-        profit * 4.0
-        + ev * 12.0
-        + winrate * 8.0
-        - max_down_streak * 2.0
-        - curve_std * 0.5
-    )
 
     return {
         "window": w,
@@ -159,64 +145,78 @@ def evaluate_window(seq_groups, w):
         "ev": ev,
         "max_down_streak": max_down_streak,
         "curve_std": curve_std,
-        "stability_score": stability_score,
     }
 
 
+# =========================
+# PRIORITIZE POSITIVE PROFIT FIRST
+# =========================
 def select_adaptive_windows(train_groups):
     rows = [evaluate_window(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
     df = pd.DataFrame(rows)
 
-    # window usable: không cần quá đẹp, nhưng không quá xấu
-    usable_df = df[
-        (df["profit"] >= MIN_WINDOW_PROFIT) &
-        (df["ev"] >= MIN_WINDOW_EV) &
-        (df["max_down_streak"] <= MAX_WINDOW_DOWN_STREAK)
-    ].copy()
-
-    # ưu tiên window có edge thật
-    strong_df = usable_df[
-        (usable_df["profit"] >= 0) &
-        (usable_df["ev"] >= 0)
-    ].copy()
-
-    strong_df = strong_df.sort_values(
-        ["stability_score", "profit", "ev", "winrate"],
-        ascending=False
+    ranked_df = df.sort_values(
+        ["profit", "ev", "max_down_streak", "score", "winrate"],
+        ascending=[False, False, True, False, False]
     ).reset_index(drop=True)
 
-    usable_df = usable_df.sort_values(
-        ["stability_score", "profit", "ev", "winrate"],
-        ascending=False
+    # 1) ưu tiên window profit dương trước
+    positive_df = ranked_df[ranked_df["profit"] > 0].copy()
+    positive_df = positive_df.sort_values(
+        ["profit", "ev", "max_down_streak", "score", "winrate"],
+        ascending=[False, False, True, False, False]
     ).reset_index(drop=True)
 
-    if len(strong_df) >= MIN_WINDOWS_REQUIRED:
-        selected_df = strong_df.head(TOP_WINDOWS).copy()
-    elif len(usable_df) >= MIN_WINDOWS_REQUIRED:
-        selected_df = usable_df.head(TOP_WINDOWS).copy()
-    else:
-        selected_df = df.sort_values(
-            ["max_down_streak", "profit", "ev", "winrate"],
-            ascending=[True, False, False, False]
-        ).head(MIN_WINDOWS_REQUIRED).copy()
+    selected_parts = []
+
+    if len(positive_df) > 0:
+        pos_take = positive_df.head(TOP_WINDOWS).copy()
+        pos_take["pick_source"] = "positive"
+        selected_parts.append(pos_take)
+
+    selected_df = pd.concat(selected_parts, ignore_index=True) if selected_parts else pd.DataFrame()
+
+    # 2) nếu chưa đủ 5 thì thêm các window còn lại theo ưu tiên:
+    # ev cao hơn -> profit đỡ âm hơn -> down streak thấp hơn
+    if len(selected_df) < TOP_WINDOWS:
+        selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
+
+        fallback_df = ranked_df[
+            (~ranked_df["window"].isin(selected_windows)) &
+            (ranked_df["profit"] > FALLBACK_MIN_PROFIT)
+        ].copy()
+
+        fallback_df = fallback_df.sort_values(
+            ["ev", "profit", "max_down_streak", "score", "winrate"],
+            ascending=[False, False, True, False, False]
+        ).reset_index(drop=True)
+
+        need = TOP_WINDOWS - len(selected_df)
+        if need > 0 and len(fallback_df) > 0:
+            fb_take = fallback_df.head(need).copy()
+            fb_take["pick_source"] = "fallback_after_positive"
+            selected_df = pd.concat([selected_df, fb_take], ignore_index=True)
+
+    # 3) nếu vẫn thiếu thì lấy phần còn lại ít xấu nhất để đủ 5
+    if len(selected_df) < TOP_WINDOWS:
+        selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
+
+        remain_df = ranked_df[~ranked_df["window"].isin(selected_windows)].copy()
+        remain_df = remain_df.sort_values(
+            ["profit", "ev", "max_down_streak", "score", "winrate"],
+            ascending=[False, False, True, False, False]
+        ).reset_index(drop=True)
+
+        need = TOP_WINDOWS - len(selected_df)
+        if need > 0 and len(remain_df) > 0:
+            rm_take = remain_df.head(need).copy()
+            rm_take["pick_source"] = "last_resort"
+            selected_df = pd.concat([selected_df, rm_take], ignore_index=True)
 
     selected_df = selected_df.head(TOP_WINDOWS).copy()
     selected_windows = selected_df["window"].astype(int).tolist()
 
-    return selected_windows, df.sort_values(
-        ["stability_score", "profit", "ev", "winrate"],
-        ascending=False
-    ).reset_index(drop=True), selected_df
-
-
-def calc_vote_required(window_count: int) -> int:
-    if window_count <= 0:
-        return 999
-    if window_count == 1:
-        return 1
-    if window_count == 2:
-        return 2
-    return max(2, int(np.ceil(window_count * DEFAULT_VOTE_RATIO)))
+    return selected_windows, ranked_df, selected_df
 
 
 # =========================
@@ -234,7 +234,6 @@ def init_state():
         "last_scan_df_all": pd.DataFrame(),
         "last_scan_df_selected": pd.DataFrame(),
         "last_locked_windows": [],
-        "last_vote_required": None,
         "is_disabled": False,
         "disable_reason": "",
         "base_data_len": None,
@@ -261,7 +260,6 @@ if st.button("🔄 Reset Session"):
         "last_scan_df_all",
         "last_scan_df_selected",
         "last_locked_windows",
-        "last_vote_required",
         "is_disabled",
         "disable_reason",
         "base_data_len",
@@ -271,7 +269,6 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# dữ liệu bị reset/giảm
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -287,7 +284,6 @@ if (
         "last_scan_df_all",
         "last_scan_df_selected",
         "last_locked_windows",
-        "last_vote_required",
         "is_disabled",
         "disable_reason",
         "base_data_len",
@@ -298,17 +294,7 @@ if (
     st.rerun()
 
 # =========================
-# INITIAL STATE
-# =========================
-start_index = ROLLING_SCAN
-
-if not st.session_state.live_initialized:
-    st.session_state.processed_until = ROLLING_SCAN - 1
-    st.session_state.base_data_len = len(groups)
-    st.session_state.live_initialized = True
-
-# =========================
-# HELPERS
+# RECENT GUARD
 # =========================
 def recent_guard(trade_profits):
     if len(trade_profits) < RECENT_TRADE_LOOKBACK:
@@ -327,6 +313,16 @@ def recent_guard(trade_profits):
 
     return False, ""
 
+
+# =========================
+# INITIAL STATE
+# =========================
+start_index = ROLLING_SCAN
+
+if not st.session_state.live_initialized:
+    st.session_state.processed_until = ROLLING_SCAN - 1
+    st.session_state.base_data_len = len(groups)
+    st.session_state.live_initialized = True
 
 # =========================
 # PROCESS ONLY NEW ROUNDS
@@ -348,32 +344,10 @@ for i in range(processed_until + 1, len(groups)):
     train_groups = groups[i - ROLLING_SCAN:i]
 
     locked_windows, scan_df_all, scan_df_selected = select_adaptive_windows(train_groups)
-    vote_required = calc_vote_required(len(locked_windows))
 
     st.session_state.last_scan_df_all = scan_df_all
     st.session_state.last_scan_df_selected = scan_df_selected
     st.session_state.last_locked_windows = locked_windows
-    st.session_state.last_vote_required = vote_required
-
-    if len(locked_windows) < MIN_WINDOWS_REQUIRED:
-        history_rows.append(
-            {
-                "round": i,
-                "number": numbers[i],
-                "group": groups[i],
-                "vote": None,
-                "confidence": 0,
-                "signal": False,
-                "trade": False,
-                "bet_group": None,
-                "hit": None,
-                "state": "WAIT_NO_MODEL",
-                "profit": profit,
-                "locked_windows": ", ".join(map(str, locked_windows)),
-            }
-        )
-        processed_until = i
-        continue
 
     preds = [groups[i - w] for w in locked_windows if i - w >= 0]
     if not preds:
@@ -397,10 +371,9 @@ for i in range(processed_until + 1, len(groups)):
         continue
 
     vote, confidence = Counter(preds).most_common(1)[0]
-    signal = confidence >= vote_required
+    signal = confidence >= VOTE_REQUIRED
     distance = i - last_trade
 
-    # stop target / stop loss / guard
     if profit >= PROFIT_TARGET:
         is_disabled = True
         disable_reason = f"Reached profit target {PROFIT_TARGET}"
@@ -434,13 +407,13 @@ for i in range(processed_until + 1, len(groups)):
             trade_profit = WIN
             profit += WIN
             hits.append(1)
-            trade_profits.append(WIN)
+            trade_profits.append(trade_profit)
         else:
             hit = 0
             trade_profit = LOSS
             profit += LOSS
             hits.append(0)
-            trade_profits.append(LOSS)
+            trade_profits.append(trade_profit)
 
     history_rows.append(
         {
@@ -482,14 +455,12 @@ next_round = len(groups)
 next_locked_windows = []
 next_scan_all = pd.DataFrame()
 next_scan_selected = pd.DataFrame()
-next_vote_required = 999
 vote = None
 confidence = 0
 
 if next_round >= ROLLING_SCAN:
     next_train_groups = groups[next_round - ROLLING_SCAN:next_round]
     next_locked_windows, next_scan_all, next_scan_selected = select_adaptive_windows(next_train_groups)
-    next_vote_required = calc_vote_required(len(next_locked_windows))
 
     preds = [groups[next_round - w] for w in next_locked_windows if next_round - w >= 0]
     if preds:
@@ -504,7 +475,7 @@ if not hist.empty:
 else:
     distance = 999
 
-raw_signal = (vote is not None) and (confidence >= next_vote_required)
+raw_signal = (vote is not None) and (confidence >= VOTE_REQUIRED)
 
 next_disabled = is_disabled
 next_disable_reason = disable_reason
@@ -550,7 +521,7 @@ hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 # =========================
 # UI
 # =========================
-st.title("🎯 Adaptive Engine v2 - Rolling 168")
+st.title("🎯 Adaptive Engine - Profit Positive First")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -562,7 +533,7 @@ st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 st.write("Rolling Scan:", ROLLING_SCAN)
 st.write("Next Locked Windows:", next_locked_windows)
-st.write("Next Vote Required:", next_vote_required)
+st.write("Vote Required:", VOTE_REQUIRED)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Stop Loss:", STOP_LOSS)
 st.write("Processed Until Round:", processed_until)
