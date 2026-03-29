@@ -29,7 +29,7 @@ LOSS = -1
 PROFIT_TARGET = 3
 
 # cần tối thiểu 4 window profit >= 0
-MIN_POSITIVE_WINDOWS = 3
+MIN_POSITIVE_WINDOWS = 4
 
 # window thứ 5 nếu thiếu sẽ lấy theo ít nhiễu
 FALLBACK_MIN_PROFIT = -5
