@@ -16,10 +16,10 @@ st_autorefresh(interval=10000, key="refresh")
 # =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# Vùng round để chọn robust zone
+# Quét vùng lock round
 LOCK_ROUND_START = 168
 LOCK_ROUND_END = 204
-LOCK_ROUND_STEP = 2   # quét 168,170,172...
+LOCK_ROUND_STEP = 2
 
 WINDOW_MIN = 6
 WINDOW_MAX = 20
@@ -32,14 +32,18 @@ WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 3
 
-# chỉ nhận window âm nhẹ khi thiếu window dương
-MIN_WINDOW_PROFIT = -15
+# Rule chọn window
+MIN_NEGATIVE_PROFIT = -10      # chỉ lấy window âm nhẹ hơn -10
+MIN_NEGATIVE_WINRATE = 0.27    # window âm nhưng phải có WR tối thiểu
+MAX_NEGATIVE_WINDOWS = 2       # tối đa 2 window âm trong top 5
 
-# trọng số robust selection
+# Robust score weights
 FREQ_WEIGHT = 15.0
 AVG_PROFIT_WEIGHT = 5.0
 AVG_WINRATE_WEIGHT = 10.0
 AVG_STREAK_PENALTY = 1.5
+AVG_SCORE_WEIGHT = 0.2
+POSITIVE_RATIO_WEIGHT = 8.0
 
 # =========================
 # LOAD DATA
@@ -103,6 +107,7 @@ def evaluate_window(seq_groups, w):
     profit = 0
     trades = 0
     wins = 0
+    profit_curve = []
 
     down_streak = 0
     max_down_streak = 0
@@ -119,6 +124,8 @@ def evaluate_window(seq_groups, w):
                 wins += 1
             else:
                 profit += LOSS
+
+            profit_curve.append(profit)
 
             if profit < prev_profit:
                 down_streak += 1
@@ -139,6 +146,7 @@ def evaluate_window(seq_groups, w):
         "winrate": winrate,
         "score": score,
         "max_down_streak": max_down_streak,
+        "profit_curve": profit_curve,
     }
 
 
@@ -146,30 +154,31 @@ def select_top_windows_for_round(train_groups):
     rows = [evaluate_window(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
     df = pd.DataFrame(rows)
 
-    # 1. window dương trước
+    # Bảng full để hiển thị
+    full_rank_df = df.sort_values(
+        ["profit", "max_down_streak", "score", "winrate"],
+        ascending=[False, True, False, False]
+    ).reset_index(drop=True)
+
+    # ===== STEP 1: window dương trước =====
     positive_df = df[df["profit"] > 0].copy()
     positive_df = positive_df.sort_values(
         ["profit", "max_down_streak", "score", "winrate"],
         ascending=[False, True, False, False]
     ).reset_index(drop=True)
 
-    selected_parts = []
+    selected = positive_df.head(TOP_WINDOWS).copy()
+    if not selected.empty:
+        selected["pick_source"] = "positive"
 
-    if len(positive_df) >= TOP_WINDOWS:
-        selected_df = positive_df.head(TOP_WINDOWS).copy()
-        selected_df["pick_source"] = "positive"
-    else:
-        if len(positive_df) > 0:
-            tmp = positive_df.copy()
-            tmp["pick_source"] = "positive"
-            selected_parts.append(tmp)
+    # ===== STEP 2: nếu thiếu thì lấy window âm nhẹ nhưng ít nhiễu =====
+    if len(selected) < TOP_WINDOWS:
+        need = TOP_WINDOWS - len(selected)
 
-        need_more = TOP_WINDOWS - len(positive_df)
-
-        # 2. âm nhẹ nhưng ít nhiễu
         negative_df = df[
             (df["profit"] <= 0) &
-            (df["profit"] > MIN_WINDOW_PROFIT)
+            (df["profit"] > MIN_NEGATIVE_PROFIT) &
+            (df["winrate"] >= MIN_NEGATIVE_WINRATE)
         ].copy()
 
         negative_df = negative_df.sort_values(
@@ -177,38 +186,32 @@ def select_top_windows_for_round(train_groups):
             ascending=[True, False, False, False]
         ).reset_index(drop=True)
 
-        if need_more > 0 and len(negative_df) > 0:
-            neg_take = negative_df.head(need_more).copy()
+        take_neg = min(MAX_NEGATIVE_WINDOWS, need, len(negative_df))
+        if take_neg > 0:
+            neg_take = negative_df.head(take_neg).copy()
             neg_take["pick_source"] = "negative_low_noise"
-            selected_parts.append(neg_take)
+            selected = pd.concat([selected, neg_take], ignore_index=True)
 
-        selected_df = pd.concat(selected_parts, ignore_index=True) if selected_parts else pd.DataFrame()
+    # ===== STEP 3: nếu vẫn thiếu thì lấy phần còn lại ưu tiên ít nhiễu =====
+    if len(selected) < TOP_WINDOWS:
+        selected_windows = set(selected["window"].tolist()) if not selected.empty else set()
 
-        # 3. nếu vẫn thiếu thì lấy tiếp phần còn lại ưu tiên ít nhiễu
-        if len(selected_df) < TOP_WINDOWS:
-            already = set(selected_df["window"].tolist()) if not selected_df.empty else set()
+        fallback_df = df[~df["window"].isin(selected_windows)].copy()
+        fallback_df = fallback_df.sort_values(
+            ["max_down_streak", "profit", "score", "winrate"],
+            ascending=[True, False, False, False]
+        ).reset_index(drop=True)
 
-            fallback_df = df[~df["window"].isin(already)].copy()
-            fallback_df = fallback_df.sort_values(
-                ["max_down_streak", "profit", "score", "winrate"],
-                ascending=[True, False, False, False]
-            ).reset_index(drop=True)
+        need_last = TOP_WINDOWS - len(selected)
+        if need_last > 0 and len(fallback_df) > 0:
+            fb_take = fallback_df.head(need_last).copy()
+            fb_take["pick_source"] = "fallback_low_noise"
+            selected = pd.concat([selected, fb_take], ignore_index=True)
 
-            need_last = TOP_WINDOWS - len(selected_df)
-            if need_last > 0 and len(fallback_df) > 0:
-                fb_take = fallback_df.head(need_last).copy()
-                fb_take["pick_source"] = "fallback_low_noise"
-                selected_df = pd.concat([selected_df, fb_take], ignore_index=True)
+    selected = selected.head(TOP_WINDOWS).copy()
+    final_windows = selected["window"].astype(int).tolist()
 
-    selected_df = selected_df.head(TOP_WINDOWS).copy()
-    selected = selected_df["window"].astype(int).tolist()
-
-    ranked_df = df.sort_values(
-        ["profit", "max_down_streak", "score", "winrate"],
-        ascending=[False, True, False, False]
-    ).reset_index(drop=True)
-
-    return selected, ranked_df, selected_df
+    return final_windows, full_rank_df, selected
 
 # =========================
 # ROBUST ZONE AGGREGATION
@@ -223,6 +226,7 @@ def build_robust_windows(groups):
         "streak_sum": 0.0,
         "rounds": [],
         "positive_count": 0,
+        "negative_pick_count": 0,
     })
 
     tested_rounds = list(range(LOCK_ROUND_START, LOCK_ROUND_END + 1, LOCK_ROUND_STEP))
@@ -244,6 +248,9 @@ def build_robust_windows(groups):
             if float(row["profit"]) > 0:
                 agg[w]["positive_count"] += 1
 
+            if row.get("pick_source", "") == "negative_low_noise":
+                agg[w]["negative_pick_count"] += 1
+
             per_round_rows.append({
                 "lock_round": r,
                 "window": w,
@@ -263,14 +270,16 @@ def build_robust_windows(groups):
         avg_winrate = v["winrate_sum"] / appear
         avg_streak = v["streak_sum"] / appear
         positive_ratio = v["positive_count"] / appear
+        negative_ratio = v["negative_pick_count"] / appear
 
         robust_score = (
             appear * FREQ_WEIGHT
             + avg_profit * AVG_PROFIT_WEIGHT
             + avg_winrate * AVG_WINRATE_WEIGHT
             - avg_streak * AVG_STREAK_PENALTY
-            + positive_ratio * 8
-            + avg_score * 0.2
+            + positive_ratio * POSITIVE_RATIO_WEIGHT
+            + avg_score * AVG_SCORE_WEIGHT
+            - negative_ratio * 4.0
         )
 
         summary_rows.append({
@@ -281,13 +290,14 @@ def build_robust_windows(groups):
             "avg_winrate": avg_winrate,
             "avg_max_down_streak": avg_streak,
             "positive_ratio": positive_ratio,
+            "negative_ratio": negative_ratio,
             "robust_score": robust_score,
             "rounds_seen": ", ".join(map(str, v["rounds"][:20])) + ("..." if len(v["rounds"]) > 20 else ""),
         })
 
     summary_df = pd.DataFrame(summary_rows).sort_values(
-        ["robust_score", "appear_count", "avg_profit", "avg_winrate"],
-        ascending=[False, False, False, False]
+        ["robust_score", "positive_ratio", "appear_count", "avg_profit", "avg_winrate"],
+        ascending=[False, False, False, False, False]
     ).reset_index(drop=True)
 
     locked_windows = summary_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
