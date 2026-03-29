@@ -16,7 +16,7 @@ st_autorefresh(interval=1000, key="refresh")
 # =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-START_LOCK_ROUND = 26
+START_LOCK_ROUND = 72
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
