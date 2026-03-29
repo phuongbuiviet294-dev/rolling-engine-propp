@@ -7,7 +7,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=10000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -24,9 +24,10 @@ WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 3
 
-# stability filter
-MAX_ALLOWED_DOWN_STREAK = 2   # tức là streak >= 3 sẽ bị loại
-STREAK_PENALTY = 3.0          # phạt vào adjusted_score
+# lọc mềm
+MAX_ALLOWED_DOWN_STREAK = 6
+STREAK_PENALTY = 2.0
+MIN_WINDOW_PROFIT = -10
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -109,7 +110,7 @@ def evaluate_window(seq_groups, w):
         "score": base_score,
         "adjusted_score": adjusted_score,
         "max_down_streak": max_down_streak,
-        "has_bad_streak": max_down_streak >= 3,
+        "has_bad_streak": max_down_streak > MAX_ALLOWED_DOWN_STREAK,
         "profit_curve": profit_curve,
     }
 
@@ -122,39 +123,21 @@ def select_windows_from_train(train_groups):
         ascending=False
     ).reset_index(drop=True)
 
-    # Ưu tiên:
-    # 1. profit dương
-    # 2. không có chuỗi giảm >= 3
-    # 3. adjusted_score cao
-    stable_positive_df = df[
-        (df["profit"] > 0) &
+    # lọc mềm: chỉ loại window quá xấu
+    filtered_df = df[
+        (df["profit"] > MIN_WINDOW_PROFIT) &
         (df["max_down_streak"] <= MAX_ALLOWED_DOWN_STREAK)
     ].copy().reset_index(drop=True)
 
-    # fallback 1: profit dương, chọn streak thấp nhất trước, rồi adjusted_score
-    positive_df = df[df["profit"] > 0].copy()
-    positive_df = positive_df.sort_values(
-        ["max_down_streak", "adjusted_score", "profit"],
-        ascending=[True, False, False]
-    ).reset_index(drop=True)
-
-    # fallback 2: nếu không có profit dương, chọn an toàn nhất
-    safe_df = df.sort_values(
-        ["max_down_streak", "adjusted_score", "profit"],
-        ascending=[True, False, False]
-    ).reset_index(drop=True)
-
-    if len(stable_positive_df) >= TOP_WINDOWS:
-        selected_df = stable_positive_df.head(TOP_WINDOWS).copy()
-    elif len(stable_positive_df) > 0:
-        selected_df = stable_positive_df.copy()
-    elif len(positive_df) > 0:
-        selected_df = positive_df.head(TOP_WINDOWS).copy()
+    if len(filtered_df) >= TOP_WINDOWS:
+        selected_df = filtered_df.head(TOP_WINDOWS).copy()
+    elif len(filtered_df) > 0:
+        selected_df = filtered_df.copy()
     else:
-        selected_df = safe_df.head(TOP_WINDOWS).copy()
+        # fallback mềm: nếu bị lọc sạch hết thì chọn top theo adjusted_score
+        selected_df = df.head(TOP_WINDOWS).copy()
 
     selected = selected_df["window"].astype(int).tolist()
-
     return selected, df, selected_df
 
 
@@ -198,7 +181,7 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# nếu dữ liệu giảm thì reset để tránh lệch state
+# nếu dữ liệu bị giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -244,6 +227,18 @@ scan_df_all = st.session_state.scan_df_all
 scan_df_selected = st.session_state.scan_df_selected
 processed_until = st.session_state.processed_until
 
+# vote động theo số window còn lại
+def get_effective_vote_required(window_count: int) -> int:
+    if window_count >= 8:
+        return 5
+    if window_count >= 5:
+        return 4
+    if window_count >= 4:
+        return 3
+    return max(1, window_count)
+
+effective_vote_required = get_effective_vote_required(len(locked_windows))
+
 for i in range(processed_until + 1, len(groups)):
     if i < start_index:
         continue
@@ -255,7 +250,7 @@ for i in range(processed_until + 1, len(groups)):
 
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = confidence >= VOTE_REQUIRED
+    signal = confidence >= effective_vote_required
     distance = i - last_trade
 
     if profit >= PROFIT_TARGET:
@@ -332,7 +327,7 @@ if not hist.empty:
 else:
     distance = 999
 
-raw_signal = confidence >= VOTE_REQUIRED if vote is not None else False
+raw_signal = confidence >= effective_vote_required if vote is not None else False
 
 if profit >= PROFIT_TARGET:
     signal = False
@@ -361,7 +356,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - Stable Window Selection")
+st.title("🎯 Rolling Prediction Engine - Soft Stable Window Filter")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -374,7 +369,9 @@ st.write("Distance From Last Trade:", distance)
 st.write("Locked Windows:", locked_windows)
 st.write("Train Scan:", TRAIN_SCAN)
 st.write("Profit Target:", PROFIT_TARGET)
-st.write("Vote Required:", VOTE_REQUIRED)
+st.write("Vote Required (config):", VOTE_REQUIRED)
+st.write("Vote Required (effective):", effective_vote_required)
+st.write("Min Window Profit:", MIN_WINDOW_PROFIT)
 st.write("Max Allowed Down Streak:", MAX_ALLOWED_DOWN_STREAK)
 st.write("Streak Penalty:", STREAK_PENALTY)
 st.write("Processed Until Round:", processed_until)
