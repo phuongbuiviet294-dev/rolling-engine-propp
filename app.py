@@ -18,7 +18,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # Quét vùng lock round
 LOCK_ROUND_START = 168
-LOCK_ROUND_END = 190
+LOCK_ROUND_END = 204
 LOCK_ROUND_STEP = 2
 
 WINDOW_MIN = 6
@@ -33,9 +33,13 @@ LOSS = -1
 PROFIT_TARGET = 3
 
 # Rule chọn window
-MIN_NEGATIVE_PROFIT = -10      # chỉ lấy window âm nhẹ hơn -10
-MIN_NEGATIVE_WINRATE = 0.27    # window âm nhưng phải có WR tối thiểu
-MAX_NEGATIVE_WINDOWS = 2       # tối đa 2 window âm trong top 5
+MIN_NEGATIVE_PROFIT = -10      # window âm chỉ được âm nhẹ hơn mức này
+MIN_NEGATIVE_WINRATE = 0.27    # window âm phải có WR tối thiểu
+MAX_NEGATIVE_WINDOWS = 2       # tối đa 2 window âm ở STEP 2
+
+# Fallback an toàn hơn
+FALLBACK_MIN_PROFIT = -5
+FALLBACK_MIN_WINRATE = 0.26
 
 # Robust score weights
 FREQ_WEIGHT = 15.0
@@ -44,6 +48,7 @@ AVG_WINRATE_WEIGHT = 10.0
 AVG_STREAK_PENALTY = 1.5
 AVG_SCORE_WEIGHT = 0.2
 POSITIVE_RATIO_WEIGHT = 8.0
+NEGATIVE_RATIO_PENALTY = 4.0
 
 # =========================
 # LOAD DATA
@@ -137,6 +142,7 @@ def evaluate_window(seq_groups, w):
 
     winrate = wins / trades if trades > 0 else 0
     score = profit * winrate * np.log(trades) if trades > 0 else -999999
+    ev = winrate * WIN - (1 - winrate) * abs(LOSS) if trades > 0 else -999999
 
     return {
         "window": w,
@@ -145,6 +151,7 @@ def evaluate_window(seq_groups, w):
         "profit": profit,
         "winrate": winrate,
         "score": score,
+        "ev": ev,
         "max_down_streak": max_down_streak,
         "profit_curve": profit_curve,
     }
@@ -192,11 +199,16 @@ def select_top_windows_for_round(train_groups):
             neg_take["pick_source"] = "negative_low_noise"
             selected = pd.concat([selected, neg_take], ignore_index=True)
 
-    # ===== STEP 3: nếu vẫn thiếu thì lấy phần còn lại ưu tiên ít nhiễu =====
+    # ===== STEP 3: fallback có kiểm soát =====
     if len(selected) < TOP_WINDOWS:
         selected_windows = set(selected["window"].tolist()) if not selected.empty else set()
 
-        fallback_df = df[~df["window"].isin(selected_windows)].copy()
+        fallback_df = df[
+            (~df["window"].isin(selected_windows)) &
+            (df["profit"] > FALLBACK_MIN_PROFIT) &
+            (df["winrate"] >= FALLBACK_MIN_WINRATE)
+        ].copy()
+
         fallback_df = fallback_df.sort_values(
             ["max_down_streak", "profit", "score", "winrate"],
             ascending=[True, False, False, False]
@@ -205,13 +217,31 @@ def select_top_windows_for_round(train_groups):
         need_last = TOP_WINDOWS - len(selected)
         if need_last > 0 and len(fallback_df) > 0:
             fb_take = fallback_df.head(need_last).copy()
-            fb_take["pick_source"] = "fallback_low_noise"
+            fb_take["pick_source"] = "fallback_safe"
             selected = pd.concat([selected, fb_take], ignore_index=True)
+
+    # ===== STEP 4: nếu vẫn thiếu thì lấy phần còn lại ít nhiễu nhất =====
+    # vẫn cố đủ 5 như yêu cầu, nhưng đây là lớp cuối cùng
+    if len(selected) < TOP_WINDOWS:
+        selected_windows = set(selected["window"].tolist()) if not selected.empty else set()
+
+        remain_df = df[~df["window"].isin(selected_windows)].copy()
+        remain_df = remain_df.sort_values(
+            ["max_down_streak", "profit", "score", "winrate"],
+            ascending=[True, False, False, False]
+        ).reset_index(drop=True)
+
+        need_last = TOP_WINDOWS - len(selected)
+        if need_last > 0 and len(remain_df) > 0:
+            rm_take = remain_df.head(need_last).copy()
+            rm_take["pick_source"] = "last_resort_low_noise"
+            selected = pd.concat([selected, rm_take], ignore_index=True)
 
     selected = selected.head(TOP_WINDOWS).copy()
     final_windows = selected["window"].astype(int).tolist()
 
     return final_windows, full_rank_df, selected
+
 
 # =========================
 # ROBUST ZONE AGGREGATION
@@ -227,6 +257,7 @@ def build_robust_windows(groups):
         "rounds": [],
         "positive_count": 0,
         "negative_pick_count": 0,
+        "fallback_pick_count": 0,
     })
 
     tested_rounds = list(range(LOCK_ROUND_START, LOCK_ROUND_END + 1, LOCK_ROUND_STEP))
@@ -245,11 +276,13 @@ def build_robust_windows(groups):
             agg[w]["streak_sum"] += float(row["max_down_streak"])
             agg[w]["rounds"].append(r)
 
+            source = row.get("pick_source", "")
             if float(row["profit"]) > 0:
                 agg[w]["positive_count"] += 1
-
-            if row.get("pick_source", "") == "negative_low_noise":
+            if source == "negative_low_noise":
                 agg[w]["negative_pick_count"] += 1
+            if source in ("fallback_safe", "last_resort_low_noise"):
+                agg[w]["fallback_pick_count"] += 1
 
             per_round_rows.append({
                 "lock_round": r,
@@ -258,8 +291,9 @@ def build_robust_windows(groups):
                 "profit": float(row["profit"]),
                 "score": float(row["score"]),
                 "winrate": float(row["winrate"]),
+                "ev": float(row["ev"]),
                 "max_down_streak": float(row["max_down_streak"]),
-                "pick_source": row.get("pick_source", ""),
+                "pick_source": source,
             })
 
     summary_rows = []
@@ -271,6 +305,7 @@ def build_robust_windows(groups):
         avg_streak = v["streak_sum"] / appear
         positive_ratio = v["positive_count"] / appear
         negative_ratio = v["negative_pick_count"] / appear
+        fallback_ratio = v["fallback_pick_count"] / appear
 
         robust_score = (
             appear * FREQ_WEIGHT
@@ -279,7 +314,8 @@ def build_robust_windows(groups):
             - avg_streak * AVG_STREAK_PENALTY
             + positive_ratio * POSITIVE_RATIO_WEIGHT
             + avg_score * AVG_SCORE_WEIGHT
-            - negative_ratio * 4.0
+            - negative_ratio * NEGATIVE_RATIO_PENALTY
+            - fallback_ratio * 5.0
         )
 
         summary_rows.append({
@@ -291,6 +327,7 @@ def build_robust_windows(groups):
             "avg_max_down_streak": avg_streak,
             "positive_ratio": positive_ratio,
             "negative_ratio": negative_ratio,
+            "fallback_ratio": fallback_ratio,
             "robust_score": robust_score,
             "rounds_seen": ", ".join(map(str, v["rounds"][:20])) + ("..." if len(v["rounds"]) > 20 else ""),
         })
@@ -307,6 +344,7 @@ def build_robust_windows(groups):
     ).reset_index(drop=True)
 
     return locked_windows, summary_df, per_round_df, tested_rounds
+
 
 # =========================
 # STATE INIT
@@ -527,7 +565,7 @@ hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 # =========================
 # UI
 # =========================
-st.title("🎯 Rolling Prediction Engine - Robust Zone Lock")
+st.title("🎯 Rolling Prediction Engine - Robust Zone Lock (fixed)")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
