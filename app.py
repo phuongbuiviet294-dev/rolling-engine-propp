@@ -24,9 +24,8 @@ WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 3
 
-# chỉ dùng khi thiếu window dương
-MIN_WINDOW_PROFIT = -10
-MAX_NEGATIVE_WINDOWS = 1   # tối đa 1 window âm trong top 5
+# chỉ dùng cho window âm khi thiếu window dương
+MIN_WINDOW_PROFIT = -15
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -113,7 +112,7 @@ def evaluate_window(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0
     score = profit * winrate * np.log(trades) if trades > 0 else -999999
 
-    # score phụ để giảm nhiễu nhẹ, không phạt quá nặng
+    # chỉ để tham khảo/xếp hạng tổng thể, không phạt quá mạnh
     hybrid_score = (profit * 5.0) + (winrate * 10.0) - (max_down_streak * 1.0)
 
     return {
@@ -133,14 +132,14 @@ def select_windows_from_train(train_groups):
     rows = [evaluate_window(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
     df = pd.DataFrame(rows)
 
-    # xếp hạng tổng thể
-    ranked_df = df.sort_values(
+    # bảng full để hiển thị
+    full_rank_df = df.sort_values(
         ["profit", "hybrid_score", "score", "winrate", "max_down_streak"],
         ascending=[False, False, False, False, True]
     ).reset_index(drop=True)
 
-    # 1) lấy window profit dương trước
-    positive_df = ranked_df[ranked_df["profit"] > 0].copy()
+    # 1) Ưu tiên window profit dương trước
+    positive_df = df[df["profit"] > 0].copy()
     positive_df = positive_df.sort_values(
         ["profit", "max_down_streak", "score", "winrate"],
         ascending=[False, True, False, False]
@@ -150,49 +149,58 @@ def select_windows_from_train(train_groups):
 
     if len(positive_df) >= TOP_WINDOWS:
         selected_df = positive_df.head(TOP_WINDOWS).copy()
-    else:
-        selected_parts.append(positive_df)
+        selected_df["pick_source"] = "positive"
 
-        # 2) nếu thiếu thì mượn thêm âm nhẹ, nhưng không quá MAX_NEGATIVE_WINDOWS
+    else:
+        if len(positive_df) > 0:
+            tmp = positive_df.copy()
+            tmp["pick_source"] = "positive"
+            selected_parts.append(tmp)
+
         need_more = TOP_WINDOWS - len(positive_df)
 
-        negative_df = ranked_df[
-            (ranked_df["profit"] <= 0) &
-            (ranked_df["profit"] > MIN_WINDOW_PROFIT)
+        # 2) Nếu chưa đủ 5 thì lấy window âm nhưng ÍT NHIỄU trước
+        negative_df = df[
+            (df["profit"] <= 0) &
+            (df["profit"] > MIN_WINDOW_PROFIT)
         ].copy()
 
+        # Rule quan trọng:
+        # - ưu tiên max_down_streak thấp trước
+        # - rồi profit đỡ âm hơn
+        # - rồi score / winrate
         negative_df = negative_df.sort_values(
-            ["profit", "max_down_streak", "score", "winrate"],
-            ascending=[False, True, False, False]
+            ["max_down_streak", "profit", "score", "winrate"],
+            ascending=[True, False, False, False]
         ).reset_index(drop=True)
 
-        take_neg = min(need_more, MAX_NEGATIVE_WINDOWS, len(negative_df))
-        if take_neg > 0:
-            selected_parts.append(negative_df.head(take_neg).copy())
+        if need_more > 0 and len(negative_df) > 0:
+            neg_take = negative_df.head(need_more).copy()
+            neg_take["pick_source"] = "negative_low_noise"
+            selected_parts.append(neg_take)
 
         selected_df = pd.concat(selected_parts, ignore_index=True) if selected_parts else pd.DataFrame()
 
-        # 3) nếu vẫn thiếu, lấy thêm tốt nhất còn lại
+        # 3) Nếu vẫn chưa đủ thì lấy tiếp phần còn lại theo ít nhiễu trước
         if len(selected_df) < TOP_WINDOWS:
             already = set(selected_df["window"].tolist()) if not selected_df.empty else set()
 
-            fallback_df = ranked_df[~ranked_df["window"].isin(already)].copy()
+            fallback_df = df[~df["window"].isin(already)].copy()
             fallback_df = fallback_df.sort_values(
-                ["profit", "max_down_streak", "score", "winrate"],
-                ascending=[False, True, False, False]
+                ["max_down_streak", "profit", "score", "winrate"],
+                ascending=[True, False, False, False]
             ).reset_index(drop=True)
 
             need_last = TOP_WINDOWS - len(selected_df)
             if need_last > 0 and len(fallback_df) > 0:
-                selected_df = pd.concat(
-                    [selected_df, fallback_df.head(need_last).copy()],
-                    ignore_index=True
-                )
+                fb_take = fallback_df.head(need_last).copy()
+                fb_take["pick_source"] = "fallback_low_noise"
+                selected_df = pd.concat([selected_df, fb_take], ignore_index=True)
 
     selected_df = selected_df.head(TOP_WINDOWS).copy()
     selected = selected_df["window"].astype(int).tolist()
 
-    return selected, ranked_df, selected_df
+    return selected, full_rank_df, selected_df
 
 
 # ---------------- STATE INIT ----------------
@@ -398,7 +406,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - Top 5 ưu tiên profit dương")
+st.title("🎯 Rolling Prediction Engine - 5 window ít nhiễu, ưu tiên profit dương")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -413,7 +421,6 @@ st.write("Train Scan:", TRAIN_SCAN)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Vote Required:", VOTE_REQUIRED)
 st.write("Min Window Profit:", MIN_WINDOW_PROFIT)
-st.write("Max Negative Windows:", MAX_NEGATIVE_WINDOWS)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
