@@ -1,5 +1,5 @@
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
@@ -12,7 +12,10 @@ st_autorefresh(interval=10000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-TRAIN_SCAN = 204
+# quét dải lock round
+LOCK_ROUND_START = 168
+LOCK_ROUND_END = 204
+
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
@@ -24,7 +27,7 @@ WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 3
 
-# chỉ dùng cho window âm khi thiếu window dương
+# chỉ dùng khi thiếu window dương
 MIN_WINDOW_PROFIT = -15
 
 # ---------------- LOAD DATA ----------------
@@ -70,9 +73,9 @@ def group(n: int) -> int:
 groups = [group(n) for n in numbers]
 
 # ---------------- GUARD ----------------
-if len(groups) <= TRAIN_SCAN:
+if len(groups) <= LOCK_ROUND_END:
     st.error(
-        f"Chưa đủ dữ liệu để chạy trade. Cần nhiều hơn {TRAIN_SCAN} rounds, hiện có {len(groups)}."
+        f"Chưa đủ dữ liệu để quét lock round đến {LOCK_ROUND_END}. Hiện có {len(groups)} rounds."
     )
     st.stop()
 
@@ -112,7 +115,7 @@ def evaluate_window(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0
     score = profit * winrate * np.log(trades) if trades > 0 else -999999
 
-    # chỉ để tham khảo/xếp hạng tổng thể, không phạt quá mạnh
+    # ưu tiên profit dương, ít nhiễu
     hybrid_score = (profit * 5.0) + (winrate * 10.0) - (max_down_streak * 1.0)
 
     return {
@@ -128,17 +131,15 @@ def evaluate_window(seq_groups, w):
     }
 
 
-def select_windows_from_train(train_groups):
+def select_top_windows_for_round(train_groups):
     rows = [evaluate_window(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
     df = pd.DataFrame(rows)
 
-    # bảng full để hiển thị
     full_rank_df = df.sort_values(
         ["profit", "hybrid_score", "score", "winrate", "max_down_streak"],
         ascending=[False, False, False, False, True]
     ).reset_index(drop=True)
 
-    # 1) Ưu tiên window profit dương trước
     positive_df = df[df["profit"] > 0].copy()
     positive_df = positive_df.sort_values(
         ["profit", "max_down_streak", "score", "winrate"],
@@ -150,7 +151,6 @@ def select_windows_from_train(train_groups):
     if len(positive_df) >= TOP_WINDOWS:
         selected_df = positive_df.head(TOP_WINDOWS).copy()
         selected_df["pick_source"] = "positive"
-
     else:
         if len(positive_df) > 0:
             tmp = positive_df.copy()
@@ -159,16 +159,12 @@ def select_windows_from_train(train_groups):
 
         need_more = TOP_WINDOWS - len(positive_df)
 
-        # 2) Nếu chưa đủ 5 thì lấy window âm nhưng ÍT NHIỄU trước
         negative_df = df[
             (df["profit"] <= 0) &
             (df["profit"] > MIN_WINDOW_PROFIT)
         ].copy()
 
-        # Rule quan trọng:
-        # - ưu tiên max_down_streak thấp trước
-        # - rồi profit đỡ âm hơn
-        # - rồi score / winrate
+        # với window âm: ưu tiên ít nhiễu trước
         negative_df = negative_df.sort_values(
             ["max_down_streak", "profit", "score", "winrate"],
             ascending=[True, False, False, False]
@@ -181,7 +177,6 @@ def select_windows_from_train(train_groups):
 
         selected_df = pd.concat(selected_parts, ignore_index=True) if selected_parts else pd.DataFrame()
 
-        # 3) Nếu vẫn chưa đủ thì lấy tiếp phần còn lại theo ít nhiễu trước
         if len(selected_df) < TOP_WINDOWS:
             already = set(selected_df["window"].tolist()) if not selected_df.empty else set()
 
@@ -203,6 +198,92 @@ def select_windows_from_train(train_groups):
     return selected, full_rank_df, selected_df
 
 
+# ---------------- AGGREGATE LOCK WINDOWS FROM ROUND RANGE ----------------
+def aggregate_best_windows(groups, lock_start, lock_end):
+    per_round_rows = []
+    agg = defaultdict(lambda: {
+        "appear_count": 0,
+        "profit_sum": 0.0,
+        "score_sum": 0.0,
+        "hybrid_sum": 0.0,
+        "winrate_sum": 0.0,
+        "streak_sum": 0.0,
+        "rounds": []
+    })
+
+    for r in range(lock_start, lock_end + 1):
+        train_groups = groups[:r]
+        selected, _, selected_df = select_top_windows_for_round(train_groups)
+
+        rank_map = {w: idx + 1 for idx, w in enumerate(selected)}
+
+        for _, row in selected_df.iterrows():
+            w = int(row["window"])
+            agg[w]["appear_count"] += 1
+            agg[w]["profit_sum"] += float(row["profit"])
+            agg[w]["score_sum"] += float(row["score"])
+            agg[w]["hybrid_sum"] += float(row["hybrid_score"])
+            agg[w]["winrate_sum"] += float(row["winrate"])
+            agg[w]["streak_sum"] += float(row["max_down_streak"])
+            agg[w]["rounds"].append(r)
+
+            per_round_rows.append({
+                "lock_round": r,
+                "window": w,
+                "rank_in_round": rank_map[w],
+                "profit": float(row["profit"]),
+                "score": float(row["score"]),
+                "hybrid_score": float(row["hybrid_score"]),
+                "winrate": float(row["winrate"]),
+                "max_down_streak": float(row["max_down_streak"]),
+                "pick_source": row.get("pick_source", ""),
+            })
+
+    summary_rows = []
+    for w, v in agg.items():
+        appear = v["appear_count"]
+        avg_profit = v["profit_sum"] / appear
+        avg_score = v["score_sum"] / appear
+        avg_hybrid = v["hybrid_sum"] / appear
+        avg_winrate = v["winrate_sum"] / appear
+        avg_streak = v["streak_sum"] / appear
+
+        # điểm tổng hợp trên cả dải lock round
+        aggregate_score = (
+            appear * 10
+            + avg_profit * 5
+            + avg_winrate * 10
+            + avg_score * 0.5
+            + avg_hybrid * 0.2
+            - avg_streak * 2
+        )
+
+        summary_rows.append({
+            "window": w,
+            "appear_count": appear,
+            "avg_profit": avg_profit,
+            "avg_score": avg_score,
+            "avg_hybrid_score": avg_hybrid,
+            "avg_winrate": avg_winrate,
+            "avg_max_down_streak": avg_streak,
+            "aggregate_score": aggregate_score,
+            "rounds_seen": ", ".join(map(str, v["rounds"][:15])) + ("..." if len(v["rounds"]) > 15 else ""),
+        })
+
+    summary_df = pd.DataFrame(summary_rows).sort_values(
+        ["aggregate_score", "appear_count", "avg_profit", "avg_winrate"],
+        ascending=[False, False, False, False]
+    ).reset_index(drop=True)
+
+    locked_windows = summary_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
+    per_round_df = pd.DataFrame(per_round_rows).sort_values(
+        ["lock_round", "rank_in_round"],
+        ascending=[True, True]
+    ).reset_index(drop=True)
+
+    return locked_windows, summary_df, per_round_df
+
+
 # ---------------- STATE INIT ----------------
 def init_state():
     defaults = {
@@ -213,8 +294,8 @@ def init_state():
         "hits": [],
         "history_rows": [],
         "locked_windows": [],
-        "scan_df_all": pd.DataFrame(),
-        "scan_df_selected": pd.DataFrame(),
+        "window_summary_df": pd.DataFrame(),
+        "window_per_round_df": pd.DataFrame(),
         "base_data_len": None,
     }
     for k, v in defaults.items():
@@ -234,8 +315,8 @@ if st.button("🔄 Reset Session"):
         "hits",
         "history_rows",
         "locked_windows",
-        "scan_df_all",
-        "scan_df_selected",
+        "window_summary_df",
+        "window_per_round_df",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -243,7 +324,6 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# nếu dữ liệu bị giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -256,8 +336,8 @@ if (
         "hits",
         "history_rows",
         "locked_windows",
-        "scan_df_all",
-        "scan_df_selected",
+        "window_summary_df",
+        "window_per_round_df",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -266,16 +346,17 @@ if (
     st.rerun()
 
 # ---------------- INITIAL LOCK ONLY ONCE ----------------
-start_index = TRAIN_SCAN
+start_index = LOCK_ROUND_END
 
 if not st.session_state.live_initialized:
-    train_groups = groups[:TRAIN_SCAN]
-    locked_windows, scan_df_all, scan_df_selected = select_windows_from_train(train_groups)
+    locked_windows, window_summary_df, window_per_round_df = aggregate_best_windows(
+        groups, LOCK_ROUND_START, LOCK_ROUND_END
+    )
 
     st.session_state.locked_windows = locked_windows
-    st.session_state.scan_df_all = scan_df_all
-    st.session_state.scan_df_selected = scan_df_selected
-    st.session_state.processed_until = TRAIN_SCAN - 1
+    st.session_state.window_summary_df = window_summary_df
+    st.session_state.window_per_round_df = window_per_round_df
+    st.session_state.processed_until = LOCK_ROUND_END - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
 
@@ -285,8 +366,8 @@ last_trade = st.session_state.last_trade
 hits = st.session_state.hits
 history_rows = st.session_state.history_rows
 locked_windows = st.session_state.locked_windows
-scan_df_all = st.session_state.scan_df_all
-scan_df_selected = st.session_state.scan_df_selected
+window_summary_df = st.session_state.window_summary_df
+window_per_round_df = st.session_state.window_per_round_df
 processed_until = st.session_state.processed_until
 
 for i in range(processed_until + 1, len(groups)):
@@ -352,8 +433,8 @@ st.session_state.last_trade = last_trade
 st.session_state.hits = hits
 st.session_state.history_rows = history_rows
 st.session_state.locked_windows = locked_windows
-st.session_state.scan_df_all = scan_df_all
-st.session_state.scan_df_selected = scan_df_selected
+st.session_state.window_summary_df = window_summary_df
+st.session_state.window_per_round_df = window_per_round_df
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 
@@ -406,7 +487,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - 5 window ít nhiễu, ưu tiên profit dương")
+st.title("🎯 Rolling Prediction Engine - Lock windows from round range 168→204")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -417,10 +498,9 @@ st.divider()
 st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 st.write("Locked Windows:", locked_windows)
-st.write("Train Scan:", TRAIN_SCAN)
+st.write("Lock Round Range:", f"{LOCK_ROUND_START} → {LOCK_ROUND_END}")
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Vote Required:", VOTE_REQUIRED)
-st.write("Min Window Profit:", MIN_WINDOW_PROFIT)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
@@ -469,14 +549,12 @@ st.subheader("Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["profit"])
 
-# ---------------- WINDOW SCAN ----------------
-st.subheader("Initial Window Scan (all windows)")
-scan_df_show = scan_df_all.drop(columns=["profit_curve"], errors="ignore")
-st.dataframe(scan_df_show, use_container_width=True)
+# ---------------- WINDOW SUMMARY ----------------
+st.subheader("Window Summary Across Lock Rounds")
+st.dataframe(window_summary_df, use_container_width=True)
 
-st.subheader("Selected Window Scan")
-scan_selected_show = scan_df_selected.drop(columns=["profit_curve"], errors="ignore")
-st.dataframe(scan_selected_show, use_container_width=True)
+st.subheader("Per-Round Top Windows (168→204)")
+st.dataframe(window_per_round_df, use_container_width=True)
 
 # ---------------- HISTORY ----------------
 st.subheader("History")
@@ -496,5 +574,5 @@ st.dataframe(
 )
 
 # ---------------- DEBUG ----------------
-st.write("Locked Windows (fixed):", locked_windows)
+st.write("Locked Windows (final from range):", locked_windows)
 st.write("Total Rows:", len(numbers))
