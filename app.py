@@ -649,4 +649,5 @@ st.dataframe(
 # =========================
 # DEBUG
 # =========================
-st.write("Recent trade profits:", trade_profits[-
+st.write("Recent trade profits:", trade_profits[-RECENT_TRADE_LOOKBACK:])
+st.write("Total Rows:", len(numbers))
