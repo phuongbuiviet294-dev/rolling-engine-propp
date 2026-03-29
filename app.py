@@ -10,27 +10,32 @@ from streamlit_autorefresh import st_autorefresh
 st_autorefresh(interval=10000, key="refresh")
 
 # ---------------- CONFIG ----------------
-SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
+SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPYP1vtGatflAuuY"
 
 TRAIN_SCAN = 190
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
 TOP_WINDOWS = 5
-VOTE_REQUIRED = 3
+BASE_VOTE_REQUIRED = 3
 GAP = 0
 
 WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 3
 
-# chỉ loại window quá xấu, còn lại ưu tiên theo độ ổn định
+# chỉ loại window quá xấu
 MIN_WINDOW_PROFIT = -15
 
-# hệ số phạt nhiễu
-STABILITY_PROFIT_WEIGHT = 2.0
+# trọng số stability
+STABILITY_PROFIT_WEIGHT = 3.0
 STABILITY_WINRATE_WEIGHT = 10.0
-STABILITY_STREAK_PENALTY = 3.0
+STABILITY_STREAK_PENALTY = 4.0
+
+# market regime
+BAD_MARKET_STREAK_AVG = 12      # nếu streak TB của top windows >= ngưỡng này
+WEAK_MARKET_STREAK_AVG = 8      # nếu streak TB >= ngưỡng này thì tăng vote
+BAD_MARKET_PROFIT_AVG = -5      # nếu profit TB của top windows <= ngưỡng này
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -103,7 +108,6 @@ def evaluate_window(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0
     base_score = profit * winrate * np.log(trades) if trades > 0 else -999999
 
-    # ưu tiên ổn định hơn là chỉ profit cao
     stability_score = (
         profit * STABILITY_PROFIT_WEIGHT
         + winrate * STABILITY_WINRATE_WEIGHT
@@ -127,12 +131,10 @@ def select_windows_from_train(train_groups):
     rows = [evaluate_window(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
     df = pd.DataFrame(rows)
 
-    # chỉ loại window quá xấu
     usable_df = df[df["profit"] > MIN_WINDOW_PROFIT].copy()
     if len(usable_df) == 0:
         usable_df = df.copy()
 
-    # xếp hạng theo độ ổn định
     usable_df = usable_df.sort_values(
         ["stability_score", "profit", "winrate"],
         ascending=False
@@ -149,6 +151,33 @@ def select_windows_from_train(train_groups):
     return selected, full_rank_df, selected_df
 
 
+def get_market_mode(selected_df: pd.DataFrame) -> str:
+    if selected_df.empty:
+        return "BAD"
+
+    avg_streak = selected_df["max_down_streak"].mean()
+    avg_profit = selected_df["profit"].mean()
+
+    if avg_streak >= BAD_MARKET_STREAK_AVG or avg_profit <= BAD_MARKET_PROFIT_AVG:
+        return "BAD"
+    if avg_streak >= WEAK_MARKET_STREAK_AVG:
+        return "WEAK"
+    return "NORMAL"
+
+
+def get_effective_vote_required(window_count: int, market_mode: str) -> int:
+    base = BASE_VOTE_REQUIRED
+
+    # market yếu thì tăng ngưỡng
+    if market_mode == "WEAK":
+        base += 1
+    elif market_mode == "BAD":
+        # vẫn tính, nhưng thường sẽ bị chặn trade ở dưới
+        base += 2
+
+    return min(max(1, base), max(1, window_count))
+
+
 # ---------------- STATE INIT ----------------
 def init_state():
     defaults = {
@@ -161,6 +190,7 @@ def init_state():
         "locked_windows": [],
         "scan_df_all": pd.DataFrame(),
         "scan_df_selected": pd.DataFrame(),
+        "market_mode": "NORMAL",
         "base_data_len": None,
     }
     for k, v in defaults.items():
@@ -182,6 +212,7 @@ if st.button("🔄 Reset Session"):
         "locked_windows",
         "scan_df_all",
         "scan_df_selected",
+        "market_mode",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -189,7 +220,6 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# nếu dữ liệu bị giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -204,6 +234,7 @@ if (
         "locked_windows",
         "scan_df_all",
         "scan_df_selected",
+        "market_mode",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -217,10 +248,12 @@ start_index = TRAIN_SCAN
 if not st.session_state.live_initialized:
     train_groups = groups[:TRAIN_SCAN]
     locked_windows, scan_df_all, scan_df_selected = select_windows_from_train(train_groups)
+    market_mode = get_market_mode(scan_df_selected)
 
     st.session_state.locked_windows = locked_windows
     st.session_state.scan_df_all = scan_df_all
     st.session_state.scan_df_selected = scan_df_selected
+    st.session_state.market_mode = market_mode
     st.session_state.processed_until = TRAIN_SCAN - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
@@ -233,7 +266,10 @@ history_rows = st.session_state.history_rows
 locked_windows = st.session_state.locked_windows
 scan_df_all = st.session_state.scan_df_all
 scan_df_selected = st.session_state.scan_df_selected
+market_mode = st.session_state.market_mode
 processed_until = st.session_state.processed_until
+
+effective_vote_required = get_effective_vote_required(len(locked_windows), market_mode)
 
 for i in range(processed_until + 1, len(groups)):
     if i < start_index:
@@ -246,7 +282,7 @@ for i in range(processed_until + 1, len(groups)):
 
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = confidence >= VOTE_REQUIRED
+    signal = confidence >= effective_vote_required
     distance = i - last_trade
 
     if profit >= PROFIT_TARGET:
@@ -254,6 +290,11 @@ for i in range(processed_until + 1, len(groups)):
         trade = False
         can_bet = False
         state = "STOP"
+    elif market_mode == "BAD":
+        signal = False
+        trade = False
+        can_bet = False
+        state = "WAIT_BAD_MARKET"
     else:
         trade = signal and distance >= GAP
         can_bet = trade
@@ -300,6 +341,7 @@ st.session_state.history_rows = history_rows
 st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_all = scan_df_all
 st.session_state.scan_df_selected = scan_df_selected
+st.session_state.market_mode = market_mode
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 
@@ -323,12 +365,16 @@ if not hist.empty:
 else:
     distance = 999
 
-raw_signal = confidence >= VOTE_REQUIRED if vote is not None else False
+raw_signal = confidence >= effective_vote_required if vote is not None else False
 
 if profit >= PROFIT_TARGET:
     signal = False
     can_bet = False
     next_state = "STOP"
+elif market_mode == "BAD":
+    signal = False
+    can_bet = False
+    next_state = "WAIT_BAD_MARKET"
 else:
     signal = raw_signal
     can_bet = signal and distance >= GAP
@@ -352,7 +398,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - Top 5 ít nhiễu")
+st.title("🎯 Rolling Prediction Engine - Top 5 ít nhiễu + Dynamic Vote")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -365,7 +411,9 @@ st.write("Distance From Last Trade:", distance)
 st.write("Locked Windows:", locked_windows)
 st.write("Train Scan:", TRAIN_SCAN)
 st.write("Profit Target:", PROFIT_TARGET)
-st.write("Vote Required:", VOTE_REQUIRED)
+st.write("Vote Required (base):", BASE_VOTE_REQUIRED)
+st.write("Vote Required (effective):", effective_vote_required)
+st.write("Market Mode:", market_mode)
 st.write("Min Window Profit:", MIN_WINDOW_PROFIT)
 st.write("Processed Until Round:", processed_until)
 
@@ -385,6 +433,8 @@ st.markdown(
 
 if profit >= PROFIT_TARGET:
     st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
+elif market_mode == "BAD":
+    st.warning("⚠️ Market đang xấu, tạm không bet")
 elif can_bet and vote is not None:
     st.markdown(
         f"""
@@ -432,6 +482,8 @@ def highlight_trade(row):
         return ["background-color: #ffd700"] * len(row)
     if row["state"] == "STOP":
         return ["background-color: #d9534f; color:white"] * len(row)
+    if row["state"] == "WAIT_BAD_MARKET":
+        return ["background-color: #fff3cd"] * len(row)
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
