@@ -6,11 +6,38 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# ---------------- AUTO REFRESH ----------------
 st_autorefresh(interval=10000, key="refresh")
 
-# ---------------- CONFIG ----------------
-SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPYP1vtGatflAuuY"
+SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
+
+@st.cache_data(ttl=10)
+def load_numbers():
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+
+    try:
+        df = pd.read_csv(url)
+    except Exception as e:
+        st.error(f"Load Google Sheet failed: {e}")
+        st.stop()
+
+    df.columns = [c.lower().strip() for c in df.columns]
+
+    if "number" not in df.columns:
+        st.error("Sheet thiếu cột 'number'")
+        st.write("Columns found:", df.columns.tolist())
+        st.stop()
+
+    df["number"] = pd.to_numeric(df["number"], errors="coerce")
+    numbers = df["number"].dropna().astype(int).tolist()
+
+    if not numbers:
+        st.error("Không đọc được dữ liệu number từ sheet")
+        st.stop()
+
+    return numbers
+
+numbers = load_numbers()
+st.write("Data loaded:", len(numbers))
 
 TRAIN_SCAN = 190
 WINDOW_MIN = 6
