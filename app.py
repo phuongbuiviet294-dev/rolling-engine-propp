@@ -16,12 +16,12 @@ st_autorefresh(interval=1000, key="refresh")
 # =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-START_LOCK_ROUND = 168
+START_LOCK_ROUND = 100
 WINDOW_MIN = 6
-WINDOW_MAX = 30
+WINDOW_MAX = 20
 
-TOP_WINDOWS =3
-VOTE_REQUIRED = 2
+TOP_WINDOWS =5
+VOTE_REQUIRED = 4
 GAP = 0
 
 WIN = 2.5
@@ -29,7 +29,7 @@ LOSS = -1
 PROFIT_TARGET = 3
 
 # cần tối thiểu 4 window profit >= 0
-MIN_POSITIVE_WINDOWS = 3
+MIN_POSITIVE_WINDOWS = 4
 
 # window thứ 5 nếu thiếu sẽ lấy theo ít nhiễu
 FALLBACK_MIN_PROFIT = -5
