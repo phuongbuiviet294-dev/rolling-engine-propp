@@ -7,7 +7,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=10000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -19,13 +19,14 @@ TOP_WINDOWS = 5
 
 VOTE_REQUIRED = 3
 GAP = 0
+
 WIN = 2.5
 LOSS = -1
-
 PROFIT_TARGET = 3
 
-# loại window nếu profit curve có chuỗi giảm liên tiếp >= ngưỡng này
-MAX_ALLOWED_DOWN_STREAK = 2  # nghĩa là nếu >=3 sẽ bị loại
+# stability filter
+MAX_ALLOWED_DOWN_STREAK = 2   # tức là streak >= 3 sẽ bị loại
+STREAK_PENALTY = 3.0          # phạt vào adjusted_score
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -96,7 +97,8 @@ def evaluate_window(seq_groups, w):
             prev_profit = profit
 
     winrate = wins / trades if trades > 0 else 0
-    score = profit * winrate * np.log(trades) if trades > 0 else -999999
+    base_score = profit * winrate * np.log(trades) if trades > 0 else -999999
+    adjusted_score = base_score - max_down_streak * STREAK_PENALTY
 
     return {
         "window": w,
@@ -104,7 +106,8 @@ def evaluate_window(seq_groups, w):
         "wins": wins,
         "profit": profit,
         "winrate": winrate,
-        "score": score,
+        "score": base_score,
+        "adjusted_score": adjusted_score,
         "max_down_streak": max_down_streak,
         "has_bad_streak": max_down_streak >= 3,
         "profit_curve": profit_curve,
@@ -112,36 +115,47 @@ def evaluate_window(seq_groups, w):
 
 
 def select_windows_from_train(train_groups):
-    rows = []
+    rows = [evaluate_window(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
 
-    for w in range(WINDOW_MIN, WINDOW_MAX + 1):
-        rows.append(evaluate_window(train_groups, w))
-
-    df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values(
+        ["adjusted_score", "profit", "winrate"],
+        ascending=False
+    ).reset_index(drop=True)
 
     # Ưu tiên:
     # 1. profit dương
-    # 2. không có chuỗi giảm liên tiếp >= 3
-    filtered_df = df[
+    # 2. không có chuỗi giảm >= 3
+    # 3. adjusted_score cao
+    stable_positive_df = df[
         (df["profit"] > 0) &
         (df["max_down_streak"] <= MAX_ALLOWED_DOWN_STREAK)
     ].copy().reset_index(drop=True)
 
-    if len(filtered_df) >= TOP_WINDOWS:
-        selected = filtered_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
+    # fallback 1: profit dương, chọn streak thấp nhất trước, rồi adjusted_score
+    positive_df = df[df["profit"] > 0].copy()
+    positive_df = positive_df.sort_values(
+        ["max_down_streak", "adjusted_score", "profit"],
+        ascending=[True, False, False]
+    ).reset_index(drop=True)
+
+    # fallback 2: nếu không có profit dương, chọn an toàn nhất
+    safe_df = df.sort_values(
+        ["max_down_streak", "adjusted_score", "profit"],
+        ascending=[True, False, False]
+    ).reset_index(drop=True)
+
+    if len(stable_positive_df) >= TOP_WINDOWS:
+        selected_df = stable_positive_df.head(TOP_WINDOWS).copy()
+    elif len(stable_positive_df) > 0:
+        selected_df = stable_positive_df.copy()
+    elif len(positive_df) > 0:
+        selected_df = positive_df.head(TOP_WINDOWS).copy()
     else:
-        # fallback 1: chỉ cần profit dương
-        fallback_df = df[df["profit"] > 0].copy().reset_index(drop=True)
+        selected_df = safe_df.head(TOP_WINDOWS).copy()
 
-        if len(fallback_df) >= TOP_WINDOWS:
-            selected = fallback_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
-            filtered_df = fallback_df
-        else:
-            # fallback 2: lấy top theo score nếu quá ít window dương
-            selected = df.head(TOP_WINDOWS)["window"].astype(int).tolist()
-            filtered_df = df.head(TOP_WINDOWS).copy()
+    selected = selected_df["window"].astype(int).tolist()
 
-    return selected, df, filtered_df
+    return selected, df, selected_df
 
 
 # ---------------- STATE INIT ----------------
@@ -154,8 +168,8 @@ def init_state():
         "hits": [],
         "history_rows": [],
         "locked_windows": [],
-        "scan_df_locked": pd.DataFrame(),
-        "scan_df_filtered": pd.DataFrame(),
+        "scan_df_all": pd.DataFrame(),
+        "scan_df_selected": pd.DataFrame(),
         "base_data_len": None,
     }
     for k, v in defaults.items():
@@ -175,8 +189,8 @@ if st.button("🔄 Reset Session"):
         "hits",
         "history_rows",
         "locked_windows",
-        "scan_df_locked",
-        "scan_df_filtered",
+        "scan_df_all",
+        "scan_df_selected",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -184,7 +198,7 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# Nếu dữ liệu bị giảm thì reset để tránh lệch state
+# nếu dữ liệu giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -197,8 +211,8 @@ if (
         "hits",
         "history_rows",
         "locked_windows",
-        "scan_df_locked",
-        "scan_df_filtered",
+        "scan_df_all",
+        "scan_df_selected",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -211,11 +225,11 @@ start_index = TRAIN_SCAN
 
 if not st.session_state.live_initialized:
     train_groups = groups[:TRAIN_SCAN]
-    locked_windows, scan_df_locked, scan_df_filtered = select_windows_from_train(train_groups)
+    locked_windows, scan_df_all, scan_df_selected = select_windows_from_train(train_groups)
 
     st.session_state.locked_windows = locked_windows
-    st.session_state.scan_df_locked = scan_df_locked
-    st.session_state.scan_df_filtered = scan_df_filtered
+    st.session_state.scan_df_all = scan_df_all
+    st.session_state.scan_df_selected = scan_df_selected
     st.session_state.processed_until = TRAIN_SCAN - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
@@ -226,8 +240,8 @@ last_trade = st.session_state.last_trade
 hits = st.session_state.hits
 history_rows = st.session_state.history_rows
 locked_windows = st.session_state.locked_windows
-scan_df_locked = st.session_state.scan_df_locked
-scan_df_filtered = st.session_state.scan_df_filtered
+scan_df_all = st.session_state.scan_df_all
+scan_df_selected = st.session_state.scan_df_selected
 processed_until = st.session_state.processed_until
 
 for i in range(processed_until + 1, len(groups)):
@@ -293,8 +307,8 @@ st.session_state.last_trade = last_trade
 st.session_state.hits = hits
 st.session_state.history_rows = history_rows
 st.session_state.locked_windows = locked_windows
-st.session_state.scan_df_locked = scan_df_locked
-st.session_state.scan_df_filtered = scan_df_filtered
+st.session_state.scan_df_all = scan_df_all
+st.session_state.scan_df_selected = scan_df_selected
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 
@@ -347,7 +361,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Rolling Prediction Engine - Fixed Lock + Stable Window Filter")
+st.title("🎯 Rolling Prediction Engine - Stable Window Selection")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -362,6 +376,7 @@ st.write("Train Scan:", TRAIN_SCAN)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Vote Required:", VOTE_REQUIRED)
 st.write("Max Allowed Down Streak:", MAX_ALLOWED_DOWN_STREAK)
+st.write("Streak Penalty:", STREAK_PENALTY)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
@@ -412,12 +427,12 @@ if not hist_display.empty:
 
 # ---------------- WINDOW SCAN ----------------
 st.subheader("Initial Window Scan (all windows)")
-scan_df_show = scan_df_locked.drop(columns=["profit_curve"], errors="ignore")
+scan_df_show = scan_df_all.drop(columns=["profit_curve"], errors="ignore")
 st.dataframe(scan_df_show, use_container_width=True)
 
-st.subheader("Filtered Stable Window Scan")
-scan_filtered_show = scan_df_filtered.drop(columns=["profit_curve"], errors="ignore")
-st.dataframe(scan_filtered_show, use_container_width=True)
+st.subheader("Selected Stable Window Scan")
+scan_selected_show = scan_df_selected.drop(columns=["profit_curve"], errors="ignore")
+st.dataframe(scan_selected_show, use_container_width=True)
 
 # ---------------- HISTORY ----------------
 st.subheader("History")
