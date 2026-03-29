@@ -17,7 +17,7 @@ st_autorefresh(interval=10000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # rolling adaptive lock
-ROLLING_SCAN = 168
+ROLLING_SCAN = 182
 WINDOW_MIN = 6
 WINDOW_MAX = 20
 
