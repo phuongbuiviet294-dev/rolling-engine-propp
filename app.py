@@ -21,7 +21,7 @@ TOP_WINDOWS = 6
 GAP = 0
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 3
+PROFIT_TARGET = 10
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
