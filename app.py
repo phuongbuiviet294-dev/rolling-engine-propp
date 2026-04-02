@@ -105,12 +105,12 @@ def select_windows_from_train(train_groups):
     return selected, df, selected_df
 
 def get_vote_required(n: int):
-    # muốn trade tự động theo rule:
-    # 5 window -> vote 4
-    # 4 window -> vote 3
-    # 3 window -> vote 2
-    # 2 window -> vote 1
-    # <2 window -> không trade
+    # vote tối thiểu = số window - 1
+    # 5 -> 4
+    # 4 -> 3
+    # 3 -> 2
+    # 2 -> 1
+    # <2 -> không trade
     if n < 2:
         return None
     return n - 1
