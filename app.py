@@ -14,15 +14,16 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 TRAIN_SCAN = 182
 WINDOW_MIN = 6
-WINDOW_MAX = 20
+WINDOW_MAX = 30
 TOP_WINDOWS = 4
 
 VOTE_REQUIRED = 3
-GAP = 0
+GAP = 1
+
 WIN = 2.5
 LOSS = -1
 
-PROFIT_TARGET = 3
+PROFIT_TARGET = 7
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
