@@ -12,16 +12,17 @@ st_autorefresh(interval=1000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# lock theo round ban đầu
 TRAIN_SCAN = 182
 WINDOW_MIN = 6
 WINDOW_MAX = 20
-TOP_WINDOWS = 4
+TOP_WINDOWS = 3
 
+VOTE_REQUIRED = 3
 GAP = 0
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 20
+
+PROFIT_TARGET = 3
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -91,33 +92,16 @@ def select_windows_from_train(train_groups):
     for w in range(WINDOW_MIN, WINDOW_MAX + 1):
         rows.append(evaluate_window(train_groups, w))
 
-    df = pd.DataFrame(rows).sort_values(
-        ["profit", "score", "winrate"],
-        ascending=[False, False, False]
-    ).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
 
-    # chỉ lấy window profit dương
-    positive_df = df[df["profit"] > 0].copy().reset_index(drop=True)
+    positive_df = df[df["profit"] > 0].copy()
 
-    # lấy tối đa TOP_WINDOWS window dương
-    selected_df = positive_df.head(TOP_WINDOWS).copy()
-    selected = selected_df["window"].astype(int).tolist()
+    if len(positive_df) >= TOP_WINDOWS:
+        selected = positive_df.head(TOP_WINDOWS)["window"].astype(int).tolist()
+    else:
+        selected = df.head(TOP_WINDOWS)["window"].astype(int).tolist()
 
-    return selected, df, positive_df, selected_df
-
-def get_vote_required(n: int):
-    # vote tối thiểu = số window - 1
-    # 8 -> 7
-    # 7 -> 6
-    # 6 -> 5
-    # 5 -> 4
-    # 4 -> 3
-    # 3 -> 2
-    # 2 -> 1
-    # <2 -> không trade
-    if n < 2:
-        return None
-    return n - 1
+    return selected, df
 
 # ---------------- STATE INIT ----------------
 def init_state():
@@ -142,14 +126,8 @@ def init_state():
     if "locked_windows" not in st.session_state:
         st.session_state.locked_windows = []
 
-    if "scan_df_all" not in st.session_state:
-        st.session_state.scan_df_all = pd.DataFrame()
-
-    if "scan_df_positive" not in st.session_state:
-        st.session_state.scan_df_positive = pd.DataFrame()
-
-    if "scan_df_selected" not in st.session_state:
-        st.session_state.scan_df_selected = pd.DataFrame()
+    if "scan_df_locked" not in st.session_state:
+        st.session_state.scan_df_locked = pd.DataFrame()
 
     if "base_data_len" not in st.session_state:
         st.session_state.base_data_len = None
@@ -166,9 +144,7 @@ if st.button("🔄 Reset Session"):
         "hits",
         "history_rows",
         "locked_windows",
-        "scan_df_all",
-        "scan_df_positive",
-        "scan_df_selected",
+        "scan_df_locked",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -176,7 +152,7 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
-# nếu dữ liệu bị giảm thì reset để tránh lệch state
+# Nếu dữ liệu bị giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -189,9 +165,7 @@ if (
         "hits",
         "history_rows",
         "locked_windows",
-        "scan_df_all",
-        "scan_df_positive",
-        "scan_df_selected",
+        "scan_df_locked",
         "base_data_len",
     ]
     for k in keys_to_clear:
@@ -204,12 +178,10 @@ start_index = TRAIN_SCAN
 
 if not st.session_state.live_initialized:
     train_groups = groups[:TRAIN_SCAN]
-    locked_windows, scan_df_all, scan_df_positive, scan_df_selected = select_windows_from_train(train_groups)
+    locked_windows, scan_df_locked = select_windows_from_train(train_groups)
 
     st.session_state.locked_windows = locked_windows
-    st.session_state.scan_df_all = scan_df_all
-    st.session_state.scan_df_positive = scan_df_positive
-    st.session_state.scan_df_selected = scan_df_selected
+    st.session_state.scan_df_locked = scan_df_locked
     st.session_state.processed_until = TRAIN_SCAN - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
@@ -220,12 +192,8 @@ last_trade = st.session_state.last_trade
 hits = st.session_state.hits
 history_rows = st.session_state.history_rows
 locked_windows = st.session_state.locked_windows
-scan_df_all = st.session_state.scan_df_all
-scan_df_positive = st.session_state.scan_df_positive
-scan_df_selected = st.session_state.scan_df_selected
+scan_df_locked = st.session_state.scan_df_locked
 processed_until = st.session_state.processed_until
-
-vote_required = get_vote_required(len(locked_windows))
 
 for i in range(processed_until + 1, len(groups)):
     if i < start_index:
@@ -238,7 +206,7 @@ for i in range(processed_until + 1, len(groups)):
 
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = (vote_required is not None) and (confidence >= vote_required)
+    signal = confidence >= VOTE_REQUIRED
     distance = i - last_trade
 
     if profit >= PROFIT_TARGET:
@@ -250,9 +218,6 @@ for i in range(processed_until + 1, len(groups)):
         trade = signal and distance >= GAP
         can_bet = trade
         state = "TRADE" if trade else ("SIGNAL" if signal else "WAIT")
-
-    if vote_required is None:
-        state = "WAIT_NO_MODEL"
 
     bet_group = vote if can_bet else None
     hit = None
@@ -293,9 +258,7 @@ st.session_state.last_trade = last_trade
 st.session_state.hits = hits
 st.session_state.history_rows = history_rows
 st.session_state.locked_windows = locked_windows
-st.session_state.scan_df_all = scan_df_all
-st.session_state.scan_df_positive = scan_df_positive
-st.session_state.scan_df_selected = scan_df_selected
+st.session_state.scan_df_locked = scan_df_locked
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 
@@ -319,7 +282,7 @@ if not hist.empty:
 else:
     distance = 999
 
-raw_signal = (vote is not None) and (vote_required is not None) and (confidence >= vote_required)
+raw_signal = confidence >= VOTE_REQUIRED if vote is not None else False
 
 if profit >= PROFIT_TARGET:
     signal = False
@@ -329,11 +292,6 @@ else:
     signal = raw_signal
     can_bet = signal and distance >= GAP
     next_state = "NEXT"
-
-if vote_required is None:
-    signal = False
-    can_bet = False
-    next_state = "WAIT_NO_MODEL"
 
 next_row = {
     "round": next_round,
@@ -353,7 +311,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Fixed Lock - Top Positive Windows, Auto Vote = n-1")
+st.title("🎯 Rolling Prediction Engine - Fixed Lock + Profit Target")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -364,11 +322,7 @@ st.divider()
 st.write("Vote Strength:", confidence)
 st.write("Distance From Last Trade:", distance)
 st.write("Locked Windows:", locked_windows)
-st.write("Locked Window Count:", len(locked_windows))
-st.write("Vote Required DEBUG:", vote_required if vote_required is not None else "NO TRADE")
-st.write("Current Rule DEBUG:", f"{len(locked_windows)} windows -> need {vote_required if vote_required is not None else 'NO TRADE'}")
 st.write("Train Scan:", TRAIN_SCAN)
-st.write("Top Windows Config:", TOP_WINDOWS)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Processed Until Round:", processed_until)
 
@@ -388,8 +342,6 @@ st.markdown(
 
 if profit >= PROFIT_TARGET:
     st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
-elif vote_required is None:
-    st.warning("⚠️ Không đủ window profit dương để trade")
 elif can_bet and vote is not None:
     st.markdown(
         f"""
@@ -420,15 +372,9 @@ st.subheader("Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["profit"])
 
-# ---------------- WINDOW SCAN ----------------
-st.subheader("Initial Window Scan (all windows)")
-st.dataframe(scan_df_all, use_container_width=True)
-
-st.subheader("All Positive Windows")
-st.dataframe(scan_df_positive, use_container_width=True)
-
-st.subheader(f"Selected Positive Windows (top {TOP_WINDOWS})")
-st.dataframe(scan_df_selected, use_container_width=True)
+# ---------------- LOCKED WINDOW SCAN ----------------
+st.subheader("Initial Window Scan (locked once)")
+st.dataframe(scan_df_locked, use_container_width=True)
 
 # ---------------- HISTORY ----------------
 st.subheader("History")
@@ -448,6 +394,5 @@ st.dataframe(
 )
 
 # ---------------- DEBUG ----------------
-st.write("Locked Windows (positive only):", locked_windows)
+st.write("Locked Windows (fixed):", locked_windows)
 st.write("Total Rows:", len(numbers))
-st.write("First 20 Numbers:", numbers[:20])
