@@ -22,12 +22,14 @@ GAP = 0
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 10
+PROFIT_TARGET = 3
 
-# CHỌN KIỂU LOCK:
-# "head" = lấy 182 dòng đầu
-# "tail" = lấy 182 dòng gần nhất
+# "head" = lấy TRAIN_SCAN dòng đầu
+# "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
 LOCK_SOURCE = "head"
+
+# KEEP RULE
+KEEP_AFTER_LOSS_ROUNDS = 4
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -99,16 +101,13 @@ def select_windows_from_train(train_groups):
 
     df = pd.DataFrame(rows)
 
-    # 1. Bảng full để xem toàn bộ
+    # ưu tiên profit dương trước, rồi score cao để ổn định hơn
     df_all = df.sort_values(
         ["profit", "score", "winrate"],
         ascending=[False, False, False]
     ).reset_index(drop=True)
 
-    # 2. Ưu tiên lấy window profit dương
     positive_df = df[df["profit"] > 0].copy()
-
-    # Trong nhóm profit dương, ưu tiên score cao để lấy window ổn định hơn
     positive_df = positive_df.sort_values(
         ["score", "profit", "winrate"],
         ascending=[False, False, False]
@@ -116,7 +115,7 @@ def select_windows_from_train(train_groups):
 
     selected_df = positive_df.head(TOP_WINDOWS).copy()
 
-    # 3. Nếu chưa đủ 4 thì lấy thêm các window còn lại theo score cao nhất
+    # nếu chưa đủ 4 thì lấy thêm từ phần còn lại theo score cao
     if len(selected_df) < TOP_WINDOWS:
         selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
 
@@ -172,6 +171,16 @@ def init_state():
     if "base_data_len" not in st.session_state:
         st.session_state.base_data_len = None
 
+    # keep state
+    if "keep_bet_group" not in st.session_state:
+        st.session_state.keep_bet_group = None
+
+    if "keep_rounds_left" not in st.session_state:
+        st.session_state.keep_rounds_left = 0
+
+    if "last_trade_was_loss" not in st.session_state:
+        st.session_state.last_trade_was_loss = False
+
 init_state()
 
 # ---------------- RESET ----------------
@@ -187,13 +196,15 @@ if st.button("🔄 Reset Session"):
         "scan_df_all",
         "scan_df_selected",
         "base_data_len",
+        "keep_bet_group",
+        "keep_rounds_left",
+        "last_trade_was_loss",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
             del st.session_state[k]
     st.rerun()
 
-# Nếu dữ liệu bị giảm thì reset để tránh lệch state
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -209,6 +220,9 @@ if (
         "scan_df_all",
         "scan_df_selected",
         "base_data_len",
+        "keep_bet_group",
+        "keep_rounds_left",
+        "last_trade_was_loss",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
@@ -243,6 +257,10 @@ scan_df_all = st.session_state.scan_df_all
 scan_df_selected = st.session_state.scan_df_selected
 processed_until = st.session_state.processed_until
 
+keep_bet_group = st.session_state.keep_bet_group
+keep_rounds_left = st.session_state.keep_rounds_left
+last_trade_was_loss = st.session_state.last_trade_was_loss
+
 for i in range(processed_until + 1, len(groups)):
     if i < start_index:
         continue
@@ -254,42 +272,93 @@ for i in range(processed_until + 1, len(groups)):
 
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    signal = confidence >= VOTE_REQUIRED
+    # signal mới từ model
+    new_signal = confidence >= VOTE_REQUIRED
     distance = i - last_trade
 
+    final_vote = vote
+    used_keep = False
+
+    # nếu có signal mới thì bỏ keep
+    if new_signal:
+        keep_rounds_left = 0
+        keep_bet_group = None
+        last_trade_was_loss = False
+        final_vote = vote
+    else:
+        # nếu trade gần nhất bị âm, còn lượt keep, và chưa có signal mới chèn vào
+        if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
+            final_vote = keep_bet_group
+            used_keep = True
+
+    final_signal = new_signal or used_keep
+
     if profit >= PROFIT_TARGET:
-        signal = False
+        final_signal = False
         trade = False
         can_bet = False
         state = "STOP"
     else:
-        trade = signal and distance >= GAP
+        trade = final_signal and distance >= GAP
         can_bet = trade
-        state = "TRADE" if trade else ("SIGNAL" if signal else "WAIT")
+        if trade and used_keep:
+            state = "TRADE_KEEP"
+        elif trade:
+            state = "TRADE"
+        elif new_signal:
+            state = "SIGNAL"
+        elif used_keep:
+            state = "KEEP_WAIT"
+        else:
+            state = "WAIT"
 
-    bet_group = vote if can_bet else None
+    bet_group = final_vote if can_bet else None
     hit = None
 
     if trade:
         last_trade = i
 
-        if groups[i] == vote:
+        if groups[i] == final_vote:
             hit = 1
             profit += WIN
             hits.append(1)
+
+            # thắng thì tắt keep
+            last_trade_was_loss = False
+            keep_rounds_left = 0
+            keep_bet_group = None
         else:
             hit = 0
             profit += LOSS
             hits.append(0)
+
+            # thua thì bật keep 4 vòng với chính bet_group vừa thua
+            last_trade_was_loss = True
+            keep_rounds_left = KEEP_AFTER_LOSS_ROUNDS
+            keep_bet_group = final_vote
+
+    else:
+        # chỉ giảm keep nếu đang trong chế độ keep và không có signal mới
+        if used_keep and keep_rounds_left > 0:
+            keep_rounds_left -= 1
+            if keep_rounds_left <= 0:
+                keep_rounds_left = 0
+                keep_bet_group = None
+                last_trade_was_loss = False
 
     history_rows.append(
         {
             "round": i,
             "number": numbers[i],
             "group": groups[i],
-            "vote": vote,
+            "vote": vote,  # vote gốc từ model
             "confidence": confidence,
-            "signal": signal,
+            "new_signal": new_signal,
+            "used_keep": used_keep,
+            "keep_group": keep_bet_group,
+            "keep_left": keep_rounds_left,
+            "final_vote": final_vote,
+            "signal": final_signal,
             "trade": trade,
             "bet_group": bet_group,
             "hit": hit,
@@ -310,6 +379,9 @@ st.session_state.scan_df_all = scan_df_all
 st.session_state.scan_df_selected = scan_df_selected
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
+st.session_state.keep_bet_group = keep_bet_group
+st.session_state.keep_rounds_left = keep_rounds_left
+st.session_state.last_trade_was_loss = last_trade_was_loss
 
 hist = pd.DataFrame(history_rows)
 
@@ -331,16 +403,34 @@ if not hist.empty:
 else:
     distance = 999
 
-raw_signal = confidence >= VOTE_REQUIRED if vote is not None else False
+new_signal = confidence >= VOTE_REQUIRED if vote is not None else False
+used_keep_next = False
+final_vote = vote
+
+# nếu có signal mới thì bỏ keep
+if new_signal:
+    next_keep_bet_group = None
+    next_keep_rounds_left = 0
+else:
+    next_keep_bet_group = keep_bet_group
+    next_keep_rounds_left = keep_rounds_left
+    if last_trade_was_loss and next_keep_rounds_left > 0 and next_keep_bet_group is not None:
+        final_vote = next_keep_bet_group
+        used_keep_next = True
+
+final_signal = new_signal or used_keep_next
 
 if profit >= PROFIT_TARGET:
     signal = False
     can_bet = False
     next_state = "STOP"
 else:
-    signal = raw_signal
+    signal = final_signal
     can_bet = signal and distance >= GAP
-    next_state = "NEXT"
+    if used_keep_next and can_bet:
+        next_state = "NEXT_KEEP"
+    else:
+        next_state = "NEXT"
 
 next_row = {
     "round": next_round,
@@ -348,9 +438,14 @@ next_row = {
     "group": current_group,
     "vote": vote,
     "confidence": confidence,
+    "new_signal": new_signal,
+    "used_keep": used_keep_next,
+    "keep_group": next_keep_bet_group,
+    "keep_left": next_keep_rounds_left,
+    "final_vote": final_vote,
     "signal": signal,
     "trade": False,
-    "bet_group": vote if can_bet else None,
+    "bet_group": final_vote if can_bet else None,
     "hit": None,
     "state": next_state,
     "profit": profit,
@@ -360,22 +455,23 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Fixed Lock - 4 Windows Vote 3")
+st.title("🎯 Fixed Lock - 4 Windows Vote 3 + Keep 4 rounds after loss")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
 col2.metric("Current Group", current_group if current_group is not None else "-")
-col3.metric("Next Group", vote if vote is not None else "-")
+col3.metric("Next Group", final_vote if final_vote is not None else "-")
 
 st.divider()
 st.write("Vote Strength:", confidence)
-st.write("Distance From Last Trade:", distance)
 st.write("Locked Windows:", locked_windows)
 st.write("Locked Window Count:", len(locked_windows))
 st.write("Vote Required:", VOTE_REQUIRED)
 st.write("Train Scan:", TRAIN_SCAN)
 st.write("Lock Source:", LOCK_SOURCE)
 st.write("Profit Target:", PROFIT_TARGET)
+st.write("Keep Bet Group:", keep_bet_group)
+st.write("Keep Rounds Left:", keep_rounds_left)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
@@ -386,7 +482,7 @@ st.markdown(
     text-align:center;
     font-size:28px;
     font-weight:bold;">
-    NEXT GROUP → {vote if vote is not None else "-"} (Vote Strength: {confidence})
+    NEXT GROUP → {final_vote if final_vote is not None else "-"} (Vote Strength: {confidence})
     </div>
     """,
     unsafe_allow_html=True,
@@ -394,7 +490,7 @@ st.markdown(
 
 if profit >= PROFIT_TARGET:
     st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
-elif can_bet and vote is not None:
+elif can_bet and final_vote is not None:
     st.markdown(
         f"""
         <div style="background:#ff4b4b;
@@ -404,7 +500,7 @@ elif can_bet and vote is not None:
         font-size:32px;
         color:white;
         font-weight:bold;">
-        BET GROUP → {vote}
+        BET GROUP → {final_vote}
         </div>
         """,
         unsafe_allow_html=True,
@@ -435,10 +531,12 @@ st.dataframe(scan_df_selected, use_container_width=True)
 st.subheader("History")
 
 def highlight_trade(row):
-    if row["state"] == "NEXT":
+    if row["state"] in ("NEXT", "NEXT_KEEP"):
         return ["background-color: #ffd700"] * len(row)
     if row["state"] == "STOP":
         return ["background-color: #d9534f; color:white"] * len(row)
+    if row["state"] == "TRADE_KEEP":
+        return ["background-color: #ffb347; color:black"] * len(row)
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
