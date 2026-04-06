@@ -22,7 +22,7 @@ GAP = 0
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 10
+PROFIT_TARGET = 20
 
 # "head" = lấy TRAIN_SCAN dòng đầu
 # "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
