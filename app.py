@@ -22,14 +22,15 @@ GAP = 0
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 10
+PROFIT_TARGET = 3
 
 # "head" = lấy TRAIN_SCAN dòng đầu
 # "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
 LOCK_SOURCE = "head"
 
 # KEEP RULE
-KEEP_AFTER_LOSS_ROUNDS = 3
+# keep tổng cộng 4 vòng, tính luôn cả vòng trade thua
+KEEP_AFTER_LOSS_ROUNDS = 4
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -171,7 +172,6 @@ def init_state():
     if "base_data_len" not in st.session_state:
         st.session_state.base_data_len = None
 
-    # keep state
     if "keep_bet_group" not in st.session_state:
         st.session_state.keep_bet_group = None
 
@@ -272,21 +272,20 @@ for i in range(processed_until + 1, len(groups)):
 
     vote, confidence = Counter(preds).most_common(1)[0]
 
-    # signal mới từ model
     new_signal = confidence >= VOTE_REQUIRED
     distance = i - last_trade
 
     final_vote = vote
     used_keep = False
 
-    # nếu có signal mới thì bỏ keep
+    # nếu có signal mới thì bỏ keep ngay
     if new_signal:
         keep_rounds_left = 0
         keep_bet_group = None
         last_trade_was_loss = False
         final_vote = vote
     else:
-        # nếu trade gần nhất bị âm, còn lượt keep, và chưa có signal mới chèn vào
+        # nếu lệnh trước bị thua và còn lượt keep thì dùng keep
         if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
             final_vote = keep_bet_group
             used_keep = True
@@ -323,7 +322,6 @@ for i in range(processed_until + 1, len(groups)):
             profit += WIN
             hits.append(1)
 
-            # thắng thì tắt keep
             last_trade_was_loss = False
             keep_rounds_left = 0
             keep_bet_group = None
@@ -332,13 +330,13 @@ for i in range(processed_until + 1, len(groups)):
             profit += LOSS
             hits.append(0)
 
-            # thua thì bật keep 4 vòng với chính bet_group vừa thua
+            # round thua đã tính là keep thứ 1
             last_trade_was_loss = True
-            keep_rounds_left = KEEP_AFTER_LOSS_ROUNDS
+            keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
             keep_bet_group = final_vote
 
     else:
-        # chỉ giảm keep nếu đang trong chế độ keep và không có signal mới
+        # giảm keep ở các vòng sau round thua, khi đang dùng keep mà chưa có signal mới
         if used_keep and keep_rounds_left > 0:
             keep_rounds_left -= 1
             if keep_rounds_left <= 0:
@@ -351,7 +349,7 @@ for i in range(processed_until + 1, len(groups)):
             "round": i,
             "number": numbers[i],
             "group": groups[i],
-            "vote": vote,  # vote gốc từ model
+            "vote": vote,
             "confidence": confidence,
             "new_signal": new_signal,
             "used_keep": used_keep,
@@ -407,7 +405,6 @@ new_signal = confidence >= VOTE_REQUIRED if vote is not None else False
 used_keep_next = False
 final_vote = vote
 
-# nếu có signal mới thì bỏ keep
 if new_signal:
     next_keep_bet_group = None
     next_keep_rounds_left = 0
