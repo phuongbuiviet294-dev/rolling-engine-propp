@@ -22,14 +22,14 @@ GAP = 0
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 3
+PROFIT_TARGET = 10
 
 # "head" = lấy TRAIN_SCAN dòng đầu
 # "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
 LOCK_SOURCE = "head"
 
 # KEEP RULE
-KEEP_AFTER_LOSS_ROUNDS = 4
+KEEP_AFTER_LOSS_ROUNDS = 3
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
