@@ -28,8 +28,7 @@ PROFIT_TARGET = 3
 # "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
 LOCK_SOURCE = "head"
 
-# KEEP RULE
-# keep tổng cộng 4 vòng, tính luôn cả vòng trade thua
+# keep tổng cộng 4 vòng, tính luôn cả vòng thua
 KEEP_AFTER_LOSS_ROUNDS = 4
 
 # ---------------- LOAD DATA ----------------
@@ -102,7 +101,7 @@ def select_windows_from_train(train_groups):
 
     df = pd.DataFrame(rows)
 
-    # ưu tiên profit dương trước, rồi score cao để ổn định hơn
+    # ưu tiên profit dương trước, rồi score cao
     df_all = df.sort_values(
         ["profit", "score", "winrate"],
         ascending=[False, False, False]
@@ -142,44 +141,24 @@ def select_windows_from_train(train_groups):
 
 # ---------------- STATE INIT ----------------
 def init_state():
-    if "live_initialized" not in st.session_state:
-        st.session_state.live_initialized = False
-
-    if "processed_until" not in st.session_state:
-        st.session_state.processed_until = None
-
-    if "profit" not in st.session_state:
-        st.session_state.profit = 0.0
-
-    if "last_trade" not in st.session_state:
-        st.session_state.last_trade = -999
-
-    if "hits" not in st.session_state:
-        st.session_state.hits = []
-
-    if "history_rows" not in st.session_state:
-        st.session_state.history_rows = []
-
-    if "locked_windows" not in st.session_state:
-        st.session_state.locked_windows = []
-
-    if "scan_df_all" not in st.session_state:
-        st.session_state.scan_df_all = pd.DataFrame()
-
-    if "scan_df_selected" not in st.session_state:
-        st.session_state.scan_df_selected = pd.DataFrame()
-
-    if "base_data_len" not in st.session_state:
-        st.session_state.base_data_len = None
-
-    if "keep_bet_group" not in st.session_state:
-        st.session_state.keep_bet_group = None
-
-    if "keep_rounds_left" not in st.session_state:
-        st.session_state.keep_rounds_left = 0
-
-    if "last_trade_was_loss" not in st.session_state:
-        st.session_state.last_trade_was_loss = False
+    defaults = {
+        "live_initialized": False,
+        "processed_until": None,
+        "profit": 0.0,
+        "last_trade": -999,
+        "hits": [],
+        "history_rows": [],
+        "locked_windows": [],
+        "scan_df_all": pd.DataFrame(),
+        "scan_df_selected": pd.DataFrame(),
+        "base_data_len": None,
+        "keep_bet_group": None,
+        "keep_rounds_left": 0,
+        "last_trade_was_loss": False,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 init_state()
 
@@ -271,7 +250,6 @@ for i in range(processed_until + 1, len(groups)):
         continue
 
     vote, confidence = Counter(preds).most_common(1)[0]
-
     new_signal = confidence >= VOTE_REQUIRED
     distance = i - last_trade
 
@@ -314,6 +292,12 @@ for i in range(processed_until + 1, len(groups)):
     bet_group = final_vote if can_bet else None
     hit = None
 
+    # QUAN TRỌNG: hễ dùng keep thì trừ keep ngay ở round đó
+    if used_keep:
+        keep_rounds_left -= 1
+        if keep_rounds_left < 0:
+            keep_rounds_left = 0
+
     if trade:
         last_trade = i
 
@@ -322,6 +306,7 @@ for i in range(processed_until + 1, len(groups)):
             profit += WIN
             hits.append(1)
 
+            # thắng thì tắt keep
             last_trade_was_loss = False
             keep_rounds_left = 0
             keep_bet_group = None
@@ -330,19 +315,25 @@ for i in range(processed_until + 1, len(groups)):
             profit += LOSS
             hits.append(0)
 
-            # round thua đã tính là keep thứ 1
-            last_trade_was_loss = True
-            keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
-            keep_bet_group = final_vote
-
+            if used_keep:
+                # đang keep mà vẫn thua
+                if keep_rounds_left <= 0:
+                    last_trade_was_loss = False
+                    keep_bet_group = None
+                else:
+                    last_trade_was_loss = True
+            else:
+                # thua mới từ signal gốc
+                # tính luôn round thua là keep thứ 1
+                last_trade_was_loss = True
+                keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
+                keep_bet_group = final_vote
     else:
-        # giảm keep ở các vòng sau round thua, khi đang dùng keep mà chưa có signal mới
-        if used_keep and keep_rounds_left > 0:
-            keep_rounds_left -= 1
-            if keep_rounds_left <= 0:
-                keep_rounds_left = 0
-                keep_bet_group = None
-                last_trade_was_loss = False
+        # nếu không trade và keep đã hết thì tắt keep
+        if used_keep and keep_rounds_left <= 0:
+            keep_rounds_left = 0
+            keep_bet_group = None
+            last_trade_was_loss = False
 
     history_rows.append(
         {
@@ -424,10 +415,7 @@ if profit >= PROFIT_TARGET:
 else:
     signal = final_signal
     can_bet = signal and distance >= GAP
-    if used_keep_next and can_bet:
-        next_state = "NEXT_KEEP"
-    else:
-        next_state = "NEXT"
+    next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 
 next_row = {
     "round": next_round,
