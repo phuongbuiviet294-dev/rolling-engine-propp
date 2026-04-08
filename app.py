@@ -12,12 +12,12 @@ st_autorefresh(interval=1000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-TRAIN_SCAN = 210
+TRAIN_SCAN = 180
 WINDOW_MIN = 6
 WINDOW_MAX = 18
 
-TOP_WINDOWS = 3
-VOTE_REQUIRED = 2
+TOP_WINDOWS = 4
+VOTE_REQUIRED = 3
 GAP = 0
 
 WIN = 2.5
@@ -26,7 +26,7 @@ PROFIT_TARGET = 20
 
 # "head" = lấy TRAIN_SCAN dòng đầu
 # "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
-LOCK_SOURCE = "head"
+LOCK_SOURCE = "tail"
 
 # keep tổng cộng 4 vòng, tính luôn cả vòng thua
 KEEP_AFTER_LOSS_ROUNDS = 4
