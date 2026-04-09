@@ -26,7 +26,7 @@ PROFIT_TARGET = 20
 
 # "head" = lấy TRAIN_SCAN dòng đầu
 # "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
-LOCK_SOURCE = "tail"
+LOCK_SOURCE = "head"
 
 # keep tổng cộng 4 vòng, tính luôn cả vòng thua
 KEEP_AFTER_LOSS_ROUNDS = 4
