@@ -12,23 +12,22 @@ st_autorefresh(interval=1000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-TRAIN_SCAN = 180
-WINDOW_MIN = 6
-WINDOW_MAX = 18
+# bắt đầu tìm lock từ round này
+START_FIND_ROUND = 168
 
-TOP_WINDOWS = 3
-VOTE_REQUIRED = 2
+WINDOW_MIN = 6
+WINDOW_MAX = 30
+
+TOP_WINDOWS = 4
+MIN_POSITIVE_WINDOWS = 3
+VOTE_REQUIRED = 3
 GAP = 0
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 20
+PROFIT_TARGET = 3
 
-# "head" = lấy TRAIN_SCAN dòng đầu
-# "tail" = lấy TRAIN_SCAN dòng gần nhất để lock lúc khởi tạo
-LOCK_SOURCE = "head"
-
-# keep tổng cộng 4 vòng, tính luôn cả vòng thua
+# KEEP: tổng cộng 4 vòng, tính luôn vòng trade thua
 KEEP_AFTER_LOSS_ROUNDS = 4
 
 # ---------------- LOAD DATA ----------------
@@ -58,9 +57,9 @@ def group(n: int) -> int:
 groups = [group(n) for n in numbers]
 
 # ---------------- GUARD ----------------
-if len(groups) <= TRAIN_SCAN:
+if len(groups) <= START_FIND_ROUND:
     st.error(
-        f"Chưa đủ dữ liệu để chạy trade. Cần nhiều hơn {TRAIN_SCAN} rounds, hiện có {len(groups)}."
+        f"Chưa đủ dữ liệu. Cần nhiều hơn {START_FIND_ROUND} rounds, hiện có {len(groups)}."
     )
     st.stop()
 
@@ -101,22 +100,24 @@ def select_windows_from_train(train_groups):
 
     df = pd.DataFrame(rows)
 
-    # ưu tiên profit dương trước, rồi score cao
+    # bảng full
     df_all = df.sort_values(
         ["profit", "score", "winrate"],
         ascending=[False, False, False]
     ).reset_index(drop=True)
 
+    # nhóm profit dương
     positive_df = df[df["profit"] > 0].copy()
     positive_df = positive_df.sort_values(
         ["score", "profit", "winrate"],
         ascending=[False, False, False]
     ).reset_index(drop=True)
 
+    # chọn tối đa 4 window dương
     selected_df = positive_df.head(TOP_WINDOWS).copy()
 
-    # nếu chưa đủ 4 thì lấy thêm từ phần còn lại theo score cao
-    if len(selected_df) < TOP_WINDOWS:
+    # nếu có >=3 window dương nhưng chưa đủ 4 thì lấy thêm window tốt nhất còn lại
+    if len(positive_df) >= MIN_POSITIVE_WINDOWS and len(selected_df) < TOP_WINDOWS:
         selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
 
         remain_df = df[~df["window"].isin(selected_windows)].copy()
@@ -137,7 +138,7 @@ def select_windows_from_train(train_groups):
 
     selected = selected_df["window"].astype(int).tolist()
 
-    return selected, df_all, selected_df
+    return selected, df_all, positive_df, selected_df
 
 # ---------------- STATE INIT ----------------
 def init_state():
@@ -150,7 +151,9 @@ def init_state():
         "history_rows": [],
         "locked_windows": [],
         "scan_df_all": pd.DataFrame(),
+        "scan_df_positive": pd.DataFrame(),
         "scan_df_selected": pd.DataFrame(),
+        "lock_round_used": None,
         "base_data_len": None,
         "keep_bet_group": None,
         "keep_rounds_left": 0,
@@ -173,7 +176,9 @@ if st.button("🔄 Reset Session"):
         "history_rows",
         "locked_windows",
         "scan_df_all",
+        "scan_df_positive",
         "scan_df_selected",
+        "lock_round_used",
         "base_data_len",
         "keep_bet_group",
         "keep_rounds_left",
@@ -197,7 +202,9 @@ if (
         "history_rows",
         "locked_windows",
         "scan_df_all",
+        "scan_df_positive",
         "scan_df_selected",
+        "lock_round_used",
         "base_data_len",
         "keep_bet_group",
         "keep_rounds_left",
@@ -208,21 +215,38 @@ if (
             del st.session_state[k]
     st.rerun()
 
-# ---------------- INITIAL LOCK ONLY ONCE ----------------
-start_index = TRAIN_SCAN
-
+# ---------------- FIND LOCK ROUND FROM 168 ----------------
 if not st.session_state.live_initialized:
-    if LOCK_SOURCE == "head":
-        train_groups = groups[:TRAIN_SCAN]
-    else:
-        train_groups = groups[-TRAIN_SCAN:]
+    lock_round_used = None
+    locked_windows = []
+    scan_df_all = pd.DataFrame()
+    scan_df_positive = pd.DataFrame()
+    scan_df_selected = pd.DataFrame()
 
-    locked_windows, scan_df_all, scan_df_selected = select_windows_from_train(train_groups)
+    for r in range(START_FIND_ROUND, len(groups) + 1):
+        train_groups = groups[:r]
+        tmp_windows, tmp_all, tmp_positive, tmp_selected = select_windows_from_train(train_groups)
+
+        if len(tmp_positive) >= MIN_POSITIVE_WINDOWS:
+            lock_round_used = r
+            locked_windows = tmp_windows
+            scan_df_all = tmp_all
+            scan_df_positive = tmp_positive
+            scan_df_selected = tmp_selected
+            break
+
+    if lock_round_used is None:
+        st.error(
+            f"Không tìm được round nào từ {START_FIND_ROUND} trở đi có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương để lock."
+        )
+        st.stop()
 
     st.session_state.locked_windows = locked_windows
     st.session_state.scan_df_all = scan_df_all
+    st.session_state.scan_df_positive = scan_df_positive
     st.session_state.scan_df_selected = scan_df_selected
-    st.session_state.processed_until = TRAIN_SCAN - 1
+    st.session_state.lock_round_used = lock_round_used
+    st.session_state.processed_until = lock_round_used - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
 
@@ -233,7 +257,9 @@ hits = st.session_state.hits
 history_rows = st.session_state.history_rows
 locked_windows = st.session_state.locked_windows
 scan_df_all = st.session_state.scan_df_all
+scan_df_positive = st.session_state.scan_df_positive
 scan_df_selected = st.session_state.scan_df_selected
+lock_round_used = st.session_state.lock_round_used
 processed_until = st.session_state.processed_until
 
 keep_bet_group = st.session_state.keep_bet_group
@@ -241,7 +267,7 @@ keep_rounds_left = st.session_state.keep_rounds_left
 last_trade_was_loss = st.session_state.last_trade_was_loss
 
 for i in range(processed_until + 1, len(groups)):
-    if i < start_index:
+    if i < lock_round_used:
         continue
 
     preds = [groups[i - w] for w in locked_windows if i - w >= 0]
@@ -256,14 +282,14 @@ for i in range(processed_until + 1, len(groups)):
     final_vote = vote
     used_keep = False
 
-    # nếu có signal mới thì bỏ keep ngay
+    # có signal mới -> bỏ keep ngay
     if new_signal:
         keep_rounds_left = 0
         keep_bet_group = None
         last_trade_was_loss = False
         final_vote = vote
     else:
-        # nếu lệnh trước bị thua và còn lượt keep thì dùng keep
+        # không có signal mới -> nếu đang keep thì dùng keep
         if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
             final_vote = keep_bet_group
             used_keep = True
@@ -292,7 +318,7 @@ for i in range(processed_until + 1, len(groups)):
     bet_group = final_vote if can_bet else None
     hit = None
 
-    # QUAN TRỌNG: hễ dùng keep thì trừ keep ngay ở round đó
+    # dùng keep ở round này thì trừ keep ngay
     if used_keep:
         keep_rounds_left -= 1
         if keep_rounds_left < 0:
@@ -323,13 +349,12 @@ for i in range(processed_until + 1, len(groups)):
                 else:
                     last_trade_was_loss = True
             else:
-                # thua mới từ signal gốc
-                # tính luôn round thua là keep thứ 1
+                # thua mới -> bật keep
+                # tổng keep = 4, tính luôn round thua
                 last_trade_was_loss = True
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote
     else:
-        # nếu không trade và keep đã hết thì tắt keep
         if used_keep and keep_rounds_left <= 0:
             keep_rounds_left = 0
             keep_bet_group = None
@@ -365,7 +390,9 @@ st.session_state.hits = hits
 st.session_state.history_rows = history_rows
 st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_all = scan_df_all
+st.session_state.scan_df_positive = scan_df_positive
 st.session_state.scan_df_selected = scan_df_selected
+st.session_state.lock_round_used = lock_round_used
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 st.session_state.keep_bet_group = keep_bet_group
@@ -440,7 +467,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Fixed Lock - 4 Windows Vote 3 + Keep 4 rounds after loss")
+st.title("🎯 Lock from round 168 when >=3 positive windows -> trade 4 vote 3 + keep")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -452,8 +479,9 @@ st.write("Vote Strength:", confidence)
 st.write("Locked Windows:", locked_windows)
 st.write("Locked Window Count:", len(locked_windows))
 st.write("Vote Required:", VOTE_REQUIRED)
-st.write("Train Scan:", TRAIN_SCAN)
-st.write("Lock Source:", LOCK_SOURCE)
+st.write("Start Find Round:", START_FIND_ROUND)
+st.write("Lock Round Used:", lock_round_used)
+st.write("Need Positive Windows >=", MIN_POSITIVE_WINDOWS)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
@@ -509,7 +537,10 @@ if not hist_display.empty:
 st.subheader("Window Scan All")
 st.dataframe(scan_df_all, use_container_width=True)
 
-st.subheader("Selected Windows")
+st.subheader("All Positive Windows")
+st.dataframe(scan_df_positive, use_container_width=True)
+
+st.subheader("Locked Windows")
 st.dataframe(scan_df_selected, use_container_width=True)
 
 # ---------------- HISTORY ----------------
