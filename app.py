@@ -12,8 +12,9 @@ st_autorefresh(interval=1000, key="refresh")
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# bắt đầu tìm lock từ round này
-START_FIND_ROUND = 168
+# tìm round lock tốt nhất trong khoảng này
+LOCK_ROUND_START = 168
+LOCK_ROUND_END = 204
 
 WINDOW_MIN = 6
 WINDOW_MAX = 30
@@ -25,10 +26,13 @@ GAP = 0
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 10
+PROFIT_TARGET = 3
 
-# KEEP: tổng cộng 4 vòng, tính luôn vòng trade thua
+# keep tổng cộng 4 vòng, tính luôn vòng trade thua
 KEEP_AFTER_LOSS_ROUNDS = 4
+
+# lọc window để tránh ăn may
+MIN_TRADES_PER_WINDOW = 20
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -57,15 +61,20 @@ def group(n: int) -> int:
 groups = [group(n) for n in numbers]
 
 # ---------------- GUARD ----------------
-if len(groups) <= START_FIND_ROUND:
+if len(groups) <= LOCK_ROUND_START:
     st.error(
-        f"Chưa đủ dữ liệu. Cần nhiều hơn {START_FIND_ROUND} rounds, hiện có {len(groups)}."
+        f"Chưa đủ dữ liệu. Cần nhiều hơn {LOCK_ROUND_START} rounds, hiện có {len(groups)}."
     )
+    st.stop()
+
+effective_lock_round_end = min(LOCK_ROUND_END, len(groups))
+if effective_lock_round_end < LOCK_ROUND_START:
+    st.error("Khoảng round lock không hợp lệ.")
     st.stop()
 
 # ---------------- WINDOW EVAL ----------------
 def evaluate_window(seq_groups, w):
-    profit = 0
+    profit = 0.0
     trades = 0
     wins = 0
 
@@ -80,8 +89,8 @@ def evaluate_window(seq_groups, w):
             else:
                 profit += LOSS
 
-    winrate = wins / trades if trades > 0 else 0
-    score = profit * winrate * np.log(trades) if trades > 0 else -999999
+    winrate = wins / trades if trades > 0 else 0.0
+    score = profit * winrate * np.log(trades) if trades > 0 else -999999.0
 
     return {
         "window": w,
@@ -92,38 +101,37 @@ def evaluate_window(seq_groups, w):
         "score": score,
     }
 
-def select_windows_from_train(train_groups):
+def build_window_tables(train_groups):
     rows = []
-
     for w in range(WINDOW_MIN, WINDOW_MAX + 1):
         rows.append(evaluate_window(train_groups, w))
 
     df = pd.DataFrame(rows)
 
-    # bảng full
     df_all = df.sort_values(
-        ["profit", "score", "winrate"],
-        ascending=[False, False, False]
+        ["profit", "score", "winrate", "trades"],
+        ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
-    # nhóm profit dương
-    positive_df = df[df["profit"] > 0].copy()
+    positive_df = df[
+        (df["profit"] > 0) &
+        (df["trades"] >= MIN_TRADES_PER_WINDOW)
+    ].copy()
+
     positive_df = positive_df.sort_values(
-        ["score", "profit", "winrate"],
-        ascending=[False, False, False]
+        ["score", "profit", "winrate", "trades"],
+        ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
-    # chọn tối đa 4 window dương
     selected_df = positive_df.head(TOP_WINDOWS).copy()
 
-    # nếu có >=3 window dương nhưng chưa đủ 4 thì lấy thêm window tốt nhất còn lại
     if len(positive_df) >= MIN_POSITIVE_WINDOWS and len(selected_df) < TOP_WINDOWS:
         selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
 
         remain_df = df[~df["window"].isin(selected_windows)].copy()
         remain_df = remain_df.sort_values(
-            ["score", "profit", "winrate"],
-            ascending=[False, False, False]
+            ["score", "profit", "winrate", "trades"],
+            ascending=[False, False, False, False]
         ).reset_index(drop=True)
 
         need = TOP_WINDOWS - len(selected_df)
@@ -132,13 +140,82 @@ def select_windows_from_train(train_groups):
 
     selected_df = selected_df.head(TOP_WINDOWS).copy()
     selected_df = selected_df.sort_values(
-        ["score", "profit", "winrate"],
-        ascending=[False, False, False]
+        ["score", "profit", "winrate", "trades"],
+        ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
     selected = selected_df["window"].astype(int).tolist()
 
     return selected, df_all, positive_df, selected_df
+
+def calc_round_score(selected_df: pd.DataFrame) -> float:
+    if selected_df.empty:
+        return -999999.0
+
+    total_profit = float(selected_df["profit"].sum())
+    avg_winrate = float(selected_df["winrate"].mean())
+    total_trades = float(selected_df["trades"].sum())
+    avg_score = float(selected_df["score"].mean())
+
+    round_score = (
+        total_profit * 1.0
+        + avg_winrate * 10.0
+        + np.log(max(total_trades, 1.0))
+        + avg_score * 0.2
+    )
+    return round_score
+
+def find_best_lock_round(all_groups):
+    best_round = None
+    best_score = -999999.0
+    best_windows = []
+    best_scan_all = pd.DataFrame()
+    best_positive = pd.DataFrame()
+    best_selected = pd.DataFrame()
+
+    round_eval_rows = []
+
+    for r in range(LOCK_ROUND_START, effective_lock_round_end + 1):
+        train_groups = all_groups[:r]
+        tmp_windows, tmp_all, tmp_positive, tmp_selected = build_window_tables(train_groups)
+
+        pos_count = len(tmp_positive)
+        round_score = -999999.0
+
+        if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
+            round_score = calc_round_score(tmp_selected)
+
+            if round_score > best_score:
+                best_score = round_score
+                best_round = r
+                best_windows = tmp_windows
+                best_scan_all = tmp_all
+                best_positive = tmp_positive
+                best_selected = tmp_selected
+
+        round_eval_rows.append(
+            {
+                "lock_round": r,
+                "positive_windows": pos_count,
+                "selected_count": len(tmp_selected),
+                "selected_windows": ", ".join(map(str, tmp_windows)),
+                "round_score": round_score,
+            }
+        )
+
+    round_eval_df = pd.DataFrame(round_eval_rows).sort_values(
+        ["round_score", "positive_windows", "lock_round"],
+        ascending=[False, False, True]
+    ).reset_index(drop=True)
+
+    return (
+        best_round,
+        best_windows,
+        best_scan_all,
+        best_positive,
+        best_selected,
+        round_eval_df,
+    )
 
 # ---------------- STATE INIT ----------------
 def init_state():
@@ -153,6 +230,7 @@ def init_state():
         "scan_df_all": pd.DataFrame(),
         "scan_df_positive": pd.DataFrame(),
         "scan_df_selected": pd.DataFrame(),
+        "round_eval_df": pd.DataFrame(),
         "lock_round_used": None,
         "base_data_len": None,
         "keep_bet_group": None,
@@ -178,6 +256,7 @@ if st.button("🔄 Reset Session"):
         "scan_df_all",
         "scan_df_positive",
         "scan_df_selected",
+        "round_eval_df",
         "lock_round_used",
         "base_data_len",
         "keep_bet_group",
@@ -204,6 +283,7 @@ if (
         "scan_df_all",
         "scan_df_positive",
         "scan_df_selected",
+        "round_eval_df",
         "lock_round_used",
         "base_data_len",
         "keep_bet_group",
@@ -215,29 +295,20 @@ if (
             del st.session_state[k]
     st.rerun()
 
-# ---------------- FIND LOCK ROUND FROM 168 ----------------
+# ---------------- FIND BEST LOCK ROUND ----------------
 if not st.session_state.live_initialized:
-    lock_round_used = None
-    locked_windows = []
-    scan_df_all = pd.DataFrame()
-    scan_df_positive = pd.DataFrame()
-    scan_df_selected = pd.DataFrame()
-
-    for r in range(START_FIND_ROUND, len(groups) + 1):
-        train_groups = groups[:r]
-        tmp_windows, tmp_all, tmp_positive, tmp_selected = select_windows_from_train(train_groups)
-
-        if len(tmp_positive) >= MIN_POSITIVE_WINDOWS:
-            lock_round_used = r
-            locked_windows = tmp_windows
-            scan_df_all = tmp_all
-            scan_df_positive = tmp_positive
-            scan_df_selected = tmp_selected
-            break
+    (
+        lock_round_used,
+        locked_windows,
+        scan_df_all,
+        scan_df_positive,
+        scan_df_selected,
+        round_eval_df,
+    ) = find_best_lock_round(groups)
 
     if lock_round_used is None:
         st.error(
-            f"Không tìm được round nào từ {START_FIND_ROUND} trở đi có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương để lock."
+            f"Không tìm được round nào từ {LOCK_ROUND_START} đến {effective_lock_round_end} có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương."
         )
         st.stop()
 
@@ -245,6 +316,7 @@ if not st.session_state.live_initialized:
     st.session_state.scan_df_all = scan_df_all
     st.session_state.scan_df_positive = scan_df_positive
     st.session_state.scan_df_selected = scan_df_selected
+    st.session_state.round_eval_df = round_eval_df
     st.session_state.lock_round_used = lock_round_used
     st.session_state.processed_until = lock_round_used - 1
     st.session_state.base_data_len = len(groups)
@@ -259,6 +331,7 @@ locked_windows = st.session_state.locked_windows
 scan_df_all = st.session_state.scan_df_all
 scan_df_positive = st.session_state.scan_df_positive
 scan_df_selected = st.session_state.scan_df_selected
+round_eval_df = st.session_state.round_eval_df
 lock_round_used = st.session_state.lock_round_used
 processed_until = st.session_state.processed_until
 
@@ -282,14 +355,12 @@ for i in range(processed_until + 1, len(groups)):
     final_vote = vote
     used_keep = False
 
-    # có signal mới -> bỏ keep ngay
     if new_signal:
         keep_rounds_left = 0
         keep_bet_group = None
         last_trade_was_loss = False
         final_vote = vote
     else:
-        # không có signal mới -> nếu đang keep thì dùng keep
         if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
             final_vote = keep_bet_group
             used_keep = True
@@ -318,7 +389,6 @@ for i in range(processed_until + 1, len(groups)):
     bet_group = final_vote if can_bet else None
     hit = None
 
-    # dùng keep ở round này thì trừ keep ngay
     if used_keep:
         keep_rounds_left -= 1
         if keep_rounds_left < 0:
@@ -332,7 +402,6 @@ for i in range(processed_until + 1, len(groups)):
             profit += WIN
             hits.append(1)
 
-            # thắng thì tắt keep
             last_trade_was_loss = False
             keep_rounds_left = 0
             keep_bet_group = None
@@ -342,15 +411,12 @@ for i in range(processed_until + 1, len(groups)):
             hits.append(0)
 
             if used_keep:
-                # đang keep mà vẫn thua
                 if keep_rounds_left <= 0:
                     last_trade_was_loss = False
                     keep_bet_group = None
                 else:
                     last_trade_was_loss = True
             else:
-                # thua mới -> bật keep
-                # tổng keep = 4, tính luôn round thua
                 last_trade_was_loss = True
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote
@@ -392,6 +458,7 @@ st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_all = scan_df_all
 st.session_state.scan_df_positive = scan_df_positive
 st.session_state.scan_df_selected = scan_df_selected
+st.session_state.round_eval_df = round_eval_df
 st.session_state.lock_round_used = lock_round_used
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
@@ -467,7 +534,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Lock from round 168 when >=3 positive windows -> trade 4 vote 3 + keep")
+st.title("🎯 Best lock round in 168-204 -> need >=3 positive windows -> trade 4 vote 3 + keep")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -479,9 +546,10 @@ st.write("Vote Strength:", confidence)
 st.write("Locked Windows:", locked_windows)
 st.write("Locked Window Count:", len(locked_windows))
 st.write("Vote Required:", VOTE_REQUIRED)
-st.write("Start Find Round:", START_FIND_ROUND)
+st.write("Lock Round Range:", f"{LOCK_ROUND_START} -> {effective_lock_round_end}")
 st.write("Lock Round Used:", lock_round_used)
 st.write("Need Positive Windows >=", MIN_POSITIVE_WINDOWS)
+st.write("Min Trades / Window:", MIN_TRADES_PER_WINDOW)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
@@ -532,6 +600,10 @@ s3.metric("Winrate %", round(np.mean(hits) * 100, 2) if hits else 0)
 st.subheader("Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["profit"])
+
+# ---------------- ROUND EVAL ----------------
+st.subheader("Round Evaluation")
+st.dataframe(round_eval_df, use_container_width=True)
 
 # ---------------- WINDOW SCAN ----------------
 st.subheader("Window Scan All")
