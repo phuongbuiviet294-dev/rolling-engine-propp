@@ -13,7 +13,7 @@ st_autorefresh(interval=1000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # bắt đầu tìm lock từ round này
-START_FIND_ROUND = 168
+START_FIND_ROUND = 180
 
 WINDOW_MIN = 6
 WINDOW_MAX = 18
