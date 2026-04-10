@@ -692,4 +692,34 @@ st.subheader("Round Evaluation")
 st.dataframe(round_eval_df, use_container_width=True)
 
 # ---------------- WINDOW SCAN ----------------
-st.subheader("Window Scan
+st.subheader("Window Scan All")
+st.dataframe(scan_df_all, use_container_width=True)
+
+st.subheader("All Positive Windows")
+st.dataframe(scan_df_positive, use_container_width=True)
+
+st.subheader("Locked Windows")
+st.dataframe(scan_df_selected, use_container_width=True)
+
+# ---------------- HISTORY ----------------
+st.subheader("History")
+
+def highlight_trade(row):
+    if row["state"] in ("NEXT", "NEXT_KEEP"):
+        return ["background-color: #ffd700"] * len(row)
+    if row["state"] == "RELOCK_READY":
+        return ["background-color: #90ee90; color:black"] * len(row)
+    if row["state"] == "TRADE_KEEP":
+        return ["background-color: #ffb347; color:black"] * len(row)
+    if row["trade"]:
+        return ["background-color: #ff4b4b; color:white"] * len(row)
+    return [""] * len(row)
+
+st.dataframe(
+    hist_display.iloc[::-1].style.apply(highlight_trade, axis=1),
+    use_container_width=True,
+)
+
+# ---------------- DEBUG ----------------
+st.write("Locked Windows:", locked_windows)
+st.write("Total Rows:", len(numbers))
