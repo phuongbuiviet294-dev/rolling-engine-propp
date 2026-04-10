@@ -16,42 +16,23 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 LOCK_ROUND_START = 144
 LOCK_ROUND_END = 180
 
-# tối ưu lại: ưu tiên window ngắn-trung bình
 WINDOW_MIN = 6
-WINDOW_MAX = 18
+WINDOW_MAX = 26
 
 TOP_WINDOWS = 4
-VOTE_REQUIRED = 3
 MIN_POSITIVE_WINDOWS = 3
+VOTE_REQUIRED = 3
 GAP = 0
 
 WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 30
-STOP_LOSS = -10
 
 # keep tổng cộng 4 vòng, tính luôn vòng trade thua
 KEEP_AFTER_LOSS_ROUNDS = 4
 
-# bộ lọc mạnh hơn
-MIN_PROFIT_STRONG = 5.0
-MIN_WINRATE_STRONG = 0.31
-MIN_TRADES_STRONG = 80
-
-# fallback nhẹ nếu chưa đủ 4 window
-MIN_PROFIT_WEAK = 0.0
-MIN_WINRATE_WEAK = 0.29
-MIN_TRADES_WEAK = 60
-
-# phạt window dài mạnh hơn
-WINDOW_PENALTY = 0.60
-
-# ép diversity mạnh hơn
-MIN_WINDOW_GAP = 4
-
-# nếu 5 lệnh gần nhất <= 1 win thì dừng
-RECENT_HITS_CHECK = 26
-RECENT_HITS_MIN_WIN = 1
+# lọc window để tránh ăn may
+MIN_TRADES_PER_WINDOW = 26
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -110,7 +91,6 @@ def evaluate_window(seq_groups, w):
 
     winrate = wins / trades if trades > 0 else 0.0
     score = profit * winrate * np.log(trades) if trades > 0 else -999999.0
-    adjusted_score = score - WINDOW_PENALTY * w
 
     return {
         "window": w,
@@ -119,26 +99,7 @@ def evaluate_window(seq_groups, w):
         "profit": profit,
         "winrate": winrate,
         "score": score,
-        "adjusted_score": adjusted_score,
     }
-
-def pick_diverse_windows(df_source: pd.DataFrame, selected_rows: list, selected_windows: set, max_count: int):
-    if df_source.empty:
-        return selected_rows, selected_windows
-
-    for _, row in df_source.iterrows():
-        w = int(row["window"])
-        if w in selected_windows:
-            continue
-
-        if all(abs(w - int(r["window"])) >= MIN_WINDOW_GAP for r in selected_rows):
-            selected_rows.append(row.to_dict())
-            selected_windows.add(w)
-
-        if len(selected_rows) >= max_count:
-            break
-
-    return selected_rows, selected_windows
 
 def build_window_tables(train_groups):
     rows = []
@@ -148,63 +109,42 @@ def build_window_tables(train_groups):
     df = pd.DataFrame(rows)
 
     df_all = df.sort_values(
-        ["adjusted_score", "profit", "winrate", "trades"],
+        ["profit", "score", "winrate", "trades"],
         ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
-    positive_df = df[df["profit"] > 0].copy()
+    positive_df = df[
+        (df["profit"] > 0) &
+        (df["trades"] >= MIN_TRADES_PER_WINDOW)
+    ].copy()
+
     positive_df = positive_df.sort_values(
-        ["adjusted_score", "profit", "winrate", "trades"],
+        ["score", "profit", "winrate", "trades"],
         ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
-    strong_df = df[
-        (df["profit"] >= MIN_PROFIT_STRONG) &
-        (df["winrate"] >= MIN_WINRATE_STRONG) &
-        (df["trades"] >= MIN_TRADES_STRONG)
-    ].copy()
+    selected_df = positive_df.head(TOP_WINDOWS).copy()
 
-    strong_df = strong_df.sort_values(
-        ["adjusted_score", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False]
-    ).reset_index(drop=True)
+    if len(positive_df) >= MIN_POSITIVE_WINDOWS and len(selected_df) < TOP_WINDOWS:
+        selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
 
-    weak_df = df[
-        (df["profit"] > MIN_PROFIT_WEAK) &
-        (df["winrate"] >= MIN_WINRATE_WEAK) &
-        (df["trades"] >= MIN_TRADES_WEAK)
-    ].copy()
-
-    weak_df = weak_df.sort_values(
-        ["adjusted_score", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False]
-    ).reset_index(drop=True)
-
-    selected_rows = []
-    selected_windows = set()
-
-    selected_rows, selected_windows = pick_diverse_windows(
-        strong_df, selected_rows, selected_windows, TOP_WINDOWS
-    )
-
-    if len(selected_rows) < TOP_WINDOWS:
-        selected_rows, selected_windows = pick_diverse_windows(
-            weak_df, selected_rows, selected_windows, TOP_WINDOWS
-        )
-
-    if len(selected_rows) < TOP_WINDOWS:
-        selected_rows, selected_windows = pick_diverse_windows(
-            df_all, selected_rows, selected_windows, TOP_WINDOWS
-        )
-
-    selected_df = pd.DataFrame(selected_rows)
-    if not selected_df.empty:
-        selected_df = selected_df.sort_values(
-            ["adjusted_score", "profit", "winrate", "trades"],
+        remain_df = df[~df["window"].isin(selected_windows)].copy()
+        remain_df = remain_df.sort_values(
+            ["score", "profit", "winrate", "trades"],
             ascending=[False, False, False, False]
         ).reset_index(drop=True)
 
-    selected = selected_df["window"].astype(int).tolist() if not selected_df.empty else []
+        need = TOP_WINDOWS - len(selected_df)
+        if need > 0 and len(remain_df) > 0:
+            selected_df = pd.concat([selected_df, remain_df.head(need)], ignore_index=True)
+
+    selected_df = selected_df.head(TOP_WINDOWS).copy()
+    selected_df = selected_df.sort_values(
+        ["score", "profit", "winrate", "trades"],
+        ascending=[False, False, False, False]
+    ).reset_index(drop=True)
+
+    selected = selected_df["window"].astype(int).tolist()
 
     return selected, df_all, positive_df, selected_df
 
@@ -215,15 +155,13 @@ def calc_round_score(selected_df: pd.DataFrame) -> float:
     total_profit = float(selected_df["profit"].sum())
     avg_winrate = float(selected_df["winrate"].mean())
     total_trades = float(selected_df["trades"].sum())
-    avg_adjusted_score = float(selected_df["adjusted_score"].mean())
-    avg_window = float(selected_df["window"].mean())
+    avg_score = float(selected_df["score"].mean())
 
     round_score = (
-        total_profit * 1.4
-        + avg_winrate * 14.0
+        total_profit * 1.0
+        + avg_winrate * 10.0
         + np.log(max(total_trades, 1.0))
-        + avg_adjusted_score * 0.40
-        - avg_window * 0.08
+        + avg_score * 0.2
     )
     return round_score
 
@@ -298,8 +236,6 @@ def init_state():
         "keep_bet_group": None,
         "keep_rounds_left": 0,
         "last_trade_was_loss": False,
-        "stop_due_to_loss": False,
-        "stop_due_to_recent_hits": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -326,8 +262,6 @@ if st.button("🔄 Reset Session"):
         "keep_bet_group",
         "keep_rounds_left",
         "last_trade_was_loss",
-        "stop_due_to_loss",
-        "stop_due_to_recent_hits",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
@@ -355,8 +289,6 @@ if (
         "keep_bet_group",
         "keep_rounds_left",
         "last_trade_was_loss",
-        "stop_due_to_loss",
-        "stop_due_to_recent_hits",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
@@ -402,8 +334,6 @@ scan_df_selected = st.session_state.scan_df_selected
 round_eval_df = st.session_state.round_eval_df
 lock_round_used = st.session_state.lock_round_used
 processed_until = st.session_state.processed_until
-stop_due_to_loss = st.session_state.stop_due_to_loss
-stop_due_to_recent_hits = st.session_state.stop_due_to_recent_hits
 
 keep_bet_group = st.session_state.keep_bet_group
 keep_rounds_left = st.session_state.keep_rounds_left
@@ -441,18 +371,7 @@ for i in range(processed_until + 1, len(groups)):
         final_signal = False
         trade = False
         can_bet = False
-        state = "STOP_TARGET"
-    elif profit <= STOP_LOSS:
-        stop_due_to_loss = True
-        final_signal = False
-        trade = False
-        can_bet = False
-        state = "STOP_LOSS"
-    elif stop_due_to_recent_hits:
-        final_signal = False
-        trade = False
-        can_bet = False
-        state = "STOP_RECENT_HITS"
+        state = "STOP"
     else:
         trade = final_signal and distance >= GAP
         can_bet = trade
@@ -501,10 +420,6 @@ for i in range(processed_until + 1, len(groups)):
                 last_trade_was_loss = True
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote
-
-        if len(hits) >= RECENT_HITS_CHECK and sum(hits[-RECENT_HITS_CHECK:]) <= RECENT_HITS_MIN_WIN:
-            stop_due_to_recent_hits = True
-
     else:
         if used_keep and keep_rounds_left <= 0:
             keep_rounds_left = 0
@@ -550,8 +465,6 @@ st.session_state.base_data_len = len(groups)
 st.session_state.keep_bet_group = keep_bet_group
 st.session_state.keep_rounds_left = keep_rounds_left
 st.session_state.last_trade_was_loss = last_trade_was_loss
-st.session_state.stop_due_to_loss = stop_due_to_loss
-st.session_state.stop_due_to_recent_hits = stop_due_to_recent_hits
 
 hist = pd.DataFrame(history_rows)
 
@@ -592,15 +505,7 @@ final_signal = new_signal or used_keep_next
 if profit >= PROFIT_TARGET:
     signal = False
     can_bet = False
-    next_state = "STOP_TARGET"
-elif profit <= STOP_LOSS:
-    signal = False
-    can_bet = False
-    next_state = "STOP_LOSS"
-elif stop_due_to_recent_hits:
-    signal = False
-    can_bet = False
-    next_state = "STOP_RECENT_HITS"
+    next_state = "STOP"
 else:
     signal = final_signal
     can_bet = signal and distance >= GAP
@@ -629,7 +534,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Optimized 6-18 Lock + 4 vote 3 + Keep")
+st.title("🎯 Best lock round in 168-204 -> need >=3 positive windows -> trade 4 vote 3 + keep")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -644,15 +549,10 @@ st.write("Vote Required:", VOTE_REQUIRED)
 st.write("Lock Round Range:", f"{LOCK_ROUND_START} -> {effective_lock_round_end}")
 st.write("Lock Round Used:", lock_round_used)
 st.write("Need Positive Windows >=", MIN_POSITIVE_WINDOWS)
-st.write("Window Range:", f"{WINDOW_MIN} -> {WINDOW_MAX}")
-st.write("Min Trades Strong:", MIN_TRADES_STRONG)
-st.write("Window Penalty:", WINDOW_PENALTY)
-st.write("Min Window Gap:", MIN_WINDOW_GAP)
+st.write("Min Trades / Window:", MIN_TRADES_PER_WINDOW)
 st.write("Profit Target:", PROFIT_TARGET)
-st.write("Stop Loss:", STOP_LOSS)
 st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
-st.write("Stop Recent Hits:", stop_due_to_recent_hits)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
@@ -671,10 +571,6 @@ st.markdown(
 
 if profit >= PROFIT_TARGET:
     st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
-elif profit <= STOP_LOSS:
-    st.error(f"🛑 STOP - Hit Stop Loss {STOP_LOSS}")
-elif stop_due_to_recent_hits:
-    st.error(f"🛑 STOP - Last {RECENT_HITS_CHECK} trades <= {RECENT_HITS_MIN_WIN} win")
 elif can_bet and final_vote is not None:
     st.markdown(
         f"""
@@ -725,7 +621,7 @@ st.subheader("History")
 def highlight_trade(row):
     if row["state"] in ("NEXT", "NEXT_KEEP"):
         return ["background-color: #ffd700"] * len(row)
-    if row["state"] in ("STOP_TARGET", "STOP_LOSS", "STOP_RECENT_HITS"):
+    if row["state"] == "STOP":
         return ["background-color: #d9534f; color:white"] * len(row)
     if row["state"] == "TRADE_KEEP":
         return ["background-color: #ffb347; color:black"] * len(row)
