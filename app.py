@@ -50,7 +50,7 @@ WINDOW_PENALTY = 0.60
 MIN_WINDOW_GAP = 4
 
 # nếu 5 lệnh gần nhất <= 1 win thì dừng
-RECENT_HITS_CHECK = 5
+RECENT_HITS_CHECK = 26
 RECENT_HITS_MIN_WIN = 1
 
 # ---------------- LOAD DATA ----------------
