@@ -29,7 +29,7 @@ LOSS = -1
 PROFIT_TARGET = 4
 
 # keep tổng cộng 4 vòng, tính luôn vòng trade thua
-KEEP_AFTER_LOSS_ROUNDS = 1
+KEEP_AFTER_LOSS_ROUNDS = 2
 
 # lọc window để tránh ăn may
 MIN_TRADES_PER_WINDOW = 30
