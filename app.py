@@ -7,12 +7,13 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st.set_page_config(page_title="Fast Multi-Cycle Lock Engine", layout="wide")
+st.set_page_config(page_title="Multi-Cycle Lock Engine", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
+# lock gốc
 LOCK_ROUND_START = 144
 LOCK_ROUND_END = 180
 
@@ -26,21 +27,26 @@ GAP = 0
 WIN = 2.5
 LOSS = -1.0
 
+# chu kỳ
 CYCLE_TARGET_PROFIT = 4.0
-REENTRY_DRAWDOWN_PROFIT = -8.0
+WAIT_AFTER_TARGET_ROUNDS = 60
 
+# keep
 KEEP_AFTER_LOSS_ROUNDS = 4
+
+# anti lucky
 MIN_TRADES_PER_WINDOW = 26
 
-MAX_HISTORY_ROWS = 50
+# ui
+MAX_HISTORY_ROWS = 80
 SHOW_DEBUG = st.sidebar.checkbox("Show Debug", value=False)
 
 # ---------------- LOAD DATA ----------------
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def load_numbers():
     url = (
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export"
-        f"?format=csv&cache={int(time.time() // 60)}"
+        f"?format=csv&cache={int(time.time() // 30)}"
     )
     df = pd.read_csv(url)
     df.columns = [c.lower() for c in df.columns]
@@ -73,12 +79,17 @@ if len(groups) <= LOCK_ROUND_START:
 LOCK_SPAN = LOCK_ROUND_END - LOCK_ROUND_START
 
 def get_lock_range(current_round: int):
+    """
+    Chu kỳ đầu: dùng đúng vùng 144 -> 180 nếu dữ liệu còn ngắn.
+    Các chu kỳ sau: trượt cửa sổ theo round hiện tại với độ rộng LOCK_SPAN.
+    """
     if current_round <= LOCK_ROUND_END:
         start = LOCK_ROUND_START
         end = min(LOCK_ROUND_END, current_round)
     else:
         end = current_round
         start = max(LOCK_ROUND_START, end - LOCK_SPAN)
+
     if end < start:
         end = start
     return start, end
@@ -169,7 +180,7 @@ def calc_round_score(selected_df: pd.DataFrame) -> float:
         + avg_score * 0.2
     )
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def find_best_lock_round_cached(groups_tuple, current_round):
     all_groups = list(groups_tuple)
     lock_start, lock_end = get_lock_range(current_round)
@@ -191,6 +202,7 @@ def find_best_lock_round_cached(groups_tuple, current_round):
 
         if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
             round_score = calc_round_score(tmp_selected)
+
             if round_score > best_score:
                 best_score = round_score
                 best_round = r
@@ -249,12 +261,14 @@ def init_state():
         "live_initialized": False,
         "processed_until": None,
 
+        # trade thật
         "total_profit": 0.0,
         "cycle_profit": 0.0,
         "last_trade": -999,
         "hits": [],
         "history_rows": [],
 
+        # lock
         "locked_windows": [],
         "scan_df_all": pd.DataFrame(),
         "scan_df_positive": pd.DataFrame(),
@@ -264,30 +278,33 @@ def init_state():
         "lock_range_start": None,
         "lock_range_end": None,
 
+        # keep
         "keep_bet_group": None,
         "keep_rounds_left": 0,
         "last_trade_was_loss": False,
 
-        "engine_mode": "TRADE",
+        # mode
+        "engine_mode": "TRADE",   # TRADE / WAIT_60
 
-        "monitor_profit": 0.0,
-        "monitor_last_trade": -999,
-        "monitor_keep_bet_group": None,
-        "monitor_keep_rounds_left": 0,
-        "monitor_last_trade_was_loss": False,
+        # wait mode
+        "wait_rounds_left": 0,
+        "wait_start_round": None,
 
+        # cycle
         "cycle_id": 1,
         "cycle_start_round": None,
         "cycle_closed_rows": [],
 
         "base_data_len": None,
     }
+
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 init_state()
 
+# ---------------- RESET ----------------
 if st.button("🔄 Reset Session"):
     for k in list(st.session_state.keys()):
         del st.session_state[k]
@@ -327,6 +344,8 @@ def relock_engine(current_round, next_cycle_id):
     st.session_state.lock_range_end = lock_end
 
     st.session_state.engine_mode = "TRADE"
+    st.session_state.wait_rounds_left = 0
+    st.session_state.wait_start_round = None
 
     st.session_state.cycle_id = next_cycle_id
     st.session_state.cycle_start_round = current_round
@@ -335,12 +354,6 @@ def relock_engine(current_round, next_cycle_id):
     st.session_state.keep_bet_group = None
     st.session_state.keep_rounds_left = 0
     st.session_state.last_trade_was_loss = False
-
-    st.session_state.monitor_profit = 0.0
-    st.session_state.monitor_last_trade = -999
-    st.session_state.monitor_keep_bet_group = None
-    st.session_state.monitor_keep_rounds_left = 0
-    st.session_state.monitor_last_trade_was_loss = False
 
     return True
 
@@ -378,12 +391,8 @@ keep_rounds_left = st.session_state.keep_rounds_left
 last_trade_was_loss = st.session_state.last_trade_was_loss
 
 engine_mode = st.session_state.engine_mode
-
-monitor_profit = st.session_state.monitor_profit
-monitor_last_trade = st.session_state.monitor_last_trade
-monitor_keep_bet_group = st.session_state.monitor_keep_bet_group
-monitor_keep_rounds_left = st.session_state.monitor_keep_rounds_left
-monitor_last_trade_was_loss = st.session_state.monitor_last_trade_was_loss
+wait_rounds_left = st.session_state.wait_rounds_left
+wait_start_round = st.session_state.wait_start_round
 
 cycle_id = st.session_state.cycle_id
 cycle_start_round = st.session_state.cycle_start_round
@@ -402,6 +411,9 @@ for i in range(processed_until + 1, len(groups)):
     vote, confidence = Counter(preds).most_common(1)[0]
     new_signal = confidence >= VOTE_REQUIRED
 
+    # =====================================================
+    # MODE 1: TRADE
+    # =====================================================
     if engine_mode == "TRADE":
         distance = i - last_trade
         final_vote = vote
@@ -433,6 +445,7 @@ for i in range(processed_until + 1, len(groups)):
                 total_profit += WIN
                 cycle_profit += WIN
                 hits.append(1)
+
                 last_trade_was_loss = False
                 keep_rounds_left = 0
                 keep_bet_group = None
@@ -467,12 +480,13 @@ for i in range(processed_until + 1, len(groups)):
                 "hit": hit,
                 "cycle_profit": cycle_profit,
                 "total_profit": total_profit,
-                "monitor_profit": monitor_profit,
+                "wait_rounds_left": wait_rounds_left,
             }
         )
 
         processed_until = i
 
+        # đạt +4 => đóng cycle và WAIT 60 round
         if cycle_profit >= CYCLE_TARGET_PROFIT:
             cycle_hits = [x["hit"] for x in history_rows if x["cycle_id"] == cycle_id and x["hit"] in (0, 1)]
             cycle_trades = len(cycle_hits)
@@ -494,60 +508,21 @@ for i in range(processed_until + 1, len(groups)):
                 }
             )
 
-            engine_mode = "WAIT_DROP"
-            monitor_profit = 0.0
-            monitor_last_trade = -999
-            monitor_keep_bet_group = None
-            monitor_keep_rounds_left = 0
-            monitor_last_trade_was_loss = False
+            engine_mode = "WAIT_60"
+            wait_rounds_left = WAIT_AFTER_TARGET_ROUNDS
+            wait_start_round = i + 1
 
+            keep_bet_group = None
+            keep_rounds_left = 0
+            last_trade_was_loss = False
+
+    # =====================================================
+    # MODE 2: WAIT_60
+    # =====================================================
     else:
-        monitor_distance = i - monitor_last_trade
-        monitor_final_vote = vote
-        monitor_used_keep = False
-
-        if new_signal:
-            monitor_keep_rounds_left = 0
-            monitor_keep_bet_group = None
-            monitor_last_trade_was_loss = False
-        else:
-            if (
-                monitor_last_trade_was_loss
-                and monitor_keep_rounds_left > 0
-                and monitor_keep_bet_group is not None
-            ):
-                monitor_final_vote = monitor_keep_bet_group
-                monitor_used_keep = True
-
-        monitor_signal = new_signal or monitor_used_keep
-        monitor_trade = monitor_signal and monitor_distance >= GAP
-
-        if monitor_used_keep:
-            monitor_keep_rounds_left -= 1
-            if monitor_keep_rounds_left < 0:
-                monitor_keep_rounds_left = 0
-
-        if monitor_trade:
-            monitor_last_trade = i
-
-            if groups[i] == monitor_final_vote:
-                monitor_profit += WIN
-                monitor_last_trade_was_loss = False
-                monitor_keep_rounds_left = 0
-                monitor_keep_bet_group = None
-            else:
-                monitor_profit += LOSS
-
-                if monitor_used_keep:
-                    if monitor_keep_rounds_left <= 0:
-                        monitor_last_trade_was_loss = False
-                        monitor_keep_bet_group = None
-                    else:
-                        monitor_last_trade_was_loss = True
-                else:
-                    monitor_last_trade_was_loss = True
-                    monitor_keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
-                    monitor_keep_bet_group = monitor_final_vote
+        wait_rounds_left -= 1
+        if wait_rounds_left < 0:
+            wait_rounds_left = 0
 
         history_rows.append(
             {
@@ -558,18 +533,18 @@ for i in range(processed_until + 1, len(groups)):
                 "group": groups[i],
                 "vote": vote,
                 "confidence": confidence,
-                "final_vote": monitor_final_vote,
+                "final_vote": None,
                 "trade": False,
                 "hit": None,
                 "cycle_profit": cycle_profit,
                 "total_profit": total_profit,
-                "monitor_profit": monitor_profit,
+                "wait_rounds_left": wait_rounds_left,
             }
         )
 
         processed_until = i
 
-        if monitor_profit <= REENTRY_DRAWDOWN_PROFIT:
+        if wait_rounds_left == 0:
             ok = relock_engine(current_round=i, next_cycle_id=cycle_id + 1)
             if ok:
                 locked_windows = st.session_state.locked_windows
@@ -580,18 +555,18 @@ for i in range(processed_until + 1, len(groups)):
                 lock_round_used = st.session_state.lock_round_used
                 lock_range_start = st.session_state.lock_range_start
                 lock_range_end = st.session_state.lock_range_end
+
                 engine_mode = st.session_state.engine_mode
+                wait_rounds_left = st.session_state.wait_rounds_left
+                wait_start_round = st.session_state.wait_start_round
+
                 cycle_id = st.session_state.cycle_id
                 cycle_start_round = st.session_state.cycle_start_round
                 cycle_profit = st.session_state.cycle_profit
+
                 keep_bet_group = st.session_state.keep_bet_group
                 keep_rounds_left = st.session_state.keep_rounds_left
                 last_trade_was_loss = st.session_state.last_trade_was_loss
-                monitor_profit = st.session_state.monitor_profit
-                monitor_last_trade = st.session_state.monitor_last_trade
-                monitor_keep_bet_group = st.session_state.monitor_keep_bet_group
-                monitor_keep_rounds_left = st.session_state.monitor_keep_rounds_left
-                monitor_last_trade_was_loss = st.session_state.monitor_last_trade_was_loss
 
 # ---------------- SAVE STATE ----------------
 st.session_state.total_profit = total_profit
@@ -599,6 +574,7 @@ st.session_state.cycle_profit = cycle_profit
 st.session_state.last_trade = last_trade
 st.session_state.hits = hits
 st.session_state.history_rows = history_rows
+
 st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_all = scan_df_all
 st.session_state.scan_df_positive = scan_df_positive
@@ -607,17 +583,18 @@ st.session_state.round_eval_df = round_eval_df
 st.session_state.lock_round_used = lock_round_used
 st.session_state.lock_range_start = lock_range_start
 st.session_state.lock_range_end = lock_range_end
+
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
+
 st.session_state.keep_bet_group = keep_bet_group
 st.session_state.keep_rounds_left = keep_rounds_left
 st.session_state.last_trade_was_loss = last_trade_was_loss
+
 st.session_state.engine_mode = engine_mode
-st.session_state.monitor_profit = monitor_profit
-st.session_state.monitor_last_trade = monitor_last_trade
-st.session_state.monitor_keep_bet_group = monitor_keep_bet_group
-st.session_state.monitor_keep_rounds_left = monitor_keep_rounds_left
-st.session_state.monitor_last_trade_was_loss = monitor_last_trade_was_loss
+st.session_state.wait_rounds_left = wait_rounds_left
+st.session_state.wait_start_round = wait_start_round
+
 st.session_state.cycle_id = cycle_id
 st.session_state.cycle_start_round = cycle_start_round
 st.session_state.cycle_closed_rows = cycle_closed_rows
@@ -661,14 +638,12 @@ if engine_mode == "TRADE":
 
     final_signal = new_signal or used_keep_next
     can_bet = final_signal and distance >= GAP
-    next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 else:
-    next_keep_bet_group = monitor_keep_bet_group
-    next_keep_rounds_left = monitor_keep_rounds_left
-    next_state = "WAIT_DROP"
+    next_keep_bet_group = None
+    next_keep_rounds_left = wait_rounds_left
 
 # ---------------- UI ----------------
-st.title("⚡ Fast Multi-Cycle Lock Engine")
+st.title("🎯 Multi-Cycle Engine: đạt +4 thì WAIT 60 round rồi relock theo vùng gần nhất")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Current Number", current_number if current_number is not None else "-")
@@ -678,20 +653,22 @@ m4.metric("Mode", engine_mode)
 
 s1, s2, s3, s4 = st.columns(4)
 s1.metric("Total Profit", total_profit)
-s2.metric("Cycle Profit", cycle_profit)
-s3.metric("Monitor Profit", monitor_profit)
-s4.metric("Closed Cycles", len(cycle_closed_rows))
+s2.metric("Current Cycle Profit", cycle_profit)
+s3.metric("Closed Cycles", len(cycle_closed_rows))
+s4.metric("Trades", len(hits))
 
 st.write("Locked Windows:", locked_windows)
 st.write("Lock Range:", f"{lock_range_start} -> {lock_range_end}")
 st.write("Lock Round Used:", lock_round_used)
 st.write("Cycle ID:", cycle_id)
 st.write("Cycle Start Round:", cycle_start_round)
+st.write("Wait Start Round:", wait_start_round)
+st.write("Wait Rounds Left:", wait_rounds_left)
 
-if engine_mode == "WAIT_DROP":
+if engine_mode == "WAIT_60":
     st.warning(
-        f"WAIT_DROP MODE: đã chốt +{CYCLE_TARGET_PROFIT}, đang chờ monitor_profit <= {REENTRY_DRAWDOWN_PROFIT}. "
-        f"Monitor Profit hiện tại: {monitor_profit}"
+        f"WAIT_60 MODE: đã đạt +{CYCLE_TARGET_PROFIT}. "
+        f"Đang chờ thêm {wait_rounds_left} round trước khi relock bộ window mới."
     )
 elif can_bet and final_vote is not None:
     st.error(f"BET GROUP → {final_vote}")
@@ -702,18 +679,15 @@ st.subheader("Profit Curve - Total")
 if not hist.empty:
     st.line_chart(hist["total_profit"].ffill().tail(150))
 
-st.subheader("Profit Curve - Cycle / Monitor")
+st.subheader("Profit Curve - Cycle")
 if not hist.empty:
-    if engine_mode == "TRADE":
-        st.line_chart(hist["cycle_profit"].ffill().tail(150))
-    else:
-        st.line_chart(hist["monitor_profit"].ffill().tail(150))
+    st.line_chart(hist["cycle_profit"].ffill().tail(150))
 
 st.subheader("Cycle Summary")
 if not cycle_df.empty:
     st.dataframe(cycle_df.iloc[::-1].head(20), use_container_width=True)
 else:
-    st.info("Chưa có chu kỳ nào đóng.")
+    st.info("Chưa có cycle nào đóng.")
 
 st.subheader("History")
 if not hist.empty:
