@@ -7,18 +7,18 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ---------------- AUTO REFRESH ----------------
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=5000, key="refresh")
 
 # ---------------- CONFIG ----------------
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# relock động theo vùng gần hiện tại:
-# current_round - LOCK_LOOKBACK_MAX  -> current_round - LOCK_LOOKBACK_MIN
-LOCK_LOOKBACK_MIN = 144
-LOCK_LOOKBACK_MAX = 180
+# relock động theo vùng gần hiện tại
+LOCK_LOOKBACK_MIN = 150
+LOCK_LOOKBACK_MAX = 170
 
+# scan window nhẹ hơn để giảm lag
 WINDOW_MIN = 6
-WINDOW_MAX = 26
+WINDOW_MAX = 18
 
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 3
@@ -36,6 +36,10 @@ KEEP_AFTER_LOSS_ROUNDS = 4
 
 # lọc window dương
 MIN_TRADES_PER_WINDOW = 26
+
+# số dòng hiển thị
+MAX_DEBUG_ROWS = 20
+MAX_HISTORY_ROWS = 50
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
@@ -73,10 +77,6 @@ if len(groups) < min_needed_rows:
 
 # ---------------- HELPERS ----------------
 def get_dynamic_lock_range(current_round: int):
-    """
-    current_round là round sắp chạy / round hiện tại của engine.
-    scan vùng lùi lại phía sau current_round.
-    """
     lock_start = max(WINDOW_MAX + 1, current_round - LOCK_LOOKBACK_MAX)
     lock_end = max(lock_start, current_round - LOCK_LOOKBACK_MIN)
     return lock_start, lock_end
@@ -110,7 +110,7 @@ def evaluate_window(seq_groups, w):
         "score": score,
     }
 
-def build_window_tables(train_groups):
+def build_window_tables_from_groups(train_groups):
     rows = []
     for w in range(WINDOW_MIN, WINDOW_MAX + 1):
         rows.append(evaluate_window(train_groups, w))
@@ -132,7 +132,7 @@ def build_window_tables(train_groups):
         ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
-    # CHỈ lấy window dương, không được nhét window âm để đủ số lượng
+    # chỉ lấy window dương, không nhét window âm
     selected_df = positive_df.head(TOP_WINDOWS).copy()
 
     selected_df = selected_df.sort_values(
@@ -161,14 +161,16 @@ def calc_round_score(selected_df: pd.DataFrame) -> float:
     )
     return round_score
 
-def find_best_lock_round_nearest(current_round: int):
+@st.cache_data(ttl=20)
+def find_best_lock_round_nearest_cached(groups_tuple, current_round: int):
+    groups_local = list(groups_tuple)
     lock_start, lock_end = get_dynamic_lock_range(current_round)
 
     candidates = []
 
     for r in range(lock_start, lock_end + 1):
-        train_groups = groups[:r]
-        tmp_windows, tmp_all, tmp_positive, tmp_selected = build_window_tables(train_groups)
+        train_groups = groups_local[:r]
+        tmp_windows, tmp_all, tmp_positive, tmp_selected = build_window_tables_from_groups(train_groups)
 
         pos_count = len(tmp_positive)
         round_score = -999999.0
@@ -184,9 +186,9 @@ def find_best_lock_round_nearest(current_round: int):
                 "selected_windows": ", ".join(map(str, tmp_windows)),
                 "round_score": round_score,
                 "windows": tmp_windows,
-                "scan_all": tmp_all,
-                "scan_positive": tmp_positive,
-                "scan_selected": tmp_selected,
+                "scan_all": tmp_all.to_dict(orient="records"),
+                "scan_positive": tmp_positive.to_dict(orient="records"),
+                "scan_selected": tmp_selected.to_dict(orient="records"),
             }
         )
 
@@ -209,9 +211,8 @@ def find_best_lock_round_nearest(current_round: int):
     ]
 
     if not valid:
-        return None, [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), round_eval_df
+        return None, [], [], [], [], round_eval_df.to_dict(orient="records")
 
-    # ưu tiên score cao; nếu gần nhau thì round lớn hơn sẽ được ưu tiên
     valid_sorted = sorted(
         valid,
         key=lambda x: (x["round_score"], x["lock_round"]),
@@ -229,7 +230,31 @@ def find_best_lock_round_nearest(current_round: int):
         round_eval_df.sort_values(
             ["round_score", "lock_round"],
             ascending=[False, False]
-        ).reset_index(drop=True),
+        ).reset_index(drop=True).to_dict(orient="records"),
+    )
+
+def find_best_lock_round_nearest(current_round: int):
+    (
+        lock_round_used,
+        locked_windows,
+        scan_all_records,
+        scan_positive_records,
+        scan_selected_records,
+        round_eval_records,
+    ) = find_best_lock_round_nearest_cached(tuple(groups), current_round)
+
+    scan_df_all = pd.DataFrame(scan_all_records)
+    scan_df_positive = pd.DataFrame(scan_positive_records)
+    scan_df_selected = pd.DataFrame(scan_selected_records)
+    round_eval_df = pd.DataFrame(round_eval_records)
+
+    return (
+        lock_round_used,
+        locked_windows,
+        scan_df_all,
+        scan_df_positive,
+        scan_df_selected,
+        round_eval_df,
     )
 
 # ---------------- STATE INIT ----------------
@@ -289,6 +314,7 @@ if st.button("🔄 Reset Session"):
             del st.session_state[k]
     st.rerun()
 
+# reset nếu dữ liệu bị giảm
 if (
     st.session_state.base_data_len is not None
     and len(groups) < st.session_state.base_data_len
@@ -384,7 +410,6 @@ cycle_id = st.session_state.cycle_id
 cycle_start_round = st.session_state.cycle_start_round
 
 for i in range(processed_until + 1, len(groups)):
-    # đạt target chu kỳ thì relock trước khi xử lý round mới
     if cycle_profit >= CYCLE_PROFIT_TARGET:
         relocked = do_relock(processed_until)
         if relocked:
@@ -608,9 +633,10 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ---------------- UI ----------------
-st.title("🎯 Dynamic relock near current round + only positive windows")
+st.title("🎯 Dynamic relock near current round + optimized speed")
 
 dynamic_start, dynamic_end = get_dynamic_lock_range(processed_until + 1)
+show_debug = st.checkbox("Show Debug Tables", value=False)
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -687,20 +713,6 @@ st.subheader("Profit Curve (Cycle)")
 if not hist_display.empty:
     st.line_chart(hist_display["cycle_profit"])
 
-# ---------------- ROUND EVAL ----------------
-st.subheader("Round Evaluation")
-st.dataframe(round_eval_df, use_container_width=True)
-
-# ---------------- WINDOW SCAN ----------------
-st.subheader("Window Scan All")
-st.dataframe(scan_df_all, use_container_width=True)
-
-st.subheader("All Positive Windows")
-st.dataframe(scan_df_positive, use_container_width=True)
-
-st.subheader("Locked Windows")
-st.dataframe(scan_df_selected, use_container_width=True)
-
 # ---------------- HISTORY ----------------
 st.subheader("History")
 
@@ -715,11 +727,25 @@ def highlight_trade(row):
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
 
+history_view = hist_display.iloc[::-1].head(MAX_HISTORY_ROWS)
 st.dataframe(
-    hist_display.iloc[::-1].style.apply(highlight_trade, axis=1),
+    history_view.style.apply(highlight_trade, axis=1),
     use_container_width=True,
 )
 
 # ---------------- DEBUG ----------------
+if show_debug:
+    st.subheader("Round Evaluation")
+    st.dataframe(round_eval_df.head(MAX_DEBUG_ROWS), use_container_width=True)
+
+    st.subheader("Window Scan All")
+    st.dataframe(scan_df_all.head(MAX_DEBUG_ROWS), use_container_width=True)
+
+    st.subheader("All Positive Windows")
+    st.dataframe(scan_df_positive.head(MAX_DEBUG_ROWS), use_container_width=True)
+
+    st.subheader("Locked Windows")
+    st.dataframe(scan_df_selected.head(MAX_DEBUG_ROWS), use_container_width=True)
+
 st.write("Locked Windows:", locked_windows)
 st.write("Total Rows:", len(numbers))
