@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # AUTO REFRESH
 # =========================================================
-st_autorefresh(interval=8000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # =========================================================
 # CONFIG
@@ -38,8 +38,6 @@ KEEP_AFTER_LOSS_ROUNDS = 4
 
 MIN_TRADES_PER_WINDOW = 26
 
-RECENT_TRADES_CHECK = 20
-MIN_RECENT_WINRATE = 0.25
 
 MAX_HISTORY_ROWS = 30
 MAX_DEBUG_ROWS = 15
