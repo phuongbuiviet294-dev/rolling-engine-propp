@@ -13,12 +13,12 @@ st_autorefresh(interval=5000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # relock động theo vùng gần hiện tại
-LOCK_LOOKBACK_MIN = 150
-LOCK_LOOKBACK_MAX = 170
+LOCK_LOOKBACK_MIN = 144
+LOCK_LOOKBACK_MAX = 180
 
 # scan window nhẹ hơn để giảm lag
 WINDOW_MIN = 6
-WINDOW_MAX = 18
+WINDOW_MAX = 26
 
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 3
