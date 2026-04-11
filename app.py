@@ -9,11 +9,11 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / AUTO REFRESH
 # =========================================================
-st.set_page_config(page_title="Rolling Engine PRO MAX", layout="wide")
+st.set_page_config(page_title="Rolling Engine PRO MAX Balanced", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
-# CONFIG
+# CONFIG - BALANCED VERSION
 # =========================================================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -27,9 +27,9 @@ WINDOW_MAX = 26
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 3
 
-# anti-overfit
-MIN_TRADES_PER_WINDOW = 26
-MIN_WINRATE_PER_WINDOW = 0.28
+# anti-overfit - balanced
+MIN_TRADES_PER_WINDOW = 22
+MIN_WINRATE_PER_WINDOW = 0.26
 
 # trade
 GAP = 0
@@ -40,19 +40,18 @@ LOSS = -1.0
 CYCLE_PROFIT_TARGET = 4.0
 CYCLE_STOP_LOSS = -8.0
 
-# recent relock
+# recent relock - balanced
 RECENT_HITS_WINDOW = 20
-RECENT_WINRATE_FLOOR = 0.27
+RECENT_WINRATE_FLOOR = 0.24
 
 # keep
 KEEP_AFTER_LOSS_ROUNDS = 4
 
-# pro max
+# balanced rules
 USE_WEIGHTED_VOTE = True
-FULL_VOTE_ONLY = True
 USE_EV_FILTER = True
-EV_MIN_THRESHOLD = 0.0
-RELOCK_COOLDOWN_ROUNDS = 1
+EV_MIN_THRESHOLD = -0.05
+RELOCK_COOLDOWN_ROUNDS = 0
 
 # display
 MAX_HISTORY_ROWS = 80
@@ -98,23 +97,19 @@ def recent_winrate(hit_list, n):
 def calc_ev(winrate: float):
     return winrate * WIN - (1.0 - winrate) * abs(LOSS)
 
-def full_vote_required(lock_count: int) -> int:
-    return max(1, lock_count)
+def dynamic_vote_required(lock_count: int) -> int:
+    # balanced:
+    # 4 window -> cần 3 vote
+    # 3 window -> cần 2 vote
+    # 2 window -> cần 1 vote
+    # 1 window -> cần 1 vote
+    if lock_count >= 4:
+        return 3
+    if lock_count == 3:
+        return 2
+    return 1
 
 def weighted_vote(pred_rows):
-    """
-    pred_rows: list of dict
-    each item:
-    {
-      "window": int,
-      "pred_group": int,
-      "score": float,
-      "profit": float,
-      "winrate": float,
-      "trades": int,
-      "weight": float
-    }
-    """
     if not pred_rows:
         return None, 0, {}
 
@@ -127,7 +122,10 @@ def weighted_vote(pred_rows):
         group_weights[g] = group_weights.get(g, 0.0) + w
         group_counts[g] = group_counts.get(g, 0) + 1
 
-    best_group = max(group_weights.items(), key=lambda x: (x[1], group_counts.get(x[0], 0)))[0]
+    best_group = max(
+        group_weights.items(),
+        key=lambda x: (x[1], group_counts.get(x[0], 0))
+    )[0]
     best_count = group_counts.get(best_group, 0)
 
     return best_group, best_count, group_weights
@@ -185,7 +183,6 @@ def build_window_tables(train_groups):
     ).reset_index(drop=True)
 
     selected_df = positive_df.head(TOP_WINDOWS).copy()
-
     selected_df = selected_df.sort_values(
         ["score", "profit", "winrate", "trades"],
         ascending=[False, False, False, False]
@@ -384,7 +381,7 @@ def do_relock(current_round_start: int, reason: str):
     if lock_round_used is None or len(locked_windows) < MIN_POSITIVE_WINDOWS:
         return False
 
-    vote_required = full_vote_required(len(locked_windows)) if FULL_VOTE_ONLY else max(2, len(locked_windows) - 1)
+    vote_required = dynamic_vote_required(len(locked_windows))
 
     st.session_state.locked_windows = locked_windows
     st.session_state.vote_required = vote_required
@@ -430,7 +427,7 @@ if not st.session_state.live_initialized:
         st.stop()
 
     st.session_state.locked_windows = locked_windows
-    st.session_state.vote_required = full_vote_required(len(locked_windows)) if FULL_VOTE_ONLY else max(2, len(locked_windows) - 1)
+    st.session_state.vote_required = dynamic_vote_required(len(locked_windows))
     st.session_state.scan_df_all = scan_df_all
     st.session_state.scan_df_positive = scan_df_positive
     st.session_state.scan_df_selected = scan_df_selected
@@ -507,7 +504,7 @@ for i in range(processed_until + 1, len(groups)):
         need_relock = True
         relock_reason = "RECENT_WR_LOW"
 
-    # RELock ngay, bỏ qua round hiện tại
+    # relock ngay và bỏ qua round hiện tại
     if need_relock:
         ok = do_relock(i, relock_reason)
         if ok:
@@ -591,18 +588,15 @@ for i in range(processed_until + 1, len(groups)):
         group_weights = {}
 
     distance = i - last_trade
-
-    # EV của nhóm thắng: trung bình theo các window bỏ phiếu cho nhóm đó
     winning_rows = [x for x in pred_rows if x["pred_group"] == vote]
     avg_ev = float(np.mean([x["ev"] for x in winning_rows])) if winning_rows else -999999.0
 
-    # full vote
     new_signal = confidence >= vote_required
 
     final_vote = vote
     used_keep = False
 
-    # signal mới sẽ hủy keep
+    # signal mới hủy keep
     if new_signal:
         keep_rounds_left = 0
         keep_bet_group = None
@@ -613,22 +607,15 @@ for i in range(processed_until + 1, len(groups)):
             used_keep = True
 
     final_signal = new_signal or used_keep
-
-    # cooldown
     in_cooldown = i <= cooldown_until_round
 
-    # can_bet chuẩn PRO MAX
-    can_bet = (
-        final_signal
-        and distance >= GAP
-        and not in_cooldown
-    )
+    can_bet = final_signal and distance >= GAP and not in_cooldown
 
-    # chỉ cho bet khi signal mới đủ full vote
+    # signal mới: cần đủ vote
     if new_signal:
         can_bet = can_bet and (confidence >= vote_required)
 
-    # EV filter chỉ áp vào signal mới
+    # EV filter chỉ áp cho signal mới
     if new_signal and USE_EV_FILTER:
         can_bet = can_bet and (avg_ev >= EV_MIN_THRESHOLD)
 
@@ -887,7 +874,7 @@ hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True) if
 # =========================================================
 show_debug = st.checkbox("Show Debug", value=SHOW_DEBUG_DEFAULT)
 
-st.title("🎯 Rolling Engine PRO MAX")
+st.title("🎯 Rolling Engine PRO MAX - Balanced")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
