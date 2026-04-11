@@ -1,6 +1,6 @@
 import math
 from collections import Counter
-
+USE_EV_FILTER = True   # hoặc False nếu muốn tắt EV filter
 import numpy as np
 import pandas as pd
 import streamlit as st
