@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / AUTO REFRESH
 # =========================================================
-st.set_page_config(page_title="Rolling Engine PRO", layout="wide")
+st.set_page_config(page_title="Rolling Engine PRO MAX", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
@@ -17,11 +17,11 @@ st_autorefresh(interval=5000, key="refresh")
 # =========================================================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# vùng relock gần hiện tại
+# vùng lock gần hiện tại
 LOCK_LOOKBACK_MIN = 144
 LOCK_LOOKBACK_MAX = 180
 
-# quét window
+# window scan
 WINDOW_MIN = 6
 WINDOW_MAX = 26
 TOP_WINDOWS = 4
@@ -31,23 +31,30 @@ MIN_POSITIVE_WINDOWS = 3
 MIN_TRADES_PER_WINDOW = 26
 MIN_WINRATE_PER_WINDOW = 0.28
 
-# trade rule
+# trade
 GAP = 0
 WIN = 2.5
 LOSS = -1.0
 
-# relock rule
+# relock
 CYCLE_PROFIT_TARGET = 4.0
 CYCLE_STOP_LOSS = -8.0
 
-# relock sớm nếu recent quá xấu
+# recent relock
 RECENT_HITS_WINDOW = 20
-RECENT_WINRATE_FLOOR = 0.25
+RECENT_WINRATE_FLOOR = 0.27
 
-# keep rule: tính cả lệnh thua đầu tiên
+# keep
 KEEP_AFTER_LOSS_ROUNDS = 4
 
-# hiển thị
+# pro max
+USE_WEIGHTED_VOTE = True
+FULL_VOTE_ONLY = True
+USE_EV_FILTER = True
+EV_MIN_THRESHOLD = 0.0
+RELOCK_COOLDOWN_ROUNDS = 1
+
+# display
 MAX_HISTORY_ROWS = 80
 MAX_DEBUG_ROWS = 30
 SHOW_DEBUG_DEFAULT = True
@@ -82,16 +89,48 @@ def get_dynamic_lock_range(current_round: int):
     lock_end = max(lock_start, current_round - LOCK_LOOKBACK_MIN)
     return lock_start, lock_end
 
-def dynamic_vote_required(lock_count: int) -> int:
-    if lock_count <= 1:
-        return 1
-    return max(2, lock_count - 1)
-
 def recent_winrate(hit_list, n):
     if not hit_list:
         return 0.0
     arr = hit_list[-n:] if len(hit_list) >= n else hit_list
     return float(np.mean(arr)) if len(arr) > 0 else 0.0
+
+def calc_ev(winrate: float):
+    return winrate * WIN - (1.0 - winrate) * abs(LOSS)
+
+def full_vote_required(lock_count: int) -> int:
+    return max(1, lock_count)
+
+def weighted_vote(pred_rows):
+    """
+    pred_rows: list of dict
+    each item:
+    {
+      "window": int,
+      "pred_group": int,
+      "score": float,
+      "profit": float,
+      "winrate": float,
+      "trades": int,
+      "weight": float
+    }
+    """
+    if not pred_rows:
+        return None, 0, {}
+
+    group_weights = {}
+    group_counts = {}
+
+    for row in pred_rows:
+        g = row["pred_group"]
+        w = row["weight"]
+        group_weights[g] = group_weights.get(g, 0.0) + w
+        group_counts[g] = group_counts.get(g, 0) + 1
+
+    best_group = max(group_weights.items(), key=lambda x: (x[1], group_counts.get(x[0], 0)))[0]
+    best_count = group_counts.get(best_group, 0)
+
+    return best_group, best_count, group_weights
 
 # =========================================================
 # WINDOW EVAL
@@ -113,6 +152,7 @@ def evaluate_window(seq_groups, w):
 
     winrate = wins / trades if trades > 0 else 0.0
     score = profit * winrate * math.log(trades) if trades > 0 else -999999.0
+    ev = calc_ev(winrate) if trades > 0 else -999999.0
 
     return {
         "window": w,
@@ -121,6 +161,7 @@ def evaluate_window(seq_groups, w):
         "profit": profit,
         "winrate": winrate,
         "score": score,
+        "ev": ev,
     }
 
 def build_window_tables(train_groups):
@@ -162,16 +203,18 @@ def calc_round_score(selected_df: pd.DataFrame) -> float:
     avg_winrate = float(selected_df["winrate"].mean())
     total_trades = float(selected_df["trades"].sum())
     avg_score = float(selected_df["score"].mean())
+    avg_ev = float(selected_df["ev"].mean())
 
     return (
         total_profit * 1.0
         + avg_winrate * 10.0
         + math.log(max(total_trades, 1.0))
         + avg_score * 0.2
+        + avg_ev * 8.0
     )
 
 # =========================================================
-# CACHE RELock SEARCH
+# CACHE LOCK SEARCH
 # =========================================================
 @st.cache_data(ttl=30)
 def find_best_lock_round_dynamic_cached(groups_tuple, current_round: int):
@@ -195,8 +238,6 @@ def find_best_lock_round_dynamic_cached(groups_tuple, current_round: int):
 
         if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
             round_score = calc_round_score(tmp_selected)
-
-            # ưu tiên score cao, nếu hòa thì round gần hiện tại hơn
             if (round_score > best_score) or (
                 round_score == best_score and (best_round is None or r > best_round)
             ):
@@ -285,6 +326,7 @@ def init_state():
         "cycle_start_round": None,
         "last_relock_reason": "INIT",
         "engine_status": "RUNNING",
+        "cooldown_until_round": -1,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -342,7 +384,7 @@ def do_relock(current_round_start: int, reason: str):
     if lock_round_used is None or len(locked_windows) < MIN_POSITIVE_WINDOWS:
         return False
 
-    vote_required = dynamic_vote_required(len(locked_windows))
+    vote_required = full_vote_required(len(locked_windows)) if FULL_VOTE_ONLY else max(2, len(locked_windows) - 1)
 
     st.session_state.locked_windows = locked_windows
     st.session_state.vote_required = vote_required
@@ -354,7 +396,6 @@ def do_relock(current_round_start: int, reason: str):
     st.session_state.lock_range_start = lock_range_start
     st.session_state.lock_range_end = lock_range_end
 
-    # reset cycle
     st.session_state.cycle_profit = 0.0
     st.session_state.keep_bet_group = None
     st.session_state.keep_rounds_left = 0
@@ -363,6 +404,7 @@ def do_relock(current_round_start: int, reason: str):
     st.session_state.cycle_id += 1
     st.session_state.last_relock_reason = reason
     st.session_state.engine_status = "RUNNING"
+    st.session_state.cooldown_until_round = current_round_start + RELOCK_COOLDOWN_ROUNDS - 1
 
     return True
 
@@ -388,7 +430,7 @@ if not st.session_state.live_initialized:
         st.stop()
 
     st.session_state.locked_windows = locked_windows
-    st.session_state.vote_required = dynamic_vote_required(len(locked_windows))
+    st.session_state.vote_required = full_vote_required(len(locked_windows)) if FULL_VOTE_ONLY else max(2, len(locked_windows) - 1)
     st.session_state.scan_df_all = scan_df_all
     st.session_state.scan_df_positive = scan_df_positive
     st.session_state.scan_df_selected = scan_df_selected
@@ -403,9 +445,10 @@ if not st.session_state.live_initialized:
     st.session_state.cycle_start_round = lock_round_used
     st.session_state.last_relock_reason = "INIT"
     st.session_state.engine_status = "RUNNING"
+    st.session_state.cooldown_until_round = lock_round_used + RELOCK_COOLDOWN_ROUNDS - 1
 
 # =========================================================
-# LOAD STATE TO LOCAL
+# LOAD STATE
 # =========================================================
 total_profit = st.session_state.total_profit
 cycle_profit = st.session_state.cycle_profit
@@ -429,12 +472,26 @@ cycle_id = st.session_state.cycle_id
 cycle_start_round = st.session_state.cycle_start_round
 last_relock_reason = st.session_state.last_relock_reason
 engine_status = st.session_state.engine_status
+cooldown_until_round = st.session_state.cooldown_until_round
+
+# =========================================================
+# FAST LOOKUP WINDOW META
+# =========================================================
+selected_window_meta = {}
+if not scan_df_selected.empty:
+    for _, row in scan_df_selected.iterrows():
+        selected_window_meta[int(row["window"])] = {
+            "score": float(row["score"]),
+            "profit": float(row["profit"]),
+            "winrate": float(row["winrate"]),
+            "trades": int(row["trades"]),
+            "ev": float(row["ev"]) if "ev" in row else calc_ev(float(row["winrate"])),
+        }
 
 # =========================================================
 # PROCESS NEW ROUNDS ONLY
 # =========================================================
 for i in range(processed_until + 1, len(groups)):
-    # relock trước khi xử lý round mới nếu cycle chạm ngưỡng
     recent_wr = recent_winrate(hits, RECENT_HITS_WINDOW)
 
     need_relock = False
@@ -450,6 +507,7 @@ for i in range(processed_until + 1, len(groups)):
         need_relock = True
         relock_reason = "RECENT_WR_LOW"
 
+    # RELock ngay, bỏ qua round hiện tại
     if need_relock:
         ok = do_relock(i, relock_reason)
         if ok:
@@ -470,22 +528,81 @@ for i in range(processed_until + 1, len(groups)):
             cycle_start_round = st.session_state.cycle_start_round
             last_relock_reason = st.session_state.last_relock_reason
             engine_status = st.session_state.engine_status
+            cooldown_until_round = st.session_state.cooldown_until_round
+
+            selected_window_meta = {}
+            if not scan_df_selected.empty:
+                for _, row in scan_df_selected.iterrows():
+                    selected_window_meta[int(row["window"])] = {
+                        "score": float(row["score"]),
+                        "profit": float(row["profit"]),
+                        "winrate": float(row["winrate"]),
+                        "trades": int(row["trades"]),
+                        "ev": float(row["ev"]) if "ev" in row else calc_ev(float(row["winrate"])),
+                    }
+
+            processed_until = i - 1
+            continue
 
     if i < lock_round_used:
         continue
 
-    preds = [groups[i - w] for w in locked_windows if i - w >= 0]
-    if not preds:
+    pred_rows = []
+    for w in locked_windows:
+        if i - w >= 0:
+            meta = selected_window_meta.get(
+                int(w),
+                {
+                    "score": 0.0,
+                    "profit": 0.0,
+                    "winrate": 0.0,
+                    "trades": 0,
+                    "ev": 0.0,
+                },
+            )
+            score_val = max(meta["score"], 0.01)
+            weight = (
+                score_val * 0.6
+                + max(meta["profit"], 0.0) * 0.25
+                + max(meta["winrate"], 0.0) * 10.0 * 0.15
+            )
+            pred_rows.append(
+                {
+                    "window": int(w),
+                    "pred_group": groups[i - w],
+                    "score": meta["score"],
+                    "profit": meta["profit"],
+                    "winrate": meta["winrate"],
+                    "trades": meta["trades"],
+                    "ev": meta["ev"],
+                    "weight": weight,
+                }
+            )
+
+    if not pred_rows:
         processed_until = i
         continue
 
-    vote, confidence = Counter(preds).most_common(1)[0]
-    new_signal = confidence >= vote_required
+    if USE_WEIGHTED_VOTE:
+        vote, confidence, group_weights = weighted_vote(pred_rows)
+    else:
+        raw_preds = [x["pred_group"] for x in pred_rows]
+        vote, confidence = Counter(raw_preds).most_common(1)[0]
+        group_weights = {}
+
     distance = i - last_trade
+
+    # EV của nhóm thắng: trung bình theo các window bỏ phiếu cho nhóm đó
+    winning_rows = [x for x in pred_rows if x["pred_group"] == vote]
+    avg_ev = float(np.mean([x["ev"] for x in winning_rows])) if winning_rows else -999999.0
+
+    # full vote
+    new_signal = confidence >= vote_required
 
     final_vote = vote
     used_keep = False
 
+    # signal mới sẽ hủy keep
     if new_signal:
         keep_rounds_left = 0
         keep_bet_group = None
@@ -497,14 +614,32 @@ for i in range(processed_until + 1, len(groups)):
 
     final_signal = new_signal or used_keep
 
-    # nếu vừa chạm ngưỡng relock thì round tiếp theo mới relock, round hiện tại vẫn theo logic hiện tại
-    trade = final_signal and distance >= GAP
-    can_bet = trade
+    # cooldown
+    in_cooldown = i <= cooldown_until_round
+
+    # can_bet chuẩn PRO MAX
+    can_bet = (
+        final_signal
+        and distance >= GAP
+        and not in_cooldown
+    )
+
+    # chỉ cho bet khi signal mới đủ full vote
+    if new_signal:
+        can_bet = can_bet and (confidence >= vote_required)
+
+    # EV filter chỉ áp vào signal mới
+    if new_signal and USE_EV_FILTER:
+        can_bet = can_bet and (avg_ev >= EV_MIN_THRESHOLD)
+
+    trade = can_bet
 
     if trade and used_keep:
         state = "TRADE_KEEP"
     elif trade:
         state = "TRADE"
+    elif in_cooldown:
+        state = "COOLDOWN"
     elif new_signal:
         state = "SIGNAL"
     elif used_keep:
@@ -512,7 +647,7 @@ for i in range(processed_until + 1, len(groups)):
     else:
         state = "WAIT"
 
-    bet_group = final_vote if can_bet else None
+    bet_group = final_vote if trade else None
     hit = None
 
     if used_keep:
@@ -576,6 +711,7 @@ for i in range(processed_until + 1, len(groups)):
             "bet_group": bet_group,
             "hit": hit,
             "state": state,
+            "avg_ev": avg_ev,
             "cycle_profit": cycle_profit,
             "total_profit": total_profit,
             "locked_windows": ", ".join(map(str, locked_windows)),
@@ -611,6 +747,7 @@ st.session_state.cycle_id = cycle_id
 st.session_state.cycle_start_round = cycle_start_round
 st.session_state.last_relock_reason = last_relock_reason
 st.session_state.engine_status = engine_status
+st.session_state.cooldown_until_round = cooldown_until_round
 
 hist = pd.DataFrame(history_rows)
 
@@ -618,12 +755,48 @@ hist = pd.DataFrame(history_rows)
 # NEXT BET
 # =========================================================
 next_round = len(groups)
-preds = [groups[next_round - w] for w in locked_windows if next_round - w >= 0]
 
-if preds:
-    vote, confidence = Counter(preds).most_common(1)[0]
+pred_rows_next = []
+for w in locked_windows:
+    if next_round - w >= 0:
+        meta = selected_window_meta.get(
+            int(w),
+            {
+                "score": 0.0,
+                "profit": 0.0,
+                "winrate": 0.0,
+                "trades": 0,
+                "ev": 0.0,
+            },
+        )
+        score_val = max(meta["score"], 0.01)
+        weight = (
+            score_val * 0.6
+            + max(meta["profit"], 0.0) * 0.25
+            + max(meta["winrate"], 0.0) * 10.0 * 0.15
+        )
+        pred_rows_next.append(
+            {
+                "window": int(w),
+                "pred_group": groups[next_round - w],
+                "score": meta["score"],
+                "profit": meta["profit"],
+                "winrate": meta["winrate"],
+                "trades": meta["trades"],
+                "ev": meta["ev"],
+                "weight": weight,
+            }
+        )
+
+if pred_rows_next:
+    if USE_WEIGHTED_VOTE:
+        vote, confidence, group_weights_next = weighted_vote(pred_rows_next)
+    else:
+        raw_preds = [x["pred_group"] for x in pred_rows_next]
+        vote, confidence = Counter(raw_preds).most_common(1)[0]
+        group_weights_next = {}
 else:
-    vote, confidence = None, 0
+    vote, confidence, group_weights_next = None, 0, {}
 
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
@@ -633,6 +806,9 @@ if not hist.empty:
     distance = next_round - last_trade_rows["round"].max() if len(last_trade_rows) > 0 else 999
 else:
     distance = 999
+
+winning_rows_next = [x for x in pred_rows_next if x["pred_group"] == vote] if vote is not None else []
+avg_ev_next = float(np.mean([x["ev"] for x in winning_rows_next])) if winning_rows_next else -999999.0
 
 new_signal = confidence >= vote_required if vote is not None else False
 used_keep_next = False
@@ -649,8 +825,9 @@ else:
         used_keep_next = True
 
 final_signal = new_signal or used_keep_next
-
 curr_recent_wr = recent_winrate(hits, RECENT_HITS_WINDOW)
+in_cooldown_next = next_round <= cooldown_until_round
+
 if cycle_profit >= CYCLE_PROFIT_TARGET:
     can_bet = False
     next_state = "RELOCK_READY_TARGET"
@@ -661,8 +838,18 @@ elif len(hits) >= RECENT_HITS_WINDOW and curr_recent_wr < RECENT_WINRATE_FLOOR:
     can_bet = False
     next_state = "RELOCK_READY_RECENT_WR"
 else:
-    can_bet = final_signal and distance >= GAP
-    next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
+    can_bet = final_signal and distance >= GAP and not in_cooldown_next
+
+    if new_signal:
+        can_bet = can_bet and (confidence >= vote_required)
+
+    if new_signal and USE_EV_FILTER:
+        can_bet = can_bet and (avg_ev_next >= EV_MIN_THRESHOLD)
+
+    if in_cooldown_next:
+        next_state = "COOLDOWN"
+    else:
+        next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 
 next_row = {
     "cycle_id": cycle_id,
@@ -686,6 +873,7 @@ next_row = {
     "bet_group": final_vote if can_bet else None,
     "hit": None,
     "state": next_state,
+    "avg_ev": avg_ev_next,
     "cycle_profit": cycle_profit,
     "total_profit": total_profit,
     "locked_windows": ", ".join(map(str, locked_windows)),
@@ -699,7 +887,7 @@ hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True) if
 # =========================================================
 show_debug = st.checkbox("Show Debug", value=SHOW_DEBUG_DEFAULT)
 
-st.title("🎯 Rolling Engine PRO")
+st.title("🎯 Rolling Engine PRO MAX")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -727,6 +915,8 @@ st.write("Keep Rounds Left:", keep_rounds_left)
 st.write("Processed Until Round:", processed_until)
 st.write("Cycle Start Round:", cycle_start_round)
 st.write("Last Relock Reason:", last_relock_reason)
+st.write("Cooldown Until Round:", cooldown_until_round)
+st.write("Next EV:", round(avg_ev_next, 4) if avg_ev_next > -999 else "-")
 
 st.markdown(
     f"""
@@ -743,6 +933,8 @@ elif next_state == "RELOCK_READY_LOSS":
     st.warning(f"⚠️ RELock ready - Cycle reached {CYCLE_STOP_LOSS}")
 elif next_state == "RELOCK_READY_RECENT_WR":
     st.warning(f"⚠️ RELock ready - Recent winrate < {RECENT_WINRATE_FLOOR*100:.0f}%")
+elif next_state == "COOLDOWN":
+    st.info("COOLDOWN (just relocked, waiting)")
 elif can_bet and final_vote is not None:
     st.markdown(
         f"""
