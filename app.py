@@ -26,7 +26,7 @@ GAP = 1
 
 WIN = 2.5
 LOSS = -1
-PROFIT_TARGET = 4
+PROFIT_TARGET = 10
 
 # keep tổng cộng 4 vòng, tính luôn vòng trade thua
 KEEP_AFTER_LOSS_ROUNDS = 2
