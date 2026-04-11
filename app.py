@@ -34,6 +34,9 @@ KEEP_AFTER_LOSS_ROUNDS = 2
 # lọc window để tránh ăn may
 MIN_TRADES_PER_WINDOW = 30
 
+# NEW: thua 2 lệnh liên tiếp thì nghỉ 4 vòng
+PAUSE_AFTER_2_LOSSES = 4
+
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
 def load_numbers():
@@ -236,6 +239,10 @@ def init_state():
         "keep_bet_group": None,
         "keep_rounds_left": 0,
         "last_trade_was_loss": False,
+
+        # NEW
+        "consecutive_losses": 0,
+        "pause_rounds_left": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -262,6 +269,8 @@ if st.button("🔄 Reset Session"):
         "keep_bet_group",
         "keep_rounds_left",
         "last_trade_was_loss",
+        "consecutive_losses",
+        "pause_rounds_left",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
@@ -289,6 +298,8 @@ if (
         "keep_bet_group",
         "keep_rounds_left",
         "last_trade_was_loss",
+        "consecutive_losses",
+        "pause_rounds_left",
     ]
     for k in keys_to_clear:
         if k in st.session_state:
@@ -339,6 +350,10 @@ keep_bet_group = st.session_state.keep_bet_group
 keep_rounds_left = st.session_state.keep_rounds_left
 last_trade_was_loss = st.session_state.last_trade_was_loss
 
+# NEW
+consecutive_losses = st.session_state.consecutive_losses
+pause_rounds_left = st.session_state.pause_rounds_left
+
 for i in range(processed_until + 1, len(groups)):
     if i < lock_round_used:
         continue
@@ -354,6 +369,42 @@ for i in range(processed_until + 1, len(groups)):
 
     final_vote = vote
     used_keep = False
+
+    # NEW: nếu đang pause thì nghỉ hẳn, không trade, không keep
+    if pause_rounds_left > 0:
+        pause_rounds_left -= 1
+        trade = False
+        can_bet = False
+        final_signal = False
+        state = "PAUSE"
+        bet_group = None
+        hit = None
+
+        history_rows.append(
+            {
+                "round": i,
+                "number": numbers[i],
+                "group": groups[i],
+                "vote": vote,
+                "confidence": confidence,
+                "new_signal": new_signal,
+                "used_keep": False,
+                "keep_group": None,
+                "keep_left": 0,
+                "final_vote": final_vote,
+                "signal": False,
+                "trade": False,
+                "bet_group": None,
+                "hit": None,
+                "state": state,
+                "profit": profit,
+                "locked_windows": ", ".join(map(str, locked_windows)),
+                "consecutive_losses": consecutive_losses,
+                "pause_left": pause_rounds_left,
+            }
+        )
+        processed_until = i
+        continue
 
     if new_signal:
         keep_rounds_left = 0
@@ -405,10 +456,16 @@ for i in range(processed_until + 1, len(groups)):
             last_trade_was_loss = False
             keep_rounds_left = 0
             keep_bet_group = None
+
+            # NEW
+            consecutive_losses = 0
         else:
             hit = 0
             profit += LOSS
             hits.append(0)
+
+            # NEW
+            consecutive_losses += 1
 
             if used_keep:
                 if keep_rounds_left <= 0:
@@ -420,6 +477,15 @@ for i in range(processed_until + 1, len(groups)):
                 last_trade_was_loss = True
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote
+
+            # NEW: nếu thua 2 lệnh liên tiếp thì pause 4 vòng
+            if consecutive_losses >= 2:
+                pause_rounds_left = PAUSE_AFTER_2_LOSSES
+                keep_rounds_left = 0
+                keep_bet_group = None
+                last_trade_was_loss = False
+                consecutive_losses = 0
+                state = "PAUSE_TRIGGER"
     else:
         if used_keep and keep_rounds_left <= 0:
             keep_rounds_left = 0
@@ -445,6 +511,8 @@ for i in range(processed_until + 1, len(groups)):
             "state": state,
             "profit": profit,
             "locked_windows": ", ".join(map(str, locked_windows)),
+            "consecutive_losses": consecutive_losses,
+            "pause_left": pause_rounds_left,
         }
     )
 
@@ -465,6 +533,10 @@ st.session_state.base_data_len = len(groups)
 st.session_state.keep_bet_group = keep_bet_group
 st.session_state.keep_rounds_left = keep_rounds_left
 st.session_state.last_trade_was_loss = last_trade_was_loss
+
+# NEW
+st.session_state.consecutive_losses = consecutive_losses
+st.session_state.pause_rounds_left = pause_rounds_left
 
 hist = pd.DataFrame(history_rows)
 
@@ -490,26 +562,34 @@ new_signal = confidence >= VOTE_REQUIRED if vote is not None else False
 used_keep_next = False
 final_vote = vote
 
-if new_signal:
+# NEW: nếu đang pause thì next cũng pause
+if pause_rounds_left > 0:
+    signal = False
+    can_bet = False
+    next_state = "PAUSE"
     next_keep_bet_group = None
     next_keep_rounds_left = 0
 else:
-    next_keep_bet_group = keep_bet_group
-    next_keep_rounds_left = keep_rounds_left
-    if last_trade_was_loss and next_keep_rounds_left > 0 and next_keep_bet_group is not None:
-        final_vote = next_keep_bet_group
-        used_keep_next = True
+    if new_signal:
+        next_keep_bet_group = None
+        next_keep_rounds_left = 0
+    else:
+        next_keep_bet_group = keep_bet_group
+        next_keep_rounds_left = keep_rounds_left
+        if last_trade_was_loss and next_keep_rounds_left > 0 and next_keep_bet_group is not None:
+            final_vote = next_keep_bet_group
+            used_keep_next = True
 
-final_signal = new_signal or used_keep_next
+    final_signal = new_signal or used_keep_next
 
-if profit >= PROFIT_TARGET:
-    signal = False
-    can_bet = False
-    next_state = "STOP"
-else:
-    signal = final_signal
-    can_bet = signal and distance >= GAP
-    next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
+    if profit >= PROFIT_TARGET:
+        signal = False
+        can_bet = False
+        next_state = "STOP"
+    else:
+        signal = final_signal
+        can_bet = signal and distance >= GAP
+        next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 
 next_row = {
     "round": next_round,
@@ -529,6 +609,8 @@ next_row = {
     "state": next_state,
     "profit": profit,
     "locked_windows": ", ".join(map(str, locked_windows)),
+    "consecutive_losses": consecutive_losses,
+    "pause_left": pause_rounds_left,
 }
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
@@ -553,6 +635,8 @@ st.write("Min Trades / Window:", MIN_TRADES_PER_WINDOW)
 st.write("Profit Target:", PROFIT_TARGET)
 st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
+st.write("Consecutive Losses:", consecutive_losses)
+st.write("Pause Rounds Left:", pause_rounds_left)
 st.write("Processed Until Round:", processed_until)
 
 st.markdown(
@@ -569,7 +653,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if profit >= PROFIT_TARGET:
+if pause_rounds_left > 0:
+    st.warning(f"⏸ PAUSE - Đang nghỉ {pause_rounds_left} vòng do thua 2 lệnh liên tiếp")
+elif profit >= PROFIT_TARGET:
     st.error(f"🛑 STOP - Reached Profit Target {PROFIT_TARGET}")
 elif can_bet and final_vote is not None:
     st.markdown(
@@ -625,6 +711,10 @@ def highlight_trade(row):
         return ["background-color: #d9534f; color:white"] * len(row)
     if row["state"] == "TRADE_KEEP":
         return ["background-color: #ffb347; color:black"] * len(row)
+    if row["state"] == "PAUSE":
+        return ["background-color: #87ceeb; color:black"] * len(row)
+    if row["state"] == "PAUSE_TRIGGER":
+        return ["background-color: #9370db; color:white"] * len(row)
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
