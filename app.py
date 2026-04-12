@@ -27,10 +27,11 @@ GAP = 1
 WIN = 2.5
 LOSS = -1.0
 
-# đạt profit chu kỳ này thì relock bộ mới
+# relock theo chu kỳ
 CYCLE_PROFIT_TARGET = 6.0
+CYCLE_LOSS_TARGET = -8.0
 
-# keep sau khi thua
+# keep sau thua
 KEEP_AFTER_LOSS_ROUNDS = 2
 
 # thua 2 lệnh liên tiếp thì nghỉ
@@ -75,12 +76,17 @@ if len(groups) <= LOCK_ROUND_START:
 LOCK_SPAN = LOCK_ROUND_END - LOCK_ROUND_START
 
 def get_dynamic_lock_range(current_round: int, max_len: int):
+    """
+    Lần đầu ưu tiên vùng 168 -> 180.
+    Các lần relock sau sẽ trượt vùng lock theo round hiện tại.
+    """
     if current_round <= LOCK_ROUND_END:
         start = LOCK_ROUND_START
         end = min(LOCK_ROUND_END, max_len)
     else:
         end = min(current_round, max_len)
         start = max(LOCK_ROUND_START, end - LOCK_SPAN)
+
     if end < start:
         end = start
     return start, end
@@ -91,7 +97,6 @@ def evaluate_window(seq_groups, w):
     trades = 0
     wins = 0
 
-    # local binding cho nhanh hơn
     s = seq_groups
     n = len(s)
     for i in range(w, n):
@@ -241,7 +246,7 @@ def init_state():
         "last_trade": -999,
         "hits": [],
 
-        # cycle hiện tại
+        # chu kỳ hiện tại
         "cycle_profit": 0.0,
         "cycle_id": 1,
         "cycle_start_round": None,
@@ -296,7 +301,7 @@ if (
         del st.session_state[k]
     st.rerun()
 
-# ================= RELOCK HELPER =================
+# ================= HELPERS =================
 def run_relock(current_round: int, reason: str):
     (
         lock_round_used,
@@ -321,6 +326,7 @@ def run_relock(current_round: int, reason: str):
     st.session_state.lock_range_start = lock_range_start
     st.session_state.lock_range_end = lock_range_end
 
+    # reset tactical state
     st.session_state.keep_bet_group = None
     st.session_state.keep_rounds_left = 0
     st.session_state.last_trade_was_loss = False
@@ -424,7 +430,6 @@ for i in range(processed_until + 1, len(groups)):
     state = "WAIT"
     relock_event = ""
 
-    # ----- pause -----
     if pause_rounds_left > 0:
         pause_rounds_left -= 1
         state = "PAUSE"
@@ -460,7 +465,6 @@ for i in range(processed_until + 1, len(groups)):
         processed_until = i
         continue
 
-    # ----- keep logic -----
     if new_signal:
         keep_rounds_left = 0
         keep_bet_group = None
@@ -494,7 +498,6 @@ for i in range(processed_until + 1, len(groups)):
         if keep_rounds_left < 0:
             keep_rounds_left = 0
 
-    # ----- trade result -----
     if trade:
         last_trade = i
 
@@ -540,14 +543,24 @@ for i in range(processed_until + 1, len(groups)):
             keep_bet_group = None
             last_trade_was_loss = False
 
-    # ----- relock by cycle target -----
-    if cycle_profit >= CYCLE_PROFIT_TARGET:
-        close_cycle(i, "TARGET_REACHED")
+    # relock theo chu kỳ: +6 hoặc -8
+    need_relock = False
+    relock_reason = None
 
-        ok, info = run_relock(i, "TARGET_REACHED")
+    if cycle_profit >= CYCLE_PROFIT_TARGET:
+        need_relock = True
+        relock_reason = "TARGET_REACHED"
+    elif cycle_profit <= CYCLE_LOSS_TARGET:
+        need_relock = True
+        relock_reason = "LOSS_REACHED"
+
+    if need_relock:
+        close_cycle(i, relock_reason)
+
+        ok, info = run_relock(i, relock_reason)
         if ok:
             relock_event = f"relock@{i}"
-            state = "RELOCK_TARGET"
+            state = "RELOCK_TARGET" if relock_reason == "TARGET_REACHED" else "RELOCK_LOSS"
 
             locked_windows = st.session_state.locked_windows
             scan_df_all = st.session_state.scan_df_all
@@ -709,7 +722,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Rolling Engine PRO - total_profit / cycle_profit rõ ràng")
+st.title("🎯 Rolling Engine PRO - relock by cycle +6 / -8")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -724,6 +737,7 @@ st.write("Lock Count:", len(locked_windows))
 st.write("Current Lock Range:", f"{lock_range_start} -> {lock_range_end}")
 st.write("Lock Round Used:", lock_round_used)
 st.write("Cycle Profit Target:", CYCLE_PROFIT_TARGET)
+st.write("Cycle Loss Target:", CYCLE_LOSS_TARGET)
 st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
 st.write("Consecutive Losses:", consecutive_losses)
@@ -803,6 +817,8 @@ def highlight_trade(row):
         return ["background-color: #9370db; color:white"] * len(row)
     if row["state"] == "RELOCK_TARGET":
         return ["background-color: #32cd32; color:black"] * len(row)
+    if row["state"] == "RELOCK_LOSS":
+        return ["background-color: #1e90ff; color:white"] * len(row)
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
