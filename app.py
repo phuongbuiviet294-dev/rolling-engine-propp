@@ -35,7 +35,7 @@ KEEP_AFTER_LOSS_ROUNDS = 2
 MIN_TRADES_PER_WINDOW = 30
 
 # NEW: thua 2 lệnh liên tiếp thì nghỉ 4 vòng
-PAUSE_AFTER_2_LOSSES = 2
+PAUSE_AFTER_2_LOSSES = 4
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
