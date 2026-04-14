@@ -22,20 +22,20 @@ WINDOW_MAX = 26
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 3
 VOTE_REQUIRED = 3
-GAP = 1
+GAP = 0
 
 WIN = 2.5
 LOSS = -1
 PROFIT_TARGET = 6
 
 # keep tổng cộng 4 vòng, tính luôn vòng trade thua
-KEEP_AFTER_LOSS_ROUNDS = 2
+KEEP_AFTER_LOSS_ROUNDS = 0
 
 # lọc window để tránh ăn may
 MIN_TRADES_PER_WINDOW = 30
 
 # NEW: thua 2 lệnh liên tiếp thì nghỉ 4 vòng
-PAUSE_AFTER_2_LOSSES = 4
+PAUSE_AFTER_2_LOSSES = 0
 
 # ---------------- LOAD DATA ----------------
 @st.cache_data(ttl=10)
