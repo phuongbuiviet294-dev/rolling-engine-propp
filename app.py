@@ -14,7 +14,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # tìm round lock tốt nhất trong khoảng này
 LOCK_ROUND_START = 168
-LOCK_ROUND_END = 174
+LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
 WINDOW_MAX = 26
