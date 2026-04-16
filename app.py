@@ -13,15 +13,15 @@ st_autorefresh(interval=1500, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # Bắt đầu scan từ đây, nếu đủ điều kiện thì lock luôn
-LOCK_ROUND_START = 120
-LOCK_SCAN_END = 180  # chỉ để tham chiếu, không bắt buộc phải đợi tới đây nữa
+LOCK_ROUND_START = 168
+LOCK_SCAN_END = 180  # chỉ để tham chiếu
 
 WINDOW_MIN = 6
 WINDOW_MAX = 18
 
 TOP_WINDOWS = 4
-MIN_POSITIVE_WINDOWS = 3
-VOTE_REQUIRED = 4
+MIN_POSITIVE_WINDOWS = 2
+VOTE_REQUIRED = 3
 GAP = 1
 
 # Group PnL
@@ -37,7 +37,7 @@ PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 26
 
 # Pause group nếu:
-GROUP_MAX_LOSS_STREAK = 6   # thua 3 lệnh group liên tiếp
+GROUP_MAX_LOSS_STREAK = 3   # thua 3 lệnh group liên tiếp
 GROUP_PROFIT_STOP = 6.0     # profit group >= 6
 
 # ================= LOAD DATA =================
@@ -76,6 +76,27 @@ def color_of(n: int) -> str:
     if n <= 8:
         return "green"
     return "blue"
+
+
+def group_color_match(group_vote: int, color_vote: str) -> bool:
+    group_to_numbers = {
+        1: {1, 2, 3},
+        2: {4, 5, 6},
+        3: {7, 8, 9},
+        4: {10, 11, 12},
+    }
+    color_to_numbers = {
+        "red": {1, 2, 3, 4},
+        "green": {5, 6, 7, 8},
+        "blue": {9, 10, 11, 12},
+    }
+
+    if group_vote not in group_to_numbers:
+        return False
+    if color_vote not in color_to_numbers:
+        return False
+
+    return len(group_to_numbers[group_vote] & color_to_numbers[color_vote]) > 0
 
 
 groups = [group_of(n) for n in numbers]
@@ -170,7 +191,6 @@ def find_first_lock_round(all_groups):
     """
     Scan từ round 168 trở đi.
     Hễ có ít nhất 3 window profit dương là lock luôn tại round đó.
-    Không đợi tới 180.
     """
     best_round = None
     best_windows = []
@@ -344,6 +364,7 @@ for i in range(processed_until + 1, len(groups)):
 
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
     vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
+    group_color_ok = group_color_match(vote_group, vote_color)
 
     new_signal = confidence_group >= VOTE_REQUIRED
     distance = i - last_trade
@@ -375,6 +396,7 @@ for i in range(processed_until + 1, len(groups)):
                 "vote_color": vote_color,
                 "confidence_group": confidence_group,
                 "confidence_color": confidence_color,
+                "group_color_ok": group_color_ok,
                 "new_signal": new_signal,
                 "used_keep": False,
                 "keep_group": None,
@@ -412,8 +434,8 @@ for i in range(processed_until + 1, len(groups)):
 
     final_signal = new_signal or used_keep
 
-    # block group trade nếu group_pause
-    trade = (not group_pause) and final_signal and distance >= GAP
+    # block group trade nếu group_pause hoặc group-color không khớp
+    trade = (not group_pause) and final_signal and distance >= GAP and group_color_ok
     can_bet = trade
 
     if trade and used_keep:
@@ -422,6 +444,8 @@ for i in range(processed_until + 1, len(groups)):
         state = "TRADE"
     elif group_pause:
         state = "GROUP_PAUSED"
+    elif not group_color_ok:
+        state = "GROUP_COLOR_MISMATCH"
     elif new_signal:
         state = "SIGNAL"
     elif used_keep:
@@ -518,6 +542,7 @@ for i in range(processed_until + 1, len(groups)):
             "vote_color": vote_color,
             "confidence_group": confidence_group,
             "confidence_color": confidence_color,
+            "group_color_ok": group_color_ok,
             "new_signal": new_signal,
             "used_keep": used_keep,
             "keep_group": keep_bet_group,
@@ -579,9 +604,11 @@ preds_color = [colors[next_round - w] for w in locked_windows if next_round - w 
 if preds_group:
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
     vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
+    group_color_ok = group_color_match(vote_group, vote_color)
 else:
     vote_group, confidence_group = None, 0
     vote_color, confidence_color = None, 0
+    group_color_ok = False
 
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
@@ -616,10 +643,12 @@ else:
 
     final_signal = new_signal or used_keep_next
     signal = final_signal
-    can_bet = (not group_pause) and signal and distance >= GAP
+    can_bet = (not group_pause) and signal and distance >= GAP and group_color_ok
 
     if group_pause:
         next_state = "GROUP_PAUSED"
+    elif not group_color_ok:
+        next_state = "GROUP_COLOR_MISMATCH"
     else:
         next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 
@@ -632,6 +661,7 @@ next_row = {
     "vote_color": vote_color,
     "confidence_group": confidence_group,
     "confidence_color": confidence_color,
+    "group_color_ok": group_color_ok,
     "new_signal": new_signal,
     "used_keep": used_keep_next,
     "keep_group": next_keep_bet_group,
@@ -657,7 +687,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Rolling Engine - lock ngay khi đủ 3 window profit dương")
+st.title("🎯 Rolling Engine - next bet only when group and color match")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -670,6 +700,7 @@ st.write("Vote Strength Group:", confidence_group)
 st.write("Vote Strength Color:", confidence_color)
 st.write("Next Group:", final_vote_group)
 st.write("Next Color:", vote_color)
+st.write("Group/Color Match:", group_color_ok)
 st.write("Locked Windows:", locked_windows)
 st.write("Locked Window Count:", len(locked_windows))
 st.write("Scan Start Round:", LOCK_ROUND_START)
@@ -699,6 +730,8 @@ if group_pause:
     st.warning("⛔ GROUP PAUSED (thua 3 liên tiếp hoặc profit group >= +6)")
 elif pause_rounds_left > 0:
     st.warning(f"⏸ PAUSE - Đang nghỉ {pause_rounds_left} vòng do thua 2 lệnh liên tiếp")
+elif not group_color_ok:
+    st.warning("⚠️ NO BET - Group và Color không khớp nhau")
 elif can_bet and final_vote_group is not None:
     st.markdown(
         f"""
@@ -760,6 +793,8 @@ def highlight_trade(row):
         return ["background-color: #9370db; color:white"] * len(row)
     if row["state"] in ("GROUP_PAUSED", "GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS"):
         return ["background-color: #696969; color:white"] * len(row)
+    if row["state"] == "GROUP_COLOR_MISMATCH":
+        return ["background-color: #f0ad4e; color:black"] * len(row)
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
