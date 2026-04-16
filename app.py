@@ -39,7 +39,7 @@ PAUSE_AFTER_2_LOSSES = 0
 
 # Group stop logic
 GROUP_MAX_LOSS_STREAK = 5
-GROUP_PROFIT_STOP = 6.0          # đạt +6 thì nghỉ bet group
+GROUP_PROFIT_STOP = 5.0          # đạt +6 thì nghỉ bet group
 
 # Window filter
 MIN_TRADES_PER_WINDOW = 20
