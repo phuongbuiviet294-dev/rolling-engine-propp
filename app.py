@@ -34,7 +34,7 @@ LOSS_GROUP = -1.0
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-# Live risk control
+# Risk control
 PAUSE_AFTER_2_LOSSES = 0
 GROUP_MAX_LOSS_STREAK = 5
 GROUP_PROFIT_STOP = 6.0
@@ -43,7 +43,7 @@ GROUP_PROFIT_STOP = 6.0
 MIN_TRADES_PER_WINDOW = 20
 RECENT_WINDOW_SIZE = 20
 
-# Train / validate (2 tầng)
+# Train / validate
 VALIDATE1_LEN = 20
 VALIDATE2_LEN = 20
 MIN_TRAIN_LEN = 120
@@ -64,30 +64,30 @@ BUNDLE_SCORE_TRADES_WEIGHT = 1.5
 BUNDLE_SCORE_DRAWDOWN_PENALTY = 1.0
 BUNDLE_SCORE_RECENT_WEIGHT = 1.0
 
-# Final score after validate1 + validate2
+# Final score after validate
 FINAL_VAL1_PROFIT_WEIGHT = 1.5
 FINAL_VAL2_PROFIT_WEIGHT = 2.0
 FINAL_VAL2_WINRATE_WEIGHT = 8.0
 FINAL_VAL1_DD_PENALTY = 1.0
 FINAL_VAL2_DD_PENALTY = 1.2
 
-# Run-pattern PRO
+# Run group thật - bản nhẹ
 RUN_MIN_LEN = 2
 RUN_MAX_LEN = 5
-RUN_MIN_SAMPLES = 5
-RUN_MIN_PROB = 0.42
-RUN_STRONG_PROB = 0.60
-RUN_OVERRIDE_PROB = 0.70
+RUN_MIN_SAMPLES = 4
+RUN_MIN_PROB = 0.40
+RUN_STRONG_PROB = 0.58
+RUN_OVERRIDE_PROB = 0.72
 
-# Regime filter
-REGIME_LOOKBACK = 30
-REGIME_MIN_TRADES = 3
-REGIME_MIN_PROFIT = -2.0
-REGIME_MIN_DRAWDOWN = -4.0
+# Regime nhẹ
+REGIME_LOOKBACK = 24
+REGIME_MIN_TRADES = 2
+REGIME_MIN_PROFIT = -3.0
+REGIME_MIN_DRAWDOWN = -5.0
 
-# Hybrid score
-BET_SCORE = 0.78
-BET_SMALL_SCORE = 0.58
+# Hybrid thresholds nhẹ hơn
+BET_SCORE = 0.72
+BET_SMALL_SCORE = 0.52
 
 SHOW_HISTORY_ROWS = 150
 
@@ -125,22 +125,6 @@ def color_of(n: int) -> str:
     if n <= 8:
         return "green"
     return "blue"
-
-def group_color_match(group_vote: int, color_vote: str) -> bool:
-    group_to_numbers = {
-        1: {1, 2, 3},
-        2: {4, 5, 6},
-        3: {7, 8, 9},
-        4: {10, 11, 12},
-    }
-    color_to_numbers = {
-        "red": {1, 2, 3, 4},
-        "green": {5, 6, 7, 8},
-        "blue": {9, 10, 11, 12},
-    }
-    if group_vote not in group_to_numbers or color_vote not in color_to_numbers:
-        return False
-    return len(group_to_numbers[group_vote] & color_to_numbers[color_vote]) > 0
 
 groups = [group_of(n) for n in numbers]
 colors = [color_of(n) for n in numbers]
@@ -208,7 +192,7 @@ def get_current_run(seq):
         j -= 1
     return cur, run_len
 
-# ================= RUN PATTERN PRO =================
+# ================= RUN GROUP THẬT =================
 def build_run_pattern_stats(seq, min_run_len=2, max_run_len=5):
     stats = defaultdict(Counter)
     n = len(seq)
@@ -226,7 +210,7 @@ def build_run_pattern_stats(seq, min_run_len=2, max_run_len=5):
         i = j
     return stats
 
-def get_run_signal(seq, min_run_len=2, max_run_len=5, min_samples=5, min_prob=0.42):
+def get_run_signal(seq, min_run_len=2, max_run_len=5, min_samples=4, min_prob=0.40):
     if len(seq) < 10:
         return None
 
@@ -234,7 +218,6 @@ def get_run_signal(seq, min_run_len=2, max_run_len=5, min_samples=5, min_prob=0.
     cur, run_len = get_current_run(seq)
     capped = min(run_len, max_run_len)
 
-    # exact run
     for rl in range(capped, min_run_len - 1, -1):
         key = (cur, rl)
         if key in stats:
@@ -244,42 +227,20 @@ def get_run_signal(seq, min_run_len=2, max_run_len=5, min_samples=5, min_prob=0.
                 nxt, c = cnt.most_common(1)[0]
                 prob = c / total
                 if prob >= min_prob:
+                    ranked = cnt.most_common(2)
+                    edge = 0.0
+                    if len(ranked) > 1:
+                        edge = ranked[0][1] / total - ranked[1][1] / total
                     return {
                         "run_value": cur,
                         "run_len": rl,
                         "next_value": nxt,
                         "samples": total,
                         "prob": prob,
-                        "mode": "run_exact",
-                        "dist": dict(cnt)
-                    }
-
-    # fallback cùng group
-    candidates = []
-    for (rv, rl), cnt in stats.items():
-        if rv == cur:
-            total = sum(cnt.values())
-            if total >= min_samples:
-                nxt, c = cnt.most_common(1)[0]
-                prob = c / total
-                if prob >= min_prob:
-                    edge = 0.0
-                    ranked = cnt.most_common(2)
-                    if len(ranked) > 1:
-                        edge = ranked[0][1] / total - ranked[1][1] / total
-                    candidates.append({
-                        "run_value": rv,
-                        "run_len": rl,
-                        "next_value": nxt,
-                        "samples": total,
-                        "prob": prob,
                         "edge": edge,
-                        "mode": "run_fallback",
-                        "dist": dict(cnt)
-                    })
-    if candidates:
-        candidates.sort(key=lambda x: (x["prob"], x["edge"], x["samples"], x["run_len"]), reverse=True)
-        return candidates[0]
+                        "mode": "run_exact",
+                        "dist": dict(cnt),
+                    }
 
     return None
 
@@ -392,58 +353,43 @@ def build_window_tables(train_groups):
     return candidate_windows, df_all, positive_df, selected_df, spaced_candidate_df
 
 # ================= BUNDLE BACKTEST =================
-def backtest_bundle_vote_range(seq_groups, seq_colors, windows, start_idx, end_idx):
+def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
     results_group = []
-    results_color = []
     trades = 0
     wins_group = 0
-    wins_color = 0
     last_trade = -999999
 
     effective_start = max(start_idx, max(windows))
 
     for i in range(effective_start, end_idx):
         preds_group = [seq_groups[i - w] for w in windows]
-        preds_color = [seq_colors[i - w] for w in windows]
-
         vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
-        vote_color, _ = Counter(preds_color).most_common(1)[0]
 
         signal = confidence_group >= VOTE_REQUIRED
-        gc_ok = group_color_match(vote_group, vote_color)
 
-        if signal and gc_ok and (i - last_trade >= GAP):
+        if signal and (i - last_trade >= GAP):
             last_trade = i
             trades += 1
 
             group_hit = 1 if seq_groups[i] == vote_group else 0
-            color_hit = 1 if seq_colors[i] == vote_color else 0
-
             wins_group += group_hit
-            wins_color += color_hit
             results_group.append(group_hit)
-            results_color.append(color_hit)
 
     profit_group = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results_group))
-    profit_color = float(sum(WIN_COLOR if r == 1 else LOSS_COLOR for r in results_color))
     winrate_group = wins_group / trades if trades > 0 else 0.0
-    winrate_color = wins_color / trades if trades > 0 else 0.0
     max_drawdown_group = compute_max_drawdown(results_group, WIN_GROUP, LOSS_GROUP)
     recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
 
     return {
         "trades": trades,
         "wins_group": wins_group,
-        "wins_color": wins_color,
         "profit_group": profit_group,
-        "profit_color": profit_color,
         "winrate_group": winrate_group,
-        "winrate_color": winrate_color,
         "max_drawdown_group": max_drawdown_group,
         "recent_profit_group": recent_profit_group,
     }
 
-def build_bundle_backtest(train_groups, train_colors, candidate_windows):
+def build_bundle_backtest(train_groups, candidate_windows):
     bundle_rows = []
 
     if len(candidate_windows) >= TOP_WINDOWS:
@@ -454,13 +400,7 @@ def build_bundle_backtest(train_groups, train_colors, candidate_windows):
             if len(buckets) < 3:
                 continue
 
-            train_bt = backtest_bundle_vote_range(
-                train_groups,
-                train_colors,
-                combo,
-                0,
-                len(train_groups),
-            )
+            train_bt = backtest_bundle_vote_range(train_groups, combo, 0, len(train_groups))
 
             if train_bt["trades"] > 0:
                 train_score = (
@@ -478,9 +418,7 @@ def build_bundle_backtest(train_groups, train_colors, candidate_windows):
                     "windows": ", ".join(map(str, combo)),
                     "train_trades": train_bt["trades"],
                     "train_profit_group": train_bt["profit_group"],
-                    "train_profit_color": train_bt["profit_color"],
                     "train_winrate_group": train_bt["winrate_group"],
-                    "train_winrate_color": train_bt["winrate_color"],
                     "train_max_drawdown_group": train_bt["max_drawdown_group"],
                     "train_recent_profit_group": train_bt["recent_profit_group"],
                     "train_score": train_score,
@@ -497,7 +435,7 @@ def build_bundle_backtest(train_groups, train_colors, candidate_windows):
     return bundle_df
 
 # ================= LOCK SCAN =================
-def find_best_lock_round_168_180(all_groups, all_colors):
+def find_best_lock_round_168_180(all_groups):
     effective_lock_round_end = min(LOCK_ROUND_END, len(all_groups))
     if effective_lock_round_end < LOCK_ROUND_START:
         return None, [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -540,10 +478,7 @@ def find_best_lock_round_168_180(all_groups, all_colors):
         validate2_end = r
 
         train_groups = all_groups[:train_end]
-        train_colors = all_colors[:train_end]
-
-        all_to_validate_groups = all_groups[:validate2_end]
-        all_to_validate_colors = all_colors[:validate2_end]
+        validate_groups = all_groups[:validate2_end]
 
         (
             candidate_windows,
@@ -554,7 +489,7 @@ def find_best_lock_round_168_180(all_groups, all_colors):
         ) = build_window_tables(train_groups)
 
         pos_count = len(tmp_positive)
-        bundle_df = build_bundle_backtest(train_groups, train_colors, candidate_windows)
+        bundle_df = build_bundle_backtest(train_groups, candidate_windows)
 
         passed_rows = []
 
@@ -563,12 +498,12 @@ def find_best_lock_round_168_180(all_groups, all_colors):
                 windows = [int(x) for x in row["windows"].split(", ")]
 
                 val1_bt = backtest_bundle_vote_range(
-                    all_to_validate_groups, all_to_validate_colors, windows,
+                    validate_groups, windows,
                     validate1_start, validate1_end
                 )
 
                 val2_bt = backtest_bundle_vote_range(
-                    all_to_validate_groups, all_to_validate_colors, windows,
+                    validate_groups, windows,
                     validate2_start, validate2_end
                 )
 
@@ -597,20 +532,16 @@ def find_best_lock_round_168_180(all_groups, all_colors):
                         "windows": row["windows"],
                         "train_trades": row["train_trades"],
                         "train_profit_group": row["train_profit_group"],
-                        "train_profit_color": row["train_profit_color"],
                         "train_winrate_group": row["train_winrate_group"],
-                        "train_winrate_color": row["train_winrate_color"],
                         "train_max_drawdown_group": row["train_max_drawdown_group"],
                         "train_recent_profit_group": row["train_recent_profit_group"],
                         "train_score": row["train_score"],
                         "validate1_trades": val1_bt["trades"],
                         "validate1_profit_group": val1_bt["profit_group"],
-                        "validate1_profit_color": val1_bt["profit_color"],
                         "validate1_winrate_group": val1_bt["winrate_group"],
                         "validate1_max_drawdown_group": val1_bt["max_drawdown_group"],
                         "validate2_trades": val2_bt["trades"],
                         "validate2_profit_group": val2_bt["profit_group"],
-                        "validate2_profit_color": val2_bt["profit_color"],
                         "validate2_winrate_group": val2_bt["winrate_group"],
                         "validate2_max_drawdown_group": val2_bt["max_drawdown_group"],
                         "validate_pass": validate_pass,
@@ -732,10 +663,10 @@ if not st.session_state.live_initialized:
         bundle_df,
         candidate_df,
         round_eval_df,
-    ) = find_best_lock_round_168_180(groups, colors)
+    ) = find_best_lock_round_168_180(groups)
 
     if lock_round_used is None:
-        st.error("Không tìm được bộ lock tốt trong vùng 168 → 180 theo train/validate.")
+        st.error("Không tìm được bộ lock tốt trong vùng 168 → 180.")
         st.stop()
 
     st.session_state.locked_windows = locked_windows
@@ -786,44 +717,32 @@ for i in range(processed_until + 1, len(groups)):
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
     vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
 
-    # ===== RUN PRO =====
+    # ===== RUN GROUP THẬT =====
     run_group_signal = get_run_signal(groups[:i], RUN_MIN_LEN, RUN_MAX_LEN, RUN_MIN_SAMPLES, RUN_MIN_PROB)
-    run_color_signal = get_run_signal(colors[:i], RUN_MIN_LEN, RUN_MAX_LEN, RUN_MIN_SAMPLES, RUN_MIN_PROB)
 
     run_group_ok = True
-    run_color_ok = True
     run_group_prob = None
-    run_color_prob = None
+    run_override = False
+
+    final_vote_group = vote_group
 
     if run_group_signal is not None:
         run_group_prob = round(run_group_signal["prob"], 4)
         run_group_ok = (run_group_signal["next_value"] == vote_group)
 
-    if run_color_signal is not None:
-        run_color_prob = round(run_color_signal["prob"], 4)
-        run_color_ok = (run_color_signal["next_value"] == vote_color)
+        if run_group_signal["prob"] >= RUN_OVERRIDE_PROB:
+            final_vote_group = run_group_signal["next_value"]
+            run_override = True
 
-    # override nếu run quá mạnh
-    final_vote_group = vote_group
+    # color chỉ tham khảo
     final_vote_color = vote_color
-    run_override = False
 
-    if run_group_signal is not None and run_group_signal["prob"] >= RUN_OVERRIDE_PROB:
-        final_vote_group = run_group_signal["next_value"]
-        run_override = True
-
-    if run_color_signal is not None and run_color_signal["prob"] >= RUN_OVERRIDE_PROB:
-        final_vote_color = run_color_signal["next_value"]
-
-    group_color_ok = group_color_match(final_vote_group, final_vote_color)
-
-    # current run penalty / bonus
     current_group_run_value, current_group_run_len = get_current_run(groups[:i])
     current_color_run_value, current_color_run_len = get_current_run(colors[:i])
 
-    # regime
+    # regime nhẹ
     recent_health = backtest_bundle_vote_range(
-        groups[:i], colors[:i], locked_windows,
+        groups[:i], locked_windows,
         max(0, i - REGIME_LOOKBACK), i
     )
     regime_ok = (
@@ -852,11 +771,8 @@ for i in range(processed_until + 1, len(groups)):
                 "final_vote_color": final_vote_color,
                 "confidence_group": confidence_group,
                 "confidence_color": confidence_color,
-                "group_color_ok": group_color_ok,
                 "run_group_ok": run_group_ok,
-                "run_color_ok": run_color_ok,
                 "run_group_prob": run_group_prob,
-                "run_color_prob": run_color_prob,
                 "run_override": run_override,
                 "regime_ok": regime_ok,
                 "signal": False,
@@ -880,63 +796,46 @@ for i in range(processed_until + 1, len(groups)):
         processed_until = i
         continue
 
-    # ===== HYBRID SCORE PRO =====
+    # ===== HYBRID NHẸ =====
     hybrid_score = 0.0
 
-    # nền chính vẫn là window
     if confidence_group >= VOTE_REQUIRED:
-        hybrid_score += 0.38
+        hybrid_score += 0.45
+    elif confidence_group == 2:
+        hybrid_score += 0.18
 
-    if confidence_color >= 2:
-        hybrid_score += 0.08
-
-    # group/color khớp
-    if group_color_ok:
-        hybrid_score += 0.16
-
-    # run thật
+    # run group
     if run_group_signal is not None:
-        if run_group_ok:
-            hybrid_score += 0.12
+        if final_vote_group == run_group_signal["next_value"]:
+            hybrid_score += 0.18
         else:
-            hybrid_score -= 0.10
+            hybrid_score -= 0.08
 
         if run_group_signal["prob"] >= RUN_STRONG_PROB:
-            hybrid_score += 0.06
-
-    if run_color_signal is not None:
-        if run_color_ok:
             hybrid_score += 0.08
-        else:
-            hybrid_score -= 0.06
 
     # regime
     if regime_ok:
-        hybrid_score += 0.10
+        hybrid_score += 0.12
     else:
-        hybrid_score -= 0.10
-
-    # anti overfit: quá đẹp thì trừ nhẹ
-    if confidence_group >= VOTE_REQUIRED and run_group_ok and regime_ok:
         hybrid_score -= 0.08
 
-    # anti chase trend: run quá dài
+    # anti chase trend
     if current_group_run_len >= 3:
-        hybrid_score -= 0.10
+        hybrid_score -= 0.08
     if current_group_run_len >= 4:
         hybrid_score -= 0.08
 
-    # nếu vừa override bởi run rất mạnh thì cộng lại
+    # override mạnh
     if run_override:
         hybrid_score += 0.08
 
-    # streak xấu
+    # anti streak
     if group_consecutive_losses >= 1:
-        hybrid_score -= 0.08
+        hybrid_score -= 0.06
     if group_consecutive_losses >= 2:
-        hybrid_score -= 0.15
+        hybrid_score -= 0.12
 
-    # clamp
     hybrid_score = max(0.0, min(1.0, hybrid_score))
 
     action = "WAIT"
@@ -949,8 +848,6 @@ for i in range(processed_until + 1, len(groups)):
         (not group_pause)
         and new_signal
         and distance >= GAP
-        and group_color_ok
-        and regime_ok
         and action in ("BET", "BET_SMALL")
     )
 
@@ -990,6 +887,7 @@ for i in range(processed_until + 1, len(groups)):
                 group_pause = True
                 state = "GROUP_PAUSE_LOSS"
 
+        # color chỉ thống kê
         if colors[i] == final_vote_color:
             hit_color = 1
             total_profit_color += WIN_COLOR
@@ -1001,8 +899,6 @@ for i in range(processed_until + 1, len(groups)):
     else:
         if group_pause:
             state = "GROUP_PAUSED"
-        elif not group_color_ok:
-            state = "GROUP_COLOR_MISMATCH"
         elif not regime_ok:
             state = "REGIME_BLOCK"
         elif new_signal:
@@ -1022,11 +918,8 @@ for i in range(processed_until + 1, len(groups)):
             "final_vote_color": final_vote_color,
             "confidence_group": confidence_group,
             "confidence_color": confidence_color,
-            "group_color_ok": group_color_ok,
             "run_group_ok": run_group_ok,
-            "run_color_ok": run_color_ok,
             "run_group_prob": run_group_prob,
-            "run_color_prob": run_color_prob,
             "run_override": run_override,
             "regime_ok": regime_ok,
             "signal": new_signal,
@@ -1087,33 +980,21 @@ else:
     vote_color, confidence_color = None, 0
 
 run_group_signal = get_run_signal(groups, RUN_MIN_LEN, RUN_MAX_LEN, RUN_MIN_SAMPLES, RUN_MIN_PROB)
-run_color_signal = get_run_signal(colors, RUN_MIN_LEN, RUN_MAX_LEN, RUN_MIN_SAMPLES, RUN_MIN_PROB)
 
 run_group_ok = True
-run_color_ok = True
 run_group_prob = None
-run_color_prob = None
+run_override = False
 
+final_vote_group = vote_group
 if run_group_signal is not None and vote_group is not None:
     run_group_prob = round(run_group_signal["prob"], 4)
     run_group_ok = (run_group_signal["next_value"] == vote_group)
 
-if run_color_signal is not None and vote_color is not None:
-    run_color_prob = round(run_color_signal["prob"], 4)
-    run_color_ok = (run_color_signal["next_value"] == vote_color)
+    if run_group_signal["prob"] >= RUN_OVERRIDE_PROB:
+        final_vote_group = run_group_signal["next_value"]
+        run_override = True
 
-final_vote_group = vote_group
-final_vote_color = vote_color
-run_override = False
-
-if run_group_signal is not None and run_group_signal["prob"] >= RUN_OVERRIDE_PROB:
-    final_vote_group = run_group_signal["next_value"]
-    run_override = True
-
-if run_color_signal is not None and run_color_signal["prob"] >= RUN_OVERRIDE_PROB:
-    final_vote_color = run_color_signal["next_value"]
-
-group_color_ok = group_color_match(final_vote_group, final_vote_color)
+final_vote_color = vote_color  # chỉ tham khảo
 
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
@@ -1128,7 +1009,7 @@ else:
     distance = 999
 
 recent_health = backtest_bundle_vote_range(
-    groups, colors, locked_windows,
+    groups, locked_windows,
     max(0, len(groups) - REGIME_LOOKBACK), len(groups)
 )
 regime_ok = (
@@ -1141,39 +1022,36 @@ new_signal = confidence_group >= VOTE_REQUIRED if vote_group is not None else Fa
 
 hybrid_score = 0.0
 if confidence_group >= VOTE_REQUIRED:
-    hybrid_score += 0.38
-if confidence_color >= 2:
-    hybrid_score += 0.08
-if group_color_ok:
-    hybrid_score += 0.16
+    hybrid_score += 0.45
+elif confidence_group == 2:
+    hybrid_score += 0.18
+
 if run_group_signal is not None:
     if final_vote_group == run_group_signal["next_value"]:
-        hybrid_score += 0.12
+        hybrid_score += 0.18
     else:
-        hybrid_score -= 0.10
+        hybrid_score -= 0.08
+
     if run_group_signal["prob"] >= RUN_STRONG_PROB:
-        hybrid_score += 0.06
-if run_color_signal is not None:
-    if final_vote_color == run_color_signal["next_value"]:
         hybrid_score += 0.08
-    else:
-        hybrid_score -= 0.06
+
 if regime_ok:
-    hybrid_score += 0.10
+    hybrid_score += 0.12
 else:
-    hybrid_score -= 0.10
-if confidence_group >= VOTE_REQUIRED and regime_ok:
     hybrid_score -= 0.08
+
 if current_group_run_len >= 3:
-    hybrid_score -= 0.10
+    hybrid_score -= 0.08
 if current_group_run_len >= 4:
     hybrid_score -= 0.08
+
 if run_override:
     hybrid_score += 0.08
+
 if group_consecutive_losses >= 1:
-    hybrid_score -= 0.08
+    hybrid_score -= 0.06
 if group_consecutive_losses >= 2:
-    hybrid_score -= 0.15
+    hybrid_score -= 0.12
 
 hybrid_score = max(0.0, min(1.0, hybrid_score))
 
@@ -1188,8 +1066,6 @@ can_bet = (
     and (not group_pause)
     and new_signal
     and distance >= GAP
-    and group_color_ok
-    and regime_ok
     and next_action in ("BET", "BET_SMALL")
 )
 
@@ -1204,11 +1080,8 @@ next_row = {
     "final_vote_color": final_vote_color,
     "confidence_group": confidence_group,
     "confidence_color": confidence_color,
-    "group_color_ok": group_color_ok,
     "run_group_ok": run_group_ok,
-    "run_color_ok": run_color_ok,
     "run_group_prob": run_group_prob,
-    "run_color_prob": run_color_prob,
     "run_override": run_override,
     "regime_ok": regime_ok,
     "signal": new_signal,
@@ -1232,7 +1105,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 PRO RUN THẬT + LOCK WINDOW")
+st.title("🎯 PRO RUN THẬT NHẸ - BỎ COLOR KHỎI FILTER")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -1247,9 +1120,7 @@ st.write("Window Vote Group:", vote_group)
 st.write("Window Vote Color:", vote_color)
 st.write("Final Vote Group:", final_vote_group)
 st.write("Final Vote Color:", final_vote_color)
-st.write("Group/Color Match:", group_color_ok)
 st.write("Run Group Prob:", run_group_prob)
-st.write("Run Color Prob:", run_color_prob)
 st.write("Run Override:", run_override)
 st.write("Current Group Run Len:", current_group_run_len)
 st.write("Current Color Run Len:", current_color_run_len)
@@ -1275,9 +1146,9 @@ if group_pause:
 elif pause_rounds_left > 0:
     st.warning(f"⏸ PAUSE - nghỉ {pause_rounds_left} vòng")
 elif can_bet and next_action == "BET":
-    st.error(f"🔥 BET FULL → GROUP {final_vote_group} | COLOR {final_vote_color}")
+    st.error(f"🔥 BET FULL → GROUP {final_vote_group}")
 elif can_bet and next_action == "BET_SMALL":
-    st.warning(f"⚠️ BET SMALL → GROUP {final_vote_group} | COLOR {final_vote_color}")
+    st.warning(f"⚠️ BET SMALL → GROUP {final_vote_group}")
 else:
     st.info("WAIT")
 
