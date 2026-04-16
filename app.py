@@ -22,7 +22,7 @@ WINDOW_MAX = 18
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 2
 VOTE_REQUIRED = 3
-GAP = 1
+GAP = 0
 
 # Group PnL
 WIN_GROUP = 2.5
@@ -37,7 +37,7 @@ PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 26
 
 # Pause group nếu:
-GROUP_MAX_LOSS_STREAK = 3  # thua 3 lệnh group liên tiếp
+GROUP_MAX_LOSS_STREAK = 4  # thua 3 lệnh group liên tiếp
 GROUP_PROFIT_STOP = 3.0    # profit group >= 6
 
 # ================= LOAD DATA =================
