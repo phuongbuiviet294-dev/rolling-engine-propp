@@ -13,7 +13,7 @@ st_autorefresh(interval=1500, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # Bắt đầu scan từ đây, nếu đủ điều kiện thì lock luôn
-LOCK_ROUND_START = 144
+LOCK_ROUND_START = 120
 LOCK_SCAN_END = 180  # chỉ để tham chiếu, không bắt buộc phải đợi tới đây nữa
 
 WINDOW_MIN = 6
