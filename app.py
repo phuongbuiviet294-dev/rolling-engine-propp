@@ -23,17 +23,21 @@ MIN_POSITIVE_WINDOWS = 3
 VOTE_REQUIRED = 3
 GAP = 1
 
-# hệ group
+# Group PnL
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-# hệ color
+# Color PnL
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 30
+
+# NEW RULE
+GROUP_MAX_LOSS_STREAK = 3
+GROUP_PROFIT_STOP = 6.0
 
 # ================= LOAD DATA =================
 @st.cache_data(ttl=10)
@@ -42,8 +46,10 @@ def load_numbers():
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export"
         f"?format=csv&cache={time.time()}"
     )
-    df = pd.read_csv(url, usecols=["number"])
-    df.columns = ["number"]
+    df = pd.read_csv(url)
+    df.columns = [c.lower() for c in df.columns]
+    if "number" not in df.columns:
+        raise ValueError("Sheet must contain column 'number'")
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
@@ -87,13 +93,12 @@ def evaluate_window_group(seq_groups, w):
     trades = 0
     wins = 0
 
-    s = seq_groups
-    n = len(s)
+    n = len(seq_groups)
     for i in range(w, n):
-        pred = s[i - w]
-        if s[i - 1] != pred:
+        pred = seq_groups[i - w]
+        if seq_groups[i - 1] != pred:
             trades += 1
-            if s[i] == pred:
+            if seq_groups[i] == pred:
                 profit += WIN_GROUP
                 wins += 1
             else:
@@ -134,7 +139,6 @@ def build_window_tables(train_groups):
 
     if len(positive_df) >= MIN_POSITIVE_WINDOWS and len(selected_df) < TOP_WINDOWS:
         selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
-
         remain_df = df[~df["window"].isin(selected_windows)].copy()
         remain_df = remain_df.sort_values(
             ["score", "profit", "winrate", "trades"],
@@ -228,9 +232,9 @@ def init_state():
         "processed_until": None,
 
         # group
-        "total_profit": 0.0,
+        "total_profit_group": 0.0,
         "last_trade": -999,
-        "hits": [],
+        "hits_group": [],
 
         # color
         "total_profit_color": 0.0,
@@ -239,7 +243,7 @@ def init_state():
         # history
         "history_rows": [],
 
-        # lock cố định
+        # lock fixed
         "locked_windows": [],
         "scan_df_all": pd.DataFrame(),
         "scan_df_positive": pd.DataFrame(),
@@ -255,6 +259,10 @@ def init_state():
         "last_trade_was_loss": False,
         "consecutive_losses": 0,
         "pause_rounds_left": 0,
+
+        # new group pause rule
+        "group_consecutive_losses": 0,
+        "group_pause": False,
     }
 
     for k, v in defaults.items():
@@ -305,10 +313,10 @@ if not st.session_state.live_initialized:
     st.session_state.live_initialized = True
 
 # ================= LOAD LOCAL STATE =================
-total_profit = st.session_state.total_profit
+total_profit_group = st.session_state.total_profit_group
 total_profit_color = st.session_state.total_profit_color
 last_trade = st.session_state.last_trade
-hits = st.session_state.hits
+hits_group = st.session_state.hits_group
 hits_color = st.session_state.hits_color
 history_rows = st.session_state.history_rows
 
@@ -325,6 +333,9 @@ keep_rounds_left = st.session_state.keep_rounds_left
 last_trade_was_loss = st.session_state.last_trade_was_loss
 consecutive_losses = st.session_state.consecutive_losses
 pause_rounds_left = st.session_state.pause_rounds_left
+
+group_consecutive_losses = st.session_state.group_consecutive_losses
+group_pause = st.session_state.group_pause
 
 # ================= MAIN LOOP =================
 for i in range(processed_until + 1, len(groups)):
@@ -352,6 +363,11 @@ for i in range(processed_until + 1, len(groups)):
     hit_color = None
     state = "WAIT"
 
+    # Rule: profit group >= +6 => pause group forever
+    if total_profit_group >= GROUP_PROFIT_STOP:
+        group_pause = True
+
+    # Pause after 2 consecutive losses
     if pause_rounds_left > 0:
         pause_rounds_left -= 1
         state = "PAUSE"
@@ -379,11 +395,13 @@ for i in range(processed_until + 1, len(groups)):
                 "hit_group": None,
                 "hit_color": None,
                 "state": state,
-                "total_profit": total_profit,
+                "total_profit_group": total_profit_group,
                 "total_profit_color": total_profit_color,
                 "locked_windows": ", ".join(map(str, locked_windows)),
                 "consecutive_losses": consecutive_losses,
                 "pause_left": pause_rounds_left,
+                "group_consecutive_losses": group_consecutive_losses,
+                "group_pause": group_pause,
             }
         )
         processed_until = i
@@ -400,13 +418,17 @@ for i in range(processed_until + 1, len(groups)):
             used_keep = True
 
     final_signal = new_signal or used_keep
-    trade = final_signal and distance >= GAP
+
+    # Block group trade if group_pause = True
+    trade = (not group_pause) and final_signal and distance >= GAP
     can_bet = trade
 
     if trade and used_keep:
         state = "TRADE_KEEP"
     elif trade:
         state = "TRADE"
+    elif group_pause:
+        state = "GROUP_PAUSED"
     elif new_signal:
         state = "SIGNAL"
     elif used_keep:
@@ -425,21 +447,29 @@ for i in range(processed_until + 1, len(groups)):
     if trade:
         last_trade = i
 
-        # ===== group =====
+        # ===== GROUP =====
         if groups[i] == final_vote_group:
             hit_group = 1
-            total_profit += WIN_GROUP
-            hits.append(1)
+            total_profit_group += WIN_GROUP
+            hits_group.append(1)
 
             last_trade_was_loss = False
             keep_rounds_left = 0
             keep_bet_group = None
             consecutive_losses = 0
+            group_consecutive_losses = 0
+
+            if total_profit_group >= GROUP_PROFIT_STOP:
+                group_pause = True
+                state = "GROUP_PAUSE_PROFIT"
+
         else:
             hit_group = 0
-            total_profit += LOSS_GROUP
-            hits.append(0)
+            total_profit_group += LOSS_GROUP
+            hits_group.append(0)
+
             consecutive_losses += 1
+            group_consecutive_losses += 1
 
             if used_keep:
                 if keep_rounds_left <= 0:
@@ -452,6 +482,7 @@ for i in range(processed_until + 1, len(groups)):
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote_group
 
+            # Pause 4 rounds after 2 consecutive losses
             if consecutive_losses >= 2:
                 pause_rounds_left = PAUSE_AFTER_2_LOSSES
                 keep_rounds_left = 0
@@ -460,7 +491,15 @@ for i in range(processed_until + 1, len(groups)):
                 consecutive_losses = 0
                 state = "PAUSE_TRIGGER"
 
-        # ===== color =====
+            # Group pause after 3 consecutive losses
+            if group_consecutive_losses >= GROUP_MAX_LOSS_STREAK:
+                group_pause = True
+                keep_rounds_left = 0
+                keep_bet_group = None
+                last_trade_was_loss = False
+                state = "GROUP_PAUSE_LOSS"
+
+        # ===== COLOR =====
         if colors[i] == vote_color:
             hit_color = 1
             total_profit_color += WIN_COLOR
@@ -499,21 +538,23 @@ for i in range(processed_until + 1, len(groups)):
             "hit_group": hit_group,
             "hit_color": hit_color,
             "state": state,
-            "total_profit": total_profit,
+            "total_profit_group": total_profit_group,
             "total_profit_color": total_profit_color,
             "locked_windows": ", ".join(map(str, locked_windows)),
             "consecutive_losses": consecutive_losses,
             "pause_left": pause_rounds_left,
+            "group_consecutive_losses": group_consecutive_losses,
+            "group_pause": group_pause,
         }
     )
 
     processed_until = i
 
 # ================= SAVE STATE =================
-st.session_state.total_profit = total_profit
+st.session_state.total_profit_group = total_profit_group
 st.session_state.total_profit_color = total_profit_color
 st.session_state.last_trade = last_trade
-st.session_state.hits = hits
+st.session_state.hits_group = hits_group
 st.session_state.hits_color = hits_color
 st.session_state.history_rows = history_rows
 
@@ -531,6 +572,9 @@ st.session_state.keep_rounds_left = keep_rounds_left
 st.session_state.last_trade_was_loss = last_trade_was_loss
 st.session_state.consecutive_losses = consecutive_losses
 st.session_state.pause_rounds_left = pause_rounds_left
+
+st.session_state.group_consecutive_losses = group_consecutive_losses
+st.session_state.group_pause = group_pause
 
 hist = pd.DataFrame(history_rows)
 
@@ -579,8 +623,12 @@ else:
 
     final_signal = new_signal or used_keep_next
     signal = final_signal
-    can_bet = signal and distance >= GAP
-    next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
+    can_bet = (not group_pause) and signal and distance >= GAP
+
+    if group_pause:
+        next_state = "GROUP_PAUSED"
+    else:
+        next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 
 next_row = {
     "round": next_round,
@@ -604,17 +652,19 @@ next_row = {
     "hit_group": None,
     "hit_color": None,
     "state": next_state,
-    "total_profit": total_profit,
+    "total_profit_group": total_profit_group,
     "total_profit_color": total_profit_color,
     "locked_windows": ", ".join(map(str, locked_windows)),
     "consecutive_losses": consecutive_losses,
     "pause_left": pause_rounds_left,
+    "group_consecutive_losses": group_consecutive_losses,
+    "group_pause": group_pause,
 }
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Rolling Engine - group + color, no relock")
+st.title("🎯 Rolling Engine - fixed lock + color + group stop")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -632,6 +682,8 @@ st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
 st.write("Consecutive Losses:", consecutive_losses)
 st.write("Pause Rounds Left:", pause_rounds_left)
+st.write("Group Loss Streak:", group_consecutive_losses)
+st.write("Group Pause:", group_pause)
 st.write("Processed Until:", processed_until)
 
 st.markdown(
@@ -643,7 +695,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if pause_rounds_left > 0:
+if group_pause:
+    st.warning("⛔ GROUP PAUSED (thua 3 liên tiếp hoặc profit group >= +6)")
+elif pause_rounds_left > 0:
     st.warning(f"⏸ PAUSE - Đang nghỉ {pause_rounds_left} vòng do thua 2 lệnh liên tiếp")
 elif can_bet and final_vote_group is not None:
     st.markdown(
@@ -659,9 +713,9 @@ else:
 
 st.subheader("Session Statistics")
 s1, s2, s3, s4 = st.columns(4)
-s1.metric("Total Profit Group", total_profit)
-s2.metric("Trades Group", len(hits))
-s3.metric("Winrate Group %", round(np.mean(hits) * 100, 2) if hits else 0)
+s1.metric("Total Profit Group", total_profit_group)
+s2.metric("Trades Group", len(hits_group))
+s3.metric("Winrate Group %", round(np.mean(hits_group) * 100, 2) if hits_group else 0)
 s4.metric("Pause Left", pause_rounds_left)
 
 s5, s6, s7 = st.columns(3)
@@ -671,7 +725,7 @@ s7.metric("Winrate Color %", round(np.mean(hits_color) * 100, 2) if hits_color e
 
 st.subheader("Profit Curve - Total Group")
 if not hist_display.empty:
-    st.line_chart(hist_display["total_profit"])
+    st.line_chart(hist_display["total_profit_group"])
 
 st.subheader("Profit Curve - Total Color")
 if not hist_display.empty:
@@ -700,6 +754,8 @@ def highlight_trade(row):
         return ["background-color: #87ceeb; color:black"] * len(row)
     if row["state"] == "PAUSE_TRIGGER":
         return ["background-color: #9370db; color:white"] * len(row)
+    if row["state"] in ("GROUP_PAUSED", "GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS"):
+        return ["background-color: #696969; color:white"] * len(row)
     if row["trade"]:
         return ["background-color: #ff4b4b; color:white"] * len(row)
     return [""] * len(row)
