@@ -34,12 +34,12 @@ WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
 # Keep / pause
-KEEP_AFTER_LOSS_ROUNDS = 2     # =0 nếu muốn bỏ keep sau thua
+KEEP_AFTER_LOSS_ROUNDS = 2      # =0 nếu muốn bỏ keep sau thua
 PAUSE_AFTER_2_LOSSES = 0
 
 # Group stop logic
 GROUP_MAX_LOSS_STREAK = 5
-GROUP_PROFIT_STOP = 5.0          # đạt +6 thì nghỉ bet group
+GROUP_PROFIT_STOP = 6.0          # đạt +6 thì nghỉ bet group
 
 # Window filter
 MIN_TRADES_PER_WINDOW = 20
@@ -1168,4 +1168,17 @@ def highlight_trade(row):
         return ["background-color: #87ceeb; color:black"] * len(row)
     if row["state"] == "PAUSE_TRIGGER":
         return ["background-color: #9370db; color:white"] * len(row)
-    if row["state"] in (
+    if row["state"] in ("GROUP_PAUSED", "GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS"):
+        return ["background-color: #696969; color:white"] * len(row)
+    if row["state"] == "GROUP_COLOR_MISMATCH":
+        return ["background-color: #f0ad4e; color:black"] * len(row)
+    if row["trade"]:
+        return ["background-color: #ff4b4b; color:white"] * len(row)
+    return [""] * len(row)
+
+st.dataframe(
+    hist_display.iloc[::-1].style.apply(highlight_trade, axis=1),
+    use_container_width=True,
+)
+
+st.write("Total Rows:", len(numbers))
