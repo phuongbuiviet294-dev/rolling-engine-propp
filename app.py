@@ -11,32 +11,32 @@ st_autorefresh(interval=2000, key="refresh")
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# Live starts here
+# Chỉ tính profit live từ đây
 LIVE_START = 168
 
 # Run config
 MIN_RUN_LEN = 2
 MAX_RUN_LEN = 5
 
-# Pattern quality
-MIN_SAMPLES = 5
-MIN_PROB = 0.38
-MIN_EDGE = 0.08
+# Pattern quality - NỚI
+MIN_SAMPLES = 3
+MIN_PROB = 0.34
+MIN_EDGE = 0.00
 
-# Trading thresholds
-BET_PROB = 0.62
-BET_SMALL_PROB = 0.50
+# Trading thresholds - NỚI
+BET_PROB = 0.52
+BET_SMALL_PROB = 0.40
 
-# Risk / execution
-GAP = 2
-PAUSE_AFTER_2_LOSSES = 3
+# Execution / risk
+GAP = 1
+PAUSE_AFTER_2_LOSSES = 2
 GROUP_PROFIT_STOP = 8.0
-GROUP_MAX_LOSS_STREAK = 5
+GROUP_MAX_LOSS_STREAK = 6
 
-# Regime filter
-REGIME_LOOKBACK = 12
-REGIME_MIN_TRADES = 4
-REGIME_MIN_WR = 0.34
+# Regime filter - NỚI
+REGIME_LOOKBACK = 10
+REGIME_MIN_TRADES = 2
+REGIME_MIN_WR = 0.25
 
 # PnL
 WIN_GROUP = 2.5
@@ -112,15 +112,14 @@ def build_run_stats(seq, min_run_len=2, max_run_len=5):
 
 def get_signal(seq):
     """
-    Trả về tín hiệu tốt nhất cho current run:
+    Tìm tín hiệu cho run hiện tại:
     (group hiện tại, run_len hiện tại) -> next group
     """
-    if len(seq) < 20:
+    if len(seq) < 10:
         return None, None
 
     stats = build_run_stats(seq, MIN_RUN_LEN, MAX_RUN_LEN)
     g, run_len = get_current_run(seq)
-
     capped_len = min(run_len, MAX_RUN_LEN)
 
     for rl in range(capped_len, MIN_RUN_LEN - 1, -1):
@@ -136,7 +135,6 @@ def get_signal(seq):
             pred, top1 = ranked[0]
             prob = top1 / total
 
-            edge = 0.0
             if len(ranked) > 1:
                 edge = top1 / total - ranked[1][1] / total
             else:
@@ -155,7 +153,7 @@ def get_signal(seq):
 
     return None, stats
 
-def calc_recent_regime_from_hits(hits, lookback=12):
+def calc_recent_regime_from_hits(hits, lookback=10):
     if not hits:
         return {
             "recent_trades": 0,
@@ -194,7 +192,7 @@ def init_state():
 
 init_state()
 
-# reset khi data ngắn lại
+# reset nếu data bị ngắn lại
 if st.session_state.base_data_len is not None and len(groups) < st.session_state.base_data_len:
     for k in list(st.session_state.keys()):
         del st.session_state[k]
@@ -225,7 +223,6 @@ for i in range(processed, len(groups) - 1):
 
     current_group, current_run_len = get_current_run(seq)
     signal, _stats = get_signal(seq)
-
     regime = calc_recent_regime_from_hits(hits, REGIME_LOOKBACK)
 
     action = "WAIT"
@@ -233,11 +230,12 @@ for i in range(processed, len(groups) - 1):
     hit = None
     trade = False
     state = "WAIT"
+
     signal_prob = None
     signal_samples = None
     signal_edge = None
+    adj_prob = None
 
-    # hard stop
     if profit >= GROUP_PROFIT_STOP:
         group_pause = True
 
@@ -256,26 +254,29 @@ for i in range(processed, len(groups) - 1):
 
         adj_prob = signal_prob
 
-        # penalty nếu run quá dài, tránh đu trend muộn
+        # penalty nhẹ nếu run quá dài
         if current_run_len >= 5:
-            adj_prob -= 0.05
+            adj_prob -= 0.02
         elif current_run_len >= 4:
+            adj_prob -= 0.01
+
+        # regime yếu chỉ trừ nhẹ
+        if not regime["regime_ok"]:
             adj_prob -= 0.02
 
-        # regime yếu thì giảm xác suất hiệu lực
-        if not regime["regime_ok"]:
-            adj_prob -= 0.06
-
-        # rules vào lệnh
-        if (
+        can_consider = (
             current_run_len >= MIN_RUN_LEN
             and signal_samples >= MIN_SAMPLES
             and (i - last_trade_round) >= GAP
-        ):
+        )
+
+        if can_consider:
             if adj_prob >= BET_PROB:
                 action = "BET"
-            elif adj_prob >= BET_SMALL_PROB and regime["regime_ok"]:
+            elif adj_prob >= BET_SMALL_PROB:
                 action = "BET_SMALL"
+            else:
+                action = "WAIT"
 
         if action in ("BET", "BET_SMALL"):
             trade = True
@@ -299,10 +300,8 @@ for i in range(processed, len(groups) - 1):
                     loss_streak = 0
                     state = "PAUSE_TRIGGER"
 
-                # nếu 5 lệnh gần nhất toàn thua thì stop
                 if len(hits) >= GROUP_MAX_LOSS_STREAK:
-                    last_hits = hits[-GROUP_MAX_LOSS_STREAK:]
-                    if sum(last_hits) == 0:
+                    if sum(hits[-GROUP_MAX_LOSS_STREAK:]) == 0:
                         group_pause = True
                         state = "STOP_BAD_STREAK"
 
@@ -316,6 +315,7 @@ for i in range(processed, len(groups) - 1):
         "signal_prob": round(signal_prob, 4) if signal_prob is not None else None,
         "signal_samples": signal_samples,
         "signal_edge": round(signal_edge, 4) if signal_edge is not None else None,
+        "adj_prob": round(adj_prob, 4) if adj_prob is not None else None,
         "recent_wr": round(regime["recent_wr"], 4),
         "recent_trades": regime["recent_trades"],
         "regime_ok": regime["regime_ok"],
@@ -325,6 +325,7 @@ for i in range(processed, len(groups) - 1):
         "state": state,
         "profit": round(profit, 2),
         "pause": pause,
+        "gap_ok": (i - last_trade_round) >= GAP if action == "WAIT" else True,
     })
 
     processed = i + 1
@@ -351,6 +352,7 @@ next_group = None
 next_prob = None
 next_samples = None
 next_edge = None
+next_adj_prob = None
 next_action = "WAIT"
 
 if next_signal:
@@ -359,29 +361,33 @@ if next_signal:
     next_samples = int(next_signal["samples"])
     next_edge = float(next_signal["edge"])
 
-    adj_prob = next_prob
+    next_adj_prob = next_prob
 
     if current_run_len >= 5:
-        adj_prob -= 0.05
+        next_adj_prob -= 0.02
     elif current_run_len >= 4:
-        adj_prob -= 0.02
+        next_adj_prob -= 0.01
 
     if not regime["regime_ok"]:
-        adj_prob -= 0.06
+        next_adj_prob -= 0.02
+
+    gap_ok = (len(groups) - 1 - last_trade_round) >= GAP
 
     if pause > 0 or group_pause:
         next_action = "WAIT"
-    elif (len(groups) - 1 - last_trade_round) < GAP:
+    elif not gap_ok:
         next_action = "WAIT"
-    elif adj_prob >= BET_PROB:
+    elif next_adj_prob >= BET_PROB:
         next_action = "BET"
-    elif adj_prob >= BET_SMALL_PROB and regime["regime_ok"]:
+    elif next_adj_prob >= BET_SMALL_PROB:
         next_action = "BET_SMALL"
     else:
         next_action = "WAIT"
+else:
+    gap_ok = (len(groups) - 1 - last_trade_round) >= GAP
 
 # ================= UI =================
-st.title("🎯 RUN GROUP LIVE CHUẨN")
+st.title("🎯 RUN GROUP LIVE - BẢN NỚI CÒN CÓ TRADE")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Group", current_group)
@@ -398,6 +404,8 @@ st.write("Regime OK:", regime["regime_ok"])
 st.write("Signal Prob:", round(next_prob, 4) if next_prob is not None else "-")
 st.write("Signal Samples:", next_samples if next_samples is not None else "-")
 st.write("Signal Edge:", round(next_edge, 4) if next_edge is not None else "-")
+st.write("Adjusted Prob:", round(next_adj_prob, 4) if next_adj_prob is not None else "-")
+st.write("Gap OK:", gap_ok)
 
 if group_pause:
     st.error("STOP GROUP")
@@ -428,11 +436,12 @@ with st.expander("Run Pattern Stats"):
             total = sum(cnt.values())
             top = cnt.most_common(1)[0]
             ranked = cnt.most_common(2)
-            edge = 0.0
+
             if len(ranked) > 1:
                 edge = ranked[0][1] / total - ranked[1][1] / total
             else:
                 edge = ranked[0][1] / total
+
             rows.append({
                 "run_group": run_group,
                 "run_len": run_len,
@@ -443,9 +452,10 @@ with st.expander("Run Pattern Stats"):
                 "edge": round(edge, 4),
                 "dist": dict(cnt),
             })
+
         stats_df = pd.DataFrame(rows).sort_values(
-            ["top1_prob", "edge", "samples", "run_len"],
-            ascending=[False, False, False, False]
+            ["top1_prob", "samples", "run_len"],
+            ascending=[False, False, False]
         )
         st.dataframe(stats_df, use_container_width=True)
 
