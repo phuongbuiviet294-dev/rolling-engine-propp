@@ -19,9 +19,9 @@ LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
 WINDOW_MAX = 26
-TOP_WINDOWS = 8
+TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 1
-VOTE_REQUIRED = 5
+VOTE_REQUIRED = 3
 GAP = 1
 
 # Group PnL
@@ -54,6 +54,7 @@ WINDOW_SCORE_WINRATE_WEIGHT = 8.0
 WINDOW_SCORE_TRADES_WEIGHT = 1.2
 WINDOW_SCORE_RECENT_WEIGHT = 0.8
 WINDOW_SCORE_DRAWDOWN_PENALTY = 0.7
+WINDOW_SCORE_STREAK_WEIGHT = 1.2
 
 # Score weights - bundle train
 BUNDLE_SCORE_PROFIT_WEIGHT = 1.0
@@ -61,11 +62,13 @@ BUNDLE_SCORE_WINRATE_WEIGHT = 10.0
 BUNDLE_SCORE_TRADES_WEIGHT = 1.5
 BUNDLE_SCORE_DRAWDOWN_PENALTY = 1.0
 BUNDLE_SCORE_RECENT_WEIGHT = 1.0
+BUNDLE_SCORE_STREAK_WEIGHT = 1.5
 
 # Score weights - final after validate
 FINAL_VALIDATE_PROFIT_WEIGHT = 2.0
 FINAL_VALIDATE_WINRATE_WEIGHT = 8.0
 FINAL_VALIDATE_DRAWDOWN_PENALTY = 1.0
+FINAL_VALIDATE_STREAK_WEIGHT = 1.5
 
 
 # ================= LOAD DATA =================
@@ -139,6 +142,67 @@ def compute_recent_profit(results, recent_n, win_value, loss_value):
     return float(sum(win_value if r == 1 else loss_value for r in tail))
 
 
+def compute_streak_metrics(results):
+    """
+    results: list 0/1
+    """
+    if not results:
+        return {
+            "max_hit_streak": 0,
+            "max_loss_streak": 0,
+            "count_hit_streak_ge2": 0,
+            "count_loss_streak_ge2": 0,
+            "streak_score": -999999.0,
+        }
+
+    max_hit_streak = 0
+    max_loss_streak = 0
+    count_hit_streak_ge2 = 0
+    count_loss_streak_ge2 = 0
+
+    cur_val = results[0]
+    cur_len = 1
+
+    for x in results[1:]:
+        if x == cur_val:
+            cur_len += 1
+        else:
+            if cur_val == 1:
+                max_hit_streak = max(max_hit_streak, cur_len)
+                if cur_len >= 2:
+                    count_hit_streak_ge2 += 1
+            else:
+                max_loss_streak = max(max_loss_streak, cur_len)
+                if cur_len >= 2:
+                    count_loss_streak_ge2 += 1
+            cur_val = x
+            cur_len = 1
+
+    if cur_val == 1:
+        max_hit_streak = max(max_hit_streak, cur_len)
+        if cur_len >= 2:
+            count_hit_streak_ge2 += 1
+    else:
+        max_loss_streak = max(max_loss_streak, cur_len)
+        if cur_len >= 2:
+            count_loss_streak_ge2 += 1
+
+    streak_score = (
+        max_hit_streak * 2.0
+        + count_hit_streak_ge2 * 1.5
+        - max_loss_streak * 2.0
+        - count_loss_streak_ge2 * 1.5
+    )
+
+    return {
+        "max_hit_streak": max_hit_streak,
+        "max_loss_streak": max_loss_streak,
+        "count_hit_streak_ge2": count_hit_streak_ge2,
+        "count_loss_streak_ge2": count_loss_streak_ge2,
+        "streak_score": streak_score,
+    }
+
+
 def pick_spaced_windows(df_sorted, top_n, min_spacing):
     selected_rows = []
     for _, row in df_sorted.iterrows():
@@ -181,6 +245,7 @@ def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
     winrate_group = wins_group / trades if trades > 0 else 0.0
     max_drawdown_group = compute_max_drawdown(results_group, WIN_GROUP, LOSS_GROUP)
     recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+    streak_metrics = compute_streak_metrics(results_group)
 
     return {
         "trades": trades,
@@ -189,6 +254,11 @@ def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
         "winrate_group": winrate_group,
         "max_drawdown_group": max_drawdown_group,
         "recent_profit_group": recent_profit_group,
+        "max_hit_streak": streak_metrics["max_hit_streak"],
+        "max_loss_streak": streak_metrics["max_loss_streak"],
+        "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
+        "count_loss_streak_ge2": streak_metrics["count_loss_streak_ge2"],
+        "streak_score": streak_metrics["streak_score"],
     }
 
 
@@ -215,6 +285,7 @@ def evaluate_window_group(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0.0
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+    streak_metrics = compute_streak_metrics(results)
 
     if trades > 0:
         score = (
@@ -223,6 +294,7 @@ def evaluate_window_group(seq_groups, w):
             + np.log(trades + 1) * WINDOW_SCORE_TRADES_WEIGHT
             + recent_profit * WINDOW_SCORE_RECENT_WEIGHT
             - abs(max_drawdown) * WINDOW_SCORE_DRAWDOWN_PENALTY
+            + streak_metrics["streak_score"] * WINDOW_SCORE_STREAK_WEIGHT
         )
     else:
         score = -999999.0
@@ -235,6 +307,11 @@ def evaluate_window_group(seq_groups, w):
         "winrate": winrate,
         "max_drawdown": max_drawdown,
         "recent_profit": recent_profit,
+        "max_hit_streak": streak_metrics["max_hit_streak"],
+        "max_loss_streak": streak_metrics["max_loss_streak"],
+        "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
+        "count_loss_streak_ge2": streak_metrics["count_loss_streak_ge2"],
+        "streak_score": streak_metrics["streak_score"],
         "score": score,
     }
 
@@ -244,18 +321,31 @@ def build_window_tables(train_groups):
     df = pd.DataFrame(rows)
 
     df_all = df.sort_values(
-        ["score", "recent_profit", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False, False]
+        ["score", "streak_score", "recent_profit", "profit", "winrate", "trades"],
+        ascending=[False, False, False, False, False, False]
     ).reset_index(drop=True)
 
     positive_df = df[
         (df["profit"] > 0) &
-        (df["trades"] >= MIN_TRADES_PER_WINDOW)
+        (df["trades"] >= MIN_TRADES_PER_WINDOW) &
+        (df["count_hit_streak_ge2"] >= 1) &
+        (df["max_hit_streak"] >= 2) &
+        (df["max_loss_streak"] <= 4)
     ].copy()
 
     positive_df = positive_df.sort_values(
-        ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
-        ascending=[False, False, False, False, False, False]
+        [
+            "streak_score",
+            "count_hit_streak_ge2",
+            "max_hit_streak",
+            "score",
+            "recent_profit",
+            "profit",
+            "winrate",
+            "trades",
+            "max_loss_streak",
+        ],
+        ascending=[False, False, False, False, False, False, False, False, True]
     ).reset_index(drop=True)
 
     selected_seed = positive_df.head(MAX_CANDIDATE_WINDOWS).copy()
@@ -268,8 +358,18 @@ def build_window_tables(train_groups):
             (~df["window"].isin(selected_windows))
         ].copy()
         remain_df = remain_df.sort_values(
-            ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
-            ascending=[False, False, False, False, False, False]
+            [
+                "streak_score",
+                "count_hit_streak_ge2",
+                "max_hit_streak",
+                "score",
+                "recent_profit",
+                "profit",
+                "winrate",
+                "trades",
+                "max_loss_streak",
+            ],
+            ascending=[False, False, False, False, False, False, False, False, True]
         ).reset_index(drop=True)
 
         need = MAX_CANDIDATE_WINDOWS - len(selected_seed)
@@ -280,8 +380,18 @@ def build_window_tables(train_groups):
         selected_windows = set(selected_seed["window"].tolist()) if not selected_seed.empty else set()
         remain_df = df[~df["window"].isin(selected_windows)].copy()
         remain_df = remain_df.sort_values(
-            ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
-            ascending=[False, False, False, False, False, False]
+            [
+                "streak_score",
+                "count_hit_streak_ge2",
+                "max_hit_streak",
+                "score",
+                "recent_profit",
+                "profit",
+                "winrate",
+                "trades",
+                "max_loss_streak",
+            ],
+            ascending=[False, False, False, False, False, False, False, False, True]
         ).reset_index(drop=True)
 
         need = MAX_CANDIDATE_WINDOWS - len(selected_seed)
@@ -289,8 +399,18 @@ def build_window_tables(train_groups):
             selected_seed = pd.concat([selected_seed, remain_df.head(need)], ignore_index=True)
 
     candidate_df = selected_seed.sort_values(
-        ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
-        ascending=[False, False, False, False, False, False]
+        [
+            "streak_score",
+            "count_hit_streak_ge2",
+            "max_hit_streak",
+            "score",
+            "recent_profit",
+            "profit",
+            "winrate",
+            "trades",
+            "max_loss_streak",
+        ],
+        ascending=[False, False, False, False, False, False, False, False, True]
     ).reset_index(drop=True)
 
     spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING)
@@ -326,6 +446,7 @@ def build_bundle_backtest(train_groups, candidate_windows):
                     + np.log(train_bt["trades"] + 1) * BUNDLE_SCORE_TRADES_WEIGHT
                     + train_bt["recent_profit_group"] * BUNDLE_SCORE_RECENT_WEIGHT
                     - abs(train_bt["max_drawdown_group"]) * BUNDLE_SCORE_DRAWDOWN_PENALTY
+                    + train_bt["streak_score"] * BUNDLE_SCORE_STREAK_WEIGHT
                 )
             else:
                 train_score = -999999.0
@@ -338,6 +459,11 @@ def build_bundle_backtest(train_groups, candidate_windows):
                     "train_winrate_group": train_bt["winrate_group"],
                     "train_max_drawdown_group": train_bt["max_drawdown_group"],
                     "train_recent_profit_group": train_bt["recent_profit_group"],
+                    "train_max_hit_streak": train_bt["max_hit_streak"],
+                    "train_max_loss_streak": train_bt["max_loss_streak"],
+                    "train_count_hit_streak_ge2": train_bt["count_hit_streak_ge2"],
+                    "train_count_loss_streak_ge2": train_bt["count_loss_streak_ge2"],
+                    "train_streak_score": train_bt["streak_score"],
                     "train_score": train_score,
                 }
             )
@@ -345,10 +471,24 @@ def build_bundle_backtest(train_groups, candidate_windows):
     bundle_df = pd.DataFrame(bundle_rows)
 
     if not bundle_df.empty:
-        bundle_df = bundle_df.sort_values(
-            ["train_score", "train_profit_group", "train_winrate_group", "train_trades"],
-            ascending=[False, False, False, False]
-        ).reset_index(drop=True)
+        bundle_df = bundle_df[
+            (bundle_df["train_count_hit_streak_ge2"] >= 1) &
+            (bundle_df["train_max_hit_streak"] >= 2)
+        ].copy()
+
+        if not bundle_df.empty:
+            bundle_df = bundle_df.sort_values(
+                [
+                    "train_streak_score",
+                    "train_count_hit_streak_ge2",
+                    "train_max_hit_streak",
+                    "train_score",
+                    "train_profit_group",
+                    "train_winrate_group",
+                    "train_trades",
+                ],
+                ascending=[False, False, False, False, False, False, False]
+            ).reset_index(drop=True)
 
     return bundle_df
 
@@ -428,6 +568,8 @@ def find_best_lock_round_168_180(all_groups):
                     validate_bt["trades"] >= MIN_VALIDATE_TRADES
                     and validate_bt["profit_group"] >= VALIDATE_MIN_PROFIT
                     and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+                    and validate_bt["count_hit_streak_ge2"] >= 1
+                    and validate_bt["max_hit_streak"] >= 2
                 )
 
                 final_score = -999999.0
@@ -437,6 +579,7 @@ def find_best_lock_round_168_180(all_groups):
                         + validate_bt["profit_group"] * FINAL_VALIDATE_PROFIT_WEIGHT
                         + validate_bt["winrate_group"] * FINAL_VALIDATE_WINRATE_WEIGHT
                         - abs(validate_bt["max_drawdown_group"]) * FINAL_VALIDATE_DRAWDOWN_PENALTY
+                        + validate_bt["streak_score"] * FINAL_VALIDATE_STREAK_WEIGHT
                     )
 
                 passed_rows.append(
@@ -447,12 +590,22 @@ def find_best_lock_round_168_180(all_groups):
                         "train_winrate_group": row["train_winrate_group"],
                         "train_max_drawdown_group": row["train_max_drawdown_group"],
                         "train_recent_profit_group": row["train_recent_profit_group"],
+                        "train_max_hit_streak": row["train_max_hit_streak"],
+                        "train_max_loss_streak": row["train_max_loss_streak"],
+                        "train_count_hit_streak_ge2": row["train_count_hit_streak_ge2"],
+                        "train_count_loss_streak_ge2": row["train_count_loss_streak_ge2"],
+                        "train_streak_score": row["train_streak_score"],
                         "train_score": row["train_score"],
                         "validate_trades": validate_bt["trades"],
                         "validate_profit_group": validate_bt["profit_group"],
                         "validate_winrate_group": validate_bt["winrate_group"],
                         "validate_max_drawdown_group": validate_bt["max_drawdown_group"],
                         "validate_recent_profit_group": validate_bt["recent_profit_group"],
+                        "validate_max_hit_streak": validate_bt["max_hit_streak"],
+                        "validate_max_loss_streak": validate_bt["max_loss_streak"],
+                        "validate_count_hit_streak_ge2": validate_bt["count_hit_streak_ge2"],
+                        "validate_count_loss_streak_ge2": validate_bt["count_loss_streak_ge2"],
+                        "validate_streak_score": validate_bt["streak_score"],
                         "validate_pass": validate_pass,
                         "final_score": final_score,
                     }
@@ -462,8 +615,16 @@ def find_best_lock_round_168_180(all_groups):
 
         if not final_bundle_df.empty:
             final_bundle_df = final_bundle_df.sort_values(
-                ["final_score", "validate_profit_group", "train_profit_group", "validate_winrate_group"],
-                ascending=[False, False, False, False]
+                [
+                    "final_score",
+                    "validate_streak_score",
+                    "validate_count_hit_streak_ge2",
+                    "validate_max_hit_streak",
+                    "validate_profit_group",
+                    "train_profit_group",
+                    "validate_winrate_group",
+                ],
+                ascending=[False, False, False, False, False, False, False]
             ).reset_index(drop=True)
 
         validate_pass_count = (
@@ -662,11 +823,9 @@ for i in range(processed_until + 1, len(groups)):
     hit_group = None
     state = "WAIT"
 
-    # stop group nếu đạt target live
     if total_profit_group >= GROUP_PROFIT_STOP:
         group_pause = True
 
-    # pause do thua 2 lệnh liên tiếp
     if pause_rounds_left > 0:
         pause_rounds_left -= 1
         state = "PAUSE"
@@ -736,7 +895,6 @@ for i in range(processed_until + 1, len(groups)):
     if trade:
         last_trade = i
 
-        # ===== GROUP =====
         if groups[i] == final_vote_group:
             hit_group = 1
             total_profit_group += WIN_GROUP
@@ -920,7 +1078,7 @@ hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 
 # ================= UI =================
-st.title("🎯 Engine scan 168 → 180 | chỉ xét GROUP | profit chỉ tính từ trade thật")
+st.title("🎯 Engine scan 168 → 180 | chỉ xét GROUP | ưu tiên chuỗi hit >= 2")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
