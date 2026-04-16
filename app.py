@@ -14,7 +14,7 @@ st_autorefresh(interval=1500, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # Scan lock đúng vùng 168 -> 180
-LOCK_ROUND_START = 120
+LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
