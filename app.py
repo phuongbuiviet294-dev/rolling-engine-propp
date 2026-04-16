@@ -13,16 +13,16 @@ st_autorefresh(interval=1500, key="refresh")
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# scan lock vùng cố định
+# Scan lock vùng cố định
 LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
-# lock 6 windows để chạy daily ổn định
+# Lock 6 windows
 TOP_WINDOWS = 6
 WINDOW_MIN = 6
 WINDOW_MAX = 22
 
-# vote động:
+# Vote động:
 # mặc định 6 vote 4
 # nếu regime tốt thì 6 vote 5
 BASE_VOTE_REQUIRED = 4
@@ -34,31 +34,35 @@ GAP = 1
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-# keep / pause
+# Keep / pause
 KEEP_AFTER_LOSS_ROUNDS = 1
 PAUSE_AFTER_2_LOSSES = 4
 
-# stop logic
+# Stop logic
 GROUP_MAX_LOSS_STREAK = 4
 GROUP_PROFIT_STOP = 8.0
 
-# filter window
-MIN_TRADES_PER_WINDOW = 12
+# Filter window
+MIN_TRADES_PER_WINDOW = 10
 RECENT_WINDOW_SIZE = 20
 MIN_WINDOW_SPACING = 3
-MAX_CANDIDATE_WINDOWS = 8
+MAX_CANDIDATE_WINDOWS = 10
 
-# train / validate
+# Train / validate
 VALIDATE_LEN = 20
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -6.0
 
-# regime filter live
+# Regime filter live
 RECENT_REGIME_LOOKBACK = 6
 RECENT_REGIME_WR_GOOD = 0.50
 RECENT_REGIME_WR_BAD = 0.34
-REGIME_PAUSE_ROUNDS = 6
+REGIME_BAD_RECENT_PROFIT = -2.0
+REGIME_PAUSE_ROUNDS = 4
+
+# Phạt lock round muộn để giảm overfit
+LOCK_ROUND_PENALTY = 0.15
 
 # UI
 SHOW_HISTORY_ROWS = 120
@@ -204,6 +208,19 @@ def pick_spaced_windows(df_sorted: pd.DataFrame, top_n: int, min_spacing: int) -
     return pd.DataFrame(selected_rows)
 
 
+def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: int) -> list[int]:
+    out = []
+    if df_sorted.empty:
+        return out
+    for _, row in df_sorted.iterrows():
+        w = int(row["window"])
+        if all(abs(w - x) >= min_spacing for x in out):
+            out.append(w)
+            if len(out) >= top_n:
+                break
+    return out
+
+
 def recent_live_stats(hits, lookback):
     if not hits:
         return {
@@ -227,7 +244,7 @@ def decide_vote_required_from_hits(hits):
     if (
         rs["recent_trades"] >= RECENT_REGIME_LOOKBACK
         and rs["recent_winrate"] >= RECENT_REGIME_WR_GOOD
-        and rs["recent_profit"] > 0
+        and rs["recent_profit"] >= 2.0
     ):
         return STRONG_VOTE_REQUIRED, rs, "strong"
     return BASE_VOTE_REQUIRED, rs, "base"
@@ -238,6 +255,7 @@ def should_pause_regime(hits):
     bad = (
         rs["recent_trades"] >= RECENT_REGIME_LOOKBACK
         and rs["recent_winrate"] < RECENT_REGIME_WR_BAD
+        and rs["recent_profit"] <= REGIME_BAD_RECENT_PROFIT
     )
     return bad, rs
 
@@ -378,11 +396,12 @@ def build_window_tables(train_groups):
     spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING)
     candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
 
+    # fallback vẫn phải qua spacing
     if len(candidate_windows) < TOP_WINDOWS:
-        candidate_windows = selected_seed["window"].astype(int).tolist()[:MAX_CANDIDATE_WINDOWS]
+        candidate_windows = enforce_spacing_from_df(selected_seed, TOP_WINDOWS, MIN_WINDOW_SPACING)
 
     if len(candidate_windows) < TOP_WINDOWS:
-        candidate_windows = df_all["window"].astype(int).tolist()[:TOP_WINDOWS]
+        candidate_windows = enforce_spacing_from_df(df_all, TOP_WINDOWS, 2)
 
     return candidate_windows, df_all, filtered_df
 
@@ -425,7 +444,7 @@ def find_best_lock_round_168_180(all_groups):
         for combo in combinations(candidate_windows, TOP_WINDOWS):
             combo = sorted(combo)
 
-            # backtest ở mode base 6/4 để chọn bộ lock ổn định daily
+            # chọn lock bằng mode base để ổn định
             train_bt = backtest_bundle_vote_range(
                 train_groups, combo, 0, len(train_groups), BASE_VOTE_REQUIRED
             )
@@ -449,6 +468,9 @@ def find_best_lock_round_168_180(all_groups):
                 - abs(validate_bt["max_drawdown_group"]) * 1.0
                 + validate_bt["streak_score"] * 1.5
             )
+
+            # phạt round lock muộn
+            final_score -= (r - LOCK_ROUND_START) * LOCK_ROUND_PENALTY
 
             bundle_rows.append({
                 "windows": ", ".join(map(str, combo)),
