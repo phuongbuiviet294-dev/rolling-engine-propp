@@ -35,7 +35,7 @@ LOSS_COLOR = -1.0
 
 # Keep / pause
 KEEP_AFTER_LOSS_ROUNDS = 2      # =0 nếu muốn bỏ keep sau thua
-PAUSE_AFTER_2_LOSSES = 0
+PAUSE_AFTER_2_LOSSES = 4
 
 # Group stop logic
 GROUP_MAX_LOSS_STREAK = 5
