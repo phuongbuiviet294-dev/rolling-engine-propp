@@ -20,8 +20,8 @@ MIN_SAMPLES = 3
 MIN_PROB = 0.34
 
 # Tín hiệu thực chiến
-BET_PROB = 0.52
-BET_SMALL_PROB = 0.38
+BET_PROB = 0.6
+BET_SMALL_PROB = 0.48
 
 # Risk control
 PAUSE_AFTER_2_LOSSES = 0
