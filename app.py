@@ -17,7 +17,7 @@ LOCK_ROUND_START = 120
 LOCK_SCAN_END = 180  # chỉ để tham chiếu, không bắt buộc phải đợi tới đây nữa
 
 WINDOW_MIN = 6
-WINDOW_MAX = 26
+WINDOW_MAX = 18
 
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 3
@@ -34,7 +34,7 @@ LOSS_COLOR = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
-MIN_TRADES_PER_WINDOW = 18
+MIN_TRADES_PER_WINDOW = 26
 
 # Pause group nếu:
 GROUP_MAX_LOSS_STREAK = 6   # thua 3 lệnh group liên tiếp
