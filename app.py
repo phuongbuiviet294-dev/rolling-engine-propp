@@ -37,7 +37,7 @@ PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 30
 
 # Pause group nếu:
-GROUP_MAX_LOSS_STREAK = 5   # thua 3 lệnh group liên tiếp
+GROUP_MAX_LOSS_STREAK = 6   # thua 3 lệnh group liên tiếp
 GROUP_PROFIT_STOP = 6.0     # profit group >= 6
 
 # ================= LOAD DATA =================
