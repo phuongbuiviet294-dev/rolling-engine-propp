@@ -13,9 +13,9 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 START_LIVE = 168
 WINDOW_MIN = 6
 WINDOW_MAX = 20
-TOP_WINDOWS = 3
+TOP_WINDOWS = 4
 
-VOTE_REQUIRED = 2
+VOTE_REQUIRED = 3
 GAP = 1
 
 WIN = 2.5
@@ -42,10 +42,7 @@ def group(n):
 groups = [group(n) for n in numbers]
 
 # ================= RUN =================
-def get_run_info(seq):
-    if len(seq) < 2:
-        return seq[-1], 1
-
+def get_run(seq):
     last = seq[-1]
     run = 1
     for i in range(len(seq)-2, -1, -1):
@@ -56,13 +53,12 @@ def get_run_info(seq):
     return last, run
 
 def run_predict(last, run):
-    # pattern đơn giản (tránh overfit)
     if run >= 3:
-        return last  # theo trend
+        return last
     elif run == 2:
-        return last  # nhẹ
+        return last
     else:
-        return None  # run yếu
+        return None
 
 # ================= WINDOW =================
 def eval_window(seq, w):
@@ -73,9 +69,7 @@ def eval_window(seq, w):
         if seq[i] == pred:
             wins += 1
         trades += 1
-    if trades == 0:
-        return 0
-    return wins / trades
+    return wins / trades if trades else 0
 
 def pick_windows(seq):
     scores = []
@@ -93,23 +87,22 @@ locked_windows = pick_windows(train)
 profit = 0
 hits = []
 last_trade = -999
-
 history = []
 
 for i in range(START_LIVE, len(groups)):
 
-    # ===== WINDOW VOTE =====
+    # ===== WINDOW =====
     preds = [groups[i-w] for w in locked_windows if i-w >= 0]
-    if not preds:
+    if len(preds) < TOP_WINDOWS:
         continue
 
     vote, strength = Counter(preds).most_common(1)[0]
 
     # ===== RUN =====
-    last, run = get_run_info(groups[:i])
+    last, run = get_run(groups[:i])
     run_pred = run_predict(last, run)
 
-    # ===== DECISION =====
+    # ===== SIGNAL =====
     signal = strength >= VOTE_REQUIRED
     same = (run_pred == vote)
 
@@ -152,12 +145,12 @@ next_i = len(groups)
 
 preds = [groups[next_i-w] for w in locked_windows if next_i-w >= 0]
 
-if preds:
+if len(preds) >= TOP_WINDOWS:
     vote, strength = Counter(preds).most_common(1)[0]
 else:
     vote, strength = None, 0
 
-last, run = get_run_info(groups)
+last, run = get_run(groups)
 run_pred = run_predict(last, run)
 
 signal = strength >= VOTE_REQUIRED
@@ -171,7 +164,7 @@ else:
     next_action = "WAIT"
 
 # ================= UI =================
-st.title("⚡ HYBRID LIVE (RUN + WINDOW)")
+st.title("🔥 HYBRID LIVE - 4 WINDOW | VOTE 3")
 
 st.write("Locked windows:", locked_windows)
 st.write("Current group:", groups[-1])
