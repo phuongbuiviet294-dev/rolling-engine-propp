@@ -16,7 +16,7 @@ LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
-WINDOW_MAX = 26
+WINDOW_MAX = 22
 TOP_WINDOWS = 4
 VOTE_REQUIRED = 3
 GAP = 1
@@ -29,17 +29,17 @@ PAUSE_AFTER_2_LOSSES = 0
 GROUP_MAX_LOSS_STREAK = 5
 GROUP_PROFIT_STOP = 6.0
 
-MIN_TRADES_PER_WINDOW = 20
+MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
 MIN_WINDOW_SPACING = 2
-MAX_CANDIDATE_WINDOWS = 6   # nhẹ hơn 10
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 20
 MIN_TRAIN_LEN = 120
-MIN_VALIDATE_TRADES = 3
-VALIDATE_MIN_DRAWDOWN = -4.0
+MIN_VALIDATE_TRADES = 2
+VALIDATE_MIN_DRAWDOWN = -6.0
 
-SHOW_HISTORY_ROWS = 120
+SHOW_HISTORY_ROWS = 100
 
 # ================= LOAD =================
 @st.cache_data(ttl=10)
@@ -69,10 +69,7 @@ def group_of(n: int) -> int:
 groups = [group_of(n) for n in numbers]
 
 if len(groups) < LOCK_ROUND_START:
-    st.error(
-        f"Chưa đủ dữ liệu để scan vùng {LOCK_ROUND_START} → {LOCK_ROUND_END}. "
-        f"Hiện chỉ có {len(groups)} rounds."
-    )
+    st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
     st.stop()
 
 # ================= HELPERS =================
@@ -147,8 +144,8 @@ def compute_streak_metrics(results):
     streak_score = (
         max_hit_streak * 2.0
         + count_hit_streak_ge2 * 1.5
-        - max_loss_streak * 2.0
-        - count_loss_streak_ge2 * 1.5
+        - max_loss_streak * 1.5
+        - count_loss_streak_ge2 * 1.0
     )
 
     return {
@@ -268,18 +265,19 @@ def build_window_tables(train_groups):
         ascending=[False, False, False, False, False, False]
     ).reset_index(drop=True)
 
+    # NỚI ĐIỀU KIỆN
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW) &
-        (df["count_hit_streak_ge2"] >= 1) &
-        (df["max_hit_streak"] >= 2) &
-        (df["max_loss_streak"] <= 5)
+        (
+            (df["count_hit_streak_ge2"] >= 1)
+            | (df["max_hit_streak"] >= 2)
+        ) &
+        (df["max_loss_streak"] <= 6)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
         [
             "streak_score",
-            "count_hit_streak_ge2",
-            "max_hit_streak",
             "score",
             "recent_profit",
             "profit",
@@ -287,21 +285,14 @@ def build_window_tables(train_groups):
             "trades",
             "max_loss_streak",
         ],
-        ascending=[False, False, False, False, False, False, False, False, True]
+        ascending=[False, False, False, False, False, False, True]
     ).reset_index(drop=True)
 
-    selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
+    # nếu vẫn không có thì fallback cực nhẹ
+    if filtered_df.empty:
+        filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
 
-    if len(selected_seed) < MAX_CANDIDATE_WINDOWS:
-        selected_windows = set(selected_seed["window"].tolist()) if not selected_seed.empty else set()
-        remain_df = df[~df["window"].isin(selected_windows)].copy()
-        remain_df = remain_df.sort_values(
-            ["streak_score", "score", "recent_profit", "profit", "winrate", "trades"],
-            ascending=[False, False, False, False, False, False]
-        ).reset_index(drop=True)
-        need = MAX_CANDIDATE_WINDOWS - len(selected_seed)
-        if need > 0 and len(remain_df) > 0:
-            selected_seed = pd.concat([selected_seed, remain_df.head(need)], ignore_index=True)
+    selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
 
     candidate_df = selected_seed.sort_values(
         ["streak_score", "score", "recent_profit", "profit", "winrate", "trades"],
@@ -314,12 +305,15 @@ def build_window_tables(train_groups):
     if len(candidate_windows) < TOP_WINDOWS:
         candidate_windows = selected_seed["window"].astype(int).tolist()[:MAX_CANDIDATE_WINDOWS]
 
+    if len(candidate_windows) < TOP_WINDOWS:
+        candidate_windows = df_all["window"].astype(int).tolist()[:TOP_WINDOWS]
+
     return candidate_windows, df_all, filtered_df
 
 def find_best_lock_round_168_180(all_groups):
     effective_lock_round_end = min(LOCK_ROUND_END, len(all_groups))
     if effective_lock_round_end < LOCK_ROUND_START:
-        return None, [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return None, [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "no_scan_range"
 
     best_round = None
     best_score = -999999.0
@@ -327,6 +321,12 @@ def find_best_lock_round_168_180(all_groups):
     best_scan_df = pd.DataFrame()
     best_filtered_df = pd.DataFrame()
     round_eval_rows = []
+
+    fallback_round = None
+    fallback_windows = []
+    fallback_scan_df = pd.DataFrame()
+    fallback_filtered_df = pd.DataFrame()
+    fallback_score = -999999.0
 
     for r in range(LOCK_ROUND_START, effective_lock_round_end + 1):
         if r < VALIDATE_LEN + MIN_TRAIN_LEN:
@@ -350,26 +350,23 @@ def find_best_lock_round_168_180(all_groups):
             train_bt = backtest_bundle_vote_range(train_groups, combo, 0, len(train_groups))
             validate_bt = backtest_bundle_vote_range(validate_groups, combo, validate_start, validate_end)
 
+            # NỚI VALIDATE
             validate_pass = (
                 validate_bt["trades"] >= MIN_VALIDATE_TRADES
                 and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
-                and validate_bt["count_hit_streak_ge2"] >= 1
-                and validate_bt["max_hit_streak"] >= 2
             )
 
-            final_score = -999999.0
-            if validate_pass:
-                final_score = (
-                    train_bt["profit_group"] * 1.0
-                    + train_bt["winrate_group"] * 10.0
-                    + train_bt["recent_profit_group"] * 1.0
-                    - abs(train_bt["max_drawdown_group"]) * 1.0
-                    + train_bt["streak_score"] * 1.5
-                    + validate_bt["profit_group"] * 2.0
-                    + validate_bt["winrate_group"] * 8.0
-                    - abs(validate_bt["max_drawdown_group"]) * 1.0
-                    + validate_bt["streak_score"] * 1.5
-                )
+            final_score = (
+                train_bt["profit_group"] * 1.0
+                + train_bt["winrate_group"] * 10.0
+                + train_bt["recent_profit_group"] * 1.0
+                - abs(train_bt["max_drawdown_group"]) * 1.0
+                + train_bt["streak_score"] * 1.5
+                + validate_bt["profit_group"] * 2.0
+                + validate_bt["winrate_group"] * 8.0
+                - abs(validate_bt["max_drawdown_group"]) * 1.0
+                + validate_bt["streak_score"] * 1.5
+            )
 
             bundle_rows.append({
                 "windows": ", ".join(map(str, combo)),
@@ -385,8 +382,31 @@ def find_best_lock_round_168_180(all_groups):
         if bundle_df.empty:
             continue
 
+        # fallback luôn lấy combo tốt nhất dù không pass
+        bundle_all_sorted = bundle_df.sort_values(
+            ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
+            ascending=[False, False, False, False]
+        ).reset_index(drop=True)
+
+        best_any_row = bundle_all_sorted.iloc[0]
+        any_windows = [int(x) for x in best_any_row["windows"].split(", ")]
+        any_score = float(best_any_row["final_score"])
+
+        if any_score > fallback_score:
+            fallback_score = any_score
+            fallback_round = r
+            fallback_windows = any_windows
+            fallback_scan_df = scan_df
+            fallback_filtered_df = filtered_df
+
         passed_df = bundle_df[bundle_df["validate_pass"] == True].copy()
         if passed_df.empty:
+            round_eval_rows.append({
+                "lock_round": r,
+                "selected_windows": ", ".join(map(str, any_windows)),
+                "bundle_score": any_score,
+                "pass_count": 0,
+            })
             continue
 
         passed_df = passed_df.sort_values(
@@ -413,7 +433,14 @@ def find_best_lock_round_168_180(all_groups):
             best_filtered_df = filtered_df
 
     round_eval_df = pd.DataFrame(round_eval_rows)
-    return best_round, best_windows, best_scan_df, best_filtered_df, round_eval_df
+
+    if best_round is not None:
+        return best_round, best_windows, best_scan_df, best_filtered_df, round_eval_df, "validated"
+
+    if fallback_round is not None:
+        return fallback_round, fallback_windows, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback"
+
+    return None, [], pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 # ================= STATE INIT =================
 def init_state():
@@ -437,6 +464,7 @@ def init_state():
         "pause_rounds_left": 0,
         "group_consecutive_losses": 0,
         "group_pause": False,
+        "lock_mode": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -462,10 +490,11 @@ if not st.session_state.live_initialized:
         scan_df_all,
         scan_df_filtered,
         round_eval_df,
+        lock_mode,
     ) = find_best_lock_round_168_180(groups)
 
     if lock_round_used is None:
-        st.error("Không tìm được bộ lock tốt trong vùng 168 → 180.")
+        st.error("Không tìm được bộ lock.")
         st.stop()
 
     st.session_state.locked_windows = locked_windows
@@ -476,6 +505,7 @@ if not st.session_state.live_initialized:
     st.session_state.processed_until = lock_round_used - 1
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
+    st.session_state.lock_mode = lock_mode
 
 # ================= LOAD STATE =================
 total_profit_group = st.session_state.total_profit_group
@@ -495,6 +525,7 @@ consecutive_losses = st.session_state.consecutive_losses
 pause_rounds_left = st.session_state.pause_rounds_left
 group_consecutive_losses = st.session_state.group_consecutive_losses
 group_pause = st.session_state.group_pause
+lock_mode = st.session_state.lock_mode
 
 # ================= LIVE TRADE LOOP =================
 for i in range(processed_until + 1, len(groups)):
@@ -764,8 +795,12 @@ col4.metric("Next Group", final_vote_group if final_vote_group is not None else 
 
 st.write("Vote Strength:", confidence_group)
 st.write("Locked Windows:", locked_windows)
+st.write("Lock Mode:", lock_mode)
 st.write("Group Pause:", group_pause)
 st.write("Pause Left:", pause_rounds_left)
+
+if lock_mode == "fallback":
+    st.warning("Đang dùng bộ lock fallback vì không có bộ validate đẹp trong vùng 168→180.")
 
 if group_pause:
     st.warning("⛔ GROUP PAUSED")
@@ -797,10 +832,11 @@ with st.expander("Round Evaluation"):
     st.dataframe(round_eval_df, use_container_width=True)
 
 with st.expander("Locked Windows"):
-    st.dataframe(
-        scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
-        use_container_width=True,
-    )
+    if not scan_df_all.empty:
+        st.dataframe(
+            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
+            use_container_width=True,
+        )
 
 with st.expander("Filtered Windows"):
     st.dataframe(scan_df_filtered.head(20), use_container_width=True)
