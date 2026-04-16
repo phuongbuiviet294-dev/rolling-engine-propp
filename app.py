@@ -24,8 +24,8 @@ TOP_WINDOWS = 4
 MAX_CANDIDATE_WINDOWS = 10
 MIN_WINDOW_SPACING = 2
 
-# Vote
-VOTE_REQUIRED = 3
+# Vote - NỚI
+VOTE_REQUIRED = 2
 GAP = 1
 
 # PnL
@@ -34,10 +34,10 @@ LOSS_GROUP = -1.0
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-# Risk control
+# Risk control - NHẸ HƠN
 PAUSE_AFTER_2_LOSSES = 0
-GROUP_MAX_LOSS_STREAK = 5
-GROUP_PROFIT_STOP = 6.0
+GROUP_MAX_LOSS_STREAK = 6
+GROUP_PROFIT_STOP = 8.0
 
 # Window filter
 MIN_TRADES_PER_WINDOW = 20
@@ -71,23 +71,23 @@ FINAL_VAL2_WINRATE_WEIGHT = 8.0
 FINAL_VAL1_DD_PENALTY = 1.0
 FINAL_VAL2_DD_PENALTY = 1.2
 
-# Run group thật - bản nhẹ
+# Run group thật - NỚI
 RUN_MIN_LEN = 2
 RUN_MAX_LEN = 5
-RUN_MIN_SAMPLES = 4
-RUN_MIN_PROB = 0.40
-RUN_STRONG_PROB = 0.58
-RUN_OVERRIDE_PROB = 0.72
+RUN_MIN_SAMPLES = 3
+RUN_MIN_PROB = 0.34
+RUN_STRONG_PROB = 0.50
+RUN_OVERRIDE_PROB = 0.62
 
 # Regime nhẹ
-REGIME_LOOKBACK = 24
-REGIME_MIN_TRADES = 2
-REGIME_MIN_PROFIT = -3.0
-REGIME_MIN_DRAWDOWN = -5.0
+REGIME_LOOKBACK = 20
+REGIME_MIN_TRADES = 1
+REGIME_MIN_PROFIT = -4.0
+REGIME_MIN_DRAWDOWN = -6.0
 
-# Hybrid thresholds nhẹ hơn
-BET_SCORE = 0.72
-BET_SMALL_SCORE = 0.52
+# Hybrid thresholds - NỚI
+BET_SCORE = 0.62
+BET_SMALL_SCORE = 0.42
 
 SHOW_HISTORY_ROWS = 150
 
@@ -210,7 +210,7 @@ def build_run_pattern_stats(seq, min_run_len=2, max_run_len=5):
         i = j
     return stats
 
-def get_run_signal(seq, min_run_len=2, max_run_len=5, min_samples=4, min_prob=0.40):
+def get_run_signal(seq, min_run_len=2, max_run_len=5, min_samples=3, min_prob=0.34):
     if len(seq) < 10:
         return None
 
@@ -498,13 +498,11 @@ def find_best_lock_round_168_180(all_groups):
                 windows = [int(x) for x in row["windows"].split(", ")]
 
                 val1_bt = backtest_bundle_vote_range(
-                    validate_groups, windows,
-                    validate1_start, validate1_end
+                    validate_groups, windows, validate1_start, validate1_end
                 )
 
                 val2_bt = backtest_bundle_vote_range(
-                    validate_groups, windows,
-                    validate2_start, validate2_end
+                    validate_groups, windows, validate2_start, validate2_end
                 )
 
                 validate_pass = (
@@ -717,7 +715,6 @@ for i in range(processed_until + 1, len(groups)):
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
     vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
 
-    # ===== RUN GROUP THẬT =====
     run_group_signal = get_run_signal(groups[:i], RUN_MIN_LEN, RUN_MAX_LEN, RUN_MIN_SAMPLES, RUN_MIN_PROB)
 
     run_group_ok = True
@@ -725,6 +722,7 @@ for i in range(processed_until + 1, len(groups)):
     run_override = False
 
     final_vote_group = vote_group
+    final_vote_color = vote_color
 
     if run_group_signal is not None:
         run_group_prob = round(run_group_signal["prob"], 4)
@@ -734,13 +732,9 @@ for i in range(processed_until + 1, len(groups)):
             final_vote_group = run_group_signal["next_value"]
             run_override = True
 
-    # color chỉ tham khảo
-    final_vote_color = vote_color
-
     current_group_run_value, current_group_run_len = get_current_run(groups[:i])
     current_color_run_value, current_color_run_len = get_current_run(colors[:i])
 
-    # regime nhẹ
     recent_health = backtest_bundle_vote_range(
         groups[:i], locked_windows,
         max(0, i - REGIME_LOOKBACK), i
@@ -800,41 +794,36 @@ for i in range(processed_until + 1, len(groups)):
     hybrid_score = 0.0
 
     if confidence_group >= VOTE_REQUIRED:
-        hybrid_score += 0.45
-    elif confidence_group == 2:
-        hybrid_score += 0.18
+        hybrid_score += 0.42
+    elif confidence_group == 1:
+        hybrid_score += 0.12
 
-    # run group
     if run_group_signal is not None:
         if final_vote_group == run_group_signal["next_value"]:
-            hybrid_score += 0.18
+            hybrid_score += 0.16
         else:
-            hybrid_score -= 0.08
+            hybrid_score -= 0.04
 
         if run_group_signal["prob"] >= RUN_STRONG_PROB:
-            hybrid_score += 0.08
+            hybrid_score += 0.06
 
-    # regime
     if regime_ok:
-        hybrid_score += 0.12
-    else:
-        hybrid_score -= 0.08
-
-    # anti chase trend
-    if current_group_run_len >= 3:
-        hybrid_score -= 0.08
-    if current_group_run_len >= 4:
-        hybrid_score -= 0.08
-
-    # override mạnh
-    if run_override:
         hybrid_score += 0.08
+    else:
+        hybrid_score -= 0.03
 
-    # anti streak
-    if group_consecutive_losses >= 1:
-        hybrid_score -= 0.06
+    if current_group_run_len >= 4:
+        hybrid_score -= 0.05
+    if current_group_run_len >= 5:
+        hybrid_score -= 0.05
+
+    if run_override:
+        hybrid_score += 0.06
+
     if group_consecutive_losses >= 2:
-        hybrid_score -= 0.12
+        hybrid_score -= 0.06
+    if group_consecutive_losses >= 3:
+        hybrid_score -= 0.10
 
     hybrid_score = max(0.0, min(1.0, hybrid_score))
 
@@ -887,7 +876,6 @@ for i in range(processed_until + 1, len(groups)):
                 group_pause = True
                 state = "GROUP_PAUSE_LOSS"
 
-        # color chỉ thống kê
         if colors[i] == final_vote_color:
             hit_color = 1
             total_profit_color += WIN_COLOR
@@ -900,7 +888,7 @@ for i in range(processed_until + 1, len(groups)):
         if group_pause:
             state = "GROUP_PAUSED"
         elif not regime_ok:
-            state = "REGIME_BLOCK"
+            state = "REGIME_WEAK"
         elif new_signal:
             state = "SIGNAL_ONLY"
         else:
@@ -986,6 +974,8 @@ run_group_prob = None
 run_override = False
 
 final_vote_group = vote_group
+final_vote_color = vote_color
+
 if run_group_signal is not None and vote_group is not None:
     run_group_prob = round(run_group_signal["prob"], 4)
     run_group_ok = (run_group_signal["next_value"] == vote_group)
@@ -993,8 +983,6 @@ if run_group_signal is not None and vote_group is not None:
     if run_group_signal["prob"] >= RUN_OVERRIDE_PROB:
         final_vote_group = run_group_signal["next_value"]
         run_override = True
-
-final_vote_color = vote_color  # chỉ tham khảo
 
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
@@ -1022,36 +1010,36 @@ new_signal = confidence_group >= VOTE_REQUIRED if vote_group is not None else Fa
 
 hybrid_score = 0.0
 if confidence_group >= VOTE_REQUIRED:
-    hybrid_score += 0.45
-elif confidence_group == 2:
-    hybrid_score += 0.18
+    hybrid_score += 0.42
+elif confidence_group == 1:
+    hybrid_score += 0.12
 
 if run_group_signal is not None:
     if final_vote_group == run_group_signal["next_value"]:
-        hybrid_score += 0.18
+        hybrid_score += 0.16
     else:
-        hybrid_score -= 0.08
+        hybrid_score -= 0.04
 
     if run_group_signal["prob"] >= RUN_STRONG_PROB:
-        hybrid_score += 0.08
+        hybrid_score += 0.06
 
 if regime_ok:
-    hybrid_score += 0.12
+    hybrid_score += 0.08
 else:
-    hybrid_score -= 0.08
+    hybrid_score -= 0.03
 
-if current_group_run_len >= 3:
-    hybrid_score -= 0.08
 if current_group_run_len >= 4:
-    hybrid_score -= 0.08
+    hybrid_score -= 0.05
+if current_group_run_len >= 5:
+    hybrid_score -= 0.05
 
 if run_override:
-    hybrid_score += 0.08
+    hybrid_score += 0.06
 
-if group_consecutive_losses >= 1:
-    hybrid_score -= 0.06
 if group_consecutive_losses >= 2:
-    hybrid_score -= 0.12
+    hybrid_score -= 0.06
+if group_consecutive_losses >= 3:
+    hybrid_score -= 0.10
 
 hybrid_score = max(0.0, min(1.0, hybrid_score))
 
@@ -1105,7 +1093,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 PRO RUN THẬT NHẸ - BỎ COLOR KHỎI FILTER")
+st.title("🎯 FULL CODE NHẸ THỰC CHIẾN")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -1135,7 +1123,7 @@ st.write("Processed Until:", processed_until)
 st.markdown(
     f"""
     <div style="background:#ffd700;padding:20px;border-radius:10px;text-align:center;font-size:28px;font-weight:bold;">
-    NEXT → {next_action} | GROUP {final_vote_group if final_vote_group is not None else "-"} | COLOR {final_vote_color if final_vote_color is not None else "-"}
+    NEXT → {next_action} | GROUP {final_vote_group if final_vote_group is not None else "-"}
     </div>
     """,
     unsafe_allow_html=True,
