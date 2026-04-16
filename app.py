@@ -1,5 +1,6 @@
 import time
 from collections import Counter
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -12,15 +13,14 @@ st_autorefresh(interval=1500, key="refresh")
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# Bắt đầu scan từ đây, nếu đủ điều kiện thì lock luôn
+# Scan lock từ đây trở đi
 LOCK_ROUND_START = 168
-LOCK_SCAN_END = 180  # chỉ để tham chiếu
 
 WINDOW_MIN = 6
 WINDOW_MAX = 26
 
 TOP_WINDOWS = 4
-MIN_POSITIVE_WINDOWS = 3
+MIN_POSITIVE_WINDOWS = 1
 VOTE_REQUIRED = 3
 GAP = 1
 
@@ -34,11 +34,41 @@ LOSS_COLOR = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
-MIN_TRADES_PER_WINDOW = 35
+
+# Filter window
+MIN_TRADES_PER_WINDOW = 20
+RECENT_WINDOW_SIZE = 20
+MIN_WINDOW_SPACING = 2
+MAX_CANDIDATE_WINDOWS = 10
 
 # Pause group nếu:
-GROUP_MAX_LOSS_STREAK = 4  # thua 3 lệnh group liên tiếp
-GROUP_PROFIT_STOP = 3.0    # profit group >= 6
+GROUP_MAX_LOSS_STREAK = 3
+GROUP_PROFIT_STOP = 6.0
+
+# Train / Validate
+VALIDATE_LEN = 20
+MIN_TRAIN_LEN = 120
+MIN_VALIDATE_TRADES = 3
+VALIDATE_MIN_PROFIT = 0.0
+VALIDATE_MIN_DRAWDOWN = -4.0
+
+# Score weights - window
+WINDOW_SCORE_WINRATE_WEIGHT = 8.0
+WINDOW_SCORE_TRADES_WEIGHT = 1.2
+WINDOW_SCORE_RECENT_WEIGHT = 0.8
+WINDOW_SCORE_DRAWDOWN_PENALTY = 0.7
+
+# Score weights - bundle train
+BUNDLE_SCORE_PROFIT_WEIGHT = 1.0
+BUNDLE_SCORE_WINRATE_WEIGHT = 10.0
+BUNDLE_SCORE_TRADES_WEIGHT = 1.5
+BUNDLE_SCORE_DRAWDOWN_PENALTY = 1.0
+BUNDLE_SCORE_RECENT_WEIGHT = 1.0
+
+# Score weights - final after validate
+FINAL_VALIDATE_PROFIT_WEIGHT = 2.0
+FINAL_VALIDATE_WINRATE_WEIGHT = 8.0
+FINAL_VALIDATE_DRAWDOWN_PENALTY = 1.0
 
 # ================= LOAD DATA =================
 @st.cache_data(ttl=10)
@@ -110,11 +140,117 @@ if len(groups) < LOCK_ROUND_START:
     )
     st.stop()
 
+# ================= HELPERS =================
+def compute_profit_path(results, win_value, loss_value):
+    p = 0.0
+    path = []
+    for r in results:
+        p += win_value if r == 1 else loss_value
+        path.append(p)
+    return path
+
+
+def compute_max_drawdown(results, win_value, loss_value):
+    if not results:
+        return 0.0
+    path = compute_profit_path(results, win_value, loss_value)
+    peak = -1e18
+    max_dd = 0.0
+    for x in path:
+        peak = max(peak, x)
+        dd = x - peak
+        max_dd = min(max_dd, dd)
+    return float(max_dd)
+
+
+def compute_recent_profit(results, recent_n, win_value, loss_value):
+    if not results:
+        return 0.0
+    tail = results[-recent_n:]
+    return float(sum(win_value if r == 1 else loss_value for r in tail))
+
+
+def pick_spaced_windows(df_sorted, top_n, min_spacing):
+    selected_rows = []
+    for _, row in df_sorted.iterrows():
+        w = int(row["window"])
+        if all(abs(w - int(x["window"])) >= min_spacing for x in selected_rows):
+            selected_rows.append(row.to_dict())
+            if len(selected_rows) >= top_n:
+                break
+    return pd.DataFrame(selected_rows)
+
+
+def backtest_bundle_vote_range(seq_groups, seq_colors, windows, start_idx, end_idx):
+    """
+    Backtest bundle trên đoạn [start_idx, end_idx) với logic vote thật:
+    - vote group từ windows
+    - vote color từ windows
+    - chỉ trade nếu:
+        + confidence_group >= VOTE_REQUIRED
+        + group_color_match = True
+        + i - last_trade >= GAP
+    """
+    results_group = []
+    results_color = []
+    trades = 0
+    wins_group = 0
+    wins_color = 0
+    last_trade = -999999
+
+    # Cần đủ dữ liệu lùi cho max(windows)
+    effective_start = max(start_idx, max(windows))
+
+    for i in range(effective_start, end_idx):
+        preds_group = [seq_groups[i - w] for w in windows]
+        preds_color = [seq_colors[i - w] for w in windows]
+
+        vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+        vote_color, _ = Counter(preds_color).most_common(1)[0]
+
+        signal = confidence_group >= VOTE_REQUIRED
+        gc_ok = group_color_match(vote_group, vote_color)
+
+        if signal and gc_ok and (i - last_trade >= GAP):
+            last_trade = i
+            trades += 1
+
+            group_hit = 1 if seq_groups[i] == vote_group else 0
+            color_hit = 1 if seq_colors[i] == vote_color else 0
+
+            wins_group += group_hit
+            wins_color += color_hit
+            results_group.append(group_hit)
+            results_color.append(color_hit)
+
+    profit_group = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results_group))
+    profit_color = float(sum(WIN_COLOR if r == 1 else LOSS_COLOR for r in results_color))
+
+    winrate_group = wins_group / trades if trades > 0 else 0.0
+    winrate_color = wins_color / trades if trades > 0 else 0.0
+
+    max_drawdown_group = compute_max_drawdown(results_group, WIN_GROUP, LOSS_GROUP)
+    recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+
+    return {
+        "trades": trades,
+        "wins_group": wins_group,
+        "wins_color": wins_color,
+        "profit_group": profit_group,
+        "profit_color": profit_color,
+        "winrate_group": winrate_group,
+        "winrate_color": winrate_color,
+        "max_drawdown_group": max_drawdown_group,
+        "recent_profit_group": recent_profit_group,
+    }
+
+
 # ================= WINDOW EVAL =================
 def evaluate_window_group(seq_groups, w):
     profit = 0.0
     trades = 0
     wins = 0
+    results = []
 
     n = len(seq_groups)
     for i in range(w, n):
@@ -126,11 +262,25 @@ def evaluate_window_group(seq_groups, w):
             if seq_groups[i] == pred:
                 profit += WIN_GROUP
                 wins += 1
+                results.append(1)
             else:
                 profit += LOSS_GROUP
+                results.append(0)
 
     winrate = wins / trades if trades > 0 else 0.0
-    score = profit * winrate * np.log(trades) if trades > 0 else -999999.0
+    max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
+    recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+
+    if trades > 0:
+        score = (
+            profit * 1.0
+            + winrate * WINDOW_SCORE_WINRATE_WEIGHT
+            + np.log(trades + 1) * WINDOW_SCORE_TRADES_WEIGHT
+            + recent_profit * WINDOW_SCORE_RECENT_WEIGHT
+            - abs(max_drawdown) * WINDOW_SCORE_DRAWDOWN_PENALTY
+        )
+    else:
+        score = -999999.0
 
     return {
         "window": w,
@@ -138,17 +288,19 @@ def evaluate_window_group(seq_groups, w):
         "wins": wins,
         "profit": profit,
         "winrate": winrate,
+        "max_drawdown": max_drawdown,
+        "recent_profit": recent_profit,
         "score": score,
     }
 
 
-def build_window_tables(train_groups):
+def build_window_tables(train_groups, train_colors):
     rows = [evaluate_window_group(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
     df = pd.DataFrame(rows)
 
     df_all = df.sort_values(
-        ["profit", "score", "winrate", "trades"],
-        ascending=[False, False, False, False]
+        ["score", "recent_profit", "profit", "winrate", "trades"],
+        ascending=[False, False, False, False, False]
     ).reset_index(drop=True)
 
     positive_df = df[
@@ -157,72 +309,278 @@ def build_window_tables(train_groups):
     ].copy()
 
     positive_df = positive_df.sort_values(
-        ["score", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False]
+        ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
+        ascending=[False, False, False, False, False, False]
     ).reset_index(drop=True)
 
-    selected_df = positive_df.head(TOP_WINDOWS).copy()
+    # ưu tiên dương
+    selected_seed = positive_df.head(MAX_CANDIDATE_WINDOWS).copy()
 
-    if len(positive_df) >= MIN_POSITIVE_WINDOWS and len(selected_df) < TOP_WINDOWS:
-        selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
+    # thiếu thì bù âm / trung tính
+    if len(selected_seed) < MAX_CANDIDATE_WINDOWS:
+        selected_windows = set(selected_seed["window"].tolist()) if not selected_seed.empty else set()
+
+        remain_df = df[
+            (df["trades"] >= MIN_TRADES_PER_WINDOW) &
+            (~df["window"].isin(selected_windows))
+        ].copy()
+
+        remain_df = remain_df.sort_values(
+            ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
+            ascending=[False, False, False, False, False, False]
+        ).reset_index(drop=True)
+
+        need = MAX_CANDIDATE_WINDOWS - len(selected_seed)
+        if need > 0 and len(remain_df) > 0:
+            selected_seed = pd.concat([selected_seed, remain_df.head(need)], ignore_index=True)
+
+    # nếu vẫn thiếu thì nới hết
+    if len(selected_seed) < MAX_CANDIDATE_WINDOWS:
+        selected_windows = set(selected_seed["window"].tolist()) if not selected_seed.empty else set()
 
         remain_df = df[~df["window"].isin(selected_windows)].copy()
         remain_df = remain_df.sort_values(
-            ["score", "profit", "winrate", "trades"],
+            ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
+            ascending=[False, False, False, False, False, False]
+        ).reset_index(drop=True)
+
+        need = MAX_CANDIDATE_WINDOWS - len(selected_seed)
+        if need > 0 and len(remain_df) > 0:
+            selected_seed = pd.concat([selected_seed, remain_df.head(need)], ignore_index=True)
+
+    # chọn candidate không sát nhau
+    candidate_df = selected_seed.sort_values(
+        ["score", "recent_profit", "profit", "winrate", "trades", "max_drawdown"],
+        ascending=[False, False, False, False, False, False]
+    ).reset_index(drop=True)
+
+    spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING)
+
+    candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
+
+    # fallback nếu spacing quá chặt
+    if len(candidate_windows) < TOP_WINDOWS:
+        candidate_windows = selected_seed["window"].astype(int).tolist()[:MAX_CANDIDATE_WINDOWS]
+
+    selected_df = df[df["window"].isin(candidate_windows)].copy()
+    selected_df = selected_df.sort_values("window").reset_index(drop=True)
+
+    return candidate_windows, df_all, positive_df, selected_df, spaced_candidate_df
+
+
+def build_bundle_backtest(train_groups, train_colors, candidate_windows):
+    bundle_rows = []
+    if len(candidate_windows) >= TOP_WINDOWS:
+        for combo in combinations(candidate_windows, TOP_WINDOWS):
+            combo = sorted(combo)
+            train_bt = backtest_bundle_vote_range(
+                train_groups,
+                train_colors,
+                combo,
+                0,
+                len(train_groups),
+            )
+
+            if train_bt["trades"] > 0:
+                train_score = (
+                    train_bt["profit_group"] * BUNDLE_SCORE_PROFIT_WEIGHT
+                    + train_bt["winrate_group"] * BUNDLE_SCORE_WINRATE_WEIGHT
+                    + np.log(train_bt["trades"] + 1) * BUNDLE_SCORE_TRADES_WEIGHT
+                    + train_bt["recent_profit_group"] * BUNDLE_SCORE_RECENT_WEIGHT
+                    - abs(train_bt["max_drawdown_group"]) * BUNDLE_SCORE_DRAWDOWN_PENALTY
+                )
+            else:
+                train_score = -999999.0
+
+            bundle_rows.append(
+                {
+                    "windows": ", ".join(map(str, combo)),
+                    "train_trades": train_bt["trades"],
+                    "train_profit_group": train_bt["profit_group"],
+                    "train_profit_color": train_bt["profit_color"],
+                    "train_winrate_group": train_bt["winrate_group"],
+                    "train_winrate_color": train_bt["winrate_color"],
+                    "train_max_drawdown_group": train_bt["max_drawdown_group"],
+                    "train_recent_profit_group": train_bt["recent_profit_group"],
+                    "train_score": train_score,
+                }
+            )
+
+    bundle_df = pd.DataFrame(bundle_rows)
+    if not bundle_df.empty:
+        bundle_df = bundle_df.sort_values(
+            ["train_score", "train_profit_group", "train_winrate_group", "train_trades"],
             ascending=[False, False, False, False]
         ).reset_index(drop=True)
 
-        need = TOP_WINDOWS - len(selected_df)
-        if need > 0 and len(remain_df) > 0:
-            selected_df = pd.concat([selected_df, remain_df.head(need)], ignore_index=True)
-
-    selected_df = selected_df.head(TOP_WINDOWS).copy()
-    selected_df = selected_df.sort_values(
-        ["score", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False]
-    ).reset_index(drop=True)
-
-    selected = selected_df["window"].astype(int).tolist() if not selected_df.empty else []
-
-    return selected, df_all, positive_df, selected_df
+    return bundle_df
 
 
-def find_first_lock_round(all_groups):
+def find_first_lock_round(all_groups, all_colors):
     """
-    Scan từ round 168 trở đi.
-    Hễ có ít nhất 3 window profit dương là lock luôn tại round đó.
+    Scan từ LOCK_ROUND_START trở đi.
+    Với mỗi round r:
+      - train = [0, r-VALIDATE_LEN)
+      - validate = [r-VALIDATE_LEN, r)
+    Lock nếu:
+      - train đủ dài
+      - có ít nhất MIN_POSITIVE_WINDOWS dương
+      - bundle pass validate
     """
     best_round = None
     best_windows = []
     best_scan_all = pd.DataFrame()
     best_positive = pd.DataFrame()
     best_selected = pd.DataFrame()
+    best_bundle_df = pd.DataFrame()
+    best_candidate_df = pd.DataFrame()
     round_eval_rows = []
 
     scan_end = len(all_groups)
 
     for r in range(LOCK_ROUND_START, scan_end + 1):
-        train_groups = all_groups[:r]
-        tmp_windows, tmp_all, tmp_positive, tmp_selected = build_window_tables(train_groups)
+        if r < VALIDATE_LEN + MIN_TRAIN_LEN:
+            round_eval_rows.append(
+                {
+                    "lock_round": r,
+                    "train_end": None,
+                    "validate_start": None,
+                    "validate_end": None,
+                    "positive_windows": 0,
+                    "selected_count": 0,
+                    "selected_windows": "",
+                    "bundle_score": -999999.0,
+                    "validate_pass_count": 0,
+                    "lock_now": False,
+                }
+            )
+            continue
+
+        train_end = r - VALIDATE_LEN
+        validate_start = train_end
+        validate_end = r
+
+        train_groups = all_groups[:train_end]
+        train_colors = all_colors[:train_end]
+        validate_groups = all_groups[:validate_end]
+        validate_colors = all_colors[:validate_end]
+
+        (
+            candidate_windows,
+            tmp_all,
+            tmp_positive,
+            _tmp_selected_candidates,
+            tmp_candidate_df,
+        ) = build_window_tables(train_groups, train_colors)
 
         pos_count = len(tmp_positive)
+
+        bundle_df = build_bundle_backtest(train_groups, train_colors, candidate_windows)
+
+        passed_rows = []
+        if not bundle_df.empty:
+            for _, row in bundle_df.iterrows():
+                windows = [int(x) for x in row["windows"].split(", ")]
+
+                validate_bt = backtest_bundle_vote_range(
+                    validate_groups,
+                    validate_colors,
+                    windows,
+                    validate_start,
+                    validate_end,
+                )
+
+                validate_pass = (
+                    validate_bt["trades"] >= MIN_VALIDATE_TRADES
+                    and validate_bt["profit_group"] >= VALIDATE_MIN_PROFIT
+                    and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+                )
+
+                final_score = -999999.0
+                if validate_pass:
+                    final_score = (
+                        float(row["train_score"])
+                        + validate_bt["profit_group"] * FINAL_VALIDATE_PROFIT_WEIGHT
+                        + validate_bt["winrate_group"] * FINAL_VALIDATE_WINRATE_WEIGHT
+                        - abs(validate_bt["max_drawdown_group"]) * FINAL_VALIDATE_DRAWDOWN_PENALTY
+                    )
+
+                passed_rows.append(
+                    {
+                        "windows": row["windows"],
+                        "train_trades": row["train_trades"],
+                        "train_profit_group": row["train_profit_group"],
+                        "train_profit_color": row["train_profit_color"],
+                        "train_winrate_group": row["train_winrate_group"],
+                        "train_winrate_color": row["train_winrate_color"],
+                        "train_max_drawdown_group": row["train_max_drawdown_group"],
+                        "train_recent_profit_group": row["train_recent_profit_group"],
+                        "train_score": row["train_score"],
+                        "validate_trades": validate_bt["trades"],
+                        "validate_profit_group": validate_bt["profit_group"],
+                        "validate_profit_color": validate_bt["profit_color"],
+                        "validate_winrate_group": validate_bt["winrate_group"],
+                        "validate_winrate_color": validate_bt["winrate_color"],
+                        "validate_max_drawdown_group": validate_bt["max_drawdown_group"],
+                        "validate_recent_profit_group": validate_bt["recent_profit_group"],
+                        "validate_pass": validate_pass,
+                        "final_score": final_score,
+                    }
+                )
+
+        final_bundle_df = pd.DataFrame(passed_rows)
+        if not final_bundle_df.empty:
+            final_bundle_df = final_bundle_df.sort_values(
+                ["final_score", "validate_profit_group", "train_profit_group", "validate_winrate_group"],
+                ascending=[False, False, False, False]
+            ).reset_index(drop=True)
+
+        validate_pass_count = (
+            int(final_bundle_df["validate_pass"].sum())
+            if not final_bundle_df.empty else 0
+        )
+
+        selected_windows = []
+        selected_df = pd.DataFrame()
+        bundle_score = -999999.0
+
+        if not final_bundle_df.empty and validate_pass_count > 0:
+            best_row = final_bundle_df[final_bundle_df["validate_pass"] == True].iloc[0]
+            selected_windows = [int(x) for x in best_row["windows"].split(", ")]
+            selected_df = tmp_all[tmp_all["window"].isin(selected_windows)].copy().sort_values("window").reset_index(drop=True)
+            bundle_score = float(best_row["final_score"])
 
         round_eval_rows.append(
             {
                 "lock_round": r,
+                "train_end": train_end,
+                "validate_start": validate_start,
+                "validate_end": validate_end,
                 "positive_windows": pos_count,
-                "selected_count": len(tmp_selected),
-                "selected_windows": ", ".join(map(str, tmp_windows)),
-                "lock_now": pos_count >= MIN_POSITIVE_WINDOWS,
+                "selected_count": len(selected_windows),
+                "selected_windows": ", ".join(map(str, selected_windows)),
+                "bundle_score": bundle_score,
+                "validate_pass_count": validate_pass_count,
+                "lock_now": (
+                    pos_count >= MIN_POSITIVE_WINDOWS
+                    and len(selected_windows) == TOP_WINDOWS
+                    and validate_pass_count > 0
+                ),
             }
         )
 
-        if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
+        if (
+            pos_count >= MIN_POSITIVE_WINDOWS
+            and len(selected_windows) == TOP_WINDOWS
+            and validate_pass_count > 0
+        ):
             best_round = r
-            best_windows = tmp_windows
+            best_windows = selected_windows
             best_scan_all = tmp_all
             best_positive = tmp_positive
-            best_selected = tmp_selected
+            best_selected = selected_df
+            best_bundle_df = final_bundle_df
+            best_candidate_df = tmp_candidate_df
             break
 
     round_eval_df = pd.DataFrame(round_eval_rows)
@@ -233,6 +591,8 @@ def find_first_lock_round(all_groups):
         best_scan_all,
         best_positive,
         best_selected,
+        best_bundle_df,
+        best_candidate_df,
         round_eval_df,
     )
 
@@ -259,6 +619,8 @@ def init_state():
         "scan_df_all": pd.DataFrame(),
         "scan_df_positive": pd.DataFrame(),
         "scan_df_selected": pd.DataFrame(),
+        "bundle_df": pd.DataFrame(),
+        "candidate_df": pd.DataFrame(),
         "round_eval_df": pd.DataFrame(),
         "lock_round_used": None,
 
@@ -305,13 +667,15 @@ if not st.session_state.live_initialized:
         scan_df_all,
         scan_df_positive,
         scan_df_selected,
+        bundle_df,
+        candidate_df,
         round_eval_df,
-    ) = find_first_lock_round(groups)
+    ) = find_first_lock_round(groups, colors)
 
     if lock_round_used is None:
         st.error(
-            f"Chưa tìm được round lock từ {LOCK_ROUND_START} trở đi "
-            f"có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương."
+            "Chưa tìm được round lock phù hợp theo cơ chế train/validate. "
+            "Có thể do validate quá chặt hoặc dữ liệu chưa đủ tốt."
         )
         st.stop()
 
@@ -319,6 +683,8 @@ if not st.session_state.live_initialized:
     st.session_state.scan_df_all = scan_df_all
     st.session_state.scan_df_positive = scan_df_positive
     st.session_state.scan_df_selected = scan_df_selected
+    st.session_state.bundle_df = bundle_df
+    st.session_state.candidate_df = candidate_df
     st.session_state.round_eval_df = round_eval_df
     st.session_state.lock_round_used = lock_round_used
     st.session_state.processed_until = lock_round_used - 1
@@ -337,6 +703,8 @@ locked_windows = st.session_state.locked_windows
 scan_df_all = st.session_state.scan_df_all
 scan_df_positive = st.session_state.scan_df_positive
 scan_df_selected = st.session_state.scan_df_selected
+bundle_df = st.session_state.bundle_df
+candidate_df = st.session_state.candidate_df
 round_eval_df = st.session_state.round_eval_df
 lock_round_used = st.session_state.lock_round_used
 processed_until = st.session_state.processed_until
@@ -377,11 +745,9 @@ for i in range(processed_until + 1, len(groups)):
     hit_color = None
     state = "WAIT"
 
-    # profit group >= +6 thì dừng bet group vĩnh viễn trong session
     if total_profit_group >= GROUP_PROFIT_STOP:
         group_pause = True
 
-    # pause do thua 2 lệnh liên tiếp
     if pause_rounds_left > 0:
         pause_rounds_left -= 1
         state = "PAUSE"
@@ -433,8 +799,6 @@ for i in range(processed_until + 1, len(groups)):
             used_keep = True
 
     final_signal = new_signal or used_keep
-
-    # block group trade nếu group_pause hoặc group-color không khớp
     trade = (not group_pause) and final_signal and distance >= GAP and group_color_ok
     can_bet = trade
 
@@ -499,7 +863,6 @@ for i in range(processed_until + 1, len(groups)):
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote_group
 
-            # thua 2 lệnh liên tiếp => nghỉ 4 vòng
             if consecutive_losses >= 2:
                 pause_rounds_left = PAUSE_AFTER_2_LOSSES
                 keep_rounds_left = 0
@@ -508,7 +871,6 @@ for i in range(processed_until + 1, len(groups)):
                 consecutive_losses = 0
                 state = "PAUSE_TRIGGER"
 
-            # group thua 3 lệnh liên tiếp => dừng bet group
             if group_consecutive_losses >= GROUP_MAX_LOSS_STREAK:
                 group_pause = True
                 keep_rounds_left = 0
@@ -580,6 +942,8 @@ st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_all = scan_df_all
 st.session_state.scan_df_positive = scan_df_positive
 st.session_state.scan_df_selected = scan_df_selected
+st.session_state.bundle_df = bundle_df
+st.session_state.candidate_df = candidate_df
 st.session_state.round_eval_df = round_eval_df
 st.session_state.lock_round_used = lock_round_used
 st.session_state.processed_until = processed_until
@@ -687,7 +1051,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Rolling Engine - next bet only when group and color match")
+st.title("🎯 Rolling Engine - train/validate lock to reduce overfit")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -704,9 +1068,14 @@ st.write("Group/Color Match:", group_color_ok)
 st.write("Locked Windows:", locked_windows)
 st.write("Locked Window Count:", len(locked_windows))
 st.write("Scan Start Round:", LOCK_ROUND_START)
-st.write("Reference End Round:", LOCK_SCAN_END)
-st.write("Need Positive Windows >=", MIN_POSITIVE_WINDOWS)
+st.write("Validate Length:", VALIDATE_LEN)
+st.write("Min Train Length:", MIN_TRAIN_LEN)
+st.write("Min Validate Trades:", MIN_VALIDATE_TRADES)
+st.write("Validate Min Profit:", VALIDATE_MIN_PROFIT)
+st.write("Validate Min Drawdown:", VALIDATE_MIN_DRAWDOWN)
 st.write("Min Trades / Window:", MIN_TRADES_PER_WINDOW)
+st.write("Recent Window Size:", RECENT_WINDOW_SIZE)
+st.write("Min Window Spacing:", MIN_WINDOW_SPACING)
 st.write("Group Profit Stop:", GROUP_PROFIT_STOP)
 st.write("Group Loss Streak Stop:", GROUP_MAX_LOSS_STREAK)
 st.write("Keep Bet Group:", keep_bet_group)
@@ -770,11 +1139,17 @@ if not hist_display.empty:
 st.subheader("Round Evaluation")
 st.dataframe(round_eval_df, use_container_width=True)
 
-st.subheader("Window Scan All")
+st.subheader("Window Scan All (Train)")
 st.dataframe(scan_df_all, use_container_width=True)
 
-st.subheader("All Positive Windows")
+st.subheader("All Positive Windows (Train)")
 st.dataframe(scan_df_positive, use_container_width=True)
+
+st.subheader("Candidate Windows (spaced)")
+st.dataframe(candidate_df, use_container_width=True)
+
+st.subheader("Bundle Backtest (Train + Validate)")
+st.dataframe(bundle_df, use_container_width=True)
 
 st.subheader("Locked Windows")
 st.dataframe(scan_df_selected, use_container_width=True)
