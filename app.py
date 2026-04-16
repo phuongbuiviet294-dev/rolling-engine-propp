@@ -32,13 +32,13 @@ LOSS_GROUP = -1.0
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-KEEP_AFTER_LOSS_ROUNDS = 2
+KEEP_AFTER_LOSS_ROUNDS = 0
 PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 26
 
 # Pause group nếu:
-GROUP_MAX_LOSS_STREAK = 6  # thua 3 lệnh group liên tiếp
-GROUP_PROFIT_STOP = 6.0     # profit group >= 6
+GROUP_MAX_LOSS_STREAK = 3  # thua 3 lệnh group liên tiếp
+GROUP_PROFIT_STOP = 3.0    # profit group >= 6
 
 # ================= LOAD DATA =================
 @st.cache_data(ttl=10)
