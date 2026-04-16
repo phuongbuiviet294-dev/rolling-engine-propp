@@ -12,15 +12,15 @@ st_autorefresh(interval=1500, key="refresh")
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# lock cố định: chỉ scan khi đủ toàn bộ vùng này
-LOCK_ROUND_START = 120
-LOCK_ROUND_END = 204
+# Bắt đầu scan từ đây, nếu đủ điều kiện thì lock luôn
+LOCK_ROUND_START = 168
+LOCK_SCAN_END = 180  # chỉ để tham chiếu, không bắt buộc phải đợi tới đây nữa
 
 WINDOW_MIN = 6
 WINDOW_MAX = 26
 
 TOP_WINDOWS = 4
-MIN_POSITIVE_WINDOWS = 2
+MIN_POSITIVE_WINDOWS = 3
 VOTE_REQUIRED = 3
 GAP = 1
 
@@ -36,7 +36,7 @@ KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 30
 
-# pause group nếu:
+# Pause group nếu:
 GROUP_MAX_LOSS_STREAK = 3   # thua 3 lệnh group liên tiếp
 GROUP_PROFIT_STOP = 6.0     # profit group >= 6
 
@@ -48,11 +48,14 @@ def load_numbers():
         f"?format=csv&cache={time.time()}"
     )
     df = pd.read_csv(url)
-    df.columns = [c.lower() for c in df.columns]
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
     if "number" not in df.columns:
         raise ValueError("Sheet must contain column 'number'")
+
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
+
 
 numbers = load_numbers()
 
@@ -66,6 +69,7 @@ def group_of(n: int) -> int:
         return 3
     return 4
 
+
 def color_of(n: int) -> str:
     if n <= 4:
         return "red"
@@ -73,19 +77,17 @@ def color_of(n: int) -> str:
         return "green"
     return "blue"
 
+
 groups = [group_of(n) for n in numbers]
 colors = [color_of(n) for n in numbers]
 
 # ================= GUARD =================
-# PHẢI đợi đủ 180 round mới được lock
-if len(groups) < LOCK_ROUND_END:
+if len(groups) < LOCK_ROUND_START:
     st.error(
-        f"Chưa đủ dữ liệu để lock chuẩn. "
-        f"Cần ít nhất {LOCK_ROUND_END} rounds, hiện có {len(groups)}."
+        f"Chưa đủ dữ liệu để bắt đầu scan lock. "
+        f"Cần ít nhất {LOCK_ROUND_START} rounds, hiện có {len(groups)}."
     )
     st.stop()
-
-effective_lock_round_end = LOCK_ROUND_END
 
 # ================= WINDOW EVAL =================
 def evaluate_window_group(seq_groups, w):
@@ -97,7 +99,7 @@ def evaluate_window_group(seq_groups, w):
     for i in range(w, n):
         pred = seq_groups[i - w]
 
-        # logic gốc của bạn
+        # Giữ nguyên logic gốc
         if seq_groups[i - 1] != pred:
             trades += 1
             if seq_groups[i] == pred:
@@ -117,6 +119,7 @@ def evaluate_window_group(seq_groups, w):
         "winrate": winrate,
         "score": score,
     }
+
 
 def build_window_tables(train_groups):
     rows = [evaluate_window_group(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
@@ -162,49 +165,27 @@ def build_window_tables(train_groups):
 
     return selected, df_all, positive_df, selected_df
 
-def calc_round_score(selected_df: pd.DataFrame) -> float:
-    if selected_df.empty:
-        return -999999.0
 
-    total_profit = float(selected_df["profit"].sum())
-    avg_winrate = float(selected_df["winrate"].mean())
-    total_trades = float(selected_df["trades"].sum())
-    avg_score = float(selected_df["score"].mean())
-
-    return (
-        total_profit
-        + avg_winrate * 10.0
-        + np.log(max(total_trades, 1.0))
-        + avg_score * 0.2
-    )
-
-def find_best_lock_round(all_groups):
+def find_first_lock_round(all_groups):
+    """
+    Scan từ round 168 trở đi.
+    Hễ có ít nhất 3 window profit dương là lock luôn tại round đó.
+    Không đợi tới 180.
+    """
     best_round = None
-    best_score = -999999.0
     best_windows = []
     best_scan_all = pd.DataFrame()
     best_positive = pd.DataFrame()
     best_selected = pd.DataFrame()
     round_eval_rows = []
 
-    # scan đủ toàn vùng 168 -> 180
-    for r in range(LOCK_ROUND_START, effective_lock_round_end + 1):
+    scan_end = len(all_groups)
+
+    for r in range(LOCK_ROUND_START, scan_end + 1):
         train_groups = all_groups[:r]
         tmp_windows, tmp_all, tmp_positive, tmp_selected = build_window_tables(train_groups)
 
         pos_count = len(tmp_positive)
-        round_score = -999999.0
-
-        if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
-            round_score = calc_round_score(tmp_selected)
-
-            if round_score > best_score:
-                best_score = round_score
-                best_round = r
-                best_windows = tmp_windows
-                best_scan_all = tmp_all
-                best_positive = tmp_positive
-                best_selected = tmp_selected
 
         round_eval_rows.append(
             {
@@ -212,14 +193,19 @@ def find_best_lock_round(all_groups):
                 "positive_windows": pos_count,
                 "selected_count": len(tmp_selected),
                 "selected_windows": ", ".join(map(str, tmp_windows)),
-                "round_score": round_score,
+                "lock_now": pos_count >= MIN_POSITIVE_WINDOWS,
             }
         )
 
-    round_eval_df = pd.DataFrame(round_eval_rows).sort_values(
-        ["round_score", "positive_windows", "lock_round"],
-        ascending=[False, False, True]
-    ).reset_index(drop=True)
+        if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
+            best_round = r
+            best_windows = tmp_windows
+            best_scan_all = tmp_all
+            best_positive = tmp_positive
+            best_selected = tmp_selected
+            break
+
+    round_eval_df = pd.DataFrame(round_eval_rows)
 
     return (
         best_round,
@@ -236,19 +222,19 @@ def init_state():
         "live_initialized": False,
         "processed_until": None,
 
-        # group
+        # Group
         "total_profit_group": 0.0,
         "last_trade": -999,
         "hits_group": [],
 
-        # color
+        # Color
         "total_profit_color": 0.0,
         "hits_color": [],
 
-        # history
+        # History
         "history_rows": [],
 
-        # lock fixed
+        # Lock fixed
         "locked_windows": [],
         "scan_df_all": pd.DataFrame(),
         "scan_df_positive": pd.DataFrame(),
@@ -258,14 +244,14 @@ def init_state():
 
         "base_data_len": None,
 
-        # keep / pause
+        # Keep / pause
         "keep_bet_group": None,
         "keep_rounds_left": 0,
         "last_trade_was_loss": False,
         "consecutive_losses": 0,
         "pause_rounds_left": 0,
 
-        # group pause riêng
+        # Pause group riêng
         "group_consecutive_losses": 0,
         "group_pause": False,
     }
@@ -273,6 +259,7 @@ def init_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
 
 init_state()
 
@@ -299,11 +286,11 @@ if not st.session_state.live_initialized:
         scan_df_positive,
         scan_df_selected,
         round_eval_df,
-    ) = find_best_lock_round(groups)
+    ) = find_first_lock_round(groups)
 
     if lock_round_used is None:
         st.error(
-            f"Không tìm được round nào từ {LOCK_ROUND_START} đến {effective_lock_round_end} "
+            f"Chưa tìm được round lock từ {LOCK_ROUND_START} trở đi "
             f"có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương."
         )
         st.stop()
@@ -369,7 +356,7 @@ for i in range(processed_until + 1, len(groups)):
     hit_color = None
     state = "WAIT"
 
-    # profit group >= +6 thì dừng bet group
+    # profit group >= +6 thì dừng bet group vĩnh viễn trong session
     if total_profit_group >= GROUP_PROFIT_STOP:
         group_pause = True
 
@@ -670,7 +657,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Rolling Engine - fixed lock only after enough rounds")
+st.title("🎯 Rolling Engine - lock ngay khi đủ 3 window profit dương")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -685,7 +672,8 @@ st.write("Next Group:", final_vote_group)
 st.write("Next Color:", vote_color)
 st.write("Locked Windows:", locked_windows)
 st.write("Locked Window Count:", len(locked_windows))
-st.write("Lock Round Range:", f"{LOCK_ROUND_START} -> {LOCK_ROUND_END}")
+st.write("Scan Start Round:", LOCK_ROUND_START)
+st.write("Reference End Round:", LOCK_SCAN_END)
 st.write("Need Positive Windows >=", MIN_POSITIVE_WINDOWS)
 st.write("Min Trades / Window:", MIN_TRADES_PER_WINDOW)
 st.write("Group Profit Stop:", GROUP_PROFIT_STOP)
