@@ -14,7 +14,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # lock cố định: chỉ scan khi đủ toàn bộ vùng này
 LOCK_ROUND_START = 120
-LOCK_ROUND_END = 180
+LOCK_ROUND_END = 204
 
 WINDOW_MIN = 6
 WINDOW_MAX = 26
