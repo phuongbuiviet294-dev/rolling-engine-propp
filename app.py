@@ -33,11 +33,11 @@ WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
-PAUSE_AFTER_2_LOSSES = 4
+PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 30
 
 # pause group nếu:
-GROUP_MAX_LOSS_STREAK = 4   # thua 3 lệnh group liên tiếp
+GROUP_MAX_LOSS_STREAK = 3   # thua 3 lệnh group liên tiếp
 GROUP_PROFIT_STOP = 6.0     # profit group >= 6
 
 # ================= LOAD DATA =================
