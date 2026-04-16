@@ -13,11 +13,11 @@ st_autorefresh(interval=1500, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # lock cố định: chỉ scan khi đủ toàn bộ vùng này
-LOCK_ROUND_START = 130
+LOCK_ROUND_START = 120
 LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
-WINDOW_MAX = 26
+WINDOW_MAX = 18
 
 TOP_WINDOWS = 4
 MIN_POSITIVE_WINDOWS = 3
