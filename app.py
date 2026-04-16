@@ -12,7 +12,8 @@ st_autorefresh(interval=1500, key="refresh")
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-LOCK_ROUND_START = 168
+# lock cố định: chỉ scan khi đủ toàn bộ vùng này
+LOCK_ROUND_START = 144
 LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
@@ -35,9 +36,9 @@ KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
 MIN_TRADES_PER_WINDOW = 30
 
-# NEW RULE
-GROUP_MAX_LOSS_STREAK = 3
-GROUP_PROFIT_STOP = 6.0
+# pause group nếu:
+GROUP_MAX_LOSS_STREAK = 3   # thua 3 lệnh group liên tiếp
+GROUP_PROFIT_STOP = 6.0     # profit group >= 6
 
 # ================= LOAD DATA =================
 @st.cache_data(ttl=10)
@@ -76,16 +77,15 @@ groups = [group_of(n) for n in numbers]
 colors = [color_of(n) for n in numbers]
 
 # ================= GUARD =================
-if len(groups) <= LOCK_ROUND_START:
+# PHẢI đợi đủ 180 round mới được lock
+if len(groups) < LOCK_ROUND_END:
     st.error(
-        f"Chưa đủ dữ liệu. Cần nhiều hơn {LOCK_ROUND_START} rounds, hiện có {len(groups)}."
+        f"Chưa đủ dữ liệu để lock chuẩn. "
+        f"Cần ít nhất {LOCK_ROUND_END} rounds, hiện có {len(groups)}."
     )
     st.stop()
 
-effective_lock_round_end = min(LOCK_ROUND_END, len(groups))
-if effective_lock_round_end < LOCK_ROUND_START:
-    st.error("Khoảng round lock không hợp lệ.")
-    st.stop()
+effective_lock_round_end = LOCK_ROUND_END
 
 # ================= WINDOW EVAL =================
 def evaluate_window_group(seq_groups, w):
@@ -96,6 +96,8 @@ def evaluate_window_group(seq_groups, w):
     n = len(seq_groups)
     for i in range(w, n):
         pred = seq_groups[i - w]
+
+        # logic gốc của bạn
         if seq_groups[i - 1] != pred:
             trades += 1
             if seq_groups[i] == pred:
@@ -139,6 +141,7 @@ def build_window_tables(train_groups):
 
     if len(positive_df) >= MIN_POSITIVE_WINDOWS and len(selected_df) < TOP_WINDOWS:
         selected_windows = set(selected_df["window"].tolist()) if not selected_df.empty else set()
+
         remain_df = df[~df["window"].isin(selected_windows)].copy()
         remain_df = remain_df.sort_values(
             ["score", "profit", "winrate", "trades"],
@@ -184,6 +187,7 @@ def find_best_lock_round(all_groups):
     best_selected = pd.DataFrame()
     round_eval_rows = []
 
+    # scan đủ toàn vùng 168 -> 180
     for r in range(LOCK_ROUND_START, effective_lock_round_end + 1):
         train_groups = all_groups[:r]
         tmp_windows, tmp_all, tmp_positive, tmp_selected = build_window_tables(train_groups)
@@ -193,6 +197,7 @@ def find_best_lock_round(all_groups):
 
         if pos_count >= MIN_POSITIVE_WINDOWS and not tmp_selected.empty:
             round_score = calc_round_score(tmp_selected)
+
             if round_score > best_score:
                 best_score = round_score
                 best_round = r
@@ -260,7 +265,7 @@ def init_state():
         "consecutive_losses": 0,
         "pause_rounds_left": 0,
 
-        # new group pause rule
+        # group pause riêng
         "group_consecutive_losses": 0,
         "group_pause": False,
     }
@@ -298,7 +303,8 @@ if not st.session_state.live_initialized:
 
     if lock_round_used is None:
         st.error(
-            f"Không tìm được round nào từ {LOCK_ROUND_START} đến {effective_lock_round_end} có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương."
+            f"Không tìm được round nào từ {LOCK_ROUND_START} đến {effective_lock_round_end} "
+            f"có ít nhất {MIN_POSITIVE_WINDOWS} window profit dương."
         )
         st.stop()
 
@@ -363,11 +369,11 @@ for i in range(processed_until + 1, len(groups)):
     hit_color = None
     state = "WAIT"
 
-    # Rule: profit group >= +6 => pause group forever
+    # profit group >= +6 thì dừng bet group
     if total_profit_group >= GROUP_PROFIT_STOP:
         group_pause = True
 
-    # Pause after 2 consecutive losses
+    # pause do thua 2 lệnh liên tiếp
     if pause_rounds_left > 0:
         pause_rounds_left -= 1
         state = "PAUSE"
@@ -419,7 +425,7 @@ for i in range(processed_until + 1, len(groups)):
 
     final_signal = new_signal or used_keep
 
-    # Block group trade if group_pause = True
+    # block group trade nếu group_pause
     trade = (not group_pause) and final_signal and distance >= GAP
     can_bet = trade
 
@@ -482,7 +488,7 @@ for i in range(processed_until + 1, len(groups)):
                 keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                 keep_bet_group = final_vote_group
 
-            # Pause 4 rounds after 2 consecutive losses
+            # thua 2 lệnh liên tiếp => nghỉ 4 vòng
             if consecutive_losses >= 2:
                 pause_rounds_left = PAUSE_AFTER_2_LOSSES
                 keep_rounds_left = 0
@@ -491,7 +497,7 @@ for i in range(processed_until + 1, len(groups)):
                 consecutive_losses = 0
                 state = "PAUSE_TRIGGER"
 
-            # Group pause after 3 consecutive losses
+            # group thua 3 lệnh liên tiếp => dừng bet group
             if group_consecutive_losses >= GROUP_MAX_LOSS_STREAK:
                 group_pause = True
                 keep_rounds_left = 0
@@ -664,7 +670,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Rolling Engine - fixed lock + color + group stop")
+st.title("🎯 Rolling Engine - fixed lock only after enough rounds")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -678,11 +684,17 @@ st.write("Vote Strength Color:", confidence_color)
 st.write("Next Group:", final_vote_group)
 st.write("Next Color:", vote_color)
 st.write("Locked Windows:", locked_windows)
+st.write("Locked Window Count:", len(locked_windows))
+st.write("Lock Round Range:", f"{LOCK_ROUND_START} -> {LOCK_ROUND_END}")
+st.write("Need Positive Windows >=", MIN_POSITIVE_WINDOWS)
+st.write("Min Trades / Window:", MIN_TRADES_PER_WINDOW)
+st.write("Group Profit Stop:", GROUP_PROFIT_STOP)
+st.write("Group Loss Streak Stop:", GROUP_MAX_LOSS_STREAK)
 st.write("Keep Bet Group:", keep_bet_group)
 st.write("Keep Rounds Left:", keep_rounds_left)
 st.write("Consecutive Losses:", consecutive_losses)
 st.write("Pause Rounds Left:", pause_rounds_left)
-st.write("Group Loss Streak:", group_consecutive_losses)
+st.write("Group Consecutive Losses:", group_consecutive_losses)
 st.write("Group Pause:", group_pause)
 st.write("Processed Until:", processed_until)
 
@@ -711,6 +723,7 @@ elif can_bet and final_vote_group is not None:
 else:
     st.info("WAIT (conditions not met)")
 
+# ================= SESSION STATS =================
 st.subheader("Session Statistics")
 s1, s2, s3, s4 = st.columns(4)
 s1.metric("Total Profit Group", total_profit_group)
@@ -723,6 +736,7 @@ s5.metric("Total Profit Color", total_profit_color)
 s6.metric("Trades Color", len(hits_color))
 s7.metric("Winrate Color %", round(np.mean(hits_color) * 100, 2) if hits_color else 0)
 
+# ================= CHARTS =================
 st.subheader("Profit Curve - Total Group")
 if not hist_display.empty:
     st.line_chart(hist_display["total_profit_group"])
@@ -731,6 +745,7 @@ st.subheader("Profit Curve - Total Color")
 if not hist_display.empty:
     st.line_chart(hist_display["total_profit_color"])
 
+# ================= DEBUG TABLES =================
 st.subheader("Round Evaluation")
 st.dataframe(round_eval_df, use_container_width=True)
 
@@ -743,6 +758,7 @@ st.dataframe(scan_df_positive, use_container_width=True)
 st.subheader("Locked Windows")
 st.dataframe(scan_df_selected, use_container_width=True)
 
+# ================= HISTORY =================
 st.subheader("History")
 
 def highlight_trade(row):
