@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1500, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -26,7 +26,7 @@ LOSS_GROUP = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
-GROUP_MAX_LOSS_STREAK = 8
+GROUP_MAX_LOSS_STREAK = 20
 GROUP_PROFIT_STOP = 6
 
 MIN_TRADES_PER_WINDOW = 12
