@@ -27,7 +27,7 @@ LOSS_GROUP = -1.0
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
 GROUP_MAX_LOSS_STREAK = 4
-GROUP_PROFIT_STOP = 4
+GROUP_PROFIT_STOP = 4.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
@@ -166,6 +166,18 @@ def pick_spaced_windows(df_sorted, top_n, min_spacing):
                 break
     return pd.DataFrame(selected_rows)
 
+def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: int) -> list[int]:
+    out = []
+    if df_sorted.empty:
+        return out
+    for _, row in df_sorted.iterrows():
+        w = int(row["window"])
+        if all(abs(w - x) >= min_spacing for x in out):
+            out.append(w)
+            if len(out) >= top_n:
+                break
+    return out
+
 # ================= BACKTEST =================
 def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
     results_group = []
@@ -265,7 +277,6 @@ def build_window_tables(train_groups):
         ascending=[False, False, False, False, False, False]
     ).reset_index(drop=True)
 
-    # NỚI ĐIỀU KIỆN
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW) &
         (
@@ -288,7 +299,6 @@ def build_window_tables(train_groups):
         ascending=[False, False, False, False, False, False, True]
     ).reset_index(drop=True)
 
-    # nếu vẫn không có thì fallback cực nhẹ
     if filtered_df.empty:
         filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
 
@@ -303,10 +313,10 @@ def build_window_tables(train_groups):
     candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
 
     if len(candidate_windows) < TOP_WINDOWS:
-        candidate_windows = selected_seed["window"].astype(int).tolist()[:MAX_CANDIDATE_WINDOWS]
+        candidate_windows = enforce_spacing_from_df(selected_seed, TOP_WINDOWS, MIN_WINDOW_SPACING)
 
     if len(candidate_windows) < TOP_WINDOWS:
-        candidate_windows = df_all["window"].astype(int).tolist()[:TOP_WINDOWS]
+        candidate_windows = enforce_spacing_from_df(df_all, TOP_WINDOWS, 1)
 
     return candidate_windows, df_all, filtered_df
 
@@ -350,7 +360,6 @@ def find_best_lock_round_168_180(all_groups):
             train_bt = backtest_bundle_vote_range(train_groups, combo, 0, len(train_groups))
             validate_bt = backtest_bundle_vote_range(validate_groups, combo, validate_start, validate_end)
 
-            # NỚI VALIDATE
             validate_pass = (
                 validate_bt["trades"] >= MIN_VALIDATE_TRADES
                 and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
@@ -382,7 +391,6 @@ def find_best_lock_round_168_180(all_groups):
         if bundle_df.empty:
             continue
 
-        # fallback luôn lấy combo tốt nhất dù không pass
         bundle_all_sorted = bundle_df.sort_values(
             ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
             ascending=[False, False, False, False]
@@ -455,7 +463,7 @@ def init_state():
         "scan_df_all": pd.DataFrame(),
         "scan_df_filtered": pd.DataFrame(),
         "round_eval_df": pd.DataFrame(),
-        "lock_round_used": None,
+        "selected_lock_round": None,
         "base_data_len": None,
         "keep_bet_group": None,
         "keep_rounds_left": 0,
@@ -485,7 +493,7 @@ if st.session_state.base_data_len is not None and len(groups) < st.session_state
 # ================= INITIAL LOCK =================
 if not st.session_state.live_initialized:
     (
-        lock_round_used,
+        selected_lock_round,
         locked_windows,
         scan_df_all,
         scan_df_filtered,
@@ -493,7 +501,7 @@ if not st.session_state.live_initialized:
         lock_mode,
     ) = find_best_lock_round_168_180(groups)
 
-    if lock_round_used is None:
+    if selected_lock_round is None:
         st.error("Không tìm được bộ lock.")
         st.stop()
 
@@ -501,8 +509,12 @@ if not st.session_state.live_initialized:
     st.session_state.scan_df_all = scan_df_all
     st.session_state.scan_df_filtered = scan_df_filtered
     st.session_state.round_eval_df = round_eval_df
-    st.session_state.lock_round_used = lock_round_used
-    st.session_state.processed_until = lock_round_used - 1
+    st.session_state.selected_lock_round = selected_lock_round
+
+    # QUAN TRỌNG:
+    # chỉ bắt đầu live sau khi đã scan xong toàn vùng 168 -> 180
+    st.session_state.processed_until = LOCK_ROUND_END - 1
+
     st.session_state.base_data_len = len(groups)
     st.session_state.live_initialized = True
     st.session_state.lock_mode = lock_mode
@@ -516,7 +528,7 @@ locked_windows = st.session_state.locked_windows
 scan_df_all = st.session_state.scan_df_all
 scan_df_filtered = st.session_state.scan_df_filtered
 round_eval_df = st.session_state.round_eval_df
-lock_round_used = st.session_state.lock_round_used
+selected_lock_round = st.session_state.selected_lock_round
 processed_until = st.session_state.processed_until
 keep_bet_group = st.session_state.keep_bet_group
 keep_rounds_left = st.session_state.keep_rounds_left
@@ -527,9 +539,24 @@ group_consecutive_losses = st.session_state.group_consecutive_losses
 group_pause = st.session_state.group_pause
 lock_mode = st.session_state.lock_mode
 
+# ================= BACKTEST CHECK OF FINAL LOCKED WINDOWS =================
+scan_range_bt = backtest_bundle_vote_range(
+    groups,
+    locked_windows,
+    LOCK_ROUND_START,
+    min(LOCK_ROUND_END + 1, len(groups))
+)
+
+post_lock_bt = backtest_bundle_vote_range(
+    groups,
+    locked_windows,
+    min(LOCK_ROUND_END + 1, len(groups)),
+    len(groups)
+)
+
 # ================= LIVE TRADE LOOP =================
 for i in range(processed_until + 1, len(groups)):
-    if i < lock_round_used:
+    if i <= LOCK_ROUND_END:
         continue
 
     preds_group = [groups[i - w] for w in locked_windows if i - w >= 0]
@@ -698,7 +725,7 @@ st.session_state.locked_windows = locked_windows
 st.session_state.scan_df_all = scan_df_all
 st.session_state.scan_df_filtered = scan_df_filtered
 st.session_state.round_eval_df = round_eval_df
-st.session_state.lock_round_used = lock_round_used
+st.session_state.selected_lock_round = selected_lock_round
 st.session_state.processed_until = processed_until
 st.session_state.base_data_len = len(groups)
 st.session_state.keep_bet_group = keep_bet_group
@@ -752,7 +779,7 @@ else:
 
     final_signal = new_signal or used_keep_next
     signal = final_signal
-    can_bet = (not group_pause) and signal and distance >= GAP
+    can_bet = (not group_pause) and signal and distance >= GAP and next_round > LOCK_ROUND_END
 
     if group_pause:
         next_state = "GROUP_PAUSED"
@@ -785,17 +812,18 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Group-only | nhẹ hơn, nhanh hơn")
+st.title("🎯 Group-only | chuẩn scan 168→180, live sau 180")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
 col2.metric("Current Group", current_group if current_group is not None else "-")
-col3.metric("Lock Round", lock_round_used if lock_round_used is not None else "-")
+col3.metric("Best Lock Round", selected_lock_round if selected_lock_round is not None else "-")
 col4.metric("Next Group", final_vote_group if final_vote_group is not None else "-")
 
 st.write("Vote Strength:", confidence_group)
 st.write("Locked Windows:", locked_windows)
 st.write("Lock Mode:", lock_mode)
+st.write("Live starts from round:", LOCK_ROUND_END + 1)
 st.write("Group Pause:", group_pause)
 st.write("Pause Left:", pause_rounds_left)
 
@@ -820,11 +848,25 @@ else:
 
 st.subheader("Stats")
 s1, s2, s3 = st.columns(3)
-s1.metric("Profit", total_profit_group)
-s2.metric("Trades", len(hits_group))
-s3.metric("Winrate %", round(np.mean(hits_group) * 100, 2) if hits_group else 0)
+s1.metric("Live Profit", total_profit_group)
+s2.metric("Live Trades", len(hits_group))
+s3.metric("Live Winrate %", round(np.mean(hits_group) * 100, 2) if hits_group else 0)
 
-st.subheader("Profit Curve")
+st.subheader("Lock Window Backtest Check")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Scan 168-180 Trades", scan_range_bt["trades"])
+c2.metric("Scan 168-180 Profit", scan_range_bt["profit_group"])
+c3.metric("Scan 168-180 Winrate %", round(scan_range_bt["winrate_group"] * 100, 2))
+c4.metric("Scan 168-180 MaxDD", scan_range_bt["max_drawdown_group"])
+
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("Post-180 Trades", post_lock_bt["trades"])
+d2.metric("Post-180 Profit", post_lock_bt["profit_group"])
+d3.metric("Post-180 Winrate %", round(post_lock_bt["winrate_group"] * 100, 2))
+d4.metric("Post-180 MaxDD", post_lock_bt["max_drawdown_group"])
+
+st.subheader("Live Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["total_profit_group"])
 
@@ -842,6 +884,7 @@ with st.expander("Filtered Windows"):
     st.dataframe(scan_df_filtered.head(20), use_container_width=True)
 
 st.subheader("History")
+
 def highlight_trade(row):
     if row["state"] in ("NEXT", "NEXT_KEEP"):
         return ["background-color: #ffd700"] * len(row)
