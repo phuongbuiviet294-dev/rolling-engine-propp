@@ -33,8 +33,8 @@ LOSS_GROUP = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
-GROUP_MAX_LOSS_STREAK = 7
-GROUP_PROFIT_STOP = 7.0
+GROUP_MAX_LOSS_STREAK = 4
+GROUP_PROFIT_STOP = 4.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
@@ -46,7 +46,11 @@ MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -6.0
 
-SHOW_HISTORY_ROWS = 150
+# ===== tối ưu tốc độ theo yêu cầu =====
+REPLAY_FROM = 180
+SHOW_DEBUG_TABLES = False
+SHOW_STYLED_HISTORY = False
+SHOW_HISTORY_ROWS = 60
 
 # Relock
 RELOCK_TRIGGER_LOSS_STREAK = 3
@@ -498,7 +502,6 @@ def simulate_engine(numbers, groups):
         "phase_last_trade": -999,
     }
 
-    # ----- initial lock phase 1 -----
     (
         selected_lock_round,
         locked_windows,
@@ -542,8 +545,9 @@ def simulate_engine(numbers, groups):
 
     history_rows = []
 
-    # Replay đúng lịch sử
-    for i in range(LOCK_ROUND_END + 1, len(groups)):
+    start_replay = max(LOCK_ROUND_END + 1, REPLAY_FROM + 1)
+
+    for i in range(start_replay, len(groups)):
         preds_group = [groups[i - w] for w in locked_windows if i - w >= 0]
         if not preds_group:
             continue
@@ -686,7 +690,6 @@ def simulate_engine(numbers, groups):
                     last_trade_was_loss = False
                     state = "GROUP_PAUSE_LOSS"
 
-            # ----- relock trigger -----
             if (
                 phase == 1
                 and (not relocked)
@@ -1008,66 +1011,70 @@ d2.metric(f"Post-{lock_scan_end} Profit", post_lock_bt["profit_group"])
 d3.metric(f"Post-{lock_scan_end} Winrate %", round(post_lock_bt["winrate_group"] * 100, 2))
 d4.metric(f"Post-{lock_scan_end} MaxDD", post_lock_bt["max_drawdown_group"])
 
-# Chart phase hiện tại only
 st.subheader("Phase Profit Curve (Current Phase Only)")
 if not hist_display.empty:
     current_phase_df = hist_display[hist_display["phase"] == phase].copy()
     if not current_phase_df.empty:
         st.line_chart(current_phase_df["phase_profit_group"].reset_index(drop=True))
 
-# Chart tổng
 st.subheader("Total Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["total_profit_all_phase"].reset_index(drop=True))
 
-with st.expander("Phase Summary"):
-    if not hist.empty:
-        trade_hist = hist[hist["trade"] == True].copy()
-        if not trade_hist.empty:
-            phase_summary = (
-                trade_hist.groupby("phase")
-                .agg(
-                    trades=("hit_group", lambda s: s.notna().sum()),
-                    wins=("hit_group", lambda s: (s == 1).sum()),
-                    total_profit=("total_profit_all_phase", "last"),
+if SHOW_DEBUG_TABLES:
+    with st.expander("Phase Summary"):
+        if not hist.empty:
+            trade_hist = hist[hist["trade"] == True].copy()
+            if not trade_hist.empty:
+                phase_summary = (
+                    trade_hist.groupby("phase")
+                    .agg(
+                        trades=("hit_group", lambda s: s.notna().sum()),
+                        wins=("hit_group", lambda s: (s == 1).sum()),
+                        total_profit=("total_profit_all_phase", "last"),
+                    )
+                    .reset_index()
                 )
-                .reset_index()
+                st.dataframe(phase_summary, use_container_width=True)
+
+    with st.expander("Round Evaluation"):
+        st.dataframe(round_eval_df, use_container_width=True)
+
+    with st.expander("Locked Windows"):
+        if not scan_df_all.empty:
+            st.dataframe(
+                scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
+                use_container_width=True,
             )
-            st.dataframe(phase_summary, use_container_width=True)
 
-with st.expander("Round Evaluation"):
-    st.dataframe(round_eval_df, use_container_width=True)
-
-with st.expander("Locked Windows"):
-    if not scan_df_all.empty:
-        st.dataframe(
-            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
-            use_container_width=True,
-        )
-
-with st.expander("Filtered Windows"):
-    st.dataframe(scan_df_filtered.head(25), use_container_width=True)
+    with st.expander("Filtered Windows"):
+        st.dataframe(scan_df_filtered.head(25), use_container_width=True)
 
 st.subheader("History")
 
-def highlight_trade(row):
-    if row["state"] in ("NEXT", "NEXT_KEEP"):
-        return ["background-color: #ffd700"] * len(row)
-    if row["state"] == "TRADE_KEEP":
-        return ["background-color: #ffb347; color:black"] * len(row)
-    if row["state"] == "PAUSE":
-        return ["background-color: #87ceeb; color:black"] * len(row)
-    if row["state"] == "PAUSE_TRIGGER":
-        return ["background-color: #9370db; color:white"] * len(row)
-    if row["state"] == "RELOCK_TO_PHASE2":
-        return ["background-color: #32cd32; color:black"] * len(row)
-    if row["state"] in ("GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS", "GROUP_PAUSED"):
-        return ["background-color: #d9534f; color:white"] * len(row)
-    if row["trade"]:
-        return ["background-color: #ff4b4b; color:white"] * len(row)
-    return [""] * len(row)
+history_view = hist_display.iloc[::-1].head(SHOW_HISTORY_ROWS).copy()
 
-st.dataframe(
-    hist_display.iloc[::-1].head(SHOW_HISTORY_ROWS).style.apply(highlight_trade, axis=1),
-    use_container_width=True,
-)
+if SHOW_STYLED_HISTORY:
+    def highlight_trade(row):
+        if row["state"] in ("NEXT", "NEXT_KEEP"):
+            return ["background-color: #ffd700"] * len(row)
+        if row["state"] == "TRADE_KEEP":
+            return ["background-color: #ffb347; color:black"] * len(row)
+        if row["state"] == "PAUSE":
+            return ["background-color: #87ceeb; color:black"] * len(row)
+        if row["state"] == "PAUSE_TRIGGER":
+            return ["background-color: #9370db; color:white"] * len(row)
+        if row["state"] == "RELOCK_TO_PHASE2":
+            return ["background-color: #32cd32; color:black"] * len(row)
+        if row["state"] in ("GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS", "GROUP_PAUSED"):
+            return ["background-color: #d9534f; color:white"] * len(row)
+        if row["trade"]:
+            return ["background-color: #ff4b4b; color:white"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        history_view.style.apply(highlight_trade, axis=1),
+        use_container_width=True,
+    )
+else:
+    st.dataframe(history_view, use_container_width=True)
