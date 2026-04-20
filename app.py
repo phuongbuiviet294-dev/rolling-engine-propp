@@ -54,7 +54,7 @@ SHOW_STYLED_HISTORY = False
 SHOW_HISTORY_ROWS = 80
 
 # ===== Switch phase =====
-PHASE1_TO_PHASE2_PROFIT_TRIGGER = -4.0
+PHASE1_TO_PHASE2_PROFIT_TRIGGER = -1.0
 PHASE1_TO_PHASE2_LOSS_STREAK_TRIGGER = 3.5
 
 PHASE2_TO_PHASE1_PROFIT_TRIGGER = 3.5
@@ -75,7 +75,7 @@ def load_numbers():
     df.columns = [str(c).strip().lower() for c in df.columns]
     if "number" not in df.columns:
         raise ValueError("Sheet phải có cột 'number'")
-    df["number"] = pd.to_numeric(df["number"], errors="coerce")
+    df["number"] = pd.to_numeric(df["number"], errors="co-2rce")
     return df["number"].dropna().astype(int).tolist()
 
 numbers = load_numbers()
