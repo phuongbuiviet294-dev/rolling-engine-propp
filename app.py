@@ -7,8 +7,8 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# Refresh chậm lại để tránh app reload khi chưa tính xong
-st_autorefresh(interval=1000, key="refresh")
+# refresh chậm lại để tránh reload liên tục
+st_autorefresh(interval=2000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -18,8 +18,15 @@ LOCK_ROUND_END = 180
 
 WINDOW_MIN = 6
 WINDOW_MAX = 22
-TOP_WINDOWS = 6
-VOTE_REQUIRED = 4
+
+# tự chọn giữa các mode này
+MODES = [
+    {"name": "3v2", "top_windows": 3, "vote_required": 2},
+    {"name": "4v3", "top_windows": 4, "vote_required": 3},
+    {"name": "6v4", "top_windows": 6, "vote_required": 4},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5},
+]
+
 GAP = 1
 
 WIN_GROUP = 2.5
@@ -27,8 +34,8 @@ LOSS_GROUP = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
-GROUP_MAX_LOSS_STREAK = 9
-GROUP_PROFIT_STOP = 3.5
+GROUP_MAX_LOSS_STREAK = 6
+GROUP_PROFIT_STOP = 4.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
@@ -40,7 +47,17 @@ MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -6.0
 
-SHOW_HISTORY_ROWS = 100
+# relock nếu live xấu
+RELOCK_TRIGGER_PROFIT = -3.0
+RELOCK_TRIGGER_LOSS_STREAK = 3
+RELOCK_SCAN_LEN = 13
+RELOCK_BUFFER = 0
+
+# replay + UI
+REPLAY_FROM = 180
+SHOW_DEBUG_TABLES = False
+SHOW_STYLED_HISTORY = False
+SHOW_HISTORY_ROWS = 60
 
 # ================= LOAD =================
 @st.cache_data(ttl=10)
@@ -51,10 +68,8 @@ def load_numbers():
     )
     df = pd.read_csv(url)
     df.columns = [str(c).strip().lower() for c in df.columns]
-
     if "number" not in df.columns:
         raise ValueError("Sheet must contain column 'number'")
-
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
@@ -93,23 +108,19 @@ def compute_profit_path(results, win_value, loss_value):
 def compute_max_drawdown(results, win_value, loss_value):
     if not results:
         return 0.0
-
     path = compute_profit_path(results, win_value, loss_value)
     peak = -10**18
     max_dd = 0.0
-
     for x in path:
         peak = max(peak, x)
         dd = x - peak
         max_dd = min(max_dd, dd)
-
     return float(max_dd)
 
 
 def compute_recent_profit(results, recent_n, win_value, loss_value):
     if not results:
         return 0.0
-
     tail = results[-recent_n:]
     return float(sum(win_value if r == 1 else loss_value for r in tail))
 
@@ -174,14 +185,12 @@ def compute_streak_metrics(results):
 
 def pick_spaced_windows(df_sorted, top_n, min_spacing):
     selected_rows = []
-
     for _, row in df_sorted.iterrows():
         w = int(row["window"])
         if all(abs(w - int(x["window"])) >= min_spacing for x in selected_rows):
             selected_rows.append(row.to_dict())
             if len(selected_rows) >= top_n:
                 break
-
     return pd.DataFrame(selected_rows)
 
 
@@ -189,18 +198,16 @@ def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: in
     out = []
     if df_sorted.empty:
         return out
-
     for _, row in df_sorted.iterrows():
         w = int(row["window"])
         if all(abs(w - x) >= min_spacing for x in out):
             out.append(w)
             if len(out) >= top_n:
                 break
-
     return out
 
 # ================= BACKTEST =================
-def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
+def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
     results_group = []
     trades = 0
     wins_group = 0
@@ -210,7 +217,7 @@ def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
     for i in range(effective_start, end_idx):
         preds_group = [seq_groups[i - w] for w in windows]
         vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
-        signal = confidence_group >= VOTE_REQUIRED
+        signal = confidence_group >= vote_required
 
         if signal and (i - last_trade >= GAP):
             last_trade = i
@@ -222,9 +229,7 @@ def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx):
     profit_group = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results_group))
     winrate_group = wins_group / trades if trades > 0 else 0.0
     max_drawdown_group = compute_max_drawdown(results_group, WIN_GROUP, LOSS_GROUP)
-    recent_profit_group = compute_recent_profit(
-        results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP
-    )
+    recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results_group)
 
     return {
@@ -330,42 +335,37 @@ def build_window_tables(train_groups):
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
-    spaced_candidate_df = pick_spaced_windows(
-        candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING
-    )
+    spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING)
     candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
-
-    if len(candidate_windows) < TOP_WINDOWS:
-        candidate_windows = enforce_spacing_from_df(
-            selected_seed, TOP_WINDOWS, MIN_WINDOW_SPACING
-        )
-
-    if len(candidate_windows) < TOP_WINDOWS:
-        candidate_windows = enforce_spacing_from_df(df_all, TOP_WINDOWS, 1)
 
     return candidate_windows, df_all, filtered_df
 
-
-def find_best_lock_round_168_180(all_groups):
-    effective_lock_round_end = min(LOCK_ROUND_END, len(all_groups))
-
-    if effective_lock_round_end < LOCK_ROUND_START:
-        return None, [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "no_scan_range"
+# ================= AUTO MODE LOCK =================
+def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
+    effective_scan_end = min(scan_end, len(all_groups) - 1)
+    if effective_scan_end < scan_start:
+        return None, [], None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "no_scan_range"
 
     best_round = None
-    best_score = -999999.0
     best_windows = []
+    best_mode = None
     best_scan_df = pd.DataFrame()
     best_filtered_df = pd.DataFrame()
-    round_eval_rows = []
+    best_round_eval_df = pd.DataFrame()
+    best_score = -999999.0
+    best_lock_mode = "not_found"
 
     fallback_round = None
     fallback_windows = []
+    fallback_mode = None
     fallback_scan_df = pd.DataFrame()
     fallback_filtered_df = pd.DataFrame()
+    fallback_round_eval_df = pd.DataFrame()
     fallback_score = -999999.0
 
-    for r in range(LOCK_ROUND_START, effective_lock_round_end + 1):
+    round_eval_rows = []
+
+    for r in range(scan_start, effective_scan_end + 1):
         if r < VALIDATE_LEN + MIN_TRAIN_LEN:
             continue
 
@@ -377,105 +377,140 @@ def find_best_lock_round_168_180(all_groups):
         validate_groups = all_groups[:validate_end]
 
         candidate_windows, scan_df, filtered_df = build_window_tables(train_groups)
-
-        if len(candidate_windows) < TOP_WINDOWS:
+        if len(candidate_windows) < 3:
             continue
 
-        bundle_rows = []
-        for combo in combinations(candidate_windows, TOP_WINDOWS):
-            combo = sorted(combo)
+        local_best_score = -999999.0
+        local_best_windows = []
+        local_best_mode = None
+        local_lock_mode = "not_found"
 
-            train_bt = backtest_bundle_vote_range(train_groups, combo, 0, len(train_groups))
-            validate_bt = backtest_bundle_vote_range(
-                validate_groups, combo, validate_start, validate_end
-            )
+        local_fallback_score = -999999.0
+        local_fallback_windows = []
+        local_fallback_mode = None
 
-            validate_pass = (
-                validate_bt["trades"] >= MIN_VALIDATE_TRADES
-                and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
-            )
+        for mode in MODES:
+            top_windows = mode["top_windows"]
+            vote_required = mode["vote_required"]
 
-            final_score = (
-                train_bt["profit_group"] * 1.0
-                + train_bt["winrate_group"] * 10.0
-                + train_bt["recent_profit_group"] * 1.0
-                - abs(train_bt["max_drawdown_group"]) * 1.0
-                + train_bt["streak_score"] * 1.5
-                + validate_bt["profit_group"] * 2.0
-                + validate_bt["winrate_group"] * 8.0
-                - abs(validate_bt["max_drawdown_group"]) * 1.0
-                + validate_bt["streak_score"] * 1.5
-            )
+            if len(candidate_windows) < top_windows:
+                continue
 
-            bundle_rows.append(
-                {
-                    "windows": ", ".join(map(str, combo)),
-                    "validate_pass": validate_pass,
-                    "final_score": final_score,
-                    "validate_profit_group": validate_bt["profit_group"],
-                    "validate_winrate_group": validate_bt["winrate_group"],
-                    "validate_max_drawdown_group": validate_bt["max_drawdown_group"],
-                    "validate_streak_score": validate_bt["streak_score"],
-                }
-            )
+            mode_bundle_rows = []
 
-        bundle_df = pd.DataFrame(bundle_rows)
-        if bundle_df.empty:
-            continue
+            for combo in combinations(candidate_windows, top_windows):
+                combo = sorted(combo)
 
-        bundle_all_sorted = bundle_df.sort_values(
-            ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
-            ascending=[False, False, False, False],
-        ).reset_index(drop=True)
+                train_bt = backtest_bundle_vote_range(
+                    train_groups, combo, vote_required, 0, len(train_groups)
+                )
+                validate_bt = backtest_bundle_vote_range(
+                    validate_groups, combo, vote_required, validate_start, validate_end
+                )
 
-        best_any_row = bundle_all_sorted.iloc[0]
-        any_windows = [int(x) for x in best_any_row["windows"].split(", ")]
-        any_score = float(best_any_row["final_score"])
+                validate_pass = (
+                    validate_bt["trades"] >= MIN_VALIDATE_TRADES
+                    and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+                )
 
-        if any_score > fallback_score:
-            fallback_score = any_score
-            fallback_round = r
-            fallback_windows = any_windows
-            fallback_scan_df = scan_df
-            fallback_filtered_df = filtered_df
+                final_score = (
+                    train_bt["profit_group"] * 1.0
+                    + train_bt["winrate_group"] * 10.0
+                    + train_bt["recent_profit_group"] * 1.0
+                    - abs(train_bt["max_drawdown_group"]) * 1.0
+                    + train_bt["streak_score"] * 1.5
+                    + validate_bt["profit_group"] * 2.0
+                    + validate_bt["winrate_group"] * 8.0
+                    - abs(validate_bt["max_drawdown_group"]) * 1.0
+                    + validate_bt["streak_score"] * 1.5
+                )
 
-        passed_df = bundle_df[bundle_df["validate_pass"] == True].copy()
+                mode_bundle_rows.append(
+                    {
+                        "mode_name": mode["name"],
+                        "top_windows": top_windows,
+                        "vote_required": vote_required,
+                        "windows": ", ".join(map(str, combo)),
+                        "validate_pass": validate_pass,
+                        "final_score": final_score,
+                        "validate_profit_group": validate_bt["profit_group"],
+                        "validate_winrate_group": validate_bt["winrate_group"],
+                        "validate_max_drawdown_group": validate_bt["max_drawdown_group"],
+                        "validate_streak_score": validate_bt["streak_score"],
+                    }
+                )
 
-        if passed_df.empty:
+            if not mode_bundle_rows:
+                continue
+
+            mode_df = pd.DataFrame(mode_bundle_rows)
+            mode_df_sorted = mode_df.sort_values(
+                ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
+                ascending=[False, False, False, False],
+            ).reset_index(drop=True)
+
+            best_any_row = mode_df_sorted.iloc[0]
+            any_score = float(best_any_row["final_score"])
+            any_windows = [int(x) for x in best_any_row["windows"].split(", ")]
+
+            if any_score > local_fallback_score:
+                local_fallback_score = any_score
+                local_fallback_windows = any_windows
+                local_fallback_mode = mode
+
+            passed_df = mode_df[mode_df["validate_pass"] == True].copy()
+            if not passed_df.empty:
+                passed_df = passed_df.sort_values(
+                    ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
+                    ascending=[False, False, False, False],
+                ).reset_index(drop=True)
+
+                best_row = passed_df.iloc[0]
+                score = float(best_row["final_score"])
+                selected_windows = [int(x) for x in best_row["windows"].split(", ")]
+
+                if score > local_best_score:
+                    local_best_score = score
+                    local_best_windows = selected_windows
+                    local_best_mode = mode
+                    local_lock_mode = "validated"
+
+        if local_best_mode is not None:
             round_eval_rows.append(
                 {
                     "lock_round": r,
-                    "selected_windows": ", ".join(map(str, any_windows)),
-                    "bundle_score": any_score,
-                    "pass_count": 0,
+                    "mode": local_best_mode["name"],
+                    "selected_windows": ", ".join(map(str, local_best_windows)),
+                    "bundle_score": local_best_score,
+                    "lock_mode": local_lock_mode,
                 }
             )
-            continue
-
-        passed_df = passed_df.sort_values(
-            ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
-            ascending=[False, False, False, False],
-        ).reset_index(drop=True)
-
-        best_row = passed_df.iloc[0]
-        selected_windows = [int(x) for x in best_row["windows"].split(", ")]
-        bundle_score = float(best_row["final_score"])
-
-        round_eval_rows.append(
-            {
-                "lock_round": r,
-                "selected_windows": ", ".join(map(str, selected_windows)),
-                "bundle_score": bundle_score,
-                "pass_count": len(passed_df),
-            }
-        )
-
-        if bundle_score > best_score:
-            best_score = bundle_score
-            best_round = r
-            best_windows = selected_windows
-            best_scan_df = scan_df
-            best_filtered_df = filtered_df
+            if local_best_score > best_score:
+                best_score = local_best_score
+                best_round = r
+                best_windows = local_best_windows
+                best_mode = local_best_mode
+                best_scan_df = scan_df
+                best_filtered_df = filtered_df
+                best_lock_mode = local_lock_mode
+        elif local_fallback_mode is not None:
+            round_eval_rows.append(
+                {
+                    "lock_round": r,
+                    "mode": local_fallback_mode["name"],
+                    "selected_windows": ", ".join(map(str, local_fallback_windows)),
+                    "bundle_score": local_fallback_score,
+                    "lock_mode": "fallback",
+                }
+            )
+            if local_fallback_score > fallback_score:
+                fallback_score = local_fallback_score
+                fallback_round = r
+                fallback_windows = local_fallback_windows
+                fallback_mode = local_fallback_mode
+                fallback_scan_df = scan_df
+                fallback_filtered_df = filtered_df
+                fallback_lock_mode = "fallback"
 
     round_eval_df = pd.DataFrame(round_eval_rows)
 
@@ -483,330 +518,423 @@ def find_best_lock_round_168_180(all_groups):
         return (
             best_round,
             best_windows,
+            best_mode,
             best_scan_df,
             best_filtered_df,
             round_eval_df,
-            "validated",
+            best_lock_mode,
         )
 
     if fallback_round is not None:
         return (
             fallback_round,
             fallback_windows,
+            fallback_mode,
             fallback_scan_df,
             fallback_filtered_df,
             round_eval_df,
-            "fallback",
+            fallback_lock_mode,
         )
 
-    return None, [], pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
+    return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
-# ================= STATE INIT =================
-def init_state():
-    defaults = {
-        "live_initialized": False,
-        "processed_until": None,
+# ================= REPLAY ENGINE =================
+def simulate_engine(numbers, groups):
+    result = {
+        "hist": pd.DataFrame(),
         "total_profit_group": 0.0,
-        "last_trade": -999,
         "hits_group": [],
-        "history_rows": [],
         "locked_windows": [],
+        "selected_lock_round": None,
+        "selected_mode": None,
+        "lock_mode": "",
         "scan_df_all": pd.DataFrame(),
         "scan_df_filtered": pd.DataFrame(),
         "round_eval_df": pd.DataFrame(),
-        "selected_lock_round": None,
-        "base_data_len": None,
+        "lock_scan_start": None,
+        "lock_scan_end": None,
+        "group_pause": False,
+        "pause_rounds_left": 0,
         "keep_bet_group": None,
         "keep_rounds_left": 0,
         "last_trade_was_loss": False,
         "consecutive_losses": 0,
-        "pause_rounds_left": 0,
         "group_consecutive_losses": 0,
-        "group_pause": False,
-        "lock_mode": "",
+        "last_trade": -999,
+        "auto_relocked": False,
+        "relock_round": None,
     }
 
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-init_state()
-
-if st.button("🔄 Reset Session"):
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    st.rerun()
-
-if st.session_state.base_data_len is not None and len(groups) < st.session_state.base_data_len:
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    st.rerun()
-
-# ================= INITIAL LOCK =================
-if not st.session_state.live_initialized:
     (
         selected_lock_round,
         locked_windows,
+        selected_mode,
         scan_df_all,
         scan_df_filtered,
         round_eval_df,
         lock_mode,
-    ) = find_best_lock_round_168_180(groups)
+    ) = find_best_auto_mode_in_range(
+        groups, LOCK_ROUND_START, LOCK_ROUND_END
+    )
 
-    if selected_lock_round is None:
-        st.error("Không tìm được bộ lock.")
-        st.stop()
+    if selected_lock_round is None or selected_mode is None:
+        return result
 
-    st.session_state.locked_windows = locked_windows
-    st.session_state.scan_df_all = scan_df_all
-    st.session_state.scan_df_filtered = scan_df_filtered
-    st.session_state.round_eval_df = round_eval_df
-    st.session_state.selected_lock_round = selected_lock_round
+    total_profit_group = 0.0
+    hits_group = []
+    last_trade = -999
 
-    # chỉ bắt đầu live sau khi đã scan xong toàn vùng 168 -> 180
-    st.session_state.processed_until = LOCK_ROUND_END - 1
-    st.session_state.base_data_len = len(groups)
-    st.session_state.live_initialized = True
-    st.session_state.lock_mode = lock_mode
+    keep_bet_group = None
+    keep_rounds_left = 0
+    last_trade_was_loss = False
+    consecutive_losses = 0
+    pause_rounds_left = 0
+    group_consecutive_losses = 0
+    group_pause = False
 
-# ================= LOAD STATE =================
-total_profit_group = st.session_state.total_profit_group
-last_trade = st.session_state.last_trade
-hits_group = st.session_state.hits_group
-history_rows = st.session_state.history_rows
-locked_windows = st.session_state.locked_windows
-scan_df_all = st.session_state.scan_df_all
-scan_df_filtered = st.session_state.scan_df_filtered
-round_eval_df = st.session_state.round_eval_df
-selected_lock_round = st.session_state.selected_lock_round
-processed_until = st.session_state.processed_until
-keep_bet_group = st.session_state.keep_bet_group
-keep_rounds_left = st.session_state.keep_rounds_left
-last_trade_was_loss = st.session_state.last_trade_was_loss
-consecutive_losses = st.session_state.consecutive_losses
-pause_rounds_left = st.session_state.pause_rounds_left
-group_consecutive_losses = st.session_state.group_consecutive_losses
-group_pause = st.session_state.group_pause
-lock_mode = st.session_state.lock_mode
+    auto_relocked = False
+    relock_round = None
 
-# ================= BACKTEST CHECK OF FINAL LOCKED WINDOWS =================
-scan_range_bt = backtest_bundle_vote_range(
-    groups,
-    locked_windows,
-    LOCK_ROUND_START,
-    min(LOCK_ROUND_END + 1, len(groups)),
-)
+    lock_scan_start = LOCK_ROUND_START
+    lock_scan_end = LOCK_ROUND_END
 
-post_lock_bt = backtest_bundle_vote_range(
-    groups,
-    locked_windows,
-    min(LOCK_ROUND_END + 1, len(groups)),
-    len(groups),
-)
+    history_rows = []
+    start_replay = max(LOCK_ROUND_END + 1, REPLAY_FROM + 1)
 
-# ================= LIVE TRADE LOOP =================
-for i in range(processed_until + 1, len(groups)):
-    if i <= LOCK_ROUND_END:
-        continue
+    current_mode = selected_mode
 
-    preds_group = [groups[i - w] for w in locked_windows if i - w >= 0]
-    if not preds_group:
-        processed_until = i
-        continue
+    for i in range(start_replay, len(groups)):
+        preds_group = [groups[i - w] for w in locked_windows if i - w >= 0]
+        if not preds_group:
+            continue
 
-    vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
-    new_signal = confidence_group >= VOTE_REQUIRED
-    distance = i - last_trade
+        vote_required = current_mode["vote_required"]
 
-    final_vote_group = vote_group
-    used_keep = False
-    trade = False
-    can_bet = False
-    hit_group = None
-    state = "WAIT"
+        vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+        new_signal = confidence_group >= vote_required
+        distance = i - last_trade
 
-    if total_profit_group >= GROUP_PROFIT_STOP:
-        group_pause = True
+        final_vote_group = vote_group
+        used_keep = False
+        trade = False
+        hit_group = None
+        state = "WAIT"
+        relock_triggered_now = False
 
-    if pause_rounds_left > 0:
-        pause_rounds_left -= 1
-        state = "PAUSE"
+        if total_profit_group >= GROUP_PROFIT_STOP:
+            group_pause = True
+
+        if pause_rounds_left > 0:
+            pause_rounds_left -= 1
+            state = "PAUSE"
+            history_rows.append(
+                {
+                    "round": i,
+                    "number": numbers[i],
+                    "group": groups[i],
+                    "mode": current_mode["name"],
+                    "vote_required": current_mode["vote_required"],
+                    "top_windows": current_mode["top_windows"],
+                    "vote_group": vote_group,
+                    "confidence_group": confidence_group,
+                    "new_signal": new_signal,
+                    "used_keep": False,
+                    "keep_group": None,
+                    "keep_left": 0,
+                    "final_vote_group": final_vote_group,
+                    "signal": False,
+                    "trade": False,
+                    "bet_group": None,
+                    "hit_group": None,
+                    "state": state,
+                    "total_profit_group": total_profit_group,
+                    "consecutive_losses": consecutive_losses,
+                    "pause_left": pause_rounds_left,
+                    "group_consecutive_losses": group_consecutive_losses,
+                    "group_pause": group_pause,
+                    "locked_windows": ", ".join(map(str, locked_windows)),
+                    "auto_relocked": auto_relocked,
+                    "relock_triggered_now": False,
+                }
+            )
+            continue
+
+        if new_signal:
+            keep_rounds_left = 0
+            keep_bet_group = None
+            last_trade_was_loss = False
+            final_vote_group = vote_group
+        else:
+            if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
+                final_vote_group = keep_bet_group
+                used_keep = True
+
+        final_signal = new_signal or used_keep
+        trade = (not group_pause) and final_signal and distance >= GAP
+
+        if trade and used_keep:
+            state = "TRADE_KEEP"
+        elif trade:
+            state = "TRADE"
+        elif group_pause:
+            state = "GROUP_PAUSED"
+        elif new_signal:
+            state = "SIGNAL"
+        elif used_keep:
+            state = "KEEP_WAIT"
+        else:
+            state = "WAIT"
+
+        bet_group = final_vote_group if trade else None
+
+        if used_keep:
+            keep_rounds_left -= 1
+            if keep_rounds_left < 0:
+                keep_rounds_left = 0
+
+        if trade:
+            last_trade = i
+
+            if groups[i] == final_vote_group:
+                hit_group = 1
+                total_profit_group += WIN_GROUP
+                hits_group.append(1)
+
+                last_trade_was_loss = False
+                keep_rounds_left = 0
+                keep_bet_group = None
+                consecutive_losses = 0
+                group_consecutive_losses = 0
+
+                if total_profit_group >= GROUP_PROFIT_STOP:
+                    group_pause = True
+                    state = "GROUP_PAUSE_PROFIT"
+            else:
+                hit_group = 0
+                total_profit_group += LOSS_GROUP
+                hits_group.append(0)
+
+                consecutive_losses += 1
+                group_consecutive_losses += 1
+
+                if used_keep:
+                    if keep_rounds_left <= 0:
+                        last_trade_was_loss = False
+                        keep_bet_group = None
+                    else:
+                        last_trade_was_loss = True
+                else:
+                    last_trade_was_loss = True
+                    keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
+                    keep_bet_group = final_vote_group
+
+                if consecutive_losses >= 2:
+                    pause_rounds_left = PAUSE_AFTER_2_LOSSES
+                    keep_rounds_left = 0
+                    keep_bet_group = None
+                    last_trade_was_loss = False
+                    consecutive_losses = 0
+                    state = "PAUSE_TRIGGER"
+
+                if group_consecutive_losses >= GROUP_MAX_LOSS_STREAK:
+                    group_pause = True
+                    keep_rounds_left = 0
+                    keep_bet_group = None
+                    last_trade_was_loss = False
+                    state = "GROUP_PAUSE_LOSS"
+
+            # auto relock nếu live xấu
+            if (
+                (not auto_relocked)
+                and (
+                    total_profit_group <= RELOCK_TRIGGER_PROFIT
+                    or group_consecutive_losses >= RELOCK_TRIGGER_LOSS_STREAK
+                )
+            ):
+                current_round = i
+                scan_end = current_round
+                scan_start = max(
+                    LOCK_ROUND_START,
+                    scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER,
+                )
+
+                (
+                    new_selected_lock_round,
+                    new_locked_windows,
+                    new_selected_mode,
+                    new_scan_df_all,
+                    new_scan_df_filtered,
+                    new_round_eval_df,
+                    new_lock_mode,
+                ) = find_best_auto_mode_in_range(
+                    groups, scan_start, scan_end
+                )
+
+                if new_selected_lock_round is not None and new_selected_mode is not None:
+                    relock_triggered_now = True
+                    auto_relocked = True
+                    relock_round = current_round
+
+                    locked_windows = new_locked_windows
+                    selected_lock_round = new_selected_lock_round
+                    selected_mode = new_selected_mode
+                    current_mode = new_selected_mode
+                    scan_df_all = new_scan_df_all
+                    scan_df_filtered = new_scan_df_filtered
+                    round_eval_df = new_round_eval_df
+                    lock_mode = new_lock_mode
+                    lock_scan_start = scan_start
+                    lock_scan_end = scan_end
+
+                    # reset live phase
+                    total_profit_group = 0.0
+                    hits_group = []
+                    last_trade = current_round
+                    keep_bet_group = None
+                    keep_rounds_left = 0
+                    last_trade_was_loss = False
+                    consecutive_losses = 0
+                    pause_rounds_left = 0
+                    group_consecutive_losses = 0
+                    group_pause = False
+                    state = "AUTO_RELOCK"
+
+        else:
+            if used_keep and keep_rounds_left <= 0:
+                keep_rounds_left = 0
+                keep_bet_group = None
+                last_trade_was_loss = False
 
         history_rows.append(
             {
                 "round": i,
                 "number": numbers[i],
                 "group": groups[i],
+                "mode": current_mode["name"],
+                "vote_required": current_mode["vote_required"],
+                "top_windows": current_mode["top_windows"],
                 "vote_group": vote_group,
                 "confidence_group": confidence_group,
                 "new_signal": new_signal,
-                "used_keep": False,
-                "keep_group": None,
-                "keep_left": 0,
+                "used_keep": used_keep,
+                "keep_group": keep_bet_group,
+                "keep_left": keep_rounds_left,
                 "final_vote_group": final_vote_group,
-                "signal": False,
-                "trade": False,
-                "bet_group": None,
-                "hit_group": None,
+                "signal": final_signal,
+                "trade": trade,
+                "bet_group": bet_group,
+                "hit_group": hit_group,
                 "state": state,
                 "total_profit_group": total_profit_group,
                 "consecutive_losses": consecutive_losses,
                 "pause_left": pause_rounds_left,
                 "group_consecutive_losses": group_consecutive_losses,
                 "group_pause": group_pause,
+                "locked_windows": ", ".join(map(str, locked_windows)),
+                "auto_relocked": auto_relocked,
+                "relock_triggered_now": relock_triggered_now,
             }
         )
-        processed_until = i
-        continue
 
-    if new_signal:
-        keep_rounds_left = 0
-        keep_bet_group = None
-        last_trade_was_loss = False
-        final_vote_group = vote_group
-    else:
-        if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
-            final_vote_group = keep_bet_group
-            used_keep = True
+    hist = pd.DataFrame(history_rows)
 
-    final_signal = new_signal or used_keep
-    trade = (not group_pause) and final_signal and distance >= GAP
-    can_bet = trade
-
-    if trade and used_keep:
-        state = "TRADE_KEEP"
-    elif trade:
-        state = "TRADE"
-    elif group_pause:
-        state = "GROUP_PAUSED"
-    elif new_signal:
-        state = "SIGNAL"
-    elif used_keep:
-        state = "KEEP_WAIT"
-    else:
-        state = "WAIT"
-
-    bet_group = final_vote_group if can_bet else None
-
-    if used_keep:
-        keep_rounds_left -= 1
-        if keep_rounds_left < 0:
-            keep_rounds_left = 0
-
-    if trade:
-        last_trade = i
-
-        if groups[i] == final_vote_group:
-            hit_group = 1
-            total_profit_group += WIN_GROUP
-            hits_group.append(1)
-
-            last_trade_was_loss = False
-            keep_rounds_left = 0
-            keep_bet_group = None
-            consecutive_losses = 0
-            group_consecutive_losses = 0
-
-            if total_profit_group >= GROUP_PROFIT_STOP:
-                group_pause = True
-                state = "GROUP_PAUSE_PROFIT"
-        else:
-            hit_group = 0
-            total_profit_group += LOSS_GROUP
-            hits_group.append(0)
-
-            consecutive_losses += 1
-            group_consecutive_losses += 1
-
-            if used_keep:
-                if keep_rounds_left <= 0:
-                    last_trade_was_loss = False
-                    keep_bet_group = None
-                else:
-                    last_trade_was_loss = True
-            else:
-                last_trade_was_loss = True
-                keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
-                keep_bet_group = final_vote_group
-
-            if consecutive_losses >= 2:
-                pause_rounds_left = PAUSE_AFTER_2_LOSSES
-                keep_rounds_left = 0
-                keep_bet_group = None
-                last_trade_was_loss = False
-                consecutive_losses = 0
-                state = "PAUSE_TRIGGER"
-
-            if group_consecutive_losses >= GROUP_MAX_LOSS_STREAK:
-                group_pause = True
-                keep_rounds_left = 0
-                keep_bet_group = None
-                last_trade_was_loss = False
-                state = "GROUP_PAUSE_LOSS"
-    else:
-        if used_keep and keep_rounds_left <= 0:
-            keep_rounds_left = 0
-            keep_bet_group = None
-            last_trade_was_loss = False
-
-    history_rows.append(
+    result.update(
         {
-            "round": i,
-            "number": numbers[i],
-            "group": groups[i],
-            "vote_group": vote_group,
-            "confidence_group": confidence_group,
-            "new_signal": new_signal,
-            "used_keep": used_keep,
-            "keep_group": keep_bet_group,
-            "keep_left": keep_rounds_left,
-            "final_vote_group": final_vote_group,
-            "signal": final_signal,
-            "trade": trade,
-            "bet_group": bet_group,
-            "hit_group": hit_group,
-            "state": state,
+            "hist": hist,
             "total_profit_group": total_profit_group,
-            "consecutive_losses": consecutive_losses,
-            "pause_left": pause_rounds_left,
-            "group_consecutive_losses": group_consecutive_losses,
+            "hits_group": hits_group,
+            "locked_windows": locked_windows,
+            "selected_lock_round": selected_lock_round,
+            "selected_mode": selected_mode,
+            "lock_mode": lock_mode,
+            "scan_df_all": scan_df_all,
+            "scan_df_filtered": scan_df_filtered,
+            "round_eval_df": round_eval_df,
+            "lock_scan_start": lock_scan_start,
+            "lock_scan_end": lock_scan_end,
             "group_pause": group_pause,
+            "pause_rounds_left": pause_rounds_left,
+            "keep_bet_group": keep_bet_group,
+            "keep_rounds_left": keep_rounds_left,
+            "last_trade_was_loss": last_trade_was_loss,
+            "consecutive_losses": consecutive_losses,
+            "group_consecutive_losses": group_consecutive_losses,
+            "last_trade": last_trade,
+            "auto_relocked": auto_relocked,
+            "relock_round": relock_round,
         }
     )
+    return result
 
-    processed_until = i
+# ================= RUN REPLAY =================
+sim = simulate_engine(numbers, groups)
 
-# ================= SAVE STATE =================
-st.session_state.total_profit_group = total_profit_group
-st.session_state.last_trade = last_trade
-st.session_state.hits_group = hits_group
-st.session_state.history_rows = history_rows
-st.session_state.locked_windows = locked_windows
-st.session_state.scan_df_all = scan_df_all
-st.session_state.scan_df_filtered = scan_df_filtered
-st.session_state.round_eval_df = round_eval_df
-st.session_state.selected_lock_round = selected_lock_round
-st.session_state.processed_until = processed_until
-st.session_state.base_data_len = len(groups)
-st.session_state.keep_bet_group = keep_bet_group
-st.session_state.keep_rounds_left = keep_rounds_left
-st.session_state.last_trade_was_loss = last_trade_was_loss
-st.session_state.consecutive_losses = consecutive_losses
-st.session_state.pause_rounds_left = pause_rounds_left
-st.session_state.group_consecutive_losses = group_consecutive_losses
-st.session_state.group_pause = group_pause
+hist = sim["hist"]
+total_profit_group = sim["total_profit_group"]
+hits_group = sim["hits_group"]
+locked_windows = sim["locked_windows"]
+selected_lock_round = sim["selected_lock_round"]
+selected_mode = sim["selected_mode"]
+lock_mode = sim["lock_mode"]
+scan_df_all = sim["scan_df_all"]
+scan_df_filtered = sim["scan_df_filtered"]
+round_eval_df = sim["round_eval_df"]
+lock_scan_start = sim["lock_scan_start"]
+lock_scan_end = sim["lock_scan_end"]
+group_pause = sim["group_pause"]
+pause_rounds_left = sim["pause_rounds_left"]
+keep_bet_group = sim["keep_bet_group"]
+keep_rounds_left = sim["keep_rounds_left"]
+last_trade_was_loss = sim["last_trade_was_loss"]
+consecutive_losses = sim["consecutive_losses"]
+group_consecutive_losses = sim["group_consecutive_losses"]
+last_trade = sim["last_trade"]
+auto_relocked = sim["auto_relocked"]
+relock_round = sim["relock_round"]
 
-hist = pd.DataFrame(history_rows)
+# ================= CURRENT LOCK CHECK =================
+scan_range_bt = {
+    "trades": 0,
+    "profit_group": 0.0,
+    "winrate_group": 0.0,
+    "max_drawdown_group": 0.0,
+}
+post_lock_bt = {
+    "trades": 0,
+    "profit_group": 0.0,
+    "winrate_group": 0.0,
+    "max_drawdown_group": 0.0,
+}
+
+if locked_windows and selected_mode is not None:
+    vote_required = selected_mode["vote_required"]
+
+    scan_range_bt = backtest_bundle_vote_range(
+        groups,
+        locked_windows,
+        vote_required,
+        LOCK_ROUND_START,
+        min(LOCK_ROUND_END + 1, len(groups)),
+    )
+
+    post_lock_bt = backtest_bundle_vote_range(
+        groups,
+        locked_windows,
+        vote_required,
+        min((lock_scan_end or LOCK_ROUND_END) + 1, len(groups)),
+        len(groups),
+    )
 
 # ================= NEXT BET =================
 next_round = len(groups)
 preds_group = [groups[next_round - w] for w in locked_windows if next_round - w >= 0]
 
-if preds_group:
+if preds_group and selected_mode is not None:
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+    vote_required = selected_mode["vote_required"]
 else:
     vote_group, confidence_group = None, 0
+    vote_required = 0
 
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
@@ -817,7 +945,7 @@ if not hist.empty:
 else:
     distance = 999
 
-new_signal = confidence_group >= VOTE_REQUIRED if vote_group is not None else False
+new_signal = confidence_group >= vote_required if vote_group is not None else False
 used_keep_next = False
 final_vote_group = vote_group
 
@@ -852,6 +980,9 @@ next_row = {
     "round": next_round,
     "number": current_number,
     "group": current_group,
+    "mode": selected_mode["name"] if selected_mode else "-",
+    "vote_required": selected_mode["vote_required"] if selected_mode else 0,
+    "top_windows": selected_mode["top_windows"] if selected_mode else 0,
     "vote_group": vote_group,
     "confidence_group": confidence_group,
     "new_signal": new_signal,
@@ -869,12 +1000,15 @@ next_row = {
     "pause_left": pause_rounds_left,
     "group_consecutive_losses": group_consecutive_losses,
     "group_pause": group_pause,
+    "locked_windows": ", ".join(map(str, locked_windows)),
+    "auto_relocked": auto_relocked,
+    "relock_triggered_now": False,
 }
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Group-only | chuẩn scan 168→180, live sau 180")
+st.title("🎯 Auto Mode Engine | tự chọn 3v2 / 4v3 / 6v4 / 8v5")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Current Number", current_number if current_number is not None else "-")
@@ -882,15 +1016,20 @@ col2.metric("Current Group", current_group if current_group is not None else "-"
 col3.metric("Best Lock Round", selected_lock_round if selected_lock_round is not None else "-")
 col4.metric("Next Group", final_vote_group if final_vote_group is not None else "-")
 
+st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
+st.write("Vote Required:", selected_mode["vote_required"] if selected_mode else 0)
+st.write("Top Windows:", selected_mode["top_windows"] if selected_mode else 0)
 st.write("Vote Strength:", confidence_group)
 st.write("Locked Windows:", locked_windows)
 st.write("Lock Mode:", lock_mode)
+st.write("Auto Relocked:", auto_relocked)
+st.write("Relock Round:", relock_round)
 st.write("Live starts from round:", LOCK_ROUND_END + 1)
 st.write("Group Pause:", group_pause)
 st.write("Pause Left:", pause_rounds_left)
 
 if lock_mode == "fallback":
-    st.warning("Đang dùng bộ lock fallback vì không có bộ validate đẹp trong vùng 168→180.")
+    st.warning("Đang dùng bộ lock fallback.")
 
 if group_pause:
     st.warning("⛔ GROUP PAUSED")
@@ -900,7 +1039,7 @@ elif can_bet and final_vote_group is not None:
     st.markdown(
         f"""
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:30px;color:white;font-weight:bold;">
-        BET GROUP → {final_vote_group}
+        BET GROUP → {final_vote_group} | MODE → {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
         unsafe_allow_html=True,
@@ -922,46 +1061,54 @@ c3.metric("Scan 168-180 Winrate %", round(scan_range_bt["winrate_group"] * 100, 
 c4.metric("Scan 168-180 MaxDD", scan_range_bt["max_drawdown_group"])
 
 d1, d2, d3, d4 = st.columns(4)
-d1.metric("Post-180 Trades", post_lock_bt["trades"])
-d2.metric("Post-180 Profit", post_lock_bt["profit_group"])
-d3.metric("Post-180 Winrate %", round(post_lock_bt["winrate_group"] * 100, 2))
-d4.metric("Post-180 MaxDD", post_lock_bt["max_drawdown_group"])
+d1.metric("Post-lock Trades", post_lock_bt["trades"])
+d2.metric("Post-lock Profit", post_lock_bt["profit_group"])
+d3.metric("Post-lock Winrate %", round(post_lock_bt["winrate_group"] * 100, 2))
+d4.metric("Post-lock MaxDD", post_lock_bt["max_drawdown_group"])
 
 st.subheader("Live Profit Curve")
 if not hist_display.empty:
     st.line_chart(hist_display["total_profit_group"])
 
-with st.expander("Round Evaluation"):
-    st.dataframe(round_eval_df, use_container_width=True)
+if SHOW_DEBUG_TABLES:
+    with st.expander("Round Evaluation"):
+        st.dataframe(round_eval_df, use_container_width=True)
 
-with st.expander("Locked Windows"):
-    if not scan_df_all.empty:
-        st.dataframe(
-            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
-            use_container_width=True,
-        )
+    with st.expander("Locked Windows"):
+        if not scan_df_all.empty:
+            st.dataframe(
+                scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
+                use_container_width=True,
+            )
 
-with st.expander("Filtered Windows"):
-    st.dataframe(scan_df_filtered.head(20), use_container_width=True)
+    with st.expander("Filtered Windows"):
+        st.dataframe(scan_df_filtered.head(20), use_container_width=True)
 
 st.subheader("History")
 
-def highlight_trade(row):
-    if row["state"] in ("NEXT", "NEXT_KEEP"):
-        return ["background-color: #ffd700"] * len(row)
-    if row["state"] == "TRADE_KEEP":
-        return ["background-color: #ffb347; color:black"] * len(row)
-    if row["state"] == "PAUSE":
-        return ["background-color: #87ceeb; color:black"] * len(row)
-    if row["state"] == "PAUSE_TRIGGER":
-        return ["background-color: #9370db; color:white"] * len(row)
-    if row["state"] in ("GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS", "GROUP_PAUSED"):
-        return ["background-color: #d9534f; color:white"] * len(row)
-    if row["trade"]:
-        return ["background-color: #ff4b4b; color:white"] * len(row)
-    return [""] * len(row)
+history_view = hist_display.iloc[::-1].head(SHOW_HISTORY_ROWS).copy()
 
-st.dataframe(
-    hist_display.iloc[::-1].head(SHOW_HISTORY_ROWS).style.apply(highlight_trade, axis=1),
-    use_container_width=True,
-)
+if SHOW_STYLED_HISTORY:
+    def highlight_trade(row):
+        if row["state"] in ("NEXT", "NEXT_KEEP"):
+            return ["background-color: #ffd700"] * len(row)
+        if row["state"] == "TRADE_KEEP":
+            return ["background-color: #ffb347; color:black"] * len(row)
+        if row["state"] == "PAUSE":
+            return ["background-color: #87ceeb; color:black"] * len(row)
+        if row["state"] == "PAUSE_TRIGGER":
+            return ["background-color: #9370db; color:white"] * len(row)
+        if row["state"] == "AUTO_RELOCK":
+            return ["background-color: #32cd32; color:black"] * len(row)
+        if row["state"] in ("GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS", "GROUP_PAUSED"):
+            return ["background-color: #d9534f; color:white"] * len(row)
+        if row["trade"]:
+            return ["background-color: #ff4b4b; color:white"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(
+        history_view.style.apply(highlight_trade, axis=1),
+        use_container_width=True,
+    )
+else:
+    st.dataframe(history_view, use_container_width=True)
