@@ -1,6 +1,5 @@
 import time
 from collections import Counter
-from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -8,7 +7,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ================= REFRESH =================
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=8000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -17,8 +16,8 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
-# mode engine tự chọn
-MODES = [   
+# chỉ giữ 3 mode
+MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
     {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 26},
@@ -44,7 +43,7 @@ KEEP_AFTER_LOSS_ROUNDS = 2
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
 MIN_WINDOW_SPACING = 2
-MAX_CANDIDATE_WINDOWS = 6
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 20
 MIN_TRAIN_LEN = 120
@@ -52,7 +51,7 @@ MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -6.0
 
 # relock scan gần hiện tại
-RELOCK_SCAN_LEN = 6
+RELOCK_SCAN_LEN = 8
 RELOCK_BUFFER = 0
 
 # ui
@@ -208,13 +207,6 @@ def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: in
                 break
     return out
 
-
-def safe_float(x, default=0.0):
-    try:
-        return float(x)
-    except Exception:
-        return default
-
 # ================= BACKTEST =================
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
     results_group = []
@@ -344,24 +336,20 @@ def build_window_tables(train_groups, window_min, window_max):
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
-    return df_all, filtered_df, candidate_df
-
-
-def get_candidate_windows(candidate_df, selected_seed, df_all, top_windows):
-    spaced_candidate_df = pick_spaced_windows(
-        candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING
-    )
+    spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING)
     candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
 
-    if len(candidate_windows) < top_windows:
+    if len(candidate_windows) < max(m["top_windows"] for m in MODES):
         candidate_windows = enforce_spacing_from_df(
-            selected_seed, top_windows, MIN_WINDOW_SPACING
+            selected_seed, max(m["top_windows"] for m in MODES), MIN_WINDOW_SPACING
         )
 
-    if len(candidate_windows) < top_windows:
-        candidate_windows = enforce_spacing_from_df(df_all, top_windows, 1)
+    if len(candidate_windows) < max(m["top_windows"] for m in MODES):
+        candidate_windows = enforce_spacing_from_df(
+            df_all, max(m["top_windows"] for m in MODES), 1
+        )
 
-    return candidate_windows
+    return candidate_windows, df_all, filtered_df
 
 # ================= AUTO MODE LOCK =================
 def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
@@ -374,6 +362,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     best_mode = None
     best_scan_df = pd.DataFrame()
     best_filtered_df = pd.DataFrame()
+    best_round_eval_df = pd.DataFrame()
     best_score = -999999.0
     best_lock_mode = "not_found"
 
@@ -382,6 +371,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     fallback_mode = None
     fallback_scan_df = pd.DataFrame()
     fallback_filtered_df = pd.DataFrame()
+    fallback_round_eval_df = pd.DataFrame()
     fallback_score = -999999.0
 
     round_eval_rows = []
@@ -416,101 +406,54 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             window_min = mode["window_min"]
             window_max = mode["window_max"]
 
-            df_all, filtered_df, candidate_df = build_window_tables(
+            candidate_windows, df_all, filtered_df = build_window_tables(
                 train_groups, window_min, window_max
-            )
-
-            selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
-            candidate_windows = get_candidate_windows(
-                candidate_df, selected_seed, df_all, top_windows
             )
 
             if len(candidate_windows) < top_windows:
                 continue
 
-            mode_bundle_rows = []
+            # tối ưu: không combinations, lấy thẳng top windows đã spacing
+            selected_windows = candidate_windows[:top_windows]
 
-            for combo in combinations(candidate_windows, top_windows):
-                combo = sorted(combo)
+            train_bt = backtest_bundle_vote_range(
+                train_groups, selected_windows, vote_required, 0, len(train_groups)
+            )
+            validate_bt = backtest_bundle_vote_range(
+                validate_groups, selected_windows, vote_required, validate_start, validate_end
+            )
 
-                train_bt = backtest_bundle_vote_range(
-                    train_groups, combo, vote_required, 0, len(train_groups)
-                )
-                validate_bt = backtest_bundle_vote_range(
-                    validate_groups, combo, vote_required, validate_start, validate_end
-                )
+            validate_pass = (
+                validate_bt["trades"] >= MIN_VALIDATE_TRADES
+                and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+            )
 
-                validate_pass = (
-                    validate_bt["trades"] >= MIN_VALIDATE_TRADES
-                    and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
-                )
+            final_score = (
+                train_bt["profit_group"] * 1.0
+                + train_bt["winrate_group"] * 10.0
+                + train_bt["recent_profit_group"] * 1.0
+                - abs(train_bt["max_drawdown_group"]) * 1.0
+                + train_bt["streak_score"] * 1.5
+                + validate_bt["profit_group"] * 2.0
+                + validate_bt["winrate_group"] * 8.0
+                - abs(validate_bt["max_drawdown_group"]) * 1.0
+                + validate_bt["streak_score"] * 1.5
+            )
 
-                final_score = (
-                    train_bt["profit_group"] * 1.0
-                    + train_bt["winrate_group"] * 10.0
-                    + train_bt["recent_profit_group"] * 1.0
-                    - abs(train_bt["max_drawdown_group"]) * 1.0
-                    + train_bt["streak_score"] * 1.5
-                    + validate_bt["profit_group"] * 2.0
-                    + validate_bt["winrate_group"] * 8.0
-                    - abs(validate_bt["max_drawdown_group"]) * 1.0
-                    + validate_bt["streak_score"] * 1.5
-                )
-
-                mode_bundle_rows.append(
-                    {
-                        "mode_name": mode["name"],
-                        "top_windows": top_windows,
-                        "vote_required": vote_required,
-                        "window_range": f"{window_min}-{window_max}",
-                        "windows": ", ".join(map(str, combo)),
-                        "validate_pass": validate_pass,
-                        "final_score": final_score,
-                        "validate_profit_group": validate_bt["profit_group"],
-                        "validate_winrate_group": validate_bt["winrate_group"],
-                        "validate_max_drawdown_group": validate_bt["max_drawdown_group"],
-                        "validate_streak_score": validate_bt["streak_score"],
-                    }
-                )
-
-            if not mode_bundle_rows:
-                continue
-
-            mode_df = pd.DataFrame(mode_bundle_rows)
-            mode_df_sorted = mode_df.sort_values(
-                ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
-                ascending=[False, False, False, False],
-            ).reset_index(drop=True)
-
-            best_any_row = mode_df_sorted.iloc[0]
-            any_score = safe_float(best_any_row["final_score"])
-            any_windows = [int(x) for x in best_any_row["windows"].split(", ")]
-
-            if any_score > local_fallback_score:
-                local_fallback_score = any_score
-                local_fallback_windows = any_windows
+            if final_score > local_fallback_score:
+                local_fallback_score = final_score
+                local_fallback_windows = selected_windows
                 local_fallback_mode = mode
                 local_fallback_scan_df = df_all
                 local_fallback_filtered_df = filtered_df
 
-            passed_df = mode_df[mode_df["validate_pass"] == True].copy()
-            if not passed_df.empty:
-                passed_df = passed_df.sort_values(
-                    ["final_score", "validate_streak_score", "validate_profit_group", "validate_winrate_group"],
-                    ascending=[False, False, False, False],
-                ).reset_index(drop=True)
-
-                best_row = passed_df.iloc[0]
-                score = safe_float(best_row["final_score"])
-                selected_windows = [int(x) for x in best_row["windows"].split(", ")]
-
-                if score > local_best_score:
-                    local_best_score = score
-                    local_best_windows = selected_windows
-                    local_best_mode = mode
-                    local_best_scan_df = df_all
-                    local_best_filtered_df = filtered_df
-                    local_lock_mode = "validated"
+            if validate_pass and final_score > local_best_score:
+                local_best_score = final_score
+                local_best_windows = selected_windows
+                local_best_mode = mode
+                local_best_scan_df = df_all
+                local_best_filtered_df = filtered_df
+                local_lock_mode = "validated"
 
         if local_best_mode is not None:
             round_eval_rows.append(
@@ -644,7 +587,6 @@ def simulate_engine(numbers, groups):
     phase_summary_rows = []
 
     start_replay = max(LOCK_ROUND_END + 1, REPLAY_FROM + 1)
-
     current_mode = selected_mode
 
     for i in range(start_replay, len(groups)):
@@ -803,18 +745,14 @@ def simulate_engine(numbers, groups):
                     keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
                     keep_bet_group = final_vote_group
 
-            # kiểm tra stop session ngay sau trade
             if total_profit_all_phase >= SESSION_STOP_WIN:
                 state = "SESSION_STOP_WIN"
             elif total_profit_all_phase <= SESSION_STOP_LOSS:
                 state = "SESSION_STOP_LOSS"
-
-            # relock phase
             elif phase_profit_group <= PHASE_STOP_LOSS:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_STOP_LOSS"
                 state = "AUTO_RELOCK_LOSS"
-
             elif phase_profit_group >= PHASE_STOP_WIN:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_TAKE_PROFIT"
@@ -852,9 +790,7 @@ def simulate_engine(numbers, groups):
                     new_scan_df_filtered,
                     new_round_eval_df,
                     new_lock_mode,
-                ) = find_best_auto_mode_in_range(
-                    groups, scan_start, scan_end
-                )
+                ) = find_best_auto_mode_in_range(groups, scan_start, scan_end)
 
                 if new_selected_lock_round is not None and new_selected_mode is not None:
                     relock_count += 1
@@ -1068,7 +1004,6 @@ else:
     final_signal = new_signal or used_keep_next
     signal = final_signal
     can_bet = signal and distance >= GAP and next_round > LOCK_ROUND_END
-
     next_state = "NEXT_KEEP" if (used_keep_next and can_bet) else "NEXT"
 
 next_row = {
@@ -1103,7 +1038,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Auto Relock Engine | -2 relock | +3.5 relock | ±10 stop")
+st.title("🎯 Auto Relock Engine | 4v3 / 6v4 / 8v5")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
