@@ -45,20 +45,19 @@ MAX_CANDIDATE_WINDOWS = 8
 VALIDATE_LEN = 20
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -6
+VALIDATE_MIN_DRAWDOWN = -6.0
 
 # ===== Replay / UI =====
 REPLAY_FROM = 180
 SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 80
 
 # ===== Switch phase =====
-PHASE1_TO_PHASE2_PROFIT_TRIGGER = 3.5
-PHASE1_TO_PHASE2_LOSS_STREAK_TRIGGER = 3.5
+PHASE1_TO_PHASE2_PROFIT_TRIGGER = -3.0
+PHASE1_TO_PHASE2_LOSS_STREAK_TRIGGER = 3
 
 PHASE2_TO_PHASE1_PROFIT_TRIGGER = 3.5
-RESET_PROFIT_ON_RELOCK = True
 
 # ===== Scan gần hiện tại khi switch =====
 RELOCK_SCAN_LEN = 13
@@ -75,7 +74,7 @@ def load_numbers():
     df.columns = [str(c).strip().lower() for c in df.columns]
     if "number" not in df.columns:
         raise ValueError("Sheet phải có cột 'number'")
-    df["number"] = pd.to_numeric(df["number"], errors="co-2rce")
+    df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
 numbers = load_numbers()
