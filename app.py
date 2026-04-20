@@ -8,7 +8,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ================= REFRESH =================
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -60,7 +60,7 @@ RELOCK_BUFFER = 0
 REPLAY_FROM = 180
 SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
-SHOW_HISTORY_ROWS = 80
+SHOW_HISTORY_ROWS = 40
 
 # ================= LOAD =================
 @st.cache_data(ttl=10)
