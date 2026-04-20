@@ -7,7 +7,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ================= REFRESH =================
-st_autorefresh(interval=8000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -33,7 +33,7 @@ PHASE_STOP_WIN = 3.5
 PHASE_STOP_LOSS = -2.0
 
 # session logic
-SESSION_STOP_WIN = 10.0
+SESSION_STOP_WIN = 20.0
 SESSION_STOP_LOSS = -10.0
 
 # keep sau thua
