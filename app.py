@@ -7,7 +7,8 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1000, key="refresh")
+# refresh chậm lại để tránh reload khi app chưa tính xong
+st_autorefresh(interval=5000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -15,13 +16,14 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
-# ===== Phase 1 =====
+# ===== Phase 1: 6 vote 4 | window 6-22 =====
 PHASE1_WINDOW_MIN = 6
 PHASE1_WINDOW_MAX = 22
 PHASE1_TOP_WINDOWS = 6
 PHASE1_VOTE_REQUIRED = 4
 
-# ===== Phase 2 =====
+# ===== Phase 2: nhẹ hơn để chạy ổn định =====
+# vẫn chặt hơn phase 1 ở vote, nhưng không để 8 windows vì quá nặng
 PHASE2_WINDOW_MIN = 6
 PHASE2_WINDOW_MAX = 26
 PHASE2_TOP_WINDOWS = 8
@@ -51,16 +53,13 @@ VALIDATE_MIN_DRAWDOWN = -6.0
 REPLAY_FROM = 180
 SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
-SHOW_HISTORY_ROWS = 80
+SHOW_HISTORY_ROWS = 40
 
 # ===== Switch phase =====
 PHASE1_TO_PHASE2_PROFIT_TRIGGER = -3.0
 PHASE1_TO_PHASE2_LOSS_STREAK_TRIGGER = 3
-
-PHASE2_TO_PHASE1_PROFIT_TRIGGER = 3.5
+PHASE2_TO_PHASE1_PROFIT_TRIGGER = 4.0
 RESET_PROFIT_ON_RELOCK = True
-
-
 
 # ===== Scan gần hiện tại khi switch =====
 RELOCK_SCAN_LEN = 13
@@ -599,7 +598,6 @@ def simulate_engine(numbers, groups):
         final_vote_group = vote_group
         used_keep = False
         trade = False
-        can_bet = False
         hit_group = None
         state = "WAIT"
 
@@ -658,7 +656,6 @@ def simulate_engine(numbers, groups):
 
         final_signal = new_signal or used_keep
         trade = (not group_pause) and final_signal and distance >= GAP
-        can_bet = trade
 
         if trade and used_keep:
             state = "TRADE_KEEP"
@@ -673,7 +670,7 @@ def simulate_engine(numbers, groups):
         else:
             state = "WAIT"
 
-        bet_group = final_vote_group if can_bet else None
+        bet_group = final_vote_group if trade else None
 
         if used_keep:
             keep_rounds_left -= 1
@@ -1064,7 +1061,7 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 2-Phase Engine | Phase1 6v4 6-22 | Phase2 8v5 6-26")
+st.title("🎯 2-Phase Engine | Light Version")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
