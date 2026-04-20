@@ -12,20 +12,21 @@ st_autorefresh(interval=1000, key="refresh")
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-# Phase 1: scan cố định ban đầu
 LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
-# Phase 1
+# ===== Phase 1 =====
+PHASE1_WINDOW_MIN = 6
+PHASE1_WINDOW_MAX = 22
 PHASE1_TOP_WINDOWS = 6
 PHASE1_VOTE_REQUIRED = 4
 
-# Phase 2
+# ===== Phase 2 =====
+PHASE2_WINDOW_MIN = 6
+PHASE2_WINDOW_MAX = 26
 PHASE2_TOP_WINDOWS = 8
 PHASE2_VOTE_REQUIRED = 5
 
-WINDOW_MIN = 6
-WINDOW_MAX = 26
 GAP = 1
 
 WIN_GROUP = 2.5
@@ -33,8 +34,8 @@ LOSS_GROUP = -1.0
 
 KEEP_AFTER_LOSS_ROUNDS = 2
 PAUSE_AFTER_2_LOSSES = 0
-GROUP_MAX_LOSS_STREAK = 7
-GROUP_PROFIT_STOP = 3.5
+GROUP_MAX_LOSS_STREAK = 4
+GROUP_PROFIT_STOP = 4.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
@@ -46,18 +47,19 @@ MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -6.0
 
-# ===== tối ưu tốc độ theo yêu cầu =====
+# ===== Replay / UI =====
 REPLAY_FROM = 180
 SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
-SHOW_HISTORY_ROWS = 60
+SHOW_HISTORY_ROWS = 80
 
-# Relock
-RELOCK_TRIGGER_LOSS_STREAK = 3
-RELOCK_TRIGGER_PROFIT = -3.0
-RESET_PROFIT_ON_RELOCK = True
+# ===== Switch phase =====
+PHASE1_TO_PHASE2_PROFIT_TRIGGER = -3.0
+PHASE1_TO_PHASE2_LOSS_STREAK_TRIGGER = 3
 
-# Scan gần hiện tại khi relock
+PHASE2_TO_PHASE1_PROFIT_TRIGGER = 4.0
+
+# ===== Scan gần hiện tại khi switch =====
 RELOCK_SCAN_LEN = 13
 RELOCK_BUFFER = 0
 
@@ -199,6 +201,21 @@ def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: in
                 break
     return out
 
+def phase_config(phase: int):
+    if phase == 1:
+        return {
+            "window_min": PHASE1_WINDOW_MIN,
+            "window_max": PHASE1_WINDOW_MAX,
+            "top_windows": PHASE1_TOP_WINDOWS,
+            "vote_required": PHASE1_VOTE_REQUIRED,
+        }
+    return {
+        "window_min": PHASE2_WINDOW_MIN,
+        "window_max": PHASE2_WINDOW_MAX,
+        "top_windows": PHASE2_TOP_WINDOWS,
+        "vote_required": PHASE2_VOTE_REQUIRED,
+    }
+
 # ================= BACKTEST RAW =================
 def backtest_bundle_vote_range(seq_groups, windows, start_idx, end_idx, vote_required):
     results_group = []
@@ -289,8 +306,8 @@ def evaluate_window_group(seq_groups, w):
         "score": score,
     }
 
-def build_window_tables(train_groups, top_windows):
-    rows = [evaluate_window_group(train_groups, w) for w in range(WINDOW_MIN, WINDOW_MAX + 1)]
+def build_window_tables(train_groups, top_windows, window_min, window_max):
+    rows = [evaluate_window_group(train_groups, w) for w in range(window_min, window_max + 1)]
     df = pd.DataFrame(rows)
 
     df_all = df.sort_values(
@@ -341,7 +358,13 @@ def build_window_tables(train_groups, top_windows):
 
     return candidate_windows, df_all, filtered_df
 
-def find_best_lock_in_range(all_groups, scan_start, scan_end, top_windows, vote_required):
+def find_best_lock_in_range(all_groups, scan_start, scan_end, phase):
+    cfg = phase_config(phase)
+    top_windows = cfg["top_windows"]
+    vote_required = cfg["vote_required"]
+    window_min = cfg["window_min"]
+    window_max = cfg["window_max"]
+
     effective_scan_end = min(scan_end, len(all_groups) - 1)
     if effective_scan_end < scan_start:
         return None, [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "no_scan_range"
@@ -370,7 +393,12 @@ def find_best_lock_in_range(all_groups, scan_start, scan_end, top_windows, vote_
         train_groups = all_groups[:train_end]
         validate_groups = all_groups[:validate_end]
 
-        candidate_windows, scan_df, filtered_df = build_window_tables(train_groups, top_windows)
+        candidate_windows, scan_df, filtered_df = build_window_tables(
+            train_groups,
+            top_windows,
+            window_min,
+            window_max,
+        )
         if len(candidate_windows) < top_windows:
             continue
 
@@ -490,8 +518,12 @@ def simulate_engine(numbers, groups):
         "lock_scan_end": None,
         "lock_vote_required": PHASE1_VOTE_REQUIRED,
         "lock_top_windows": PHASE1_TOP_WINDOWS,
-        "relocked": False,
-        "relock_round": None,
+        "lock_window_min": PHASE1_WINDOW_MIN,
+        "lock_window_max": PHASE1_WINDOW_MAX,
+        "switched_to_phase2": False,
+        "switch_to_phase2_round": None,
+        "switched_back_to_phase1": False,
+        "switch_back_to_phase1_round": None,
         "group_pause": False,
         "pause_rounds_left": 0,
         "keep_bet_group": None,
@@ -513,12 +545,13 @@ def simulate_engine(numbers, groups):
         groups,
         LOCK_ROUND_START,
         LOCK_ROUND_END,
-        PHASE1_TOP_WINDOWS,
-        PHASE1_VOTE_REQUIRED,
+        1,
     )
 
     if selected_lock_round is None:
         return result
+
+    cfg = phase_config(1)
 
     phase = 1
     phase_profit_group = 0.0
@@ -535,13 +568,17 @@ def simulate_engine(numbers, groups):
     group_consecutive_losses = 0
     group_pause = False
 
-    relocked = False
-    relock_round = None
+    switched_to_phase2 = False
+    switch_to_phase2_round = None
+    switched_back_to_phase1 = False
+    switch_back_to_phase1_round = None
 
     lock_scan_start = LOCK_ROUND_START
     lock_scan_end = LOCK_ROUND_END
-    lock_vote_required = PHASE1_VOTE_REQUIRED
-    lock_top_windows = PHASE1_TOP_WINDOWS
+    lock_vote_required = cfg["vote_required"]
+    lock_top_windows = cfg["top_windows"]
+    lock_window_min = cfg["window_min"]
+    lock_window_max = cfg["window_max"]
 
     history_rows = []
 
@@ -562,7 +599,9 @@ def simulate_engine(numbers, groups):
         can_bet = False
         hit_group = None
         state = "WAIT"
-        relock_triggered_now = False
+
+        switched_now = False
+        switched_back_now = False
         phase_before_trade = phase
 
         if phase_profit_group >= GROUP_PROFIT_STOP:
@@ -579,6 +618,7 @@ def simulate_engine(numbers, groups):
                 "vote_group": vote_group,
                 "confidence_group": confidence_group,
                 "vote_required": lock_vote_required,
+                "window_range": f"{lock_window_min}-{lock_window_max}",
                 "new_signal": new_signal,
                 "used_keep": False,
                 "keep_group": None,
@@ -596,8 +636,10 @@ def simulate_engine(numbers, groups):
                 "group_consecutive_losses": group_consecutive_losses,
                 "group_pause": group_pause,
                 "locked_windows": ", ".join(map(str, locked_windows)),
-                "relocked": relocked,
-                "relock_triggered_now": False,
+                "switched_to_phase2": switched_to_phase2,
+                "switched_back_to_phase1": switched_back_to_phase1,
+                "switched_now": False,
+                "switched_back_now": False,
             })
             continue
 
@@ -690,12 +732,13 @@ def simulate_engine(numbers, groups):
                     last_trade_was_loss = False
                     state = "GROUP_PAUSE_LOSS"
 
+            # ===== Switch phase 1 -> phase 2 =====
             if (
                 phase == 1
-                and (not relocked)
-                and len(phase_hits_group) >= RELOCK_TRIGGER_LOSS_STREAK
-                and phase_hits_group[-RELOCK_TRIGGER_LOSS_STREAK:] == [0] * RELOCK_TRIGGER_LOSS_STREAK
-                and phase_profit_group <= RELOCK_TRIGGER_PROFIT
+                and (
+                    phase_profit_group <= PHASE1_TO_PHASE2_PROFIT_TRIGGER
+                    or group_consecutive_losses >= PHASE1_TO_PHASE2_LOSS_STREAK_TRIGGER
+                )
             ):
                 current_round = i
                 scan_end = current_round
@@ -712,16 +755,17 @@ def simulate_engine(numbers, groups):
                     groups,
                     scan_start,
                     scan_end,
-                    PHASE2_TOP_WINDOWS,
-                    PHASE2_VOTE_REQUIRED,
+                    2,
                 )
 
                 if new_selected_lock_round is not None and len(new_locked_windows) == PHASE2_TOP_WINDOWS:
-                    relock_triggered_now = True
-                    relocked = True
-                    relock_round = current_round
+                    switched_now = True
+                    switched_to_phase2 = True
+                    switch_to_phase2_round = current_round
 
                     phase = 2
+                    cfg2 = phase_config(2)
+
                     locked_windows = new_locked_windows
                     selected_lock_round = new_selected_lock_round
                     lock_mode = new_lock_mode
@@ -730,8 +774,10 @@ def simulate_engine(numbers, groups):
                     round_eval_df = new_round_eval_df
                     lock_scan_start = scan_start
                     lock_scan_end = scan_end
-                    lock_vote_required = PHASE2_VOTE_REQUIRED
-                    lock_top_windows = PHASE2_TOP_WINDOWS
+                    lock_vote_required = cfg2["vote_required"]
+                    lock_top_windows = cfg2["top_windows"]
+                    lock_window_min = cfg2["window_min"]
+                    lock_window_max = cfg2["window_max"]
 
                     if RESET_PROFIT_ON_RELOCK:
                         phase_profit_group = 0.0
@@ -745,7 +791,61 @@ def simulate_engine(numbers, groups):
                     pause_rounds_left = 0
                     group_consecutive_losses = 0
                     group_pause = False
-                    state = "RELOCK_TO_PHASE2"
+                    state = "SWITCH_TO_PHASE2"
+
+            # ===== Switch phase 2 -> phase 1 =====
+            elif phase == 2 and phase_profit_group >= PHASE2_TO_PHASE1_PROFIT_TRIGGER:
+                current_round = i
+                scan_end = current_round
+                scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
+
+                (
+                    new_selected_lock_round,
+                    new_locked_windows,
+                    new_scan_df_all,
+                    new_scan_df_filtered,
+                    new_round_eval_df,
+                    new_lock_mode,
+                ) = find_best_lock_in_range(
+                    groups,
+                    scan_start,
+                    scan_end,
+                    1,
+                )
+
+                if new_selected_lock_round is not None and len(new_locked_windows) == PHASE1_TOP_WINDOWS:
+                    switched_back_now = True
+                    switched_back_to_phase1 = True
+                    switch_back_to_phase1_round = current_round
+
+                    phase = 1
+                    cfg1 = phase_config(1)
+
+                    locked_windows = new_locked_windows
+                    selected_lock_round = new_selected_lock_round
+                    lock_mode = new_lock_mode
+                    scan_df_all = new_scan_df_all
+                    scan_df_filtered = new_scan_df_filtered
+                    round_eval_df = new_round_eval_df
+                    lock_scan_start = scan_start
+                    lock_scan_end = scan_end
+                    lock_vote_required = cfg1["vote_required"]
+                    lock_top_windows = cfg1["top_windows"]
+                    lock_window_min = cfg1["window_min"]
+                    lock_window_max = cfg1["window_max"]
+
+                    phase_profit_group = 0.0
+                    phase_hits_group = []
+
+                    phase_last_trade = current_round
+                    keep_bet_group = None
+                    keep_rounds_left = 0
+                    last_trade_was_loss = False
+                    consecutive_losses = 0
+                    pause_rounds_left = 0
+                    group_consecutive_losses = 0
+                    group_pause = False
+                    state = "SWITCH_BACK_TO_PHASE1"
 
         else:
             if used_keep and keep_rounds_left <= 0:
@@ -754,13 +854,14 @@ def simulate_engine(numbers, groups):
                 last_trade_was_loss = False
 
         history_rows.append({
-            "phase": phase_before_trade if not relock_triggered_now else 2,
+            "phase": phase_before_trade if not (switched_now or switched_back_now) else phase,
             "round": i,
             "number": numbers[i],
             "group": groups[i],
             "vote_group": vote_group,
             "confidence_group": confidence_group,
-            "vote_required": lock_vote_required if not relock_triggered_now else PHASE2_VOTE_REQUIRED,
+            "vote_required": lock_vote_required,
+            "window_range": f"{lock_window_min}-{lock_window_max}",
             "new_signal": new_signal,
             "used_keep": used_keep,
             "keep_group": keep_bet_group,
@@ -778,8 +879,10 @@ def simulate_engine(numbers, groups):
             "group_consecutive_losses": group_consecutive_losses,
             "group_pause": group_pause,
             "locked_windows": ", ".join(map(str, locked_windows)),
-            "relocked": relocked,
-            "relock_triggered_now": relock_triggered_now,
+            "switched_to_phase2": switched_to_phase2,
+            "switched_back_to_phase1": switched_back_to_phase1,
+            "switched_now": switched_now,
+            "switched_back_now": switched_back_now,
         })
 
     hist = pd.DataFrame(history_rows)
@@ -801,8 +904,12 @@ def simulate_engine(numbers, groups):
         "lock_scan_end": lock_scan_end,
         "lock_vote_required": lock_vote_required,
         "lock_top_windows": lock_top_windows,
-        "relocked": relocked,
-        "relock_round": relock_round,
+        "lock_window_min": lock_window_min,
+        "lock_window_max": lock_window_max,
+        "switched_to_phase2": switched_to_phase2,
+        "switch_to_phase2_round": switch_to_phase2_round,
+        "switched_back_to_phase1": switched_back_to_phase1,
+        "switch_back_to_phase1_round": switch_back_to_phase1_round,
         "group_pause": group_pause,
         "pause_rounds_left": pause_rounds_left,
         "keep_bet_group": keep_bet_group,
@@ -834,8 +941,14 @@ lock_scan_start = sim["lock_scan_start"]
 lock_scan_end = sim["lock_scan_end"]
 lock_vote_required = sim["lock_vote_required"]
 lock_top_windows = sim["lock_top_windows"]
-relocked = sim["relocked"]
-relock_round = sim["relock_round"]
+lock_window_min = sim["lock_window_min"]
+lock_window_max = sim["lock_window_max"]
+
+switched_to_phase2 = sim["switched_to_phase2"]
+switch_to_phase2_round = sim["switch_to_phase2_round"]
+switched_back_to_phase1 = sim["switched_back_to_phase1"]
+switch_back_to_phase1_round = sim["switch_back_to_phase1_round"]
+
 group_pause = sim["group_pause"]
 pause_rounds_left = sim["pause_rounds_left"]
 keep_bet_group = sim["keep_bet_group"]
@@ -865,7 +978,7 @@ if (
         groups, locked_windows, post_start, len(groups), lock_vote_required
     )
 
-# ================= NEXT BET (LIVE EVALUATION) =================
+# ================= NEXT BET =================
 next_round = len(groups)
 preds_group = [groups[next_round - w] for w in locked_windows if next_round - w >= 0]
 
@@ -921,6 +1034,7 @@ next_row = {
     "vote_group": vote_group,
     "confidence_group": confidence_group,
     "vote_required": lock_vote_required,
+    "window_range": f"{lock_window_min}-{lock_window_max}",
     "new_signal": new_signal,
     "used_keep": used_keep_next,
     "keep_group": next_keep_bet_group,
@@ -938,14 +1052,16 @@ next_row = {
     "group_consecutive_losses": group_consecutive_losses,
     "group_pause": group_pause,
     "locked_windows": ", ".join(map(str, locked_windows)),
-    "relocked": relocked,
-    "relock_triggered_now": False,
+    "switched_to_phase2": switched_to_phase2,
+    "switched_back_to_phase1": switched_back_to_phase1,
+    "switched_now": False,
+    "switched_back_now": False,
 }
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= UI =================
-st.title("🎯 Replay đúng quá khứ + Live đánh giá hiện tại")
+st.title("🎯 2-Phase Engine | Phase1 6v4 6-22 | Phase2 8v5 6-26")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -956,12 +1072,15 @@ c4.metric("Next Group", final_vote_group if final_vote_group is not None else "-
 st.write("Locked Windows:", locked_windows)
 st.write("Vote Required:", lock_vote_required)
 st.write("Top Windows:", lock_top_windows)
+st.write("Window Range:", f"{lock_window_min}-{lock_window_max}")
 st.write("Vote Strength:", confidence_group)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
-st.write("Relocked:", relocked)
-st.write("Relock Round:", relock_round)
+st.write("Switched To Phase2:", switched_to_phase2)
+st.write("Switch To Phase2 Round:", switch_to_phase2_round)
+st.write("Switched Back To Phase1:", switched_back_to_phase1)
+st.write("Switch Back To Phase1 Round:", switch_back_to_phase1_round)
 st.write("Group Pause:", group_pause)
 st.write("Pause Left:", pause_rounds_left)
 
@@ -1064,8 +1183,10 @@ if SHOW_STYLED_HISTORY:
             return ["background-color: #87ceeb; color:black"] * len(row)
         if row["state"] == "PAUSE_TRIGGER":
             return ["background-color: #9370db; color:white"] * len(row)
-        if row["state"] == "RELOCK_TO_PHASE2":
+        if row["state"] == "SWITCH_TO_PHASE2":
             return ["background-color: #32cd32; color:black"] * len(row)
+        if row["state"] == "SWITCH_BACK_TO_PHASE1":
+            return ["background-color: #00ced1; color:black"] * len(row)
         if row["state"] in ("GROUP_PAUSE_PROFIT", "GROUP_PAUSE_LOSS", "GROUP_PAUSED"):
             return ["background-color: #d9534f; color:white"] * len(row)
         if row["trade"]:
