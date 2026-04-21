@@ -33,7 +33,7 @@ PHASE_STOP_WIN = 3.5
 PHASE_STOP_LOSS = -2.0
 
 # session logic
-SESSION_STOP_WIN = 20.0
+SESSION_STOP_WIN = 40.0
 SESSION_STOP_LOSS = -10.0
 
 # keep sau thua
