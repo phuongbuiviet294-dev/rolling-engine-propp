@@ -68,7 +68,7 @@ TELEGRAM_SEND_MODE = "READY_ONLY"
 SEND_READY = True
 SEND_RELOCK = False
 SEND_SESSION_STOP = False
-SEND_WAIT = False
+SEND_WAIT = True
 
 # chống gửi lặp khi current round không đổi
 DEDUP_BY_CURRENT_ROUND = True
