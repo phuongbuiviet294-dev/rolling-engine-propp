@@ -54,16 +54,24 @@ SHOW_STYLED_HISTORY = False
 SHOW_HISTORY_ROWS = 40
 
 # ================= TELEGRAM CONFIG =================
-# Ưu tiên lấy từ Streamlit secrets
-# .streamlit/secrets.toml
-# BOT_TOKEN = "..."
-# CHAT_ID = "..."
-
 DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
+
+# CUSTOM gửi cái gì
+# "READY_ONLY" = chỉ gửi READY
+# "CUSTOM" = tự chọn từng loại
+TELEGRAM_SEND_MODE = "READY_ONLY"
+
+SEND_READY = True
+SEND_RELOCK = False
+SEND_SESSION_STOP = False
+SEND_WAIT = False
+
+# chống gửi lặp khi current round không đổi
+DEDUP_BY_CURRENT_ROUND = True
 
 
 def telegram_enabled() -> bool:
@@ -85,18 +93,50 @@ def send_telegram(msg: str) -> bool:
         return False
 
 
+def should_send_signal(signal_name: str) -> bool:
+    if TELEGRAM_SEND_MODE == "READY_ONLY":
+        return signal_name == "READY"
+
+    mapping = {
+        "READY": SEND_READY,
+        "RELOCK": SEND_RELOCK,
+        "SESSION_STOP": SEND_SESSION_STOP,
+        "WAIT": SEND_WAIT,
+    }
+    return mapping.get(signal_name, False)
+
+
 def init_notification_state():
-    if "last_ready_sent_round" not in st.session_state:
-        st.session_state.last_ready_sent_round = -1
-    if "last_state_sent_key" not in st.session_state:
-        st.session_state.last_state_sent_key = ""
+    if "last_sent_round" not in st.session_state:
+        st.session_state.last_sent_round = -1
+
+    if "last_signal_keys" not in st.session_state:
+        st.session_state.last_signal_keys = {}
 
 
-def send_once_state(state_key: str, msg: str):
-    if st.session_state.last_state_sent_key != state_key:
-        send_telegram(msg)
-        st.session_state.last_state_sent_key = state_key
+def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suffix: str = "") -> bool:
+    if not telegram_enabled():
+        return False
 
+    if not should_send_signal(signal_name):
+        return False
+
+    if DEDUP_BY_CURRENT_ROUND and signal_name in ("READY", "WAIT"):
+        if st.session_state.last_sent_round == current_round:
+            return False
+
+    signal_key = f"{signal_name}|{current_round}|{unique_suffix}"
+    old_key = st.session_state.last_signal_keys.get(signal_name, "")
+
+    if old_key == signal_key:
+        return False
+
+    ok = send_telegram(msg)
+    if ok:
+        st.session_state.last_signal_keys[signal_name] = signal_key
+        if signal_name in ("READY", "WAIT"):
+            st.session_state.last_sent_round = current_round
+    return ok
 # ================= LOAD =================
 @st.cache_data(ttl=10)
 def load_numbers():
@@ -1004,47 +1044,86 @@ hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 # ================= TELEGRAM NOTIFY =================
 init_notification_state()
 
-if telegram_enabled():
-    if can_bet and final_vote_group is not None:
-        if next_round != st.session_state.last_ready_sent_round:
-            ready_msg = (
-                f"READY\n"
-                f"Round: {next_round}\n"
-                f"Current Number: {current_number}\n"
-                f"Current Group: {current_group}\n"
-                f"Predicted Group: {final_vote_group}\n"
-                f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-                f"Vote Strength: {confidence_group}\n"
-                f"Phase Profit: {phase_profit_group}\n"
-                f"Total Profit: {total_profit_all_phase}\n"
-                f"Relock Count: {relock_count}\n"
-                f"Lock Mode: {lock_mode}"
-            )
-            send_telegram(ready_msg)
-            st.session_state.last_ready_sent_round = next_round
+current_round = len(numbers)
 
+if telegram_enabled():
+    # READY
+    if can_bet and final_vote_group is not None:
+        ready_msg = (
+            f"READY\n"
+            f"Round: {current_round}\n"
+            f"Current Number: {current_number}\n"
+            f"Current Group: {current_group}\n"
+            f"Predicted Group: {final_vote_group}\n"
+            f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
+            f"Vote Strength: {confidence_group}\n"
+            f"Phase Profit: {phase_profit_group}\n"
+            f"Total Profit: {total_profit_all_phase}\n"
+            f"Relock Count: {relock_count}\n"
+            f"Lock Mode: {lock_mode}"
+        )
+        send_signal_once(
+            signal_name="READY",
+            current_round=current_round,
+            msg=ready_msg,
+            unique_suffix=f"{selected_mode['name'] if selected_mode else '-'}|{final_vote_group}|{confidence_group}",
+        )
+
+    # WAIT
+    elif not session_stop:
+        wait_msg = (
+            f"WAIT\n"
+            f"Round: {current_round}\n"
+            f"Current Number: {current_number}\n"
+            f"Current Group: {current_group}\n"
+            f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
+            f"Vote Strength: {confidence_group}\n"
+            f"Phase Profit: {phase_profit_group}\n"
+            f"Total Profit: {total_profit_all_phase}\n"
+            f"Relock Count: {relock_count}\n"
+            f"Lock Mode: {lock_mode}"
+        )
+        send_signal_once(
+            signal_name="WAIT",
+            current_round=current_round,
+            msg=wait_msg,
+            unique_suffix=f"{selected_mode['name'] if selected_mode else '-'}|{confidence_group}|{phase_profit_group}|{total_profit_all_phase}",
+        )
+
+    # RELOCK
     if relock_count > 0 and last_relock_trigger_round is not None:
-        relock_key = f"RELOCK_{relock_count}_{last_relock_trigger_round}"
         relock_msg = (
             f"RELOCK\n"
+            f"Round: {current_round}\n"
             f"Trigger Round: {last_relock_trigger_round}\n"
             f"Phase: {phase_index}\n"
             f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
             f"Windows: {locked_windows}\n"
             f"Total Profit: {total_profit_all_phase}"
         )
-        send_once_state(relock_key, relock_msg)
+        send_signal_once(
+            signal_name="RELOCK",
+            current_round=current_round,
+            msg=relock_msg,
+            unique_suffix=f"{relock_count}|{last_relock_trigger_round}|{selected_mode['name'] if selected_mode else '-'}",
+        )
 
+    # SESSION STOP
     if session_stop and session_stop_reason:
-        stop_key = f"STOP_{session_stop_reason}_{total_profit_all_phase}"
         stop_msg = (
             f"SESSION STOP\n"
+            f"Round: {current_round}\n"
             f"Reason: {session_stop_reason}\n"
             f"Total Profit: {total_profit_all_phase}\n"
             f"Total Trades: {len(total_hits_all_phase)}\n"
             f"Mode: {selected_mode['name'] if selected_mode else '-'}"
         )
-        send_once_state(stop_key, stop_msg)
+        send_signal_once(
+            signal_name="SESSION_STOP",
+            current_round=current_round,
+            msg=stop_msg,
+            unique_suffix=f"{session_stop_reason}|{total_profit_all_phase}|{len(total_hits_all_phase)}",
+        )
 
 # ================= UI =================
 st.title("🎯 Auto Relock Engine | 5v4 / 6v4 / 8v5")
