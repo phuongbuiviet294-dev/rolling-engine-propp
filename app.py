@@ -63,7 +63,7 @@ CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 # CUSTOM gửi cái gì
 # "READY_ONLY" = chỉ gửi READY
 # "CUSTOM" = tự chọn từng loại
-TELEGRAM_SEND_MODE = "READY_ONLY"
+TELEGRAM_SEND_MODE = "CUSTOM"
 
 SEND_READY = True
 SEND_RELOCK = False
