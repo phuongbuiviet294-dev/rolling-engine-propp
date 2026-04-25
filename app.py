@@ -1207,32 +1207,15 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"READY DOUBLE BET\n"
         f"Round: {current_round}\n"
         f"Current Number: {current_number}\n"
-        f"Current Group: {current_group}\n"
-        f"Current Color: {color_icon(current_color)}\n"
         f"Bet Group: {final_vote_group}\n"
         f"Bet Color: {color_icon(final_vote_color)}\n"
-        f"Group Vote Strength: {confidence_group}\n"
-        f"Color Vote Strength: {confidence_color}\n"
-        f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-        f"Phase Profit Group: {phase_profit_group}\n"
-        f"Phase Profit Color: {phase_profit_color}\n"
-        f"Phase Profit Total: {phase_profit_total}\n"
-        f"Total Profit Group: {total_profit_group}\n"
-        f"Total Profit Color: {total_profit_color}\n"
-        f"Total Profit: {total_profit_all_phase}\n"
-        f"Relock Count: {relock_count}\n"
-        f"Lock Mode: {lock_mode}"
+        f"Total Profit: {total_profit_all_phase}"
     )
 
     send_signal_once(
         signal_name="READY",
         current_round=current_round,
         msg=ready_msg,
-        unique_suffix=(
-            f"{selected_mode['name'] if selected_mode else '-'}|"
-            f"G{final_vote_group}|C{final_vote_color}|"
-            f"{confidence_group}|{confidence_color}"
-        ),
     )
 
 # ================= UI =================
