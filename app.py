@@ -72,28 +72,6 @@ DEDUP_FILE = "/tmp/telegram_dedup_state.json"
 def telegram_enabled():
     return bool(BOT_TOKEN and CHAT_ID)
 
-if telegram_enabled() and can_bet and final_vote_group is not None:
-    ready_msg = (
-        f"READY DOUBLE BET\n"
-        f"Round: {current_round}\n"
-        f"Current Number: {current_number}\n"
-        f"Current Group: {current_group}\n"
-        f"Current Color: {color_icon(current_color)}\n"
-        f"Bet Group: {final_vote_group}\n"
-        f"Bet Color: {color_icon(final_vote_color)}\n"
-        f"Group Vote Strength: {confidence_group}\n"
-        f"Color Vote Strength: {confidence_color}\n"
-        f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-        f"Total Profit: {total_profit_all_phase}"
-    )
-
-    send_signal_once(
-        signal_name="READY",
-        current_round=current_round,
-        msg=ready_msg,
-        unique_suffix=f"G{final_vote_group}|C{final_vote_color}|{confidence_group}|{confidence_color}",
-    )
-
 def send_telegram(msg):
     if not telegram_enabled():
         return False
