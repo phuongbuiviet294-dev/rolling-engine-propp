@@ -1,4 +1,6 @@
 import time
+import json
+import os
 from collections import Counter
 
 import numpy as np
@@ -8,7 +10,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ================= REFRESH =================
-st_autorefresh(interval=8000, key="refresh")
+st_autorefresh(interval=3000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -53,29 +55,33 @@ SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
 SHOW_HISTORY_ROWS = 40
 
+# ================= DOUBLE BET COLOR CONFIG =================
+ENABLE_DOUBLE_BET_COLOR = True
+REQUIRE_COLOR_CONFIRM = False
+# False = đủ điều kiện group thì READY, gửi kèm color
+# True  = group đủ điều kiện và color cũng đủ vote mới READY
+
 # ================= TELEGRAM CONFIG =================
+# Khuyên dùng st.secrets để không lộ token
 DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
-# CUSTOM gửi cái gì
-# "READY_ONLY" = chỉ gửi READY
-# "CUSTOM" = tự chọn từng loại
-TELEGRAM_SEND_MODE = "CUSTOM"
+TELEGRAM_SEND_MODE = "READY_ONLY"   # READY_ONLY / CUSTOM
 
 SEND_READY = True
 SEND_RELOCK = False
 SEND_SESSION_STOP = False
-SEND_WAIT = True
+SEND_WAIT = False
 
-# chống gửi lặp khi current round không đổi
 DEDUP_BY_CURRENT_ROUND = True
+DEDUP_FILE = "/tmp/telegram_dedup_state.json"
 
 
 def telegram_enabled() -> bool:
-    return bool(BOT_TOKEN and CHAT_ID)
+    return bool(BOT_TOKEN and CHAT_ID and BOT_TOKEN != "PASTE_YOUR_NEW_BOT_TOKEN_HERE")
 
 
 def send_telegram(msg: str) -> bool:
@@ -106,12 +112,27 @@ def should_send_signal(signal_name: str) -> bool:
     return mapping.get(signal_name, False)
 
 
-def init_notification_state():
-    if "last_sent_round" not in st.session_state:
-        st.session_state.last_sent_round = -1
+def load_dedup_state():
+    if not os.path.exists(DEDUP_FILE):
+        return {"last_sent_round": -1, "last_signal_keys": {}}
+    try:
+        with open(DEDUP_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "last_sent_round" not in data:
+            data["last_sent_round"] = -1
+        if "last_signal_keys" not in data:
+            data["last_signal_keys"] = {}
+        return data
+    except Exception:
+        return {"last_sent_round": -1, "last_signal_keys": {}}
 
-    if "last_signal_keys" not in st.session_state:
-        st.session_state.last_signal_keys = {}
+
+def save_dedup_state(data):
+    try:
+        with open(DEDUP_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 
 def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suffix: str = "") -> bool:
@@ -121,22 +142,28 @@ def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suff
     if not should_send_signal(signal_name):
         return False
 
+    dedup_state = load_dedup_state()
+
     if DEDUP_BY_CURRENT_ROUND and signal_name in ("READY", "WAIT"):
-        if st.session_state.last_sent_round == current_round:
+        if dedup_state.get("last_sent_round", -1) == current_round:
             return False
 
     signal_key = f"{signal_name}|{current_round}|{unique_suffix}"
-    old_key = st.session_state.last_signal_keys.get(signal_name, "")
+    old_key = dedup_state.get("last_signal_keys", {}).get(signal_name, "")
 
     if old_key == signal_key:
         return False
 
     ok = send_telegram(msg)
     if ok:
-        st.session_state.last_signal_keys[signal_name] = signal_key
+        dedup_state["last_signal_keys"][signal_name] = signal_key
         if signal_name in ("READY", "WAIT"):
-            st.session_state.last_sent_round = current_round
+            dedup_state["last_sent_round"] = current_round
+        save_dedup_state(dedup_state)
+
     return ok
+
+
 # ================= LOAD =================
 @st.cache_data(ttl=10)
 def load_numbers():
@@ -165,7 +192,26 @@ def group_of(n: int) -> int:
     return 4
 
 
+def color_of_number(n: int) -> str:
+    if n <= 4:
+        return "RED"
+    if n <= 8:
+        return "GREEN"
+    return "BLUE"
+
+
+def color_icon(color: str) -> str:
+    if color == "RED":
+        return "🔴 RED"
+    if color == "GREEN":
+        return "🟢 GREEN"
+    if color == "BLUE":
+        return "🔵 BLUE"
+    return "-"
+
+
 groups = [group_of(n) for n in numbers]
+colors = [color_of_number(n) for n in numbers]
 
 if len(groups) < LOCK_ROUND_START:
     st.error(
@@ -284,6 +330,7 @@ def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: in
                 break
     return out
 
+
 # ================= BACKTEST =================
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
     results_group = []
@@ -321,6 +368,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
     }
+
 
 # ================= WINDOW EVAL =================
 def evaluate_window_group(seq_groups, w):
@@ -427,6 +475,7 @@ def build_window_tables(train_groups, window_min, window_max):
         )
 
     return candidate_windows, df_all, filtered_df
+
 
 # ================= AUTO MODE LOCK =================
 def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
@@ -591,6 +640,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         )
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
+
 
 # ================= SESSION ENGINE =================
 def simulate_engine(numbers, groups):
@@ -834,6 +884,7 @@ def simulate_engine(numbers, groups):
                 "round": i,
                 "number": numbers[i],
                 "group": groups[i],
+                "color": colors[i],
                 "mode": current_mode["name"],
                 "vote_required": current_mode["vote_required"],
                 "top_windows": current_mode["top_windows"],
@@ -900,6 +951,7 @@ def simulate_engine(numbers, groups):
     )
     return result
 
+
 # ================= RUN ENGINE =================
 sim = simulate_engine(numbers, groups)
 
@@ -965,7 +1017,10 @@ if locked_windows and selected_mode is not None:
 
 # ================= NEXT STATUS =================
 next_round = len(groups)
+current_round = len(numbers)
+
 preds_group = [groups[next_round - w] for w in locked_windows if next_round - w >= 0]
+preds_color = [colors[next_round - w] for w in locked_windows if next_round - w >= 0]
 
 if preds_group and selected_mode is not None:
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
@@ -974,8 +1029,14 @@ else:
     vote_group, confidence_group = None, 0
     vote_required = 0
 
+if preds_color:
+    vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
+else:
+    vote_color, confidence_color = None, 0
+
 current_number = numbers[-1] if numbers else None
 current_group = groups[-1] if groups else None
+current_color = colors[-1] if colors else None
 
 if not hist.empty:
     last_trade_rows = hist[hist["trade"] == True]
@@ -984,8 +1045,11 @@ else:
     distance = 999
 
 new_signal = confidence_group >= vote_required if vote_group is not None else False
+color_signal = confidence_color >= vote_required if vote_color is not None else False
+
 used_keep_next = False
 final_vote_group = vote_group
+final_vote_color = vote_color
 
 if session_stop:
     signal = False
@@ -1007,7 +1071,14 @@ else:
 
     final_signal = new_signal or used_keep_next
     signal = final_signal
-    can_bet = signal and distance >= GAP and next_round > LOCK_ROUND_END
+
+    can_bet_group = signal and distance >= GAP and next_round > LOCK_ROUND_END
+
+    if ENABLE_DOUBLE_BET_COLOR and REQUIRE_COLOR_CONFIRM:
+        can_bet = can_bet_group and color_signal
+    else:
+        can_bet = can_bet_group
+
     next_state = "READY" if can_bet else "WAIT"
 
 next_row = {
@@ -1015,19 +1086,25 @@ next_row = {
     "round": next_round,
     "number": current_number,
     "group": current_group,
+    "color": current_color,
     "mode": selected_mode["name"] if selected_mode else "-",
     "vote_required": selected_mode["vote_required"] if selected_mode else 0,
     "top_windows": selected_mode["top_windows"] if selected_mode else 0,
     "vote_group": vote_group,
     "confidence_group": confidence_group,
+    "vote_color": vote_color,
+    "confidence_color": confidence_color,
     "new_signal": new_signal,
+    "color_signal": color_signal,
     "used_keep": used_keep_next,
     "keep_group": next_keep_bet_group,
     "keep_left": next_keep_rounds_left,
     "final_vote_group": final_vote_group,
+    "final_vote_color": final_vote_color,
     "signal": signal,
     "trade": False,
     "bet_group": final_vote_group if can_bet else None,
+    "bet_color": final_vote_color if can_bet else None,
     "hit_group": None,
     "state": next_state,
     "phase_profit_group": phase_profit_group,
@@ -1042,103 +1119,53 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= TELEGRAM NOTIFY =================
-init_notification_state()
-
-current_round = len(numbers)
-
 if telegram_enabled():
-    # READY
     if can_bet and final_vote_group is not None:
         ready_msg = (
-            f"READY\n"
+            f"READY DOUBLE BET\n"
             f"Round: {current_round}\n"
             f"Current Number: {current_number}\n"
             f"Current Group: {current_group}\n"
-            f"Predicted Group: {final_vote_group}\n"
+            f"Current Color: {color_icon(current_color)}\n"
+            f"Bet Group: {final_vote_group}\n"
+            f"Bet Color: {color_icon(final_vote_color)}\n"
+            f"Group Vote Strength: {confidence_group}\n"
+            f"Color Vote Strength: {confidence_color}\n"
             f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-            f"Vote Strength: {confidence_group}\n"
             f"Phase Profit: {phase_profit_group}\n"
             f"Total Profit: {total_profit_all_phase}\n"
             f"Relock Count: {relock_count}\n"
             f"Lock Mode: {lock_mode}"
         )
+
         send_signal_once(
             signal_name="READY",
             current_round=current_round,
             msg=ready_msg,
-            unique_suffix=f"{selected_mode['name'] if selected_mode else '-'}|{final_vote_group}|{confidence_group}",
-        )
-
-    # WAIT
-    elif not session_stop:
-        wait_msg = (
-            f"WAIT\n"
-            f"Round: {current_round}\n"
-            f"Current Number: {current_number}\n"
-            f"Current Group: {current_group}\n"
-            f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-            f"Vote Strength: {confidence_group}\n"
-            f"Phase Profit: {phase_profit_group}\n"
-            f"Total Profit: {total_profit_all_phase}\n"
-            f"Relock Count: {relock_count}\n"
-            f"Lock Mode: {lock_mode}"
-        )
-        send_signal_once(
-            signal_name="WAIT",
-            current_round=current_round,
-            msg=wait_msg,
-            unique_suffix=f"{selected_mode['name'] if selected_mode else '-'}|{confidence_group}|{phase_profit_group}|{total_profit_all_phase}",
-        )
-
-    # RELOCK
-    if relock_count > 0 and last_relock_trigger_round is not None:
-        relock_msg = (
-            f"RELOCK\n"
-            f"Round: {current_round}\n"
-            f"Trigger Round: {last_relock_trigger_round}\n"
-            f"Phase: {phase_index}\n"
-            f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-            f"Windows: {locked_windows}\n"
-            f"Total Profit: {total_profit_all_phase}"
-        )
-        send_signal_once(
-            signal_name="RELOCK",
-            current_round=current_round,
-            msg=relock_msg,
-            unique_suffix=f"{relock_count}|{last_relock_trigger_round}|{selected_mode['name'] if selected_mode else '-'}",
-        )
-
-    # SESSION STOP
-    if session_stop and session_stop_reason:
-        stop_msg = (
-            f"SESSION STOP\n"
-            f"Round: {current_round}\n"
-            f"Reason: {session_stop_reason}\n"
-            f"Total Profit: {total_profit_all_phase}\n"
-            f"Total Trades: {len(total_hits_all_phase)}\n"
-            f"Mode: {selected_mode['name'] if selected_mode else '-'}"
-        )
-        send_signal_once(
-            signal_name="SESSION_STOP",
-            current_round=current_round,
-            msg=stop_msg,
-            unique_suffix=f"{session_stop_reason}|{total_profit_all_phase}|{len(total_hits_all_phase)}",
+            unique_suffix=(
+                f"{selected_mode['name'] if selected_mode else '-'}|"
+                f"G{final_vote_group}|C{final_vote_color}|"
+                f"{confidence_group}|{confidence_color}"
+            ),
         )
 
 # ================= UI =================
-st.title("🎯 Auto Relock Engine | 5v4 / 6v4 / 8v5")
+st.title("🎯 Auto Relock Engine | 5v4 / 6v4 / 8v5 | Group + Color")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
 c2.metric("Current Group", current_group if current_group is not None else "-")
-c3.metric("Phase", phase_index)
+c3.metric("Current Color", color_icon(current_color))
 c4.metric("Next Group", final_vote_group if final_vote_group is not None else "-")
 
+st.write("Next Color:", color_icon(final_vote_color) if final_vote_color else "-")
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Vote Required:", selected_mode["vote_required"] if selected_mode else 0)
 st.write("Top Windows:", selected_mode["top_windows"] if selected_mode else 0)
 st.write("Window Range:", f'{selected_mode["window_min"]}-{selected_mode["window_max"]}' if selected_mode else "-")
-st.write("Vote Strength:", confidence_group)
+st.write("Group Vote Strength:", confidence_group)
+st.write("Color Vote Strength:", confidence_color)
+st.write("Require Color Confirm:", REQUIRE_COLOR_CONFIRM)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
@@ -1159,8 +1186,10 @@ if session_stop:
 elif can_bet and final_vote_group is not None:
     st.markdown(
         f"""
-        <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:30px;color:white;font-weight:bold;">
-        READY → {final_vote_group} | MODE → {selected_mode["name"] if selected_mode else "-"}
+        <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
+        READY DOUBLE BET<br>
+        GROUP {final_vote_group} | COLOR {color_icon(final_vote_color)}<br>
+        MODE → {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
         unsafe_allow_html=True,
