@@ -106,28 +106,37 @@ def save_dedup_state(data):
         pass
 
 
-def send_signal_once(signal_name, current_round, msg, unique_suffix=""):
+def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suffix: str = "") -> bool:
+    if not telegram_enabled():
+        return False
+
     if TELEGRAM_SEND_MODE == "READY_ONLY" and signal_name != "READY":
         return False
 
-    dedup_state = load_dedup_state()
+    if "last_sent_round" not in st.session_state:
+        st.session_state.last_sent_round = -1
 
-    if dedup_state.get("last_sent_round", -1) == current_round:
-        return False
+    if "last_sent_key" not in st.session_state:
+        st.session_state.last_sent_key = ""
 
     signal_key = f"{signal_name}|{current_round}|{unique_suffix}"
-    old_key = dedup_state.get("last_signal_keys", {}).get(signal_name, "")
 
-    if old_key == signal_key:
+    # chống gửi lặp cùng round
+    if st.session_state.last_sent_round == current_round:
+        return False
+
+    # chống gửi lặp cùng nội dung
+    if st.session_state.last_sent_key == signal_key:
         return False
 
     ok = send_telegram(msg)
+
     if ok:
-        dedup_state["last_sent_round"] = current_round
-        dedup_state["last_signal_keys"][signal_name] = signal_key
-        save_dedup_state(dedup_state)
+        st.session_state.last_sent_round = current_round
+        st.session_state.last_sent_key = signal_key
 
     return ok
+ 
 
 
 # ================= LOAD DATA - OPTIMIZED =================
