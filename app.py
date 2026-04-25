@@ -10,7 +10,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # ================= REFRESH =================
-st_autorefresh(interval=3000, key="refresh")
+st_autorefresh(interval=10000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
