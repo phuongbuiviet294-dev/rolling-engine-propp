@@ -72,6 +72,7 @@ DEDUP_FILE = "/tmp/telegram_dedup_state.json"
 def telegram_enabled():
     return bool(BOT_TOKEN and CHAT_ID)
 
+
 def send_telegram(msg):
     if not telegram_enabled():
         return False
@@ -83,27 +84,6 @@ def send_telegram(msg):
         return False
 
 
-def load_dedup_state():
-    if not os.path.exists(DEDUP_FILE):
-        return {"last_sent_round": -1, "last_signal_keys": {}}
-    try:
-        with open(DEDUP_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        data.setdefault("last_sent_round", -1)
-        data.setdefault("last_signal_keys", {})
-        return data
-    except Exception:
-        return {"last_sent_round": -1, "last_signal_keys": {}}
-
-
-def save_dedup_state(data):
-    try:
-        with open(DEDUP_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception:
-        pass
-
-
 def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suffix: str = "") -> bool:
     if not telegram_enabled():
         return False
@@ -111,29 +91,59 @@ def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suff
     if TELEGRAM_SEND_MODE == "READY_ONLY" and signal_name != "READY":
         return False
 
-    if "last_sent_round" not in st.session_state:
-        st.session_state.last_sent_round = -1
+    # KEY duy nhất theo round, lưu cả session + file
+    signal_key = f"{signal_name}|ROUND_{current_round}"
 
-    if "last_sent_key" not in st.session_state:
-        st.session_state.last_sent_key = ""
+    if "sent_round_keys" not in st.session_state:
+        st.session_state.sent_round_keys = set()
 
-    signal_key = f"{signal_name}|{current_round}|{unique_suffix}"
-
-    # chống gửi lặp cùng round
-    if st.session_state.last_sent_round == current_round:
+    if signal_key in st.session_state.sent_round_keys:
         return False
 
-    # chống gửi lặp cùng nội dung
-    if st.session_state.last_sent_key == signal_key:
+    sent_file = "/tmp/telegram_sent_rounds.json"
+
+    try:
+        if os.path.exists(sent_file):
+            with open(sent_file, "r", encoding="utf-8") as f:
+                sent_keys = set(json.load(f))
+        else:
+            sent_keys = set()
+    except Exception:
+        sent_keys = set()
+
+    if signal_key in sent_keys:
+        st.session_state.sent_round_keys.add(signal_key)
         return False
 
     ok = send_telegram(msg)
 
     if ok:
-        st.session_state.last_sent_round = current_round
-        st.session_state.last_sent_key = signal_key
+        st.session_state.sent_round_keys.add(signal_key)
+        sent_keys.add(signal_key)
+
+        try:
+            with open(sent_file, "w", encoding="utf-8") as f:
+                json.dump(list(sent_keys)[-500:], f)
+        except Exception:
+            pass
 
     return ok
+
+if telegram_enabled() and can_bet and final_vote_group is not None:
+    ready_msg = (
+        f"READY DOUBLE BET\n"
+        f"Round: {current_round}\n"
+        f"Current Number: {current_number}\n"
+        f"Bet Group: {final_vote_group}\n"
+        f"Bet Color: {color_icon(final_vote_color)}\n"
+        f"Total Profit: {total_profit_all_phase}"
+    )
+
+    send_signal_once(
+        signal_name="READY",
+        current_round=current_round,
+        msg=ready_msg,
+    )
  
 
 
