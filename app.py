@@ -167,7 +167,7 @@ def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suff
 
 
 # ================= LOAD =================
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=30)
 def load_numbers():
     url = (
         f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export"
