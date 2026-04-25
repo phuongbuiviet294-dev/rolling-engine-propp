@@ -129,21 +129,7 @@ def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suff
 
     return ok
 
-if telegram_enabled() and can_bet and final_vote_group is not None:
-    ready_msg = (
-        f"READY DOUBLE BET\n"
-        f"Round: {current_round}\n"
-        f"Current Number: {current_number}\n"
-        f"Bet Group: {final_vote_group}\n"
-        f"Bet Color: {color_icon(final_vote_color)}\n"
-        f"Total Profit: {total_profit_all_phase}"
-    )
 
-    send_signal_once(
-        signal_name="READY",
-        current_round=current_round,
-        msg=ready_msg,
-    )
  
 
 
