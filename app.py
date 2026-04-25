@@ -69,7 +69,8 @@ CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 TELEGRAM_SEND_MODE = "READY_ONLY"
 DEDUP_FILE = "/tmp/telegram_dedup_state.json"
 
-
+def telegram_enabled():
+    return bool(BOT_TOKEN and CHAT_ID)
 
 if telegram_enabled() and can_bet and final_vote_group is not None:
     ready_msg = (
