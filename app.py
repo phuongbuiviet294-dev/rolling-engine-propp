@@ -9,8 +9,8 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# ================= REFRESH =================
-st_autorefresh(interval=8000, key="refresh")
+# ================= REFRESH - OPTIMIZED =================
+st_autorefresh(interval=15000, key="refresh")
 
 # ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -28,13 +28,11 @@ GAP = 1
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
-
 WIN_COLOR = 1.0
 LOSS_COLOR = -1.0
 
 PHASE_STOP_WIN = 3.5
 PHASE_STOP_LOSS = -2.0
-
 SESSION_STOP_WIN = 20.0
 SESSION_STOP_LOSS = -20.0
 
@@ -56,15 +54,12 @@ RELOCK_BUFFER = 0
 REPLAY_FROM = 180
 SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
-SHOW_HISTORY_ROWS = 40
+SHOW_HISTORY_ROWS = 20
 
-# ================= DOUBLE BET CONFIG =================
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
-# False: group đủ điều kiện thì READY, color đi kèm để tính profit
-# True : group + color đều đủ vote mới READY
 
-# ================= TELEGRAM CONFIG =================
+# ================= TELEGRAM =================
 DEFAULT_BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
 DEFAULT_CHAT_ID = "6655585286"
 
@@ -72,46 +67,22 @@ BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BO
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
 TELEGRAM_SEND_MODE = "READY_ONLY"
-
-SEND_READY = True
-SEND_RELOCK = False
-SEND_SESSION_STOP = False
-SEND_WAIT = False
-
-DEDUP_BY_CURRENT_ROUND = True
 DEDUP_FILE = "/tmp/telegram_dedup_state.json"
 
 
-def telegram_enabled() -> bool:
+def telegram_enabled():
     return bool(BOT_TOKEN and CHAT_ID and BOT_TOKEN != "PASTE_YOUR_BOT_TOKEN_HERE")
 
 
-def send_telegram(msg: str) -> bool:
+def send_telegram(msg):
     if not telegram_enabled():
         return False
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        resp = requests.post(
-            url,
-            json={"chat_id": CHAT_ID, "text": msg},
-            timeout=5,
-        )
-        return resp.ok
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=5)
+        return r.ok
     except Exception:
         return False
-
-
-def should_send_signal(signal_name: str) -> bool:
-    if TELEGRAM_SEND_MODE == "READY_ONLY":
-        return signal_name == "READY"
-
-    mapping = {
-        "READY": SEND_READY,
-        "RELOCK": SEND_RELOCK,
-        "SESSION_STOP": SEND_SESSION_STOP,
-        "WAIT": SEND_WAIT,
-    }
-    return mapping.get(signal_name, False)
 
 
 def load_dedup_state():
@@ -120,10 +91,8 @@ def load_dedup_state():
     try:
         with open(DEDUP_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if "last_sent_round" not in data:
-            data["last_sent_round"] = -1
-        if "last_signal_keys" not in data:
-            data["last_signal_keys"] = {}
+        data.setdefault("last_sent_round", -1)
+        data.setdefault("last_signal_keys", {})
         return data
     except Exception:
         return {"last_sent_round": -1, "last_signal_keys": {}}
@@ -137,18 +106,14 @@ def save_dedup_state(data):
         pass
 
 
-def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suffix: str = "") -> bool:
-    if not telegram_enabled():
-        return False
-
-    if not should_send_signal(signal_name):
+def send_signal_once(signal_name, current_round, msg, unique_suffix=""):
+    if TELEGRAM_SEND_MODE == "READY_ONLY" and signal_name != "READY":
         return False
 
     dedup_state = load_dedup_state()
 
-    if DEDUP_BY_CURRENT_ROUND and signal_name in ("READY", "WAIT"):
-        if dedup_state.get("last_sent_round", -1) == current_round:
-            return False
+    if dedup_state.get("last_sent_round", -1) == current_round:
+        return False
 
     signal_key = f"{signal_name}|{current_round}|{unique_suffix}"
     old_key = dedup_state.get("last_signal_keys", {}).get(signal_name, "")
@@ -158,21 +123,17 @@ def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suff
 
     ok = send_telegram(msg)
     if ok:
+        dedup_state["last_sent_round"] = current_round
         dedup_state["last_signal_keys"][signal_name] = signal_key
-        if signal_name in ("READY", "WAIT"):
-            dedup_state["last_sent_round"] = current_round
         save_dedup_state(dedup_state)
 
     return ok
 
 
-# ================= LOAD =================
-@st.cache_data(ttl=30)
+# ================= LOAD DATA - OPTIMIZED =================
+@st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
-    url = (
-        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export"
-        f"?format=csv&cache={time.time()}"
-    )
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
     df = pd.read_csv(url)
     df.columns = [str(c).strip().lower() for c in df.columns]
     if "number" not in df.columns:
@@ -181,10 +142,7 @@ def load_numbers():
     return df["number"].dropna().astype(int).tolist()
 
 
-numbers = load_numbers()
-
-
-def group_of(n: int) -> int:
+def group_of(n):
     if n <= 3:
         return 1
     if n <= 6:
@@ -194,7 +152,7 @@ def group_of(n: int) -> int:
     return 4
 
 
-def color_of_number(n: int) -> int:
+def color_of_number(n):
     if n <= 4:
         return 1
     if n <= 8:
@@ -202,7 +160,7 @@ def color_of_number(n: int) -> int:
     return 3
 
 
-def color_text(c: int) -> str:
+def color_text(c):
     if c == 1:
         return "RED"
     if c == 2:
@@ -212,7 +170,7 @@ def color_text(c: int) -> str:
     return "-"
 
 
-def color_icon(c: int) -> str:
+def color_icon(c):
     if c == 1:
         return "🔴 RED"
     if c == 2:
@@ -222,13 +180,12 @@ def color_icon(c: int) -> str:
     return "-"
 
 
+numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
 if len(groups) < LOCK_ROUND_START:
-    st.error(
-        f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}."
-    )
+    st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
     st.stop()
 
 
@@ -250,8 +207,7 @@ def compute_max_drawdown(results, win_value, loss_value):
     max_dd = 0.0
     for x in path:
         peak = max(peak, x)
-        dd = x - peak
-        max_dd = min(max_dd, dd)
+        max_dd = min(max_dd, x - peak)
     return float(max_dd)
 
 
@@ -321,17 +277,17 @@ def compute_streak_metrics(results):
 
 
 def pick_spaced_windows(df_sorted, top_n, min_spacing):
-    selected_rows = []
+    selected = []
     for _, row in df_sorted.iterrows():
         w = int(row["window"])
-        if all(abs(w - int(x["window"])) >= min_spacing for x in selected_rows):
-            selected_rows.append(row.to_dict())
-            if len(selected_rows) >= top_n:
+        if all(abs(w - int(x["window"])) >= min_spacing for x in selected):
+            selected.append(row.to_dict())
+            if len(selected) >= top_n:
                 break
-    return pd.DataFrame(selected_rows)
+    return pd.DataFrame(selected)
 
 
-def enforce_spacing_from_df(df_sorted: pd.DataFrame, top_n: int, min_spacing: int) -> list[int]:
+def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     out = []
     if df_sorted.empty:
         return out
@@ -350,19 +306,35 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     trades = 0
     wins_group = 0
     last_trade = -999999
+
+    if not windows:
+        return {
+            "trades": 0,
+            "profit_group": 0.0,
+            "winrate_group": 0.0,
+            "max_drawdown_group": 0.0,
+            "recent_profit_group": 0.0,
+            "max_hit_streak": 0,
+            "max_loss_streak": 0,
+            "count_hit_streak_ge2": 0,
+            "streak_score": -999999.0,
+        }
+
     effective_start = max(start_idx, max(windows))
 
-    for i in range(effective_start, end_idx):
-        preds_group = [seq_groups[i - w] for w in windows]
-        vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
-        signal = confidence_group >= vote_required
+    sg = seq_groups
+    ws = windows
 
-        if signal and (i - last_trade >= GAP):
+    for i in range(effective_start, end_idx):
+        preds = [sg[i - w] for w in ws]
+        vote_group, confidence_group = Counter(preds).most_common(1)[0]
+
+        if confidence_group >= vote_required and (i - last_trade >= GAP):
             last_trade = i
             trades += 1
-            group_hit = 1 if seq_groups[i] == vote_group else 0
-            wins_group += group_hit
-            results_group.append(group_hit)
+            hit = 1 if sg[i] == vote_group else 0
+            wins_group += hit
+            results_group.append(hit)
 
     profit_group = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results_group))
     winrate_group = wins_group / trades if trades > 0 else 0.0
@@ -383,7 +355,6 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     }
 
 
-# ================= WINDOW EVAL GROUP ONLY =================
 def evaluate_window_group(seq_groups, w):
     profit = 0.0
     trades = 0
@@ -391,11 +362,13 @@ def evaluate_window_group(seq_groups, w):
     results = []
     n = len(seq_groups)
 
+    sg = seq_groups
+
     for i in range(w, n):
-        pred = seq_groups[i - w]
-        if seq_groups[i - 1] != pred:
+        pred = sg[i - w]
+        if sg[i - 1] != pred:
             trades += 1
-            if seq_groups[i] == pred:
+            if sg[i] == pred:
                 profit += WIN_GROUP
                 wins += 1
                 results.append(1)
@@ -477,15 +450,13 @@ def build_window_tables(train_groups, window_min, window_max):
     spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, MIN_WINDOW_SPACING)
     candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
 
-    if len(candidate_windows) < max(m["top_windows"] for m in MODES):
-        candidate_windows = enforce_spacing_from_df(
-            selected_seed, max(m["top_windows"] for m in MODES), MIN_WINDOW_SPACING
-        )
+    need = max(m["top_windows"] for m in MODES)
 
-    if len(candidate_windows) < max(m["top_windows"] for m in MODES):
-        candidate_windows = enforce_spacing_from_df(
-            df_all, max(m["top_windows"] for m in MODES), 1
-        )
+    if len(candidate_windows) < need:
+        candidate_windows = enforce_spacing_from_df(selected_seed, need, MIN_WINDOW_SPACING)
+
+    if len(candidate_windows) < need:
+        candidate_windows = enforce_spacing_from_df(df_all, need, 1)
 
     return candidate_windows, df_all, filtered_df
 
@@ -539,11 +510,9 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         for mode in MODES:
             top_windows = mode["top_windows"]
             vote_required = mode["vote_required"]
-            window_min = mode["window_min"]
-            window_max = mode["window_max"]
 
             candidate_windows, df_all, filtered_df = build_window_tables(
-                train_groups, window_min, window_max
+                train_groups, mode["window_min"], mode["window_max"]
             )
 
             if len(candidate_windows) < top_windows:
@@ -654,7 +623,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
-# ================= SESSION ENGINE DOUBLE PROFIT =================
 def simulate_engine(numbers, groups, colors):
     result = {
         "hist": pd.DataFrame(),
@@ -717,7 +685,6 @@ def simulate_engine(numbers, groups, colors):
     total_hits_color = []
 
     last_trade = -999
-
     keep_bet_group = None
     keep_rounds_left = 0
     last_trade_was_loss = False
@@ -737,14 +704,18 @@ def simulate_engine(numbers, groups, colors):
     start_replay = max(LOCK_ROUND_END + 1, REPLAY_FROM + 1)
     current_mode = selected_mode
 
-    for i in range(start_replay, len(groups)):
+    g = groups
+    c = colors
+    ws = locked_windows
+
+    for i in range(start_replay, len(g)):
         if total_profit_all_phase >= SESSION_STOP_WIN:
             break
         if total_profit_all_phase <= SESSION_STOP_LOSS:
             break
 
-        preds_group = [groups[i - w] for w in locked_windows if i - w >= 0]
-        preds_color = [colors[i - w] for w in locked_windows if i - w >= 0]
+        preds_group = [g[i - w] for w in ws if i - w >= 0]
+        preds_color = [c[i - w] for w in ws if i - w >= 0]
 
         if not preds_group:
             continue
@@ -805,15 +776,13 @@ def simulate_engine(numbers, groups, colors):
         bet_color = final_vote_color if trade else None
 
         if used_keep:
-            keep_rounds_left -= 1
-            if keep_rounds_left < 0:
-                keep_rounds_left = 0
+            keep_rounds_left = max(0, keep_rounds_left - 1)
 
         if trade:
             last_trade = i
 
-            actual_group = groups[i]
-            actual_color = colors[i]
+            actual_group = g[i]
+            actual_color = c[i]
 
             if actual_group == final_vote_group:
                 hit_group = 1
@@ -894,8 +863,8 @@ def simulate_engine(numbers, groups, colors):
                     }
                 )
 
-                current_round = i
-                scan_end = current_round
+                current_round_i = i
+                scan_end = current_round_i
                 scan_start = max(
                     LOCK_ROUND_START,
                     scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER,
@@ -909,13 +878,14 @@ def simulate_engine(numbers, groups, colors):
                     new_scan_df_filtered,
                     new_round_eval_df,
                     new_lock_mode,
-                ) = find_best_auto_mode_in_range(groups, scan_start, scan_end)
+                ) = find_best_auto_mode_in_range(g, scan_start, scan_end)
 
                 if new_selected_lock_round is not None and new_selected_mode is not None:
                     relock_count += 1
-                    last_relock_trigger_round = current_round
+                    last_relock_trigger_round = current_round_i
 
                     locked_windows = new_locked_windows
+                    ws = locked_windows
                     selected_lock_round = new_selected_lock_round
                     selected_mode = new_selected_mode
                     current_mode = new_selected_mode
@@ -932,7 +902,7 @@ def simulate_engine(numbers, groups, colors):
                     phase_hits_group = []
                     phase_hits_color = []
 
-                    last_trade = current_round
+                    last_trade = current_round_i
                     keep_bet_group = None
                     keep_rounds_left = 0
                     last_trade_was_loss = False
@@ -951,8 +921,8 @@ def simulate_engine(numbers, groups, colors):
                 "phase": phase_index,
                 "round": i,
                 "number": numbers[i],
-                "group": groups[i],
-                "color": color_text(colors[i]),
+                "group": g[i],
+                "color": color_text(c[i]),
                 "mode": current_mode["name"],
                 "vote_required": current_mode["vote_required"],
                 "top_windows": current_mode["top_windows"],
@@ -994,53 +964,60 @@ def simulate_engine(numbers, groups, colors):
     hist = pd.DataFrame(history_rows)
     phase_summary_df = pd.DataFrame(phase_summary_rows)
 
-    result.update(
-        {
-            "hist": hist,
-            "phase_profit_group": phase_profit_group,
-            "phase_profit_color": phase_profit_color,
-            "phase_profit_total": phase_profit_total,
-            "phase_hits_group": phase_hits_group,
-            "phase_hits_color": phase_hits_color,
-            "total_profit_group": total_profit_group,
-            "total_profit_color": total_profit_color,
-            "total_profit_all_phase": total_profit_all_phase,
-            "total_hits_group": total_hits_group,
-            "total_hits_color": total_hits_color,
-            "locked_windows": locked_windows,
-            "selected_lock_round": selected_lock_round,
-            "selected_mode": selected_mode,
-            "lock_mode": lock_mode,
-            "scan_df_all": scan_df_all,
-            "scan_df_filtered": scan_df_filtered,
-            "round_eval_df": round_eval_df,
-            "lock_scan_start": lock_scan_start,
-            "lock_scan_end": lock_scan_end,
-            "keep_bet_group": keep_bet_group,
-            "keep_rounds_left": keep_rounds_left,
-            "last_trade_was_loss": last_trade_was_loss,
-            "consecutive_losses": consecutive_losses,
-            "phase_loss_streak": phase_loss_streak,
-            "last_trade": last_trade,
-            "phase_index": phase_index,
-            "session_stop": total_profit_all_phase >= SESSION_STOP_WIN or total_profit_all_phase <= SESSION_STOP_LOSS,
-            "session_stop_reason": (
-                "SESSION_STOP_WIN"
-                if total_profit_all_phase >= SESSION_STOP_WIN
-                else "SESSION_STOP_LOSS"
-                if total_profit_all_phase <= SESSION_STOP_LOSS
-                else None
-            ),
-            "relock_count": relock_count,
-            "last_relock_trigger_round": last_relock_trigger_round,
-            "phase_summary_df": phase_summary_df,
-        }
-    )
+    result = {
+        "hist": hist,
+        "phase_profit_group": phase_profit_group,
+        "phase_profit_color": phase_profit_color,
+        "phase_profit_total": phase_profit_total,
+        "phase_hits_group": phase_hits_group,
+        "phase_hits_color": phase_hits_color,
+        "total_profit_group": total_profit_group,
+        "total_profit_color": total_profit_color,
+        "total_profit_all_phase": total_profit_all_phase,
+        "total_hits_group": total_hits_group,
+        "total_hits_color": total_hits_color,
+        "locked_windows": locked_windows,
+        "selected_lock_round": selected_lock_round,
+        "selected_mode": selected_mode,
+        "lock_mode": lock_mode,
+        "scan_df_all": scan_df_all,
+        "scan_df_filtered": scan_df_filtered,
+        "round_eval_df": round_eval_df,
+        "lock_scan_start": lock_scan_start,
+        "lock_scan_end": lock_scan_end,
+        "keep_bet_group": keep_bet_group,
+        "keep_rounds_left": keep_rounds_left,
+        "last_trade_was_loss": last_trade_was_loss,
+        "consecutive_losses": consecutive_losses,
+        "phase_loss_streak": phase_loss_streak,
+        "last_trade": last_trade,
+        "phase_index": phase_index,
+        "session_stop": total_profit_all_phase >= SESSION_STOP_WIN or total_profit_all_phase <= SESSION_STOP_LOSS,
+        "session_stop_reason": (
+            "SESSION_STOP_WIN"
+            if total_profit_all_phase >= SESSION_STOP_WIN
+            else "SESSION_STOP_LOSS"
+            if total_profit_all_phase <= SESSION_STOP_LOSS
+            else None
+        ),
+        "relock_count": relock_count,
+        "last_relock_trigger_round": last_relock_trigger_round,
+        "phase_summary_df": phase_summary_df,
+    }
+
     return result
 
 
-# ================= RUN ENGINE =================
-sim = simulate_engine(numbers, groups, colors)
+@st.cache_data(ttl=20, show_spinner=False)
+def cached_simulate_engine(numbers_tuple):
+    nums = list(numbers_tuple)
+    grps = [group_of(n) for n in nums]
+    cols = [color_of_number(n) for n in nums]
+    return simulate_engine(nums, grps, cols)
+
+
+# ================= RUN ENGINE - OPTIMIZED CACHE =================
+sim = cached_simulate_engine(tuple(numbers))
 
 hist = sim["hist"]
 phase_profit_group = sim["phase_profit_group"]
@@ -1222,42 +1199,41 @@ next_row = {
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
 # ================= TELEGRAM NOTIFY =================
-if telegram_enabled():
-    if can_bet and final_vote_group is not None:
-        ready_msg = (
-            f"READY DOUBLE BET\n"
-            f"Round: {current_round}\n"
-            f"Current Number: {current_number}\n"
-            f"Current Group: {current_group}\n"
-            f"Current Color: {color_icon(current_color)}\n"
-            f"Bet Group: {final_vote_group}\n"
-            f"Bet Color: {color_icon(final_vote_color)}\n"
-            f"Group Vote Strength: {confidence_group}\n"
-            f"Color Vote Strength: {confidence_color}\n"
-            f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-            f"Phase Profit Group: {phase_profit_group}\n"
-            f"Phase Profit Color: {phase_profit_color}\n"
-            f"Phase Profit Total: {phase_profit_total}\n"
-            f"Total Profit Group: {total_profit_group}\n"
-            f"Total Profit Color: {total_profit_color}\n"
-            f"Total Profit: {total_profit_all_phase}\n"
-            f"Relock Count: {relock_count}\n"
-            f"Lock Mode: {lock_mode}"
-        )
+if telegram_enabled() and can_bet and final_vote_group is not None:
+    ready_msg = (
+        f"READY DOUBLE BET\n"
+        f"Round: {current_round}\n"
+        f"Current Number: {current_number}\n"
+        f"Current Group: {current_group}\n"
+        f"Current Color: {color_icon(current_color)}\n"
+        f"Bet Group: {final_vote_group}\n"
+        f"Bet Color: {color_icon(final_vote_color)}\n"
+        f"Group Vote Strength: {confidence_group}\n"
+        f"Color Vote Strength: {confidence_color}\n"
+        f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
+        f"Phase Profit Group: {phase_profit_group}\n"
+        f"Phase Profit Color: {phase_profit_color}\n"
+        f"Phase Profit Total: {phase_profit_total}\n"
+        f"Total Profit Group: {total_profit_group}\n"
+        f"Total Profit Color: {total_profit_color}\n"
+        f"Total Profit: {total_profit_all_phase}\n"
+        f"Relock Count: {relock_count}\n"
+        f"Lock Mode: {lock_mode}"
+    )
 
-        send_signal_once(
-            signal_name="READY",
-            current_round=current_round,
-            msg=ready_msg,
-            unique_suffix=(
-                f"{selected_mode['name'] if selected_mode else '-'}|"
-                f"G{final_vote_group}|C{final_vote_color}|"
-                f"{confidence_group}|{confidence_color}"
-            ),
-        )
+    send_signal_once(
+        signal_name="READY",
+        current_round=current_round,
+        msg=ready_msg,
+        unique_suffix=(
+            f"{selected_mode['name'] if selected_mode else '-'}|"
+            f"G{final_vote_group}|C{final_vote_color}|"
+            f"{confidence_group}|{confidence_color}"
+        ),
+    )
 
 # ================= UI =================
-st.title("🎯 Auto Relock Engine | 5v4 / 6v4 / 8v5 | Group + Color Profit")
+st.title("🎯 Auto Relock Engine | Optimized | Group + Color")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
