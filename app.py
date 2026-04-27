@@ -1,4 +1,4 @@
-limport time
+import time
 import json
 import os
 from collections import Counter
