@@ -19,7 +19,7 @@ LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
 MODES = [
-    {"name": "5v4", "top_windows": 5, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "5v4", "top_windowFals4, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
     {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
@@ -58,7 +58,7 @@ SHOW_DEBUG_TABLES = False
 SHOW_STYLED_HISTORY = False
 SHOW_HISTORY_ROWS = 40
 
-ENABLE_DOUBLE_BET_COLOR = False
+ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
 # ================= TELEGRAM =================
