@@ -20,7 +20,7 @@ LOCK_ROUND_END = 180
 
 MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 26},
-    {"name": "5v4", "top_windows": 5, "vote_required": 4, "window_min": 6, "window_max": 26},
+    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 26},
     {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 26},
    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 26}, 
     
@@ -44,7 +44,7 @@ SESSION_STOP_LOSS = -20.0
 GROUP_SESSION_STOP_WIN = 10.0
 GROUP_SESSION_STOP_LOSS = -10.0
 
-KEEP_AFTER_LOSS_ROUNDS = 3
+KEEP_AFTER_LOSS_ROUNDS = 2
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 20
