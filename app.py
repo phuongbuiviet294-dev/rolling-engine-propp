@@ -77,17 +77,17 @@ def telegram_enabled():
 
 def send_telegram(msg):
 if not telegram_enabled():
-return False
+    return False
 try:
 url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=5)
-return r.ok
+    return r.ok
 except Exception:
 return False
 
 def send_signal_once(signal_name: str, current_round: int, msg: str, unique_suffix: str = "") -> bool:
 if not telegram_enabled():
-return False
+    return False
 
 if TELEGRAM_SEND_MODE == "READY_ONLY" and signal_name != "READY":  
     return False  
@@ -128,7 +128,7 @@ if ok:
     except Exception:  
         pass  
 
-return ok
+    return ok
 
 #================= LOAD DATA - OPTIMIZED =================
 
