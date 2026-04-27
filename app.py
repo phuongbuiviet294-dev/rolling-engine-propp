@@ -9,11 +9,11 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-================= REFRESH - OPTIMIZED =================
+#================= REFRESH - OPTIMIZED =================
 
 st_autorefresh(interval=5000, key="refresh")
 
-================= CONFIG =================
+#================= CONFIG =================
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -61,7 +61,7 @@ SHOW_HISTORY_ROWS = 20
 ENABLE_DOUBLE_BET_COLOR = False
 REQUIRE_COLOR_CONFIRM = False
 
-================= TELEGRAM =================
+#================= TELEGRAM =================
 
 DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
 DEFAULT_CHAT_ID = "6655585286"
@@ -130,7 +130,7 @@ if ok:
 
 return ok
 
-================= LOAD DATA - OPTIMIZED =================
+#================= LOAD DATA - OPTIMIZED =================
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
@@ -184,7 +184,7 @@ if len(groups) < LOCK_ROUND_START:
 st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
 st.stop()
 
-================= HELPERS =================
+#================= HELPERS =================
 
 def compute_profit_path(results, win_value, loss_value):
 p = 0.0
@@ -290,7 +290,7 @@ if len(out) >= top_n:
 break
 return out
 
-================= BACKTEST GROUP ONLY =================
+#================= BACKTEST GROUP ONLY =================
 
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
 results_group = []
@@ -1001,7 +1001,7 @@ grps = [group_of(n) for n in nums]
 cols = [color_of_number(n) for n in nums]
 return simulate_engine(nums, grps, cols)
 
-================= RUN ENGINE - OPTIMIZED CACHE =================
+#================= RUN ENGINE - OPTIMIZED CACHE =================
 
 sim = cached_simulate_engine(tuple(numbers))
 
@@ -1040,7 +1040,7 @@ relock_count = sim["relock_count"]
 last_relock_trigger_round = sim["last_relock_trigger_round"]
 phase_summary_df = sim["phase_summary_df"]
 
-================= CURRENT LOCK CHECK GROUP ONLY =================
+#================= CURRENT LOCK CHECK GROUP ONLY =================
 
 scan_range_bt = {
 "trades": 0,
@@ -1074,7 +1074,7 @@ post_lock_bt = backtest_bundle_vote_range(
     len(groups),  
 )
 
-================= NEXT STATUS =================
+#================= NEXT STATUS =================
 
 next_round = len(groups)
 current_round = len(numbers)
@@ -1186,7 +1186,7 @@ next_row = {
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-================= TELEGRAM NOTIFY =================
+#================= TELEGRAM NOTIFY =================
 
 if telegram_enabled() and can_bet and final_vote_group is not None:
 ready_msg = (
@@ -1204,7 +1204,7 @@ send_signal_once(
     msg=ready_msg,  
 )
 
-================= UI =================
+#================= UI =================
 
 st.title("🎯 Auto Relock Engine | Optimized | Group + Color")
 
