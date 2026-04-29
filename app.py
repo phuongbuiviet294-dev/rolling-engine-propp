@@ -19,10 +19,10 @@ LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
 MODES = [
-    {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 26},
-    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 26},
+    {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
 
-   {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 26}, 
+   {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22}, 
     
 ]
 
@@ -42,12 +42,12 @@ SESSION_STOP_LOSS = -20.0
 
 # STOP RIÊNG THEO GROUP PROFIT
 GROUP_SESSION_STOP_WIN = 8.0
-GROUP_SESSION_STOP_LOSS = -5.0
+GROUP_SESSION_STOP_LOSS = -8.0
 
 KEEP_AFTER_LOSS_ROUNDS = 1
 
 MIN_TRADES_PER_WINDOW = 16
-RECENT_WINDOW_SIZE = 24
+RECENT_WINDOW_SIZE = 26
 MIN_WINDOW_SPACING = 5
 MAX_CANDIDATE_WINDOWS = 10
 
