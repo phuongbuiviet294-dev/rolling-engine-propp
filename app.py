@@ -19,11 +19,11 @@ LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
 MODES = [
-    {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-
-   {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22}, 
-    
+    {"name": "5v4", "top_windows": 5, "vote_required": 4, "window_min": 6, "window_max": 26},
+    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 26},
+    {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 26},
+    {"name": "7v5", "top_windows": 7, "vote_required": 5, "window_min": 6, "window_max": 26},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 26},
 ]
 
 GAP = 1
@@ -37,26 +37,25 @@ LOSS_COLOR = -1.0
 PHASE_STOP_WIN = 3.5
 PHASE_STOP_LOSS = -2.0
 
-SESSION_STOP_WIN = 200.0
-SESSION_STOP_LOSS = -200.0
+SESSION_STOP_WIN = 20.0
+SESSION_STOP_LOSS = -20.0
 
-# STOP RIÊNG THEO GROUP PROFIT
-GROUP_SESSION_STOP_WIN = 800.0
-GROUP_SESSION_STOP_LOSS = -800.0
+GROUP_SESSION_STOP_WIN = 10.0
+GROUP_SESSION_STOP_LOSS = -10.0
 
-KEEP_AFTER_LOSS_ROUNDS = 1
+KEEP_AFTER_LOSS_ROUNDS = 2
 
-MIN_TRADES_PER_WINDOW = 16
-RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 1
+MIN_TRADES_PER_WINDOW = 12
+RECENT_WINDOW_SIZE = 20
+MIN_WINDOW_SPACING = 2
 MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 24
+VALIDATE_LEN = 20
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -6.0
 
-RELOCK_SCAN_LEN = 6
+RELOCK_SCAN_LEN = 16
 RELOCK_BUFFER = 0
 
 REPLAY_FROM = 180
@@ -67,25 +66,19 @@ SHOW_HISTORY_ROWS = 40
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
-# ================= PATTERN FILTER =================
+# ================= PATTERN FILTER - GROUP ONLY =================
 ENABLE_PATTERN_FILTER = True
-
-PATTERN_REPEAT_2 = True
-PATTERN_ALTERNATE_4 = True
-
-# False = pattern hỗ trợ thêm tín hiệu
-# True = bắt buộc phải có pattern mới bet
-PATTERN_REQUIRED = True
+PATTERN_REQUIRED = False
 
 # ================= TELEGRAM =================
-DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
+DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
 TELEGRAM_SEND_MODE = "READY_ONLY"
-SENT_FILE = "/tmp/telegram_sent_rounds_pattern_engine.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_pattern_group_only.json"
 
 
 def telegram_enabled():
@@ -194,20 +187,53 @@ def color_icon(c):
     return "-"
 
 
+# ================= PATTERN GROUP ONLY =================
 def detect_pattern_next_group(seq_groups):
-    if len(seq_groups) < 4:
+    n = len(seq_groups)
+    if n < 2:
         return None, "NO_PATTERN"
 
-    g1 = seq_groups[-1]
-    g2 = seq_groups[-2]
-    g3 = seq_groups[-3]
-    g4 = seq_groups[-4]
+    tail2 = seq_groups[-2:] if n >= 2 else []
+    tail3 = seq_groups[-3:] if n >= 3 else []
+    tail4 = seq_groups[-4:] if n >= 4 else []
+    tail6 = seq_groups[-6:] if n >= 6 else []
+    tail7 = seq_groups[-7:] if n >= 7 else []
 
-    if PATTERN_REPEAT_2 and g1 == g2:
-        return g1, "REPEAT_2"
+    # A,A,A,A -> A
+    if n >= 4 and tail4[0] == tail4[1] == tail4[2] == tail4[3]:
+        return tail4[3], "REPEAT_4"
 
-    if PATTERN_ALTERNATE_4 and g4 == g2 and g3 == g1 and g1 != g2:
-        return g2, "ALTERNATE_ABAB"
+    # A,A,A -> A
+    if n >= 3 and tail3[0] == tail3[1] == tail3[2]:
+        return tail3[2], "REPEAT_3"
+
+    # A,A -> A
+    if n >= 2 and tail2[0] == tail2[1]:
+        return tail2[1], "REPEAT_2"
+
+    # A,B,A,B -> A / B,A,B,A -> B
+    if n >= 4:
+        a, b, c, d = tail4
+        if a == c and b == d and a != b:
+            return a, "ALTERNATE_ABAB"
+
+    # A,A,B,B -> A / B,B,A,A -> B
+    if n >= 4:
+        a, b, c, d = tail4
+        if a == b and c == d and a != c:
+            return a, "BLOCK_AABB"
+
+    # A,A,A,B,B,B -> A / B,B,B,A,A,A -> B
+    if n >= 6:
+        a, b, c, d, e, f = tail6
+        if a == b == c and d == e == f and a != d:
+            return a, "BLOCK_AAABBB"
+
+    # B,B,B,A,B,B,A -> B
+    if n >= 7:
+        a, b, c, d, e, f, g = tail7
+        if a == b == c and e == f and d == g and a == e and a != d:
+            return a, "PATTERN_BBBABBA"
 
     return None, "NO_PATTERN"
 
@@ -784,9 +810,8 @@ def simulate_engine(numbers, groups, colors):
                 final_vote_group = pattern_group_runtime
                 if not PATTERN_REQUIRED:
                     new_signal = True
-            else:
-                if PATTERN_REQUIRED:
-                    new_signal = False
+            elif PATTERN_REQUIRED:
+                new_signal = False
 
         used_keep = False
         trade = False
@@ -1088,7 +1113,7 @@ def simulate_engine(numbers, groups, colors):
 
 
 @st.cache_data(ttl=20, show_spinner=False)
-def cached_simulate_engine_pattern_v1(numbers_tuple):
+def cached_simulate_engine_pattern_group_only(numbers_tuple):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
     cols = [color_of_number(n) for n in nums]
@@ -1096,7 +1121,7 @@ def cached_simulate_engine_pattern_v1(numbers_tuple):
 
 
 # ================= RUN ENGINE =================
-sim = cached_simulate_engine_pattern_v1(tuple(numbers))
+sim = cached_simulate_engine_pattern_group_only(tuple(numbers))
 
 hist = sim["hist"]
 phase_profit_group = sim["phase_profit_group"]
@@ -1210,9 +1235,8 @@ if ENABLE_PATTERN_FILTER:
         final_vote_group = pattern_group
         if not PATTERN_REQUIRED:
             new_signal = True
-    else:
-        if PATTERN_REQUIRED:
-            new_signal = False
+    elif PATTERN_REQUIRED:
+        new_signal = False
 
 if session_stop:
     signal = False
@@ -1301,8 +1325,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"Current Color: {color_icon(current_color)}\n"
         f"Bet Group: {final_vote_group}\n"
         f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
-        f"Pattern: {pattern_type}\n"
-        f"Pattern Group: {pattern_group}\n"
+        f"Pattern Group: {pattern_type} -> {pattern_group}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
         f"Vote Group Strength: {confidence_group}\n"
         f"Vote Color Strength: {confidence_color}\n"
@@ -1319,7 +1342,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
     )
 
 # ================= UI =================
-st.title("🎯 Auto Relock Engine | Pattern + Group + Color")
+st.title("🎯 Auto Relock Engine | Pattern Group Only + Color Bet")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -1328,7 +1351,7 @@ c3.metric("Current Color", color_icon(current_color))
 c4.metric("Next Group", final_vote_group if final_vote_group is not None else "-")
 
 st.write("Next Color:", color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF")
-st.write("Pattern Type:", pattern_type)
+st.write("Pattern Group Type:", pattern_type)
 st.write("Pattern Group:", pattern_group)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Vote Required:", selected_mode["vote_required"] if selected_mode else 0)
@@ -1365,7 +1388,7 @@ elif can_bet and final_vote_group is not None:
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
         READY DOUBLE BET<br>
         GROUP {final_vote_group} | COLOR {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF"}<br>
-        PATTERN → {pattern_type}<br>
+        PATTERN GROUP → {pattern_type}<br>
         MODE → {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
