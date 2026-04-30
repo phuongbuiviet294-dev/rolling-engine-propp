@@ -70,7 +70,7 @@ ENABLE_PATTERN_FILTER = True
 
 # False = vote window OR pattern đều có thể bet
 # True  = chỉ bet khi có pattern
-PATTERN_REQUIRED = False
+PATTERN_REQUIRED = True
 
 # True = nếu vote window khác pattern thì theo pattern
 PATTERN_OVERRIDE_VOTE = True
