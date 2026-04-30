@@ -69,7 +69,7 @@ REQUIRE_COLOR_CONFIRM = False
 
 # ================= PATTERN FILTER - GROUP ONLY =================
 ENABLE_PATTERN_FILTER = True
-PATTERN_REQUIRED = False
+PATTERN_REQUIRED = True
 
 # ================= TELEGRAM =================
 DEFAULT_BOT_TOKEN = ""
