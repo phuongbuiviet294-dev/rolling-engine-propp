@@ -75,7 +75,7 @@ PATTERN_ALTERNATE_4 = True
 
 # False = pattern hỗ trợ thêm tín hiệu
 # True = bắt buộc phải có pattern mới bet
-PATTERN_REQUIRED = False
+PATTERN_REQUIRED = True
 
 # ================= TELEGRAM =================
 DEFAULT_BOT_TOKEN = ""
