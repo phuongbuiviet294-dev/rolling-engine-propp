@@ -9,10 +9,8 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# ================= REFRESH =================
 st_autorefresh(interval=5000, key="refresh")
 
-# ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 LOCK_ROUND_START = 168
@@ -45,7 +43,7 @@ KEEP_AFTER_LOSS_ROUNDS = 1
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 5
+MIN_WINDOW_SPACING = 1
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
@@ -64,11 +62,10 @@ SHOW_HISTORY_ROWS = 40
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
-# ================= PATTERN FILTER =================
 ENABLE_PATTERN_FILTER = True
 PATTERN_REQUIRED = True
+STRICT_WINDOW_PATTERN_MATCH = True
 
-# ================= TELEGRAM =================
 DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
@@ -76,7 +73,7 @@ BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BO
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
 TELEGRAM_SEND_MODE = "READY_ONLY"
-SENT_FILE = "/tmp/telegram_sent_rounds_pattern_group_only.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_pattern_group_strict.json"
 
 
 def telegram_enabled():
@@ -133,7 +130,6 @@ def send_signal_once(signal_name, current_round, msg):
     return ok
 
 
-# ================= LOAD DATA =================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
@@ -185,7 +181,6 @@ def color_icon(c):
     return "-"
 
 
-# ================= PATTERN GROUP ONLY =================
 def detect_pattern_next_group(seq_groups):
     n = len(seq_groups)
     if n < 2:
@@ -238,7 +233,6 @@ if len(groups) < LOCK_ROUND_START:
     st.stop()
 
 
-# ================= HELPERS =================
 def compute_profit_path(results, win_value, loss_value):
     p = 0.0
     out = []
@@ -353,7 +347,6 @@ def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     return out
 
 
-# ================= BACKTEST GROUP ONLY =================
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
     results_group = []
     trades = 0
@@ -771,22 +764,25 @@ def simulate_engine(numbers, groups, colors):
         vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
         vote_color, confidence_color = Counter(preds_color).most_common(1)[0] if preds_color else (None, 0)
 
-        new_signal = confidence_group >= vote_required
+        vote_signal = confidence_group >= vote_required
         color_signal = confidence_color >= vote_required if vote_color is not None else False
         distance = i - last_trade
+
+        pattern_group_runtime, pattern_type_runtime = detect_pattern_next_group(groups[:i])
+        pattern_match_runtime = (
+            pattern_group_runtime is not None
+            and vote_signal
+            and pattern_group_runtime == vote_group
+        )
 
         final_vote_group = vote_group
         final_vote_color = vote_color
 
-        pattern_group_runtime, pattern_type_runtime = detect_pattern_next_group(groups[:i])
-
-        if ENABLE_PATTERN_FILTER:
-            if pattern_group_runtime is not None:
-                final_vote_group = pattern_group_runtime
-                new_signal = True
-            else:
-                if PATTERN_REQUIRED:
-                    new_signal = False
+        if ENABLE_PATTERN_FILTER and STRICT_WINDOW_PATTERN_MATCH:
+            new_signal = pattern_match_runtime
+            final_vote_group = vote_group if pattern_match_runtime else None
+        else:
+            new_signal = vote_signal
 
         used_keep = False
         trade = False
@@ -818,8 +814,12 @@ def simulate_engine(numbers, groups, colors):
 
         if trade and used_keep:
             state = "TRADE_KEEP"
+        elif trade and pattern_match_runtime:
+            state = "TRADE_WINDOW_PATTERN"
         elif trade:
             state = "TRADE"
+        elif new_signal and pattern_match_runtime:
+            state = "SIGNAL_WINDOW_PATTERN"
         elif new_signal:
             state = "SIGNAL"
         elif used_keep:
@@ -990,10 +990,12 @@ def simulate_engine(numbers, groups, colors):
                 "top_windows": current_mode["top_windows"],
                 "vote_group": vote_group,
                 "confidence_group": confidence_group,
+                "vote_signal": vote_signal,
                 "vote_color": color_text(vote_color),
                 "confidence_color": confidence_color,
                 "pattern_group": pattern_group_runtime,
                 "pattern_type": pattern_type_runtime,
+                "pattern_match_vote": pattern_match_runtime,
                 "new_signal": new_signal,
                 "color_signal": color_signal,
                 "used_keep": used_keep,
@@ -1088,15 +1090,14 @@ def simulate_engine(numbers, groups, colors):
 
 
 @st.cache_data(ttl=20, show_spinner=False)
-def cached_simulate_engine_pattern_group_only(numbers_tuple):
+def cached_simulate_engine_pattern_strict(numbers_tuple):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
     cols = [color_of_number(n) for n in nums]
     return simulate_engine(nums, grps, cols)
 
 
-# ================= RUN ENGINE =================
-sim = cached_simulate_engine_pattern_group_only(tuple(numbers))
+sim = cached_simulate_engine_pattern_strict(tuple(numbers))
 
 hist = sim["hist"]
 phase_profit_group = sim["phase_profit_group"]
@@ -1133,7 +1134,6 @@ relock_count = sim["relock_count"]
 last_relock_trigger_round = sim["last_relock_trigger_round"]
 phase_summary_df = sim["phase_summary_df"]
 
-# ================= CURRENT LOCK CHECK =================
 scan_range_bt = {
     "trades": 0,
     "profit_group": 0.0,
@@ -1167,7 +1167,6 @@ if locked_windows and selected_mode is not None:
         len(groups),
     )
 
-# ================= NEXT STATUS =================
 next_round = len(groups)
 current_round = len(numbers)
 
@@ -1196,22 +1195,17 @@ if not hist.empty:
 else:
     distance = 999
 
-new_signal = confidence_group >= vote_required if vote_group is not None else False
+vote_signal = confidence_group >= vote_required if vote_group is not None else False
 color_signal = confidence_color >= vote_required if vote_color is not None else False
 
+pattern_group, pattern_type = detect_pattern_next_group(groups)
+pattern_match_vote = pattern_group is not None and vote_signal and pattern_group == vote_group
+
 used_keep_next = False
-final_vote_group = vote_group
+final_vote_group = vote_group if pattern_match_vote else None
 final_vote_color = vote_color
 
-pattern_group, pattern_type = detect_pattern_next_group(groups)
-
-if ENABLE_PATTERN_FILTER:
-    if pattern_group is not None:
-        final_vote_group = pattern_group
-        new_signal = True
-    else:
-        if PATTERN_REQUIRED:
-            new_signal = False
+new_signal = pattern_match_vote
 
 if session_stop:
     signal = False
@@ -1254,10 +1248,12 @@ next_row = {
     "top_windows": selected_mode["top_windows"] if selected_mode else 0,
     "vote_group": vote_group,
     "confidence_group": confidence_group,
+    "vote_signal": vote_signal,
     "vote_color": color_text(vote_color),
     "confidence_color": confidence_color,
     "pattern_group": pattern_group,
     "pattern_type": pattern_type,
+    "pattern_match_vote": pattern_match_vote,
     "new_signal": new_signal,
     "color_signal": color_signal,
     "used_keep": used_keep_next,
@@ -1290,24 +1286,23 @@ next_row = {
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-# ================= TELEGRAM NOTIFY =================
 if telegram_enabled() and can_bet and final_vote_group is not None:
     ready_msg = (
-        f"READY DOUBLE BET\n"
+        f"READY WINDOW + PATTERN\n"
         f"Round: {current_round}\n"
         f"Current Number: {current_number}\n"
         f"Current Group: {current_group}\n"
         f"Current Color: {color_icon(current_color)}\n"
         f"Bet Group: {final_vote_group}\n"
         f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
-        f"Pattern Group: {pattern_type} -> {pattern_group}\n"
+        f"Vote Group: {vote_group}\n"
+        f"Pattern: {pattern_type} -> {pattern_group}\n"
+        f"Match: {pattern_match_vote}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-        f"Vote Group Strength: {confidence_group}\n"
-        f"Vote Color Strength: {confidence_color}\n"
+        f"Vote Strength: {confidence_group}\n"
         f"Phase Profit Total: {phase_profit_total}\n"
         f"Total Profit Group: {total_profit_group}\n"
-        f"Total Profit All: {total_profit_all_phase}\n"
-        f"Stop Reason: {session_stop_reason}"
+        f"Total Profit All: {total_profit_all_phase}"
     )
 
     send_signal_once(
@@ -1316,8 +1311,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         msg=ready_msg,
     )
 
-# ================= UI =================
-st.title("🎯 Auto Relock Engine | Pattern Group Only + Color Bet")
+st.title("🎯 Auto Relock Engine | STRICT Window + Pattern Match")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -1326,8 +1320,11 @@ c3.metric("Current Color", color_icon(current_color))
 c4.metric("Next Group", final_vote_group if final_vote_group is not None else "-")
 
 st.write("Next Color:", color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF")
-st.write("Pattern Group Type:", pattern_type)
+st.write("Vote Group:", vote_group)
+st.write("Vote Signal:", vote_signal)
+st.write("Pattern Type:", pattern_type)
 st.write("Pattern Group:", pattern_group)
+st.write("Pattern Match Vote:", pattern_match_vote)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Vote Required:", selected_mode["vote_required"] if selected_mode else 0)
 st.write("Top Windows:", selected_mode["top_windows"] if selected_mode else 0)
@@ -1336,8 +1333,7 @@ st.write("Group Vote Strength:", confidence_group)
 st.write("Color Vote Strength:", confidence_color)
 st.write("Double Bet Color:", ENABLE_DOUBLE_BET_COLOR)
 st.write("Require Color Confirm:", REQUIRE_COLOR_CONFIRM)
-st.write("Pattern Filter:", ENABLE_PATTERN_FILTER)
-st.write("Pattern Required:", PATTERN_REQUIRED)
+st.write("Strict Window Pattern Match:", STRICT_WINDOW_PATTERN_MATCH)
 st.write("Group Stop Win:", GROUP_SESSION_STOP_WIN)
 st.write("Group Stop Loss:", GROUP_SESSION_STOP_LOSS)
 st.write("Best Lock Round:", selected_lock_round)
@@ -1361,16 +1357,16 @@ elif can_bet and final_vote_group is not None:
     st.markdown(
         f"""
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
-        READY DOUBLE BET<br>
+        READY WINDOW + PATTERN<br>
         GROUP {final_vote_group} | COLOR {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF"}<br>
-        PATTERN GROUP → {pattern_type}<br>
+        VOTE {vote_group} = PATTERN {pattern_group}<br>
         MODE → {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
         unsafe_allow_html=True,
     )
 else:
-    st.info(f"WAIT | Pattern={pattern_type}")
+    st.info(f"WAIT | Vote={vote_group} | Pattern={pattern_type} -> {pattern_group} | Match={pattern_match_vote}")
 
 st.subheader("Current Phase Stats")
 s1, s2, s3, s4 = st.columns(4)
@@ -1445,6 +1441,8 @@ if SHOW_STYLED_HISTORY:
             return ["background-color: #ffd700"] * len(row)
         if row["state"] == "TRADE_KEEP":
             return ["background-color: #ffb347; color:black"] * len(row)
+        if row["state"] in ("TRADE_WINDOW_PATTERN", "SIGNAL_WINDOW_PATTERN"):
+            return ["background-color: #ff4b4b; color:white"] * len(row)
         if row["state"] in ("AUTO_RELOCK_LOSS", "AUTO_RELOCK_WIN"):
             return ["background-color: #32cd32; color:black"] * len(row)
         if row["state"] in ("SESSION_STOP_WIN", "GROUP_STOP_WIN"):
