@@ -21,9 +21,7 @@ LOCK_ROUND_END = 180
 MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-
-   {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22}, 
-    
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
@@ -40,7 +38,6 @@ PHASE_STOP_LOSS = -2.0
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
 
-# STOP RIÊNG THEO GROUP PROFIT
 GROUP_SESSION_STOP_WIN = 15.0
 GROUP_SESSION_STOP_LOSS = -80.0
 
@@ -67,7 +64,7 @@ SHOW_HISTORY_ROWS = 40
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
-# ================= PATTERN FILTER - GROUP ONLY =================
+# ================= PATTERN FILTER =================
 ENABLE_PATTERN_FILTER = True
 PATTERN_REQUIRED = True
 
@@ -200,37 +197,30 @@ def detect_pattern_next_group(seq_groups):
     tail6 = seq_groups[-6:] if n >= 6 else []
     tail7 = seq_groups[-7:] if n >= 7 else []
 
-    # A,A,A,A -> A
     if n >= 4 and tail4[0] == tail4[1] == tail4[2] == tail4[3]:
         return tail4[3], "REPEAT_4"
 
-    # A,A,A -> A
     if n >= 3 and tail3[0] == tail3[1] == tail3[2]:
         return tail3[2], "REPEAT_3"
 
-    # A,A -> A
     if n >= 2 and tail2[0] == tail2[1]:
         return tail2[1], "REPEAT_2"
 
-    # A,B,A,B -> A / B,A,B,A -> B
     if n >= 4:
         a, b, c, d = tail4
         if a == c and b == d and a != b:
             return a, "ALTERNATE_ABAB"
 
-    # A,A,B,B -> A / B,B,A,A -> B
     if n >= 4:
         a, b, c, d = tail4
         if a == b and c == d and a != c:
             return a, "BLOCK_AABB"
 
-    # A,A,A,B,B,B -> A / B,B,B,A,A,A -> B
     if n >= 6:
         a, b, c, d, e, f = tail6
         if a == b == c and d == e == f and a != d:
             return a, "BLOCK_AAABBB"
 
-    # B,B,B,A,B,B,A -> B
     if n >= 7:
         a, b, c, d, e, f, g = tail7
         if a == b == c and e == f and d == g and a == e and a != d:
@@ -670,26 +660,10 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     round_eval_df = pd.DataFrame(round_eval_rows)
 
     if best_round is not None:
-        return (
-            best_round,
-            best_windows,
-            best_mode,
-            best_scan_df,
-            best_filtered_df,
-            round_eval_df,
-            best_lock_mode,
-        )
+        return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
     if fallback_round is not None:
-        return (
-            fallback_round,
-            fallback_windows,
-            fallback_mode,
-            fallback_scan_df,
-            fallback_filtered_df,
-            round_eval_df,
-            "fallback",
-        )
+        return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
@@ -809,10 +783,10 @@ def simulate_engine(numbers, groups, colors):
         if ENABLE_PATTERN_FILTER:
             if pattern_group_runtime is not None:
                 final_vote_group = pattern_group_runtime
-                if not PATTERN_REQUIRED:
-                    new_signal = True
-            elif PATTERN_REQUIRED:
-                new_signal = False
+                new_signal = True
+            else:
+                if PATTERN_REQUIRED:
+                    new_signal = False
 
         used_keep = False
         trade = False
@@ -1234,10 +1208,10 @@ pattern_group, pattern_type = detect_pattern_next_group(groups)
 if ENABLE_PATTERN_FILTER:
     if pattern_group is not None:
         final_vote_group = pattern_group
-        if not PATTERN_REQUIRED:
-            new_signal = True
-    elif PATTERN_REQUIRED:
-        new_signal = False
+        new_signal = True
+    else:
+        if PATTERN_REQUIRED:
+            new_signal = False
 
 if session_stop:
     signal = False
@@ -1396,7 +1370,7 @@ elif can_bet and final_vote_group is not None:
         unsafe_allow_html=True,
     )
 else:
-    st.info("WAIT")
+    st.info(f"WAIT | Pattern={pattern_type}")
 
 st.subheader("Current Phase Stats")
 s1, s2, s3, s4 = st.columns(4)
