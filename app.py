@@ -31,8 +31,8 @@ LOSS_GROUP = -1.0
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-PHASE_STOP_WIN = 8
-PHASE_STOP_LOSS = -4.0
+PHASE_STOP_WIN = 3.5
+PHASE_STOP_LOSS = -2.0
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
@@ -44,7 +44,7 @@ KEEP_AFTER_LOSS_ROUNDS = 1
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 5
+MIN_WINDOW_SPACING = 1
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
@@ -67,14 +67,14 @@ ENABLE_PATTERN_FILTER = True
 PATTERN_REQUIRED = True
 
 # ================= TELEGRAM =================
-DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
+DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
 TELEGRAM_SEND_MODE = "READY_ONLY"
-SENT_FILE = "/tmp/telegram_sent_rounds_pattern_group_only_v3.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_pattern_first_v1.json"
 
 
 def telegram_enabled():
@@ -200,7 +200,6 @@ def detect_pattern_next_group(seq_groups):
     t7 = tail(7)
     t8 = tail(8)
 
-    # ===== REPEAT =====
     if n >= 5 and len(set(t5)) == 1:
         return t5[-1], "REPEAT_5"
 
@@ -213,7 +212,6 @@ def detect_pattern_next_group(seq_groups):
     if n >= 2 and t2[0] == t2[1]:
         return t2[-1], "REPEAT_2"
 
-    # ===== RUN / BREAK =====
     if n >= 5:
         a, b, c, d, e = t5
         if a == b == c == d and e != a:
@@ -229,7 +227,6 @@ def detect_pattern_next_group(seq_groups):
         if a == b and c != a:
             return a, "AAB_TO_A"
 
-    # ===== 4-GROUP SHORT PATTERNS =====
     if n >= 4:
         a, b, c, d = t4
 
@@ -278,13 +275,11 @@ def detect_pattern_next_group(seq_groups):
         if t4 == [4, 2, 3, 1]:
             return 4, "SEQ_4231_TO_4"
 
-    # ===== 3-GROUP SHORT PATTERNS =====
     if n >= 3:
         a, b, c = t3
         if a == c and a != b:
             return a, "ABA_TO_A"
 
-    # ===== 5-GROUP PATTERNS =====
     if n >= 5:
         a, b, c, d, e = t5
 
@@ -312,7 +307,6 @@ def detect_pattern_next_group(seq_groups):
         if a == e and len({a, b, c, d}) >= 4:
             return a, "ABCDA_TO_A"
 
-    # ===== 6-GROUP PATTERNS =====
     if n >= 6:
         a, b, c, d, e, f = t6
 
@@ -331,13 +325,11 @@ def detect_pattern_next_group(seq_groups):
         if a == d and b == c == e == f and a != b:
             return a, "ABBABB_TO_A"
 
-    # ===== 7-GROUP COMPLEX =====
     if n >= 7:
         a, b, c, d, e, f, g = t7
         if a == b == c and e == f and d == g and a == e and a != d:
             return a, "BBBABBA_TO_B"
 
-    # ===== 8-GROUP PATTERNS =====
     if n >= 8:
         a, b, c, d, e, f, g, h = t8
 
@@ -887,8 +879,9 @@ def simulate_engine(numbers, groups, colors):
             continue
 
         vote_required = current_mode["vote_required"]
+        vote_counter_group = Counter(preds_group)
 
-        vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+        vote_group, confidence_group = vote_counter_group.most_common(1)[0]
         vote_color, confidence_color = Counter(preds_color).most_common(1)[0] if preds_color else (None, 0)
 
         vote_signal = confidence_group >= vote_required
@@ -896,15 +889,25 @@ def simulate_engine(numbers, groups, colors):
         distance = i - last_trade
 
         pattern_group_runtime, pattern_type_runtime = detect_pattern_next_group(groups[:i])
-        pattern_match_vote = pattern_group_runtime is not None and vote_signal and pattern_group_runtime == vote_group
+        pattern_vote_strength = (
+            vote_counter_group.get(pattern_group_runtime, 0)
+            if pattern_group_runtime is not None
+            else 0
+        )
+
+        pattern_rule_signal = (
+            pattern_group_runtime is not None
+            and pattern_vote_strength >= vote_required
+        )
 
         if ENABLE_PATTERN_FILTER and PATTERN_REQUIRED:
-            new_signal = pattern_match_vote
-            final_vote_group = vote_group if pattern_match_vote else None
+            new_signal = pattern_rule_signal
+            final_vote_group = pattern_group_runtime if pattern_rule_signal else None
         else:
             new_signal = vote_signal
-            final_vote_group = vote_group
+            final_vote_group = vote_group if vote_signal else None
 
+        pattern_match_vote = pattern_rule_signal
         final_vote_color = vote_color
 
         used_keep = False
@@ -937,12 +940,12 @@ def simulate_engine(numbers, groups, colors):
 
         if trade and used_keep:
             state = "TRADE_KEEP"
-        elif trade and pattern_match_vote:
-            state = "TRADE_WINDOW_PATTERN"
+        elif trade and pattern_rule_signal:
+            state = "TRADE_PATTERN_RULE"
         elif trade:
             state = "TRADE"
-        elif new_signal and pattern_match_vote:
-            state = "SIGNAL_WINDOW_PATTERN"
+        elif new_signal and pattern_rule_signal:
+            state = "SIGNAL_PATTERN_RULE"
         elif new_signal:
             state = "SIGNAL"
         elif used_keep:
@@ -1115,6 +1118,8 @@ def simulate_engine(numbers, groups, colors):
                 "confidence_color": confidence_color,
                 "pattern_group": pattern_group_runtime,
                 "pattern_type": pattern_type_runtime,
+                "pattern_vote_strength": pattern_vote_strength,
+                "pattern_rule_signal": pattern_rule_signal,
                 "pattern_match_vote": pattern_match_vote,
                 "new_signal": new_signal,
                 "color_signal": color_signal,
@@ -1296,8 +1301,10 @@ current_round = len(numbers)
 preds_group = [groups[next_round - w] for w in locked_windows if next_round - w >= 0]
 preds_color = [colors[next_round - w] for w in locked_windows if next_round - w >= 0]
 
+vote_counter_group = Counter(preds_group)
+
 if preds_group and selected_mode is not None:
-    vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+    vote_group, confidence_group = vote_counter_group.most_common(1)[0]
     vote_required = selected_mode["vote_required"]
 else:
     vote_group, confidence_group = None, 0
@@ -1322,26 +1329,36 @@ vote_signal = confidence_group >= vote_required if vote_group is not None else F
 color_signal = confidence_color >= vote_required if vote_color is not None else False
 
 pattern_group, pattern_type = detect_pattern_next_group(groups)
-pattern_match_vote = pattern_group is not None and vote_signal and pattern_group == vote_group
+
+pattern_vote_strength = (
+    vote_counter_group.get(pattern_group, 0)
+    if pattern_group is not None
+    else 0
+)
+
+pattern_rule_signal = (
+    pattern_group is not None
+    and pattern_vote_strength >= vote_required
+)
+
+pattern_match_vote = pattern_rule_signal
 
 if ENABLE_PATTERN_FILTER and PATTERN_REQUIRED:
-    new_signal = pattern_match_vote
-    final_vote_group = vote_group if pattern_match_vote else None
+    new_signal = pattern_rule_signal
+    final_vote_group = pattern_group if pattern_rule_signal else None
 else:
     new_signal = vote_signal
-    final_vote_group = vote_group
+    final_vote_group = vote_group if vote_signal else None
 
 used_keep_next = False
 final_vote_color = vote_color
 
 ready_reason = "OK_READY"
 
-if not vote_signal:
-    ready_reason = "NO_WINDOW_VOTE"
-elif pattern_group is None:
+if pattern_group is None:
     ready_reason = "NO_PATTERN"
-elif pattern_group != vote_group:
-    ready_reason = f"PATTERN_NOT_MATCH vote={vote_group}, pattern={pattern_group}"
+elif pattern_vote_strength < vote_required:
+    ready_reason = f"PATTERN_VOTE_NOT_ENOUGH pattern={pattern_group}, strength={pattern_vote_strength}, required={vote_required}"
 elif final_vote_group is None:
     ready_reason = "NO_FINAL_BET_GROUP"
 elif distance < GAP:
@@ -1400,6 +1417,8 @@ next_row = {
     "confidence_color": confidence_color,
     "pattern_group": pattern_group,
     "pattern_type": pattern_type,
+    "pattern_vote_strength": pattern_vote_strength,
+    "pattern_rule_signal": pattern_rule_signal,
     "pattern_match_vote": pattern_match_vote,
     "ready_reason": ready_reason,
     "new_signal": new_signal,
@@ -1445,10 +1464,13 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"Bet Group: {final_vote_group}\n"
         f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
         f"Pattern Group: {pattern_type} -> {pattern_group}\n"
-        f"Pattern Match Vote: {pattern_match_vote}\n"
+        f"Pattern Vote Strength: {pattern_vote_strength}\n"
+        f"Pattern Rule Signal: {pattern_rule_signal}\n"
         f"Ready Reason: {ready_reason}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
-        f"Vote Group Strength: {confidence_group}\n"
+        f"Vote Required: {vote_required}\n"
+        f"Top Vote Group: {vote_group}\n"
+        f"Top Vote Strength: {confidence_group}\n"
         f"Vote Color Strength: {confidence_color}\n"
         f"Phase Profit Total: {phase_profit_total}\n"
         f"Total Profit Group: {total_profit_group}\n"
@@ -1463,7 +1485,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
     )
 
 # ================= UI =================
-st.title("🎯 Auto Relock Engine | Window + Pattern Match + Color Bet")
+st.title("🎯 Auto Relock Engine | Pattern First + Window Rule + Color Bet")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -1472,20 +1494,20 @@ c3.metric("Current Color", color_icon(current_color))
 c4.metric("Next Group", final_vote_group if final_vote_group is not None else "-")
 
 st.write("Next Color:", color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF")
-st.write("Vote Group:", vote_group)
-st.write("Vote Signal:", vote_signal)
 st.write("Pattern Group Type:", pattern_type)
 st.write("Pattern Group:", pattern_group)
-st.write("Pattern Match Vote:", pattern_match_vote)
+st.write("Pattern Vote Strength:", pattern_vote_strength)
+st.write("Pattern Rule Signal:", pattern_rule_signal)
+st.write("Top Vote Group:", vote_group)
+st.write("Top Vote Strength:", confidence_group)
+st.write("Vote Required:", vote_required)
 st.write("Ready Reason:", ready_reason)
 st.write("Can Bet:", can_bet)
 st.write("Signal:", signal)
 st.write("Final Bet Group:", final_vote_group)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
-st.write("Vote Required:", selected_mode["vote_required"] if selected_mode else 0)
 st.write("Top Windows:", selected_mode["top_windows"] if selected_mode else 0)
 st.write("Window Range:", f'{selected_mode["window_min"]}-{selected_mode["window_max"]}' if selected_mode else "-")
-st.write("Group Vote Strength:", confidence_group)
 st.write("Color Vote Strength:", confidence_color)
 st.write("Double Bet Color:", ENABLE_DOUBLE_BET_COLOR)
 st.write("Require Color Confirm:", REQUIRE_COLOR_CONFIRM)
@@ -1516,8 +1538,9 @@ elif can_bet and final_vote_group is not None:
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
         READY DOUBLE BET<br>
         GROUP {final_vote_group} | COLOR {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF"}<br>
-        WINDOW VOTE = PATTERN GROUP<br>
+        PATTERN FIRST → WINDOW RULE OK<br>
         PATTERN → {pattern_type}<br>
+        STRENGTH → {pattern_vote_strength}/{vote_required}<br>
         MODE → {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
@@ -1599,7 +1622,7 @@ if SHOW_STYLED_HISTORY:
             return ["background-color: #ffd700"] * len(row)
         if row["state"] == "TRADE_KEEP":
             return ["background-color: #ffb347; color:black"] * len(row)
-        if row["state"] in ("TRADE_WINDOW_PATTERN", "SIGNAL_WINDOW_PATTERN"):
+        if row["state"] in ("TRADE_PATTERN_RULE", "SIGNAL_PATTERN_RULE"):
             return ["background-color: #ff4b4b; color:white"] * len(row)
         if row["state"] in ("AUTO_RELOCK_LOSS", "AUTO_RELOCK_WIN"):
             return ["background-color: #32cd32; color:black"] * len(row)
