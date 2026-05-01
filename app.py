@@ -28,24 +28,23 @@ GAP = 1
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
-
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-PHASE_STOP_WIN = 6
-PHASE_STOP_LOSS = -3.0
+PHASE_STOP_WIN = 3.5
+PHASE_STOP_LOSS = -2.0
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
 
 GROUP_SESSION_STOP_WIN = 15.0
-GROUP_SESSION_STOP_LOSS = -8.0
+GROUP_SESSION_STOP_LOSS = -80.0
 
 KEEP_AFTER_LOSS_ROUNDS = 1
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 5
+MIN_WINDOW_SPACING = 1
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
@@ -64,19 +63,18 @@ SHOW_HISTORY_ROWS = 40
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
-# ================= PATTERN FILTER - GROUP ONLY =================
 ENABLE_PATTERN_FILTER = True
 PATTERN_REQUIRED = True
 
 # ================= TELEGRAM =================
-DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
+DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
 TELEGRAM_SEND_MODE = "READY_ONLY"
-SENT_FILE = "/tmp/telegram_sent_rounds_pattern_group_only_v2.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_pattern_group_only_v3.json"
 
 
 def telegram_enabled():
@@ -202,7 +200,6 @@ def detect_pattern_next_group(seq_groups):
     t7 = tail(7)
     t8 = tail(8)
 
-    # ===== REPEAT =====
     if n >= 5 and len(set(t5)) == 1:
         return t5[-1], "REPEAT_5"
 
@@ -215,7 +212,6 @@ def detect_pattern_next_group(seq_groups):
     if n >= 2 and t2[0] == t2[1]:
         return t2[-1], "REPEAT_2"
 
-    # ===== RUN THEN BREAK =====
     if n >= 5:
         a, b, c, d, e = t5
         if a == b == c == d and e != a:
@@ -231,10 +227,9 @@ def detect_pattern_next_group(seq_groups):
         if a == b and c != a:
             return a, "AAB_TO_A"
 
-    # ===== FAKE BREAK / RETURN =====
     if n >= 5:
         a, b, c, d, e = t5
-        if a == b and c == e and a == d and a != c:
+        if a == b and a == d and c == e and a != c:
             return a, "AABAB_TO_A"
 
     if n >= 4:
@@ -242,12 +237,6 @@ def detect_pattern_next_group(seq_groups):
         if a == b and a == d and c != a:
             return a, "AABA_TO_A"
 
-    if n >= 5:
-        a, b, c, d, e = t5
-        if a == b == d and c == e and a != c:
-            return a, "AABAB_TO_A2"
-
-    # ===== ALTERNATE =====
     if n >= 6:
         a, b, c, d, e, f = t6
         if a == c == e and b == d == f and a != b:
@@ -268,7 +257,6 @@ def detect_pattern_next_group(seq_groups):
         if a == c and a != b:
             return a, "ABA_TO_A"
 
-    # ===== BLOCK =====
     if n >= 8:
         a, b, c, d, e, f, g, h = t8
         if a == b == c == d and e == f == g == h and a != e:
@@ -299,7 +287,6 @@ def detect_pattern_next_group(seq_groups):
         if a == b and c == d and e == a and a != c:
             return a, "AABBA_TO_A"
 
-    # ===== MIRROR =====
     if n >= 5:
         a, b, c, d, e = t5
         if a == e and b == d and a != b:
@@ -320,7 +307,6 @@ def detect_pattern_next_group(seq_groups):
         if a == d and len({a, b, c}) >= 3:
             return a, "ABCA_TO_A"
 
-    # ===== CYCLE =====
     if n >= 8:
         a, b, c, d, e, f, g, h = t8
         if a == e and b == f and c == g and d == h and len({a, b, c, d}) >= 4:
@@ -336,7 +322,6 @@ def detect_pattern_next_group(seq_groups):
         if a == e and len({a, b, c, d}) >= 4:
             return a, "ABCDA_TO_A"
 
-    # ===== SPECIAL SEQUENCE =====
     if n >= 4 and t4 == [1, 2, 3, 4]:
         return 1, "SEQ_1234_TO_1"
 
@@ -349,7 +334,6 @@ def detect_pattern_next_group(seq_groups):
     if n >= 4 and t4 == [4, 2, 3, 1]:
         return 4, "SEQ_4231_TO_4"
 
-    # ===== COMPLEX =====
     if n >= 7:
         a, b, c, d, e, f, g = t7
         if a == b == c and e == f and d == g and a == e and a != d:
@@ -424,7 +408,6 @@ def compute_streak_metrics(results):
     max_loss_streak = 0
     count_hit_streak_ge2 = 0
     count_loss_streak_ge2 = 0
-
     cur_val = results[0]
     cur_len = 1
 
@@ -799,26 +782,10 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     round_eval_df = pd.DataFrame(round_eval_rows)
 
     if best_round is not None:
-        return (
-            best_round,
-            best_windows,
-            best_mode,
-            best_scan_df,
-            best_filtered_df,
-            round_eval_df,
-            best_lock_mode,
-        )
+        return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
     if fallback_round is not None:
-        return (
-            fallback_round,
-            fallback_windows,
-            fallback_mode,
-            fallback_scan_df,
-            fallback_filtered_df,
-            round_eval_df,
-            "fallback",
-        )
+        return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
@@ -931,11 +898,7 @@ def simulate_engine(numbers, groups, colors):
         distance = i - last_trade
 
         pattern_group_runtime, pattern_type_runtime = detect_pattern_next_group(groups[:i])
-        pattern_match_vote = (
-            pattern_group_runtime is not None
-            and vote_signal
-            and pattern_group_runtime == vote_group
-        )
+        pattern_match_vote = pattern_group_runtime is not None and vote_signal and pattern_group_runtime == vote_group
 
         if ENABLE_PATTERN_FILTER and PATTERN_REQUIRED:
             new_signal = pattern_match_vote
@@ -967,7 +930,7 @@ def simulate_engine(numbers, groups, colors):
                 used_keep = True
 
         final_signal = new_signal or used_keep
-        can_trade_group = final_signal and distance >= GAP
+        can_trade_group = final_signal and final_vote_group is not None and distance >= GAP
 
         if ENABLE_DOUBLE_BET_COLOR and REQUIRE_COLOR_CONFIRM:
             trade = can_trade_group and color_signal
@@ -1090,10 +1053,7 @@ def simulate_engine(numbers, groups, colors):
 
                 current_round_i = i
                 scan_end = current_round_i
-                scan_start = max(
-                    LOCK_ROUND_START,
-                    scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER,
-                )
+                scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
 
                 (
                     new_selected_lock_round,
@@ -1364,11 +1324,7 @@ vote_signal = confidence_group >= vote_required if vote_group is not None else F
 color_signal = confidence_color >= vote_required if vote_color is not None else False
 
 pattern_group, pattern_type = detect_pattern_next_group(groups)
-pattern_match_vote = (
-    pattern_group is not None
-    and vote_signal
-    and pattern_group == vote_group
-)
+pattern_match_vote = pattern_group is not None and vote_signal and pattern_group == vote_group
 
 if ENABLE_PATTERN_FILTER and PATTERN_REQUIRED:
     new_signal = pattern_match_vote
@@ -1379,6 +1335,21 @@ else:
 
 used_keep_next = False
 final_vote_color = vote_color
+
+ready_reason = "OK_READY"
+
+if not vote_signal:
+    ready_reason = "NO_WINDOW_VOTE"
+elif pattern_group is None:
+    ready_reason = "NO_PATTERN"
+elif pattern_group != vote_group:
+    ready_reason = f"PATTERN_NOT_MATCH vote={vote_group}, pattern={pattern_group}"
+elif final_vote_group is None:
+    ready_reason = "NO_FINAL_BET_GROUP"
+elif distance < GAP:
+    ready_reason = f"GAP_NOT_ENOUGH distance={distance}"
+elif session_stop:
+    ready_reason = f"SESSION_STOP {session_stop_reason}"
 
 if session_stop:
     signal = False
@@ -1401,7 +1372,12 @@ else:
     final_signal = new_signal or used_keep_next
     signal = final_signal
 
-    can_bet_group = signal and distance >= GAP and next_round > LOCK_ROUND_END
+    can_bet_group = (
+        signal
+        and final_vote_group is not None
+        and distance >= GAP
+        and next_round > LOCK_ROUND_END
+    )
 
     if ENABLE_DOUBLE_BET_COLOR and REQUIRE_COLOR_CONFIRM:
         can_bet = can_bet_group and color_signal
@@ -1427,6 +1403,7 @@ next_row = {
     "pattern_group": pattern_group,
     "pattern_type": pattern_type,
     "pattern_match_vote": pattern_match_vote,
+    "ready_reason": ready_reason,
     "new_signal": new_signal,
     "color_signal": color_signal,
     "used_keep": used_keep_next,
@@ -1471,6 +1448,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
         f"Pattern Group: {pattern_type} -> {pattern_group}\n"
         f"Pattern Match Vote: {pattern_match_vote}\n"
+        f"Ready Reason: {ready_reason}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
         f"Vote Group Strength: {confidence_group}\n"
         f"Vote Color Strength: {confidence_color}\n"
@@ -1501,6 +1479,10 @@ st.write("Vote Signal:", vote_signal)
 st.write("Pattern Group Type:", pattern_type)
 st.write("Pattern Group:", pattern_group)
 st.write("Pattern Match Vote:", pattern_match_vote)
+st.write("Ready Reason:", ready_reason)
+st.write("Can Bet:", can_bet)
+st.write("Signal:", signal)
+st.write("Final Bet Group:", final_vote_group)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Vote Required:", selected_mode["vote_required"] if selected_mode else 0)
 st.write("Top Windows:", selected_mode["top_windows"] if selected_mode else 0)
@@ -1544,7 +1526,7 @@ elif can_bet and final_vote_group is not None:
         unsafe_allow_html=True,
     )
 else:
-    st.info("WAIT")
+    st.info(f"WAIT | {ready_reason}")
 
 st.subheader("Current Phase Stats")
 s1, s2, s3, s4 = st.columns(4)
