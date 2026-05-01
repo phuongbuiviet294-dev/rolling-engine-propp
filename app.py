@@ -19,7 +19,7 @@ LOCK_ROUND_START = 168
 LOCK_ROUND_END = 180
 
 MODES = [
-    {"name": "5v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
 
 ]
 
