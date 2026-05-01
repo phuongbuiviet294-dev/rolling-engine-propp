@@ -14,19 +14,19 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-GAP = 2
+GAP = 1
 
-TRAIN_LENS = [60, 90, 120, 160, 220]
-MIN_PATTERN_TRADES = 4
-MIN_PATTERN_WR = 0.52
-MIN_PATTERN_EV = 0.05
-MIN_PATTERN_PROFIT = 0.0
-MAX_PATTERN_DD_LIMIT = -6.0
+TRAIN_LENS = [20,30,50,80]
+MIN_PATTERN_TRADES = 1
+MIN_PATTERN_WR = 0.40
+MIN_PATTERN_EV = -0.20
+MIN_PATTERN_PROFIT = -3.0
+MAX_PATTERN_DD_LIMIT = -10.0
 
-SESSION_STOP_WIN = 50.0
+SESSION_STOP_WIN = 30.0
 SESSION_STOP_LOSS = -20.0
 
-REPLAY_FROM = 180
+REPLAY_FROM = 60
 SHOW_HISTORY_ROWS = 100
 
 DEFAULT_BOT_TOKEN = ""
@@ -292,7 +292,7 @@ def simulate_adaptive_ai(numbers, groups, colors):
     session_stop = False
     session_stop_reason = None
 
-    start_idx = max(REPLAY_FROM, max(TRAIN_LENS), 10)
+    start_idx = max(REPLAY_FROM, max(TRAIN_LENS), 20)
 
     for i in range(start_idx, len(groups)):
         if total_profit >= SESSION_STOP_WIN:
