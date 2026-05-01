@@ -16,15 +16,21 @@ LOSS_GROUP = -1.0
 
 GAP = 1
 
-TRAIN_LENS = [20,30,50,80]
+TRAIN_LENS = [20, 30, 50, 80, 120]
+
 MIN_PATTERN_TRADES = 1
+
 MIN_PATTERN_WR = 0.45
-MIN_PATTERN_EV = -0.1
-MIN_PATTERN_PROFIT = -2
+MIN_PATTERN_EV = -0.10
+MIN_PATTERN_PROFIT = -3.0
 MAX_PATTERN_DD_LIMIT = -8.0
 
-SESSION_STOP_WIN = 10.0
-SESSION_STOP_LOSS = -8.0
+STRONG_WR = 0.58
+STRONG_EV = 0.30
+STRONG_PROFIT = 2.5
+
+SESSION_STOP_WIN = 30.0
+SESSION_STOP_LOSS = -10.0
 
 REPLAY_FROM = 30
 SHOW_HISTORY_ROWS = 100
@@ -35,7 +41,7 @@ DEFAULT_CHAT_ID = "6655585286"
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
-SENT_FILE = "/tmp/telegram_sent_adaptive_ai_pattern.json"
+SENT_FILE = "/tmp/telegram_sent_adaptive_ai_pattern_balanced.json"
 
 
 def telegram_enabled():
@@ -164,13 +170,32 @@ def detect_pattern_next_group(seq_groups):
 
     if n >= 4:
         a, b, c, d = seq_groups[-4:]
+
         if a == b == c and d != a:
             return a, "AAAB"
+
+        if a == c and b == d and a != b:
+            return a, "ABAB"
+
+        if a == d and b == c and a != b:
+            return a, "ABBA"
+
+        if a == b and c == d and a != c:
+            return a, "AABB"
+
+        if a == b and a == d and c != a:
+            return a, "AABA"
+
+        if a == c == d and b != a:
+            return a, "ABAA"
 
     if n >= 3:
         a, b, c = seq_groups[-3:]
         if a == b == c:
             return a, "AAA"
+
+        if a == c and a != b:
+            return a, "ABA"
 
     return None, "NO_PATTERN"
 
@@ -231,7 +256,6 @@ def pick_best_adaptive_stats(seq_groups, pattern_type, end_idx):
 
     for train_len in TRAIN_LENS:
         stats = calc_pattern_stats(seq_groups, pattern_type, end_idx, train_len)
-        all_stats.append(stats)
 
         score = (
             stats["ev"] * 10
@@ -242,6 +266,7 @@ def pick_best_adaptive_stats(seq_groups, pattern_type, end_idx):
         )
 
         stats["score"] = score
+        all_stats.append(stats)
 
         if best is None or score > best["score"]:
             best = stats
@@ -258,19 +283,28 @@ def adaptive_ai_accept(seq_groups, pattern_group, pattern_type, end_idx):
     if best["trades"] < MIN_PATTERN_TRADES:
         return False, f"LOW_SAMPLE {best['trades']}/{MIN_PATTERN_TRADES}", best, all_stats
 
-    if best["wr"] < MIN_PATTERN_WR:
-        return False, f"WR_LOW {round(best['wr'] * 100, 2)}%", best, all_stats
+    if (
+        best["wr"] >= STRONG_WR
+        and best["ev"] >= STRONG_EV
+        and best["profit"] >= STRONG_PROFIT
+        and best["max_dd"] >= MAX_PATTERN_DD_LIMIT
+    ):
+        return True, "READY_STRONG", best, all_stats
 
-    if best["ev"] < MIN_PATTERN_EV:
-        return False, f"EV_LOW {round(best['ev'], 3)}", best, all_stats
+    if (
+        best["wr"] >= MIN_PATTERN_WR
+        and best["ev"] >= MIN_PATTERN_EV
+        and best["profit"] >= MIN_PATTERN_PROFIT
+        and best["max_dd"] >= MAX_PATTERN_DD_LIMIT
+    ):
+        return True, "READY_SOFT", best, all_stats
 
-    if best["profit"] <= MIN_PATTERN_PROFIT:
-        return False, f"PROFIT_LOW {round(best['profit'], 2)}", best, all_stats
-
-    if best["max_dd"] < MAX_PATTERN_DD_LIMIT:
-        return False, f"DD_BAD {round(best['max_dd'], 2)}", best, all_stats
-
-    return True, "ADAPTIVE_ACCEPT", best, all_stats
+    return False, (
+        f"AI_REJECT WR={round(best['wr'] * 100, 2)}% "
+        f"EV={round(best['ev'], 3)} "
+        f"PROFIT={round(best['profit'], 2)} "
+        f"DD={round(best['max_dd'], 2)}"
+    ), best, all_stats
 
 
 numbers = load_numbers()
@@ -292,7 +326,7 @@ def simulate_adaptive_ai(numbers, groups, colors):
     session_stop = False
     session_stop_reason = None
 
-    start_idx = max(REPLAY_FROM, max(TRAIN_LENS), 20)
+    start_idx = max(REPLAY_FROM, 10)
 
     for i in range(start_idx, len(groups)):
         if total_profit >= SESSION_STOP_WIN:
