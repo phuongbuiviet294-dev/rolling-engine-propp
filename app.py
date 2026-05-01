@@ -1,6 +1,13 @@
-import time import json import os from collections import Counter
+import time 
+import json 
+import os from collections 
+import Counter
 
-import numpy as np import pandas as pd import requests import streamlit as st from streamlit_autorefresh import st_autorefresh
+import numpy as np
+import pandas as pd 
+import requests 
+import streamlit as st from streamlit_autorefresh 
+import st_autorefresh
 
 ================= REFRESH =================
 
