@@ -208,9 +208,7 @@ def detect_pattern_next_group(seq_groups):
     if n >= 3 and tail3[0] == tail3[1] == tail3[2]:
         return tail3[2], "REPEAT_3"
 
-    # A,A -> A
-    if n >= 2 and tail2[0] == tail2[1]:
-        return tail2[1], "REPEAT_2"
+  
 
     # A,B,A,B -> A / B,A,B,A -> B
     if n >= 4:
