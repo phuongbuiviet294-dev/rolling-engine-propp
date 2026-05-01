@@ -9,11 +9,11 @@ import requests
 import streamlit as st 
 from streamlit_autorefresh import st_autorefresh
 
-================= REFRESH =================
+#================= REFRESH =================
 
 st_autorefresh(interval=5000, key="refresh")
 
-================= CONFIG =================
+#================= CONFIG =================
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -51,7 +51,7 @@ Pattern ngắn A,A dễ nhiễu. Nếu muốn dùng thì True.
 
 ENABLE_REPEAT_2_PATTERN = True
 
-================= TELEGRAM =================
+#================= TELEGRAM =================
 
 DEFAULT_BOT_TOKEN = "" DEFAULT_CHAT_ID = "6655585286" BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID TELEGRAM_SEND_MODE = "READY_ONLY" SENT_FILE = "/tmp/telegram_sent_rounds_window_pattern_strict_v2.json"
 
@@ -95,7 +95,7 @@ if ok:
 
 return ok
 
-================= LOAD DATA =================
+#================= LOAD DATA =================
 
 @st.cache_data(ttl=30, show_spinner=False) def load_numbers(): url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}" df = pd.read_csv(url) df.columns = [str(c).strip().lower() for c in df.columns] if "number" not in df.columns: raise ValueError("Sheet must contain column 'number'") df["number"] = pd.to_numeric(df["number"], errors="coerce") return df["number"].dropna().astype(int).tolist()
 
@@ -286,7 +286,7 @@ numbers = load_numbers() groups = [group_of(n) for n in numbers] colors = [color
 
 if len(groups) < LOCK_ROUND_START: st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.") st.stop()
 
-================= HELPERS =================
+#================= HELPERS =================
 
 def compute_profit_path(results, win_value, loss_value): p = 0.0 out = [] for r in results: p += win_value if r == 1 else loss_value out.append(p) return out
 
@@ -347,7 +347,7 @@ def pick_spaced_windows(df_sorted, top_n, min_spacing): selected = [] for _, row
 
 def enforce_spacing_from_df(df_sorted, top_n, min_spacing): out = [] if df_sorted.empty: return out for _, row in df_sorted.iterrows(): w = int(row["window"]) if all(abs(w - x) >= min_spacing for x in out): out.append(w) if len(out) >= top_n: break return out
 
-================= BACKTEST GROUP ONLY =================
+#================= BACKTEST GROUP ONLY =================
 
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx): results_group = [] trades = 0 wins_group = 0 last_trade = -999999
 
@@ -648,7 +648,7 @@ if fallback_round is not None:
 
 return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
-================= SESSION ENGINE =================
+#================= SESSION ENGINE =================
 
 def simulate_engine(numbers, groups, colors): result = { "hist": pd.DataFrame(), "phase_profit_group": 0.0, "phase_profit_color": 0.0, "phase_profit_total": 0.0, "phase_hits_group": [], "phase_hits_color": [], "total_profit_group": 0.0, "total_profit_color": 0.0, "total_profit_all_phase": 0.0, "total_hits_group": [], "total_hits_color": [], "locked_windows": [], "selected_lock_round": None, "selected_mode": None, "lock_mode": "", "scan_df_all": pd.DataFrame(), "scan_df_filtered": pd.DataFrame(), "round_eval_df": pd.DataFrame(), "lock_scan_start": None, "lock_scan_end": None, "keep_bet_group": None, "keep_rounds_left": 0, "last_trade_was_loss": False, "consecutive_losses": 0, "phase_loss_streak": 0, "last_trade": -999, "phase_index": 1, "session_stop": False, "session_stop_reason": None, "relock_count": 0, "last_relock_trigger_round": None, "phase_summary_df": pd.DataFrame(), }
 
