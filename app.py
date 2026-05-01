@@ -1,19 +1,12 @@
-import time 
-import json 
-import os 
-from collections import Counter
+import time import json import os from collections import Counter
 
-import numpy as np
-import pandas as pd 
-import requests 
-import streamlit as st 
-from streamlit_autorefresh import st_autorefresh
+import numpy as np import pandas as pd import requests import streamlit as st from streamlit_autorefresh import st_autorefresh
 
-#================= REFRESH =================
+================= REFRESH =================
 
 st_autorefresh(interval=5000, key="refresh")
 
-#================= CONFIG =================
+================= CONFIG =================
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -51,9 +44,9 @@ Pattern ngắn A,A dễ nhiễu. Nếu muốn dùng thì True.
 
 ENABLE_REPEAT_2_PATTERN = True
 
-#================= TELEGRAM =================
+================= TELEGRAM =================
 
-DEFAULT_BOT_TOKEN = "" DEFAULT_CHAT_ID = "6655585286" BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID TELEGRAM_SEND_MODE = "READY_ONLY" SENT_FILE = "/tmp/telegram_sent_rounds_window_pattern_strict_v2.json"
+DEFAULT_BOT_TOKEN = "" DEFAULT_CHAT_ID = "6655585286" BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID TELEGRAM_SEND_MODE = "READY_ONLY" SENT_FILE = "/tmp/telegram_sent_rounds_window_pattern_strict_v3.json"
 
 def telegram_enabled(): return bool(BOT_TOKEN and CHAT_ID)
 
@@ -95,7 +88,7 @@ if ok:
 
 return ok
 
-#================= LOAD DATA =================
+================= LOAD DATA =================
 
 @st.cache_data(ttl=30, show_spinner=False) def load_numbers(): url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}" df = pd.read_csv(url) df.columns = [str(c).strip().lower() for c in df.columns] if "number" not in df.columns: raise ValueError("Sheet must contain column 'number'") df["number"] = pd.to_numeric(df["number"], errors="coerce") return df["number"].dropna().astype(int).tolist()
 
@@ -109,9 +102,8 @@ def color_icon(c): if c == 1: return "🔴 RED" if c == 2: return "🟢 GREEN" i
 
 ================= PATTERN GROUP ONLY - EXPANDED =================
 
-def detect_pattern_next_group(seq_groups): """ Tất cả pattern ở đây đều tính theo GROUP. Trả về: (group_bet, pattern_name) """ n = len(seq_groups) if n < 2: return None, "NO_PATTERN"
+def detect_pattern_next_group(seq_groups): """ Tất cả pattern tính theo GROUP. Trả về: (group_bet, pattern_name) """ n = len(seq_groups) if n < 2: return None, "NO_PATTERN"
 
-# helper
 def tail(k):
     return seq_groups[-k:] if n >= k else []
 
@@ -124,23 +116,19 @@ t7 = tail(7)
 t8 = tail(8)
 
 # ===== REPEAT / CONTINUATION =====
-# A,A,A,A,A -> A
 if n >= 5 and len(set(t5)) == 1:
     return t5[-1], "REPEAT_5"
 
-# A,A,A,A -> A
 if n >= 4 and len(set(t4)) == 1:
     return t4[-1], "REPEAT_4"
 
-# A,A,A -> A
 if n >= 3 and len(set(t3)) == 1:
     return t3[-1], "REPEAT_3"
 
-# A,A -> A
 if ENABLE_REPEAT_2_PATTERN and n >= 2 and t2[0] == t2[1]:
     return t2[-1], "REPEAT_2"
 
-# ===== RUN THEN BREAK: A,A,A,B / A,A,A,A,B -> A =====
+# ===== RUN THEN BREAK =====
 if n >= 5:
     a, b, c, d, e = t5
     if a == b == c == d and e != a:
@@ -151,130 +139,107 @@ if n >= 4:
     if a == b == c and d != a:
         return a, "AAAB_TO_A"
 
-# A,A,B -> A
 if n >= 3:
     a, b, c = t3
     if a == b and c != a:
         return a, "AAB_TO_A"
 
 # ===== ALTERNATE / ZIGZAG =====
-# A,B,A,B -> A
-if n >= 4:
-    a, b, c, d = t4
-    if a == c and b == d and a != b:
-        return a, "ABAB_TO_A"
-
-# A,B,A -> A
-if n >= 3:
-    a, b, c = t3
-    if a == c and a != b:
-        return a, "ABA_TO_A"
-
-# A,B,A,B,A -> A
-if n >= 5:
-    a, b, c, d, e = t5
-    if a == c == e and b == d and a != b:
-        return a, "ABABA_TO_A"
-
-# A,B,A,B,A,B -> A
 if n >= 6:
     a, b, c, d, e, f = t6
     if a == c == e and b == d == f and a != b:
         return a, "ABABAB_TO_A"
 
-# ===== BLOCK =====
-# A,A,B,B -> A
+if n >= 5:
+    a, b, c, d, e = t5
+    if a == c == e and b == d and a != b:
+        return a, "ABABA_TO_A"
+
 if n >= 4:
     a, b, c, d = t4
-    if a == b and c == d and a != c:
-        return a, "AABB_TO_A"
+    if a == c and b == d and a != b:
+        return a, "ABAB_TO_A"
 
-# A,A,B,B,B -> A
-if n >= 5:
-    a, b, c, d, e = t5
-    if a == b and c == d == e and a != c:
-        return a, "AABBB_TO_A"
+if n >= 3:
+    a, b, c = t3
+    if a == c and a != b:
+        return a, "ABA_TO_A"
 
-# A,A,A,B,B -> A
-if n >= 5:
-    a, b, c, d, e = t5
-    if a == b == c and d == e and a != d:
-        return a, "AAABB_TO_A"
-
-# A,A,A,B,B,B -> A
-if n >= 6:
-    a, b, c, d, e, f = t6
-    if a == b == c and d == e == f and a != d:
-        return a, "AAABBB_TO_A"
-
-# A,A,A,A,B,B,B,B -> A
+# ===== BLOCK =====
 if n >= 8:
     a, b, c, d, e, f, g, h = t8
     if a == b == c == d and e == f == g == h and a != e:
         return a, "AAAABBBB_TO_A"
 
-# ===== MIRROR / RETURN =====
-# A,B,B,A -> A
+if n >= 6:
+    a, b, c, d, e, f = t6
+    if a == b == c and d == e == f and a != d:
+        return a, "AAABBB_TO_A"
+
+if n >= 5:
+    a, b, c, d, e = t5
+    if a == b == c and d == e and a != d:
+        return a, "AAABB_TO_A"
+
+if n >= 5:
+    a, b, c, d, e = t5
+    if a == b and c == d == e and a != c:
+        return a, "AABBB_TO_A"
+
 if n >= 4:
     a, b, c, d = t4
-    if a == d and b == c and a != b:
-        return a, "ABBA_TO_A"
+    if a == b and c == d and a != c:
+        return a, "AABB_TO_A"
 
-# A,B,B,B,A -> A
+# ===== MIRROR / RETURN =====
 if n >= 5:
     a, b, c, d, e = t5
     if a == e and b == c == d and a != b:
         return a, "ABBBA_TO_A"
 
-# A,B,C,A -> A
 if n >= 4:
     a, b, c, d = t4
-    if a == d and len({a, b, c}) >= 3:
-        return a, "ABCA_TO_A"
+    if a == d and b == c and a != b:
+        return a, "ABBA_TO_A"
 
-# A,B,C,A,B,C -> A
-if n >= 6:
-    a, b, c, d, e, f = t6
-    if a == d and b == e and c == f and len({a, b, c}) >= 3:
-        return a, "ABCABC_TO_A"
-
-# A,B,C,D,A -> A
-if n >= 5:
-    a, b, c, d, e = t5
-    if a == e and len({a, b, c, d}) >= 4:
-        return a, "ABCDA_TO_A"
-
-# A,B,C,D,A,B,C,D -> A
 if n >= 8:
     a, b, c, d, e, f, g, h = t8
     if a == e and b == f and c == g and d == h and len({a, b, c, d}) >= 4:
         return a, "ABCDABCD_TO_A"
 
+if n >= 6:
+    a, b, c, d, e, f = t6
+    if a == d and b == e and c == f and len({a, b, c}) >= 3:
+        return a, "ABCABC_TO_A"
+
+if n >= 5:
+    a, b, c, d, e = t5
+    if a == e and len({a, b, c, d}) >= 4:
+        return a, "ABCDA_TO_A"
+
+if n >= 4:
+    a, b, c, d = t4
+    if a == d and len({a, b, c}) >= 3:
+        return a, "ABCA_TO_A"
+
 # ===== FULL CYCLE SPECIAL =====
-# 1,2,3,4 -> 1
 if n >= 4 and t4 == [1, 2, 3, 4]:
     return 1, "SEQ_1234_TO_1"
 
-# 4,3,2,1 -> 4
 if n >= 4 and t4 == [4, 3, 2, 1]:
     return 4, "SEQ_4321_TO_4"
 
-# 1,3,1,3 -> 1 / 2,4,2,4 -> 2 etc handled by ABAB above
-
 # ===== COMPLEX =====
-# B,B,B,A,B,B,A -> B
 if n >= 7:
     a, b, c, d, e, f, g = t7
     if a == b == c and e == f and d == g and a == e and a != d:
         return a, "BBBABBA_TO_B"
 
-# A,A,B,A,A,B -> A
 if n >= 6:
     a, b, c, d, e, f = t6
     if a == b == d == e and c == f and a != c:
         return a, "AABAAB_TO_A"
 
-# A,B,B,A,B,B -> A
 if n >= 6:
     a, b, c, d, e, f = t6
     if a == d and b == c == e == f and a != b:
@@ -286,7 +251,7 @@ numbers = load_numbers() groups = [group_of(n) for n in numbers] colors = [color
 
 if len(groups) < LOCK_ROUND_START: st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.") st.stop()
 
-#================= HELPERS =================
+================= HELPERS =================
 
 def compute_profit_path(results, win_value, loss_value): p = 0.0 out = [] for r in results: p += win_value if r == 1 else loss_value out.append(p) return out
 
@@ -300,7 +265,6 @@ max_hit_streak = 0
 max_loss_streak = 0
 count_hit_streak_ge2 = 0
 count_loss_streak_ge2 = 0
-
 cur_val = results[0]
 cur_len = 1
 
@@ -347,7 +311,7 @@ def pick_spaced_windows(df_sorted, top_n, min_spacing): selected = [] for _, row
 
 def enforce_spacing_from_df(df_sorted, top_n, min_spacing): out = [] if df_sorted.empty: return out for _, row in df_sorted.iterrows(): w = int(row["window"]) if all(abs(w - x) >= min_spacing for x in out): out.append(w) if len(out) >= top_n: break return out
 
-#================= BACKTEST GROUP ONLY =================
+================= BACKTEST GROUP ONLY =================
 
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx): results_group = [] trades = 0 wins_group = 0 last_trade = -999999
 
@@ -648,7 +612,7 @@ if fallback_round is not None:
 
 return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
-#================= SESSION ENGINE =================
+================= SESSION ENGINE =================
 
 def simulate_engine(numbers, groups, colors): result = { "hist": pd.DataFrame(), "phase_profit_group": 0.0, "phase_profit_color": 0.0, "phase_profit_total": 0.0, "phase_hits_group": [], "phase_hits_color": [], "total_profit_group": 0.0, "total_profit_color": 0.0, "total_profit_all_phase": 0.0, "total_hits_group": [], "total_hits_color": [], "locked_windows": [], "selected_lock_round": None, "selected_mode": None, "lock_mode": "", "scan_df_all": pd.DataFrame(), "scan_df_filtered": pd.DataFrame(), "round_eval_df": pd.DataFrame(), "lock_scan_start": None, "lock_scan_end": None, "keep_bet_group": None, "keep_rounds_left": 0, "last_trade_was_loss": False, "consecutive_losses": 0, "phase_loss_streak": 0, "last_trade": -999, "phase_index": 1, "session_stop": False, "session_stop_reason": None, "relock_count": 0, "last_relock_trigger_round": None, "phase_summary_df": pd.DataFrame(), }
 
@@ -1081,9 +1045,7 @@ vote_signal = confidence_group >= vote_required if vote_group is not None else F
 
 pattern_group, pattern_type = detect_pattern_next_group(groups) pattern_match_vote = pattern_group is not None and vote_signal and pattern_group == vote_group
 
-used_keep_next = False final_vote_group = vote_group if pattern_match_vote else None final_vote_color = vote_color
-
-new_signal = pattern_match_vote
+used_keep_next = False final_vote_group = vote_group if pattern_match_vote else None final_vote_color = vote_color new_signal = pattern_match_vote
 
 if session_stop: signal = False can_bet = False next_state = session_stop_reason next_keep_bet_group = None next_keep_rounds_left = 0 else: if new_signal: next_keep_bet_group = None next_keep_rounds_left = 0 else: next_keep_bet_group = keep_bet_group next_keep_rounds_left = keep_rounds_left
 
@@ -1093,7 +1055,6 @@ if last_trade_was_loss and next_keep_rounds_left > 0 and next_keep_bet_group is 
 
 final_signal = new_signal or used_keep_next
 signal = final_signal
-
 can_bet_group = signal and distance >= GAP and next_round > LOCK_ROUND_END
 
 if ENABLE_DOUBLE_BET_COLOR and REQUIRE_COLOR_CONFIRM:
@@ -1107,13 +1068,15 @@ next_row = { "phase": phase_index, "round": next_round, "number": current_number
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-if telegram_enabled() and can_bet and final_vote_group is not None: ready_msg = ( f"READY WINDOW + PATTERN\n" f"Round: {current_round}\n" f"Current Number: {current_number}\n" f"Current Group: {current_group}\n" f"Current Color: {color_icon(current_color)}\n" f"Bet Group: {final_vote_group}\n" f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n" f"Vote Group: {vote_group}\n" f"Pattern: {pattern_type} -> {pattern_group}\n" f"Match: {pattern_match_vote}\n" f"Mode: {selected_mode['name'] if selected_mode else '-'}\n" f"Vote Strength: {confidence_group}\n" f"Phase Profit Total: {phase_profit_total}\n" f"Total Profit Group: {total_profit_group}\n" f"Total Profit All: {total_profit_all_phase}" )
+if telegram_enabled() and can_bet and final_vote_group is not None: ready_msg = ( f"READY WINDOW + PATTERN " f"Round: {current_round} " f"Current Number: {current_number} " f"Current Group: {current_group} " f"Current Color: {color_icon(current_color)} " f"Bet Group: {final_vote_group} " f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'} " f"Vote Group: {vote_group} " f"Pattern: {pattern_type} -> {pattern_group} " f"Match: {pattern_match_vote} " f"Mode: {selected_mode['name'] if selected_mode else '-'} " f"Vote Strength: {confidence_group} " f"Phase Profit Total: {phase_profit_total} " f"Total Profit Group: {total_profit_group} " f"Total Profit All: {total_profit_all_phase}" )
 
 send_signal_once(
     signal_name="READY",
     current_round=current_round,
     msg=ready_msg,
 )
+
+================= UI =================
 
 st.title("🎯 Auto Relock Engine | STRICT Window + Expanded Pattern")
 
