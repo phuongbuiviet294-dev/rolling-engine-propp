@@ -292,7 +292,7 @@ def simulate_adaptive_ai(numbers, groups, colors):
     session_stop = False
     session_stop_reason = None
 
-    start_idx = max(REPLAY_FROM, max(TRAIN_LENS), 10)
+    start_idx = max(REPLAY_FROM, max(TRAIN_LENS), 20)
 
     for i in range(start_idx, len(groups)):
         if total_profit >= SESSION_STOP_WIN:
