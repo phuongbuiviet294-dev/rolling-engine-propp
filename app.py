@@ -1,6 +1,7 @@
 import time
 import json
 import os
+from collections import Counter
 
 import pandas as pd
 import requests
@@ -9,39 +10,47 @@ from streamlit_autorefresh import st_autorefresh
 
 st_autorefresh(interval=5000, key="refresh")
 
+# ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-GAP = 1
-
-TRAIN_LENS = [20, 30, 50, 80, 120]
-
-MIN_PATTERN_TRADES = 5
-
-MIN_PATTERN_WR = 0.5
-MIN_PATTERN_EV = 0.1
-MIN_PATTERN_PROFIT = 1.0
-MAX_PATTERN_DD_LIMIT = -8.0
-
-STRONG_WR = 0.58
-STRONG_EV = 0.30
-STRONG_PROFIT = 2.5
-
-SESSION_STOP_WIN = 30.0
-SESSION_STOP_LOSS = -10.0
-
-REPLAY_FROM = 30
+GAP = 2
+REPLAY_FROM = 80
 SHOW_HISTORY_ROWS = 100
 
+TRAIN_LENS = [50, 80, 120, 160]
+WINDOW_MIN = 6
+WINDOW_MAX = 22
+
+MODES = [
+    {"name": "4v3", "top_windows": 4, "vote_required": 3},
+    {"name": "6v4", "top_windows": 6, "vote_required": 4},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5},
+]
+
+MIN_AI_TRADES = 4
+MIN_AI_WR = 0.52
+MIN_AI_EV = 0.05
+MIN_AI_PROFIT = 0.0
+MAX_AI_DD = -8.0
+
+SESSION_STOP_WIN = 30.0
+SESSION_STOP_LOSS = -12.0
+
+ALLOW_WINDOW_ONLY = True
+ALLOW_PATTERN_ONLY = False
+REJECT_WINDOW_PATTERN_CONFLICT = True
+
+# ================= TELEGRAM =================
 DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
-SENT_FILE = "/tmp/telegram_sent_adaptive_ai_pattern_balanced.json"
+SENT_FILE = "/tmp/telegram_sent_hybrid_ai_pro.json"
 
 
 def telegram_enabled():
@@ -95,15 +104,14 @@ def send_signal_once(current_round, msg):
     return ok
 
 
+# ================= DATA =================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
     df.columns = [str(c).strip().lower() for c in df.columns]
-
     if "number" not in df.columns:
         raise ValueError("Sheet phải có column 'number'")
-
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     return df["number"].dropna().astype(int).tolist()
 
@@ -127,25 +135,14 @@ def color_of_number(n):
 
 
 def color_text(c):
-    if c == 1:
-        return "RED"
-    if c == 2:
-        return "GREEN"
-    if c == 3:
-        return "BLUE"
-    return "-"
+    return {1: "RED", 2: "GREEN", 3: "BLUE"}.get(c, "-")
 
 
 def color_icon(c):
-    if c == 1:
-        return "🔴 RED"
-    if c == 2:
-        return "🟢 GREEN"
-    if c == 3:
-        return "🔵 BLUE"
-    return "-"
+    return {1: "🔴 RED", 2: "🟢 GREEN", 3: "🔵 BLUE"}.get(c, "-")
 
 
+# ================= PATTERN =================
 def detect_pattern_next_group(seq_groups):
     n = len(seq_groups)
 
@@ -161,31 +158,23 @@ def detect_pattern_next_group(seq_groups):
 
     if n >= 5:
         a, b, c, d, e = seq_groups[-5:]
-
         if a == b and c == d and e == a and a != c:
             return a, "AABBA"
-
         if a == c == e and b == d and a != b:
             return b, "ABABA_REVERSE"
 
     if n >= 4:
         a, b, c, d = seq_groups[-4:]
-
         if a == b == c and d != a:
             return a, "AAAB"
-
         if a == c and b == d and a != b:
             return a, "ABAB"
-
         if a == d and b == c and a != b:
             return a, "ABBA"
-
         if a == b and c == d and a != c:
             return a, "AABB"
-
         if a == b and a == d and c != a:
             return a, "AABA"
-
         if a == c == d and b != a:
             return a, "ABAA"
 
@@ -193,16 +182,16 @@ def detect_pattern_next_group(seq_groups):
         a, b, c = seq_groups[-3:]
         if a == b == c:
             return a, "AAA"
-
         if a == c and a != b:
             return a, "ABA"
 
     return None, "NO_PATTERN"
 
 
+# ================= WINDOW =================
 def calc_max_drawdown(results):
-    peak = 0.0
     cur = 0.0
+    peak = 0.0
     max_dd = 0.0
 
     for r in results:
@@ -213,21 +202,131 @@ def calc_max_drawdown(results):
     return max_dd
 
 
-def calc_pattern_stats(seq_groups, pattern_type, end_idx, train_len):
-    start_idx = max(3, end_idx - train_len)
+def evaluate_window(seq_groups, w, start_idx, end_idx):
+    results = []
+    trades = 0
+    wins = 0
+
+    for i in range(max(start_idx, w), end_idx):
+        pred = seq_groups[i - w]
+        hit = 1 if seq_groups[i] == pred else 0
+        results.append(hit)
+        trades += 1
+        wins += hit
+
+    profit = sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results)
+    wr = wins / trades if trades else 0.0
+    ev = wr * WIN_GROUP + (1 - wr) * LOSS_GROUP
+    dd = calc_max_drawdown(results)
+
+    score = profit + ev * 10 + wr * 5 - abs(dd) * 0.7
+
+    return {
+        "window": w,
+        "trades": trades,
+        "wins": wins,
+        "wr": wr,
+        "ev": ev,
+        "profit": profit,
+        "dd": dd,
+        "score": score,
+    }
+
+
+def select_windows(seq_groups, end_idx, train_len, top_n):
+    start_idx = max(1, end_idx - train_len)
+
+    rows = [
+        evaluate_window(seq_groups, w, start_idx, end_idx)
+        for w in range(WINDOW_MIN, WINDOW_MAX + 1)
+        if end_idx > w
+    ]
+
+    if not rows:
+        return []
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(
+        ["score", "profit", "ev", "wr", "trades"],
+        ascending=[False, False, False, False, False],
+    )
+
+    return df["window"].astype(int).head(top_n).tolist()
+
+
+def get_window_vote(seq_groups, idx, windows, vote_required):
+    preds = [seq_groups[idx - w] for w in windows if idx - w >= 0]
+
+    if not preds:
+        return None, 0, False
+
+    vote_group, confidence = Counter(preds).most_common(1)[0]
+    vote_signal = confidence >= vote_required
+
+    return vote_group, confidence, vote_signal
+
+
+# ================= HYBRID SIGNAL =================
+def build_hybrid_signal(seq_groups, idx, windows, mode):
+    pattern_group, pattern_type = detect_pattern_next_group(seq_groups[:idx])
+    vote_group, confidence, vote_signal = get_window_vote(
+        seq_groups, idx, windows, mode["vote_required"]
+    )
+
+    has_pattern = pattern_group is not None
+    source = "NO_SIGNAL"
+    bet_group = None
+
+    if vote_signal and has_pattern:
+        if pattern_group == vote_group:
+            source = "HYBRID_MATCH"
+            bet_group = vote_group
+        else:
+            source = "CONFLICT"
+            if not REJECT_WINDOW_PATTERN_CONFLICT:
+                bet_group = vote_group
+
+    elif vote_signal and not has_pattern:
+        if ALLOW_WINDOW_ONLY:
+            source = "WINDOW_ONLY"
+            bet_group = vote_group
+
+    elif has_pattern and not vote_signal:
+        if ALLOW_PATTERN_ONLY:
+            source = "PATTERN_ONLY"
+            bet_group = pattern_group
+
+    return {
+        "bet_group": bet_group,
+        "source": source,
+        "pattern_group": pattern_group,
+        "pattern_type": pattern_type,
+        "vote_group": vote_group,
+        "confidence": confidence,
+        "vote_signal": vote_signal,
+        "has_pattern": has_pattern,
+    }
+
+
+# ================= AI BACKTEST =================
+def calc_signal_stats(seq_groups, end_idx, train_len, mode, windows, source_filter):
+    start_idx = max(max(WINDOW_MAX + 1, 10), end_idx - train_len)
 
     results = []
     trades = 0
     wins = 0
 
     for i in range(start_idx, end_idx):
-        pg, pt = detect_pattern_next_group(seq_groups[:i])
+        sig = build_hybrid_signal(seq_groups, i, windows, mode)
 
-        if pg is None or pt != pattern_type:
+        if sig["bet_group"] is None:
+            continue
+
+        if sig["source"] != source_filter:
             continue
 
         actual = seq_groups[i]
-        hit = 1 if actual == pg else 0
+        hit = 1 if actual == sig["bet_group"] else 0
 
         results.append(hit)
         trades += 1
@@ -236,87 +335,110 @@ def calc_pattern_stats(seq_groups, pattern_type, end_idx, train_len):
     profit = sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results)
     wr = wins / trades if trades else 0.0
     ev = wr * WIN_GROUP + (1 - wr) * LOSS_GROUP
-    max_dd = calc_max_drawdown(results)
+    dd = calc_max_drawdown(results)
+
+    score = profit + ev * 12 + wr * 6 - abs(dd) * 0.8 + min(trades, 20) * 0.2
 
     return {
-        "pattern_type": pattern_type,
         "train_len": train_len,
+        "mode": mode["name"],
+        "windows": ",".join(map(str, windows)),
+        "source": source_filter,
         "trades": trades,
         "wins": wins,
         "wr": wr,
         "ev": ev,
         "profit": profit,
-        "max_dd": max_dd,
+        "max_dd": dd,
+        "score": score,
     }
 
 
-def pick_best_adaptive_stats(seq_groups, pattern_type, end_idx):
+def ai_pick_signal(seq_groups, idx):
     best = None
-    all_stats = []
+    all_rows = []
 
     for train_len in TRAIN_LENS:
-        stats = calc_pattern_stats(seq_groups, pattern_type, end_idx, train_len)
+        for mode in MODES:
+            windows = select_windows(seq_groups, idx, train_len, mode["top_windows"])
+            if len(windows) < mode["top_windows"]:
+                continue
 
-        score = (
-            stats["ev"] * 10
-            + stats["profit"] * 0.8
-            + stats["wr"] * 5
-            - abs(stats["max_dd"]) * 0.6
-            + min(stats["trades"], 20) * 0.15
-        )
+            current_sig = build_hybrid_signal(seq_groups, idx, windows, mode)
 
-        stats["score"] = score
-        all_stats.append(stats)
+            if current_sig["bet_group"] is None:
+                continue
 
-        if best is None or score > best["score"]:
-            best = stats
+            if current_sig["source"] == "CONFLICT":
+                continue
 
-    return best, all_stats
+            stats = calc_signal_stats(
+                seq_groups,
+                idx,
+                train_len,
+                mode,
+                windows,
+                current_sig["source"],
+            )
+
+            row = {**current_sig, **stats}
+            all_rows.append(row)
+
+            pass_ai = (
+                stats["trades"] >= MIN_AI_TRADES
+                and stats["wr"] >= MIN_AI_WR
+                and stats["ev"] >= MIN_AI_EV
+                and stats["profit"] >= MIN_AI_PROFIT
+                and stats["max_dd"] >= MAX_AI_DD
+            )
+
+            row["ai_ok"] = pass_ai
+
+            if pass_ai:
+                if best is None or stats["score"] > best["score"]:
+                    best = row
+
+    if best is None:
+        return {
+            "ai_ok": False,
+            "ai_reason": "NO_AI_PASS",
+            "all_rows": all_rows,
+            "bet_group": None,
+            "source": "NO_SIGNAL",
+            "pattern_group": None,
+            "pattern_type": "NO_PATTERN",
+            "vote_group": None,
+            "confidence": 0,
+            "vote_signal": False,
+            "has_pattern": False,
+            "train_len": 0,
+            "mode": "-",
+            "windows": "",
+            "trades": 0,
+            "wr": 0.0,
+            "ev": 0.0,
+            "profit": 0.0,
+            "max_dd": 0.0,
+            "score": 0.0,
+        }
+
+    best["ai_ok"] = True
+    best["ai_reason"] = "AI_ACCEPT"
+    best["all_rows"] = all_rows
+    return best
 
 
-def adaptive_ai_accept(seq_groups, pattern_group, pattern_type, end_idx):
-    if pattern_group is None or pattern_type == "NO_PATTERN":
-        return False, "NO_PATTERN", {}, []
-
-    best, all_stats = pick_best_adaptive_stats(seq_groups, pattern_type, end_idx)
-
-    if best["trades"] < MIN_PATTERN_TRADES:
-        return False, f"LOW_SAMPLE {best['trades']}/{MIN_PATTERN_TRADES}", best, all_stats
-
-    if (
-        best["wr"] >= STRONG_WR
-        and best["ev"] >= STRONG_EV
-        and best["profit"] >= STRONG_PROFIT
-        and best["max_dd"] >= MAX_PATTERN_DD_LIMIT
-    ):
-        return True, "READY_STRONG", best, all_stats
-
-    if (
-        best["wr"] >= MIN_PATTERN_WR
-        and best["ev"] >= MIN_PATTERN_EV
-        and best["profit"] >= MIN_PATTERN_PROFIT
-        and best["max_dd"] >= MAX_PATTERN_DD_LIMIT
-    ):
-        return True, "READY_SOFT", best, all_stats
-
-    return False, (
-        f"AI_REJECT WR={round(best['wr'] * 100, 2)}% "
-        f"EV={round(best['ev'], 3)} "
-        f"PROFIT={round(best['profit'], 2)} "
-        f"DD={round(best['max_dd'], 2)}"
-    ), best, all_stats
-
-
+# ================= RUN =================
 numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
-if len(groups) < 30:
-    st.error("Chưa đủ dữ liệu để chạy adaptive AI.")
+if len(groups) < 40:
+    st.error("Chưa đủ dữ liệu.")
     st.stop()
 
 
-def simulate_adaptive_ai(numbers, groups, colors):
+def simulate(numbers, groups, colors):
     rows = []
 
     total_profit = 0.0
@@ -326,7 +448,7 @@ def simulate_adaptive_ai(numbers, groups, colors):
     session_stop = False
     session_stop_reason = None
 
-    start_idx = max(REPLAY_FROM, 10)
+    start_idx = max(REPLAY_FROM, WINDOW_MAX + 5)
 
     for i in range(start_idx, len(groups)):
         if total_profit >= SESSION_STOP_WIN:
@@ -339,38 +461,34 @@ def simulate_adaptive_ai(numbers, groups, colors):
             session_stop_reason = "SESSION_STOP_LOSS"
             break
 
-        pattern_group, pattern_type = detect_pattern_next_group(groups[:i])
-        ai_ok, ai_reason, best, _ = adaptive_ai_accept(groups, pattern_group, pattern_type, i)
-
+        sig = ai_pick_signal(groups, i)
         distance = i - last_trade
-        trade = ai_ok and distance >= GAP
 
-        bet_group = pattern_group if trade else None
+        trade = sig["ai_ok"] and sig["bet_group"] is not None and distance >= GAP
+
         hit = None
         pnl = 0.0
         state = "WAIT"
 
         if trade:
-            actual_group = groups[i]
-            last_trade = i
-
-            hit = 1 if actual_group == bet_group else 0
+            actual = groups[i]
+            hit = 1 if actual == sig["bet_group"] else 0
             pnl = WIN_GROUP if hit == 1 else LOSS_GROUP
 
             total_profit += pnl
             total_hits.append(hit)
+            last_trade = i
 
             if hit == 1:
                 consecutive_losses = 0
             else:
                 consecutive_losses += 1
 
-            state = "TRADE_ADAPTIVE_AI"
-
-        elif pattern_group is not None and not ai_ok:
-            state = "AI_FILTERED"
-        elif ai_ok:
+            state = f"TRADE_{sig['source']}"
+        elif sig["ai_ok"]:
             state = "SIGNAL_WAIT_GAP"
+        else:
+            state = "AI_FILTERED"
 
         rows.append(
             {
@@ -378,25 +496,28 @@ def simulate_adaptive_ai(numbers, groups, colors):
                 "number": numbers[i],
                 "group": groups[i],
                 "color": color_text(colors[i]),
-                "pattern_group": pattern_group,
-                "pattern_type": pattern_type,
-                "ai_ok": ai_ok,
-                "ai_reason": ai_reason,
-                "best_train_len": best.get("train_len", 0),
-                "ai_trades": best.get("trades", 0),
-                "ai_wr": round(best.get("wr", 0) * 100, 2),
-                "ai_ev": round(best.get("ev", 0), 3),
-                "ai_profit": round(best.get("profit", 0), 2),
-                "ai_max_dd": round(best.get("max_dd", 0), 2),
-                "ai_score": round(best.get("score", 0), 3),
-                "trade": trade,
-                "bet_group": bet_group,
+                "state": state,
+                "source": sig["source"],
+                "bet_group": sig["bet_group"] if trade else None,
                 "hit": hit,
                 "pnl": pnl,
                 "total_profit": total_profit,
-                "consecutive_losses": consecutive_losses,
+                "pattern_type": sig["pattern_type"],
+                "pattern_group": sig["pattern_group"],
+                "vote_group": sig["vote_group"],
+                "confidence": sig["confidence"],
+                "mode": sig["mode"],
+                "train_len": sig["train_len"],
+                "windows": sig["windows"],
+                "ai_trades": sig["trades"],
+                "ai_wr": round(sig["wr"] * 100, 2),
+                "ai_ev": round(sig["ev"], 3),
+                "ai_profit": round(sig["profit"], 2),
+                "ai_max_dd": round(sig["max_dd"], 2),
+                "ai_score": round(sig["score"], 3),
+                "ai_reason": sig["ai_reason"],
                 "distance": distance,
-                "state": state,
+                "consecutive_losses": consecutive_losses,
             }
         )
 
@@ -412,14 +533,14 @@ def simulate_adaptive_ai(numbers, groups, colors):
 
 
 @st.cache_data(ttl=20, show_spinner=False)
-def cached_simulate_adaptive_ai(numbers_tuple):
+def cached_simulate(numbers_tuple):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
     cols = [color_of_number(n) for n in nums]
-    return simulate_adaptive_ai(nums, grps, cols)
+    return simulate(nums, grps, cols)
 
 
-sim = cached_simulate_adaptive_ai(tuple(numbers))
+sim = cached_simulate(tuple(numbers))
 
 hist = sim["hist"]
 total_profit = sim["total_profit"]
@@ -436,80 +557,87 @@ current_number = numbers[-1]
 current_group = groups[-1]
 current_color = colors[-1]
 
-pattern_group, pattern_type = detect_pattern_next_group(groups)
-ai_ok, ai_reason, best, all_stats = adaptive_ai_accept(groups, pattern_group, pattern_type, len(groups))
+sig = ai_pick_signal(groups, next_round)
 
 if not hist.empty:
-    trade_rows = hist[hist["trade"] == True]
+    trade_rows = hist[hist["hit"].notna()]
     distance = next_round - trade_rows["round"].max() if len(trade_rows) else 999
 else:
     distance = 999
 
-can_bet = ai_ok and distance >= GAP and not session_stop
-final_bet_group = pattern_group if can_bet else None
+can_bet = (
+    sig["ai_ok"]
+    and sig["bet_group"] is not None
+    and distance >= GAP
+    and not session_stop
+)
+
+final_bet_group = sig["bet_group"] if can_bet else None
 
 if session_stop:
     ready_reason = session_stop_reason
-elif pattern_group is None:
-    ready_reason = "NO_PATTERN"
-elif not ai_ok:
-    ready_reason = ai_reason
+elif not sig["ai_ok"]:
+    ready_reason = sig["ai_reason"]
 elif distance < GAP:
     ready_reason = f"GAP_NOT_ENOUGH {distance}"
 else:
-    ready_reason = "OK_ADAPTIVE_READY"
+    ready_reason = "OK_HYBRID_AI_READY"
 
 next_row = {
     "round": next_round,
     "number": current_number,
     "group": current_group,
     "color": color_text(current_color),
-    "pattern_group": pattern_group,
-    "pattern_type": pattern_type,
-    "ai_ok": ai_ok,
-    "ai_reason": ai_reason,
-    "best_train_len": best.get("train_len", 0),
-    "ai_trades": best.get("trades", 0),
-    "ai_wr": round(best.get("wr", 0) * 100, 2),
-    "ai_ev": round(best.get("ev", 0), 3),
-    "ai_profit": round(best.get("profit", 0), 2),
-    "ai_max_dd": round(best.get("max_dd", 0), 2),
-    "ai_score": round(best.get("score", 0), 3),
-    "trade": False,
+    "state": "READY" if can_bet else "WAIT",
+    "source": sig["source"],
     "bet_group": final_bet_group,
     "hit": None,
     "pnl": 0.0,
     "total_profit": total_profit,
-    "consecutive_losses": consecutive_losses,
+    "pattern_type": sig["pattern_type"],
+    "pattern_group": sig["pattern_group"],
+    "vote_group": sig["vote_group"],
+    "confidence": sig["confidence"],
+    "mode": sig["mode"],
+    "train_len": sig["train_len"],
+    "windows": sig["windows"],
+    "ai_trades": sig["trades"],
+    "ai_wr": round(sig["wr"] * 100, 2),
+    "ai_ev": round(sig["ev"], 3),
+    "ai_profit": round(sig["profit"], 2),
+    "ai_max_dd": round(sig["max_dd"], 2),
+    "ai_score": round(sig["score"], 3),
+    "ai_reason": ready_reason,
     "distance": distance,
-    "state": "READY" if can_bet else "WAIT",
-    "ready_reason": ready_reason,
+    "consecutive_losses": consecutive_losses,
 }
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-if telegram_enabled() and can_bet and final_bet_group is not None:
+if telegram_enabled() and can_bet:
     msg = (
-        f"READY ADAPTIVE AI BET\n"
+        f"READY HYBRID AI BET\n"
         f"Round: {current_round}\n"
         f"Current Number: {current_number}\n"
         f"Current Group: {current_group}\n"
         f"Current Color: {color_icon(current_color)}\n"
         f"Bet Group: {final_bet_group}\n"
-        f"Pattern: {pattern_type}\n"
-        f"Best Train Len: {best.get('train_len', 0)}\n"
-        f"AI Trades: {best.get('trades', 0)}\n"
-        f"AI WR: {round(best.get('wr', 0) * 100, 2)}%\n"
-        f"AI EV: {round(best.get('ev', 0), 3)}\n"
-        f"AI Profit: {round(best.get('profit', 0), 2)}\n"
-        f"AI DD: {round(best.get('max_dd', 0), 2)}\n"
+        f"Source: {sig['source']}\n"
+        f"Pattern: {sig['pattern_type']} -> {sig['pattern_group']}\n"
+        f"Vote: {sig['vote_group']} strength={sig['confidence']}\n"
+        f"Mode: {sig['mode']}\n"
+        f"Train Len: {sig['train_len']}\n"
+        f"Windows: {sig['windows']}\n"
+        f"AI WR: {round(sig['wr'] * 100, 2)}%\n"
+        f"AI EV: {round(sig['ev'], 3)}\n"
+        f"AI Profit: {round(sig['profit'], 2)}\n"
         f"Total Profit: {total_profit}\n"
         f"Reason: {ready_reason}"
     )
     send_signal_once(current_round, msg)
 
-
-st.title("🤖 Adaptive AI Pattern Live Engine")
+# ================= UI =================
+st.title("🤖 Hybrid AI PRO | Pattern + Window")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number)
@@ -517,19 +645,22 @@ c2.metric("Current Group", current_group)
 c3.metric("Current Color", color_icon(current_color))
 c4.metric("Next Bet Group", final_bet_group if final_bet_group is not None else "-")
 
-st.write("Pattern Type:", pattern_type)
-st.write("Pattern Group:", pattern_group)
-st.write("AI OK:", ai_ok)
-st.write("AI Reason:", ai_reason)
-st.write("Best Train Len:", best.get("train_len", 0))
-st.write("AI Trades:", best.get("trades", 0))
-st.write("AI WR %:", round(best.get("wr", 0) * 100, 2))
-st.write("AI EV:", round(best.get("ev", 0), 3))
-st.write("AI Profit:", round(best.get("profit", 0), 2))
-st.write("AI Max DD:", round(best.get("max_dd", 0), 2))
-st.write("AI Score:", round(best.get("score", 0), 3))
-st.write("Distance:", distance)
+st.write("Can Bet:", can_bet)
 st.write("Ready Reason:", ready_reason)
+st.write("Source:", sig["source"])
+st.write("Pattern:", f"{sig['pattern_type']} -> {sig['pattern_group']}")
+st.write("Window Vote:", sig["vote_group"])
+st.write("Vote Strength:", sig["confidence"])
+st.write("Mode:", sig["mode"])
+st.write("Train Len:", sig["train_len"])
+st.write("Windows:", sig["windows"])
+st.write("AI Trades:", sig["trades"])
+st.write("AI WR %:", round(sig["wr"] * 100, 2))
+st.write("AI EV:", round(sig["ev"], 3))
+st.write("AI Profit:", round(sig["profit"], 2))
+st.write("AI Max DD:", round(sig["max_dd"], 2))
+st.write("AI Score:", round(sig["score"], 3))
+st.write("Distance:", distance)
 
 st.write("Total Profit:", total_profit)
 st.write("Total Trades:", len(total_hits))
@@ -545,11 +676,11 @@ elif can_bet:
     st.markdown(
         f"""
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
-        READY ADAPTIVE AI BET<br>
+        READY HYBRID AI BET<br>
         BET GROUP {final_bet_group}<br>
-        PATTERN → {pattern_type}<br>
-        TRAIN LEN → {best.get("train_len", 0)}<br>
-        WR → {round(best.get("wr", 0) * 100, 2)}% | EV → {round(best.get("ev", 0), 3)}
+        SOURCE → {sig["source"]}<br>
+        MODE → {sig["mode"]} | TRAIN → {sig["train_len"]}<br>
+        WR → {round(sig["wr"] * 100, 2)}% | EV → {round(sig["ev"], 3)}
         </div>
         """,
         unsafe_allow_html=True,
@@ -557,9 +688,9 @@ elif can_bet:
 else:
     st.info(f"WAIT | {ready_reason}")
 
-st.subheader("Adaptive Train Len Comparison")
-if all_stats:
-    st.dataframe(pd.DataFrame(all_stats), use_container_width=True)
+st.subheader("Candidate Comparison")
+if sig.get("all_rows"):
+    st.dataframe(pd.DataFrame(sig["all_rows"]), use_container_width=True)
 
 st.subheader("Total Profit Curve")
 if not hist_display.empty:
