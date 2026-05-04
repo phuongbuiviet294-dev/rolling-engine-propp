@@ -11,9 +11,6 @@ from streamlit_autorefresh import st_autorefresh
 
 st_autorefresh(interval=5000, key="refresh")
 
-# =========================
-# CONFIG
-# =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 LOCK_ROUND_START = 168
@@ -55,7 +52,7 @@ VALIDATE_MIN_DRAWDOWN = -6.0
 RELOCK_SCAN_LEN = 6
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 80
+SHOW_HISTORY_ROWS = 100
 SHOW_DEBUG_TABLES = False
 
 ENABLE_DOUBLE_BET_COLOR = True
@@ -67,12 +64,9 @@ DEFAULT_CHAT_ID = "6655585286"
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
-SENT_FILE = "/tmp/telegram_sent_rounds_prev_pnl_filter.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_safe_live_engine.json"
 
 
-# =========================
-# TELEGRAM
-# =========================
 def telegram_enabled():
     return bool(BOT_TOKEN and CHAT_ID)
 
@@ -80,7 +74,6 @@ def telegram_enabled():
 def send_telegram(msg):
     if not telegram_enabled():
         return False
-
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         r = requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=5)
@@ -116,7 +109,6 @@ def send_signal_once(signal_name, current_round, msg):
     if ok:
         st.session_state.sent_round_keys.add(signal_key)
         sent_keys.add(signal_key)
-
         try:
             with open(SENT_FILE, "w", encoding="utf-8") as f:
                 json.dump(list(sent_keys)[-500:], f)
@@ -126,9 +118,6 @@ def send_signal_once(signal_name, current_round, msg):
     return ok
 
 
-# =========================
-# DATA
-# =========================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
@@ -141,7 +130,6 @@ def load_numbers():
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     nums = df["number"].dropna().astype(int).tolist()
     nums = [x for x in nums if 1 <= x <= 12]
-
     return nums
 
 
@@ -173,17 +161,12 @@ def color_text(c):
     return "-"
 
 
-# =========================
-# METRICS
-# =========================
 def compute_profit_path(results, win_value, loss_value):
     p = 0.0
     out = []
-
     for r in results:
         p += win_value if r == 1 else loss_value
         out.append(p)
-
     return out
 
 
@@ -269,9 +252,6 @@ def compute_streak_metrics(results):
     }
 
 
-# =========================
-# WINDOW SCAN
-# =========================
 def evaluate_window_group(seq_groups, w):
     profit = 0.0
     trades = 0
@@ -327,31 +307,24 @@ def evaluate_window_group(seq_groups, w):
 
 def pick_spaced_windows(df_sorted, top_n, min_spacing):
     selected = []
-
     for _, row in df_sorted.iterrows():
         w = int(row["window"])
-
         if all(abs(w - int(x["window"])) >= min_spacing for x in selected):
             selected.append(row.to_dict())
-
             if len(selected) >= top_n:
                 break
-
     return pd.DataFrame(selected)
 
 
 def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     out = []
-
     if df_sorted.empty:
         return out
 
     for _, row in df_sorted.iterrows():
         w = int(row["window"])
-
         if all(abs(w - x) >= min_spacing for x in out):
             out.append(w)
-
             if len(out) >= top_n:
                 break
 
@@ -622,9 +595,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
-# =========================
-# MAIN SIMULATION
-# =========================
 def simulate_engine(numbers, groups, colors):
     (
         selected_lock_round,
@@ -651,27 +621,27 @@ def simulate_engine(numbers, groups, colors):
 
     current_mode = selected_mode
 
-    phase_profit_group = 0.0
-    phase_profit_color = 0.0
-    phase_profit_total = 0.0
-    phase_hits_group = []
-    phase_hits_color = []
-
-    total_profit_group = 0.0
-    total_profit_color = 0.0
-    total_profit_all_phase = 0.0
-    total_hits_group = []
-    total_hits_color = []
+    paper_profit_group = 0.0
+    paper_hits_group = []
 
     live_profit_group = 0.0
+    live_profit_color = 0.0
+    live_profit_total = 0.0
     live_hits_group = []
+    live_hits_color = []
 
-    last_trade = -999999
+    phase_live_profit_group = 0.0
+    phase_live_profit_color = 0.0
+    phase_live_profit_total = 0.0
+    phase_live_hits_group = []
+    phase_live_hits_color = []
+
+    last_live_trade = -999999
     keep_bet_group = None
     keep_rounds_left = 0
-    last_trade_was_loss = False
-    consecutive_losses = 0
-    phase_loss_streak = 0
+    last_signal_was_loss = False
+    consecutive_live_losses = 0
+    phase_live_loss_streak = 0
 
     phase_index = 1
     relock_count = 0
@@ -688,10 +658,10 @@ def simulate_engine(numbers, groups, colors):
     for i in range(start_replay, len(groups)):
         round_no = i + 1
 
-        if total_profit_all_phase >= SESSION_STOP_WIN:
+        if live_profit_total >= SESSION_STOP_WIN:
             break
 
-        if total_profit_all_phase <= SESSION_STOP_LOSS:
+        if live_profit_total <= SESSION_STOP_LOSS:
             break
 
         preds_group = [groups[i - w] for w in locked_windows if i - w >= 0]
@@ -715,133 +685,147 @@ def simulate_engine(numbers, groups, colors):
         if new_signal:
             keep_rounds_left = 0
             keep_bet_group = None
-            last_trade_was_loss = False
+            last_signal_was_loss = False
         else:
-            if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
+            if last_signal_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
                 final_vote_group = keep_bet_group
                 used_keep = True
 
         final_signal = new_signal or used_keep
-        distance = i - last_trade
 
-        # ======================================================
-        # CORE FIX:
-        # READY ONLY IF PREVIOUS ROUND PNL_GROUP > 0
-        # Nếu ván trước không trade hoặc thua thì WAIT.
-        # ======================================================
-        if len(history_rows) > 0:
-            prev_round_pnl_group = float(history_rows[-1].get("pnl_group", 0.0))
+        # Signal/Paper result luôn tính nếu có signal.
+        if final_signal:
+            if groups[i] == final_vote_group:
+                signal_hit_group = 1
+                signal_pnl_group = WIN_GROUP
+            else:
+                signal_hit_group = 0
+                signal_pnl_group = LOSS_GROUP
         else:
-            prev_round_pnl_group = 0.0
+            signal_hit_group = None
+            signal_pnl_group = 0.0
 
-        prev_round_profit_filter = prev_round_pnl_group > 0
+        paper_profit_group += signal_pnl_group
+        if signal_hit_group is not None:
+            paper_hits_group.append(signal_hit_group)
 
-        can_trade_group = (
+        # CORE LIVE RULE:
+        # Live bet ván hiện tại chỉ khi signal_pnl_group của ván ngay trước đó > 0.
+        if len(history_rows) > 0:
+            prev_signal_pnl_group = float(history_rows[-1].get("signal_pnl_group", 0.0))
+        else:
+            prev_signal_pnl_group = 0.0
+
+        prev_signal_profit_filter = prev_signal_pnl_group > 0
+        distance = i - last_live_trade
+
+        can_live_bet_group = (
             final_signal
-            and prev_round_profit_filter
+            and prev_signal_profit_filter
             and distance >= GAP
             and round_no > LOCK_ROUND_END
         )
 
         if ENABLE_DOUBLE_BET_COLOR and REQUIRE_COLOR_CONFIRM:
-            trade = can_trade_group and color_signal
+            live_trade = can_live_bet_group and color_signal
         else:
-            trade = can_trade_group
+            live_trade = can_live_bet_group
 
-        hit_group = None
-        hit_color = None
-        pnl_group = 0.0
-        pnl_color = 0.0
-        pnl_total = 0.0
+        live_hit_group = None
+        live_hit_color = None
+        live_pnl_group = 0.0
+        live_pnl_color = 0.0
+        live_pnl_total = 0.0
+
         state = "WAIT"
         relock_triggered_now = False
         relock_reason_now = None
 
-        if trade and used_keep:
-            state = "TRADE_KEEP"
-        elif trade:
-            state = "TRADE"
-        elif final_signal and not prev_round_profit_filter:
-            state = "WAIT_PREV_ROUND_PROFIT_NOT_POSITIVE"
+        if live_trade and used_keep:
+            state = "LIVE_TRADE_KEEP"
+        elif live_trade:
+            state = "LIVE_TRADE"
+        elif final_signal and not prev_signal_profit_filter:
+            state = "WAIT_PREV_SIGNAL_PNL_NOT_POSITIVE"
         elif final_signal:
-            state = "SIGNAL"
+            state = "SIGNAL_ONLY"
         else:
             state = "WAIT_NO_SIGNAL"
 
-        bet_group = final_vote_group if trade else None
-        bet_color = final_vote_color if trade and ENABLE_DOUBLE_BET_COLOR else None
+        bet_group = final_vote_group if live_trade else None
+        bet_color = final_vote_color if live_trade and ENABLE_DOUBLE_BET_COLOR else None
 
         if used_keep:
             keep_rounds_left = max(0, keep_rounds_left - 1)
 
-        if trade:
-            last_trade = i
+        if live_trade:
+            last_live_trade = i
 
             actual_group = groups[i]
             actual_color = colors[i]
 
             if actual_group == final_vote_group:
-                hit_group = 1
-                pnl_group = WIN_GROUP
+                live_hit_group = 1
+                live_pnl_group = WIN_GROUP
             else:
-                hit_group = 0
-                pnl_group = LOSS_GROUP
+                live_hit_group = 0
+                live_pnl_group = LOSS_GROUP
 
             if ENABLE_DOUBLE_BET_COLOR:
                 if final_vote_color is not None and actual_color == final_vote_color:
-                    hit_color = 1
-                    pnl_color = WIN_COLOR
+                    live_hit_color = 1
+                    live_pnl_color = WIN_COLOR
                 else:
-                    hit_color = 0
-                    pnl_color = LOSS_COLOR
+                    live_hit_color = 0
+                    live_pnl_color = LOSS_COLOR
             else:
-                hit_color = None
-                pnl_color = 0.0
+                live_hit_color = None
+                live_pnl_color = 0.0
 
-            pnl_total = pnl_group + pnl_color
+            live_pnl_total = live_pnl_group + live_pnl_color
 
-            phase_profit_group += pnl_group
-            phase_profit_color += pnl_color
-            phase_profit_total += pnl_total
+            live_profit_group += live_pnl_group
+            live_profit_color += live_pnl_color
+            live_profit_total += live_pnl_total
 
-            total_profit_group += pnl_group
-            total_profit_color += pnl_color
-            total_profit_all_phase += pnl_total
+            phase_live_profit_group += live_pnl_group
+            phase_live_profit_color += live_pnl_color
+            phase_live_profit_total += live_pnl_total
 
-            live_profit_group += pnl_group
-
-            phase_hits_group.append(hit_group)
-            total_hits_group.append(hit_group)
-            live_hits_group.append(hit_group)
+            live_hits_group.append(live_hit_group)
+            phase_live_hits_group.append(live_hit_group)
 
             if ENABLE_DOUBLE_BET_COLOR:
-                phase_hits_color.append(hit_color)
-                total_hits_color.append(hit_color)
+                live_hits_color.append(live_hit_color)
+                phase_live_hits_color.append(live_hit_color)
 
-            if hit_group == 1:
-                last_trade_was_loss = False
-                keep_rounds_left = 0
-                keep_bet_group = None
-                consecutive_losses = 0
-                phase_loss_streak = 0
+            if live_hit_group == 1:
+                consecutive_live_losses = 0
+                phase_live_loss_streak = 0
             else:
-                consecutive_losses += 1
-                phase_loss_streak += 1
-                last_trade_was_loss = True
-                keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
-                keep_bet_group = final_vote_group
+                consecutive_live_losses += 1
+                phase_live_loss_streak += 1
 
-            if phase_profit_total <= PHASE_STOP_LOSS:
+            if phase_live_profit_total <= PHASE_STOP_LOSS:
                 relock_triggered_now = True
-                relock_reason_now = "PHASE_STOP_LOSS"
-                state = "AUTO_RELOCK_LOSS"
+                relock_reason_now = "PHASE_LIVE_STOP_LOSS"
+                state = "AUTO_RELOCK_LIVE_LOSS"
 
-            elif phase_profit_total >= PHASE_STOP_WIN:
+            elif phase_live_profit_total >= PHASE_STOP_WIN:
                 relock_triggered_now = True
-                relock_reason_now = "PHASE_TAKE_PROFIT"
-                state = "AUTO_RELOCK_WIN"
+                relock_reason_now = "PHASE_LIVE_TAKE_PROFIT"
+                state = "AUTO_RELOCK_LIVE_WIN"
 
-        # Ghi history TRƯỚC khi reset relock
+        # Keep logic dựa vào signal giả lập, không dựa vào live trade.
+        if signal_hit_group == 1:
+            last_signal_was_loss = False
+            keep_rounds_left = 0
+            keep_bet_group = None
+        elif signal_hit_group == 0:
+            last_signal_was_loss = True
+            keep_rounds_left = max(KEEP_AFTER_LOSS_ROUNDS - 1, 0)
+            keep_bet_group = final_vote_group
+
         history_rows.append(
             {
                 "phase": phase_index,
@@ -860,40 +844,42 @@ def simulate_engine(numbers, groups, colors):
                 "color_signal": color_signal,
                 "used_keep": used_keep,
                 "signal": final_signal,
-                "trade": trade,
-                "bet_group": bet_group,
-                "bet_color": color_text(bet_color),
                 "final_vote_group": final_vote_group,
                 "final_vote_color": color_text(final_vote_color),
-                "prev_round_pnl_group": prev_round_pnl_group,
-                "prev_round_profit_filter": prev_round_profit_filter,
-                "hit_group": hit_group,
-                "hit_color": hit_color,
-                "pnl_group": pnl_group,
-                "pnl_color": pnl_color,
-                "pnl_total": pnl_total,
+
+                "signal_hit_group": signal_hit_group,
+                "signal_pnl_group": signal_pnl_group,
+                "paper_profit_group": paper_profit_group,
+
+                "prev_signal_pnl_group": prev_signal_pnl_group,
+                "prev_signal_profit_filter": prev_signal_profit_filter,
+
+                "live_trade": live_trade,
+                "bet_group": bet_group,
+                "bet_color": color_text(bet_color),
+                "live_hit_group": live_hit_group,
+                "live_hit_color": live_hit_color,
+                "live_pnl_group": live_pnl_group,
+                "live_pnl_color": live_pnl_color,
+                "live_pnl_total": live_pnl_total,
+
                 "live_profit_group": live_profit_group,
+                "live_profit_color": live_profit_color,
+                "live_profit_total": live_profit_total,
+
+                "phase_live_profit_group": phase_live_profit_group,
+                "phase_live_profit_color": phase_live_profit_color,
+                "phase_live_profit_total": phase_live_profit_total,
+
                 "state": state,
-                "phase_profit_group": phase_profit_group,
-                "phase_profit_color": phase_profit_color,
-                "phase_profit_total": phase_profit_total,
-                "total_profit_group": total_profit_group,
-                "total_profit_color": total_profit_color,
-                "total_profit_all_phase": total_profit_all_phase,
-                "consecutive_losses": consecutive_losses,
-                "phase_loss_streak": phase_loss_streak,
+                "consecutive_live_losses": consecutive_live_losses,
+                "phase_live_loss_streak": phase_live_loss_streak,
                 "locked_windows": ", ".join(map(str, locked_windows)),
                 "relock_count": relock_count,
                 "relock_triggered_now": relock_triggered_now,
                 "relock_reason": relock_reason_now,
             }
         )
-
-        if not trade:
-            if used_keep and keep_rounds_left <= 0:
-                keep_rounds_left = 0
-                keep_bet_group = None
-                last_trade_was_loss = False
 
         if relock_triggered_now:
             phase_summary_rows.append(
@@ -903,16 +889,15 @@ def simulate_engine(numbers, groups, colors):
                     "reason": relock_reason_now,
                     "mode": current_mode["name"],
                     "lock_round": selected_lock_round,
-                    "phase_trades": len(phase_hits_group),
-                    "phase_profit_group": phase_profit_group,
-                    "phase_profit_color": phase_profit_color,
-                    "phase_profit_total": phase_profit_total,
-                    "phase_wr_group": round(np.mean(phase_hits_group) * 100, 2) if phase_hits_group else 0.0,
-                    "phase_wr_color": round(np.mean(phase_hits_color) * 100, 2) if phase_hits_color else 0.0,
-                    "total_profit_group_after_phase": total_profit_group,
-                    "total_profit_color_after_phase": total_profit_color,
-                    "total_profit_all_after_phase": total_profit_all_phase,
+                    "phase_live_trades": len(phase_live_hits_group),
+                    "phase_live_profit_group": phase_live_profit_group,
+                    "phase_live_profit_color": phase_live_profit_color,
+                    "phase_live_profit_total": phase_live_profit_total,
+                    "phase_live_wr_group": round(np.mean(phase_live_hits_group) * 100, 2) if phase_live_hits_group else 0.0,
+                    "phase_live_wr_color": round(np.mean(phase_live_hits_color) * 100, 2) if phase_live_hits_color else 0.0,
                     "live_profit_group_after_phase": live_profit_group,
+                    "live_profit_color_after_phase": live_profit_color,
+                    "live_profit_total_after_phase": live_profit_total,
                 }
             )
 
@@ -944,47 +929,47 @@ def simulate_engine(numbers, groups, colors):
                 lock_scan_start = scan_start
                 lock_scan_end = scan_end
 
-                phase_profit_group = 0.0
-                phase_profit_color = 0.0
-                phase_profit_total = 0.0
-                phase_hits_group = []
-                phase_hits_color = []
+                phase_live_profit_group = 0.0
+                phase_live_profit_color = 0.0
+                phase_live_profit_total = 0.0
+                phase_live_hits_group = []
+                phase_live_hits_color = []
 
-                last_trade = i
+                last_live_trade = i
                 keep_bet_group = None
                 keep_rounds_left = 0
-                last_trade_was_loss = False
-                consecutive_losses = 0
-                phase_loss_streak = 0
+                last_signal_was_loss = False
+                consecutive_live_losses = 0
+                phase_live_loss_streak = 0
                 phase_index += 1
 
     hist = pd.DataFrame(history_rows)
     phase_summary_df = pd.DataFrame(phase_summary_rows)
 
-    session_stop = total_profit_all_phase >= SESSION_STOP_WIN or total_profit_all_phase <= SESSION_STOP_LOSS
+    session_stop = live_profit_total >= SESSION_STOP_WIN or live_profit_total <= SESSION_STOP_LOSS
 
     session_stop_reason = (
         "SESSION_STOP_WIN"
-        if total_profit_all_phase >= SESSION_STOP_WIN
+        if live_profit_total >= SESSION_STOP_WIN
         else "SESSION_STOP_LOSS"
-        if total_profit_all_phase <= SESSION_STOP_LOSS
+        if live_profit_total <= SESSION_STOP_LOSS
         else None
     )
 
     return {
         "hist": hist,
-        "phase_profit_group": phase_profit_group,
-        "phase_profit_color": phase_profit_color,
-        "phase_profit_total": phase_profit_total,
-        "phase_hits_group": phase_hits_group,
-        "phase_hits_color": phase_hits_color,
-        "total_profit_group": total_profit_group,
-        "total_profit_color": total_profit_color,
-        "total_profit_all_phase": total_profit_all_phase,
-        "total_hits_group": total_hits_group,
-        "total_hits_color": total_hits_color,
+        "paper_profit_group": paper_profit_group,
+        "paper_hits_group": paper_hits_group,
         "live_profit_group": live_profit_group,
+        "live_profit_color": live_profit_color,
+        "live_profit_total": live_profit_total,
         "live_hits_group": live_hits_group,
+        "live_hits_color": live_hits_color,
+        "phase_live_profit_group": phase_live_profit_group,
+        "phase_live_profit_color": phase_live_profit_color,
+        "phase_live_profit_total": phase_live_profit_total,
+        "phase_live_hits_group": phase_live_hits_group,
+        "phase_live_hits_color": phase_live_hits_color,
         "locked_windows": locked_windows,
         "selected_lock_round": selected_lock_round,
         "selected_mode": selected_mode,
@@ -996,10 +981,10 @@ def simulate_engine(numbers, groups, colors):
         "lock_scan_end": lock_scan_end,
         "keep_bet_group": keep_bet_group,
         "keep_rounds_left": keep_rounds_left,
-        "last_trade_was_loss": last_trade_was_loss,
-        "consecutive_losses": consecutive_losses,
-        "phase_loss_streak": phase_loss_streak,
-        "last_trade": last_trade,
+        "last_signal_was_loss": last_signal_was_loss,
+        "consecutive_live_losses": consecutive_live_losses,
+        "phase_live_loss_streak": phase_live_loss_streak,
+        "last_live_trade": last_live_trade,
         "phase_index": phase_index,
         "session_stop": session_stop,
         "session_stop_reason": session_stop_reason,
@@ -1017,9 +1002,6 @@ def cached_simulate_engine(numbers_tuple):
     return simulate_engine(nums, grps, cols)
 
 
-# =========================
-# RUN
-# =========================
 numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
@@ -1029,27 +1011,26 @@ if len(groups) < LOCK_ROUND_START:
     st.stop()
 
 sim = cached_simulate_engine(tuple(numbers))
-
 hist = sim["hist"]
 
 if hist.empty:
     st.error("Không tìm được bộ lock phù hợp.")
     st.stop()
 
-phase_profit_group = sim["phase_profit_group"]
-phase_profit_color = sim["phase_profit_color"]
-phase_profit_total = sim["phase_profit_total"]
-phase_hits_group = sim["phase_hits_group"]
-phase_hits_color = sim["phase_hits_color"]
-
-total_profit_group = sim["total_profit_group"]
-total_profit_color = sim["total_profit_color"]
-total_profit_all_phase = sim["total_profit_all_phase"]
-total_hits_group = sim["total_hits_group"]
-total_hits_color = sim["total_hits_color"]
+paper_profit_group = sim["paper_profit_group"]
+paper_hits_group = sim["paper_hits_group"]
 
 live_profit_group = sim["live_profit_group"]
+live_profit_color = sim["live_profit_color"]
+live_profit_total = sim["live_profit_total"]
 live_hits_group = sim["live_hits_group"]
+live_hits_color = sim["live_hits_color"]
+
+phase_live_profit_group = sim["phase_live_profit_group"]
+phase_live_profit_color = sim["phase_live_profit_color"]
+phase_live_profit_total = sim["phase_live_profit_total"]
+phase_live_hits_group = sim["phase_live_hits_group"]
+phase_live_hits_color = sim["phase_live_hits_color"]
 
 locked_windows = sim["locked_windows"]
 selected_lock_round = sim["selected_lock_round"]
@@ -1063,10 +1044,10 @@ lock_scan_end = sim["lock_scan_end"]
 
 keep_bet_group = sim["keep_bet_group"]
 keep_rounds_left = sim["keep_rounds_left"]
-last_trade_was_loss = sim["last_trade_was_loss"]
-consecutive_losses = sim["consecutive_losses"]
-phase_loss_streak = sim["phase_loss_streak"]
-last_trade = sim["last_trade"]
+last_signal_was_loss = sim["last_signal_was_loss"]
+consecutive_live_losses = sim["consecutive_live_losses"]
+phase_live_loss_streak = sim["phase_live_loss_streak"]
+last_live_trade = sim["last_live_trade"]
 phase_index = sim["phase_index"]
 session_stop = sim["session_stop"]
 session_stop_reason = sim["session_stop_reason"]
@@ -1074,22 +1055,6 @@ relock_count = sim["relock_count"]
 last_relock_trigger_round = sim["last_relock_trigger_round"]
 phase_summary_df = sim["phase_summary_df"]
 
-live_rows = hist.copy()
-live_rows["live_ready"] = live_rows["trade"].astype(bool)
-live_rows["live_hit_group"] = np.where(live_rows["live_ready"], live_rows["hit_group"], np.nan)
-live_rows["live_pnl_group"] = np.where(live_rows["live_ready"], live_rows["pnl_group"], 0.0)
-live_rows["live_profit_group_check"] = live_rows["live_pnl_group"].cumsum()
-
-live_ready_trades = int(live_rows["live_ready"].sum())
-live_wr_group = (
-    round(live_rows.loc[live_rows["live_ready"], "live_hit_group"].mean() * 100, 2)
-    if live_ready_trades > 0
-    else 0.0
-)
-
-# =========================
-# NEXT SIGNAL
-# =========================
 next_idx = len(groups)
 next_round = len(groups) + 1
 current_round = len(numbers)
@@ -1113,10 +1078,6 @@ current_number = numbers[-1]
 current_group = groups[-1]
 current_color = colors[-1]
 
-last_trade_rows = hist[hist["trade"] == True]
-last_trade_round = int(last_trade_rows["round"].max()) if len(last_trade_rows) > 0 else -999999
-distance = next_round - last_trade_round
-
 new_signal = confidence_group >= vote_required if vote_group is not None else False
 color_signal = confidence_color >= vote_required if vote_color is not None else False
 
@@ -1126,41 +1087,45 @@ final_vote_color = vote_color
 
 if session_stop:
     signal = False
-    can_bet = False
+    can_live_bet = False
     next_state = session_stop_reason
-    prev_round_pnl_group = 0.0
-    prev_round_profit_filter = False
+    prev_signal_pnl_group = 0.0
+    prev_signal_profit_filter = False
 else:
     if not new_signal:
-        if last_trade_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
+        if last_signal_was_loss and keep_rounds_left > 0 and keep_bet_group is not None:
             final_vote_group = keep_bet_group
             used_keep_next = True
 
     signal = new_signal or used_keep_next
 
     if not hist.empty:
-        prev_round_pnl_group = float(hist.iloc[-1].get("pnl_group", 0.0))
+        prev_signal_pnl_group = float(hist.iloc[-1].get("signal_pnl_group", 0.0))
     else:
-        prev_round_pnl_group = 0.0
+        prev_signal_pnl_group = 0.0
 
-    prev_round_profit_filter = prev_round_pnl_group > 0
+    prev_signal_profit_filter = prev_signal_pnl_group > 0
 
-    can_bet_group = (
+    last_live_trade_rows = hist[hist["live_trade"] == True]
+    last_live_trade_round = int(last_live_trade_rows["round"].max()) if len(last_live_trade_rows) > 0 else -999999
+    distance = next_round - last_live_trade_round
+
+    can_live_bet_group = (
         signal
-        and prev_round_profit_filter
+        and prev_signal_profit_filter
         and distance >= GAP
         and next_round > LOCK_ROUND_END
     )
 
     if ENABLE_DOUBLE_BET_COLOR and REQUIRE_COLOR_CONFIRM:
-        can_bet = can_bet_group and color_signal
+        can_live_bet = can_live_bet_group and color_signal
     else:
-        can_bet = can_bet_group
+        can_live_bet = can_live_bet_group
 
-    if can_bet:
+    if can_live_bet:
         next_state = "READY"
-    elif signal and not prev_round_profit_filter:
-        next_state = "WAIT_PREV_ROUND_PROFIT_NOT_POSITIVE"
+    elif signal and not prev_signal_profit_filter:
+        next_state = "WAIT_PREV_SIGNAL_PNL_NOT_POSITIVE"
     elif not signal:
         next_state = "WAIT_NO_SIGNAL"
     else:
@@ -1183,28 +1148,30 @@ next_row = {
     "color_signal": color_signal,
     "used_keep": used_keep_next,
     "signal": signal,
-    "trade": False,
-    "bet_group": final_vote_group if can_bet else None,
-    "bet_color": color_text(final_vote_color) if can_bet and ENABLE_DOUBLE_BET_COLOR else "-",
     "final_vote_group": final_vote_group,
     "final_vote_color": color_text(final_vote_color),
-    "prev_round_pnl_group": prev_round_pnl_group,
-    "prev_round_profit_filter": prev_round_profit_filter,
-    "hit_group": None,
-    "hit_color": None,
-    "pnl_group": 0.0,
-    "pnl_color": 0.0,
-    "pnl_total": 0.0,
+    "signal_hit_group": None,
+    "signal_pnl_group": 0.0,
+    "paper_profit_group": paper_profit_group,
+    "prev_signal_pnl_group": prev_signal_pnl_group,
+    "prev_signal_profit_filter": prev_signal_profit_filter,
+    "live_trade": False,
+    "bet_group": final_vote_group if can_live_bet else None,
+    "bet_color": color_text(final_vote_color) if can_live_bet and ENABLE_DOUBLE_BET_COLOR else "-",
+    "live_hit_group": None,
+    "live_hit_color": None,
+    "live_pnl_group": 0.0,
+    "live_pnl_color": 0.0,
+    "live_pnl_total": 0.0,
     "live_profit_group": live_profit_group,
+    "live_profit_color": live_profit_color,
+    "live_profit_total": live_profit_total,
+    "phase_live_profit_group": phase_live_profit_group,
+    "phase_live_profit_color": phase_live_profit_color,
+    "phase_live_profit_total": phase_live_profit_total,
     "state": next_state,
-    "phase_profit_group": phase_profit_group,
-    "phase_profit_color": phase_profit_color,
-    "phase_profit_total": phase_profit_total,
-    "total_profit_group": total_profit_group,
-    "total_profit_color": total_profit_color,
-    "total_profit_all_phase": total_profit_all_phase,
-    "consecutive_losses": consecutive_losses,
-    "phase_loss_streak": phase_loss_streak,
+    "consecutive_live_losses": consecutive_live_losses,
+    "phase_live_loss_streak": phase_live_loss_streak,
     "locked_windows": ", ".join(map(str, locked_windows)),
     "relock_count": relock_count,
     "relock_triggered_now": False,
@@ -1213,12 +1180,9 @@ next_row = {
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-# =========================
-# TELEGRAM READY
-# =========================
-if telegram_enabled() and can_bet and final_vote_group is not None:
+if telegram_enabled() and can_live_bet and final_vote_group is not None:
     ready_msg = (
-        f"READY DOUBLE BET\n"
+        f"READY LIVE BET\n"
         f"Round: {current_round}\n"
         f"Current Number: {current_number}\n"
         f"Current Group: {current_group}\n"
@@ -1227,10 +1191,10 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"Bet Color: {color_text(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
         f"Vote Group Strength: {confidence_group}\n"
-        f"Prev Round PNL Group: {prev_round_pnl_group}\n"
-        f"Prev Round Profit Filter: {prev_round_profit_filter}\n"
+        f"Prev Signal PNL Group: {prev_signal_pnl_group}\n"
+        f"Prev Signal Profit Filter: {prev_signal_profit_filter}\n"
         f"Live Profit Group: {live_profit_group}\n"
-        f"Total Profit All: {total_profit_all_phase}"
+        f"Live Profit Total: {live_profit_total}"
     )
 
     send_signal_once(
@@ -1239,10 +1203,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         msg=ready_msg,
     )
 
-# =========================
-# UI
-# =========================
-st.title("Auto Relock Engine | FINAL PREVIOUS ROUND PROFIT FILTER")
+st.title("Auto Relock Engine | SAFE LIVE BET")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number)
@@ -1258,9 +1219,9 @@ st.write("Window Range:", f'{selected_mode["window_min"]}-{selected_mode["window
 st.write("Group Vote Strength:", confidence_group)
 st.write("Color Vote Strength:", confidence_color)
 st.write("Signal:", signal)
-st.write("Previous Round PNL Group:", prev_round_pnl_group)
-st.write("Previous Round Profit Filter:", prev_round_profit_filter)
-st.write("Can Bet:", can_bet)
+st.write("Previous Signal PNL Group:", prev_signal_pnl_group)
+st.write("Previous Signal Profit Filter:", prev_signal_profit_filter)
+st.write("Can Live Bet:", can_live_bet)
 st.write("State:", next_state)
 st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
@@ -1277,66 +1238,57 @@ if lock_mode == "fallback":
 
 if session_stop:
     st.error(session_stop_reason)
-elif can_bet and final_vote_group is not None:
+elif can_live_bet and final_vote_group is not None:
     st.markdown(
         f"""
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
-        READY DOUBLE BET<br>
+        READY LIVE BET<br>
         GROUP {final_vote_group} | COLOR {color_text(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF"}<br>
-        PREVIOUS ROUND PNL -> {prev_round_pnl_group}<br>
+        PREVIOUS SIGNAL PNL -> {prev_signal_pnl_group}<br>
         MODE -> {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
         unsafe_allow_html=True,
     )
 else:
-    if signal and not prev_round_profit_filter:
-        st.info("WAIT | PREVIOUS ROUND PNL GROUP <= 0")
+    if signal and not prev_signal_profit_filter:
+        st.info("WAIT | PREVIOUS SIGNAL PNL GROUP <= 0")
     elif not signal:
         st.info("WAIT | NO SIGNAL")
     else:
         st.info("WAIT")
 
-st.subheader("Live Ready Bet Stats")
-l1, l2, l3 = st.columns(3)
-l1.metric("Live Ready Profit Group", live_profit_group)
-l2.metric("Live Ready Trades", live_ready_trades)
-l3.metric("Live Ready WR Group %", live_wr_group)
+st.subheader("Paper Signal Stats")
+p1, p2, p3 = st.columns(3)
+p1.metric("Paper Profit Group", paper_profit_group)
+p2.metric("Paper Signal Trades", len(paper_hits_group))
+p3.metric("Paper WR Group %", round(np.mean(paper_hits_group) * 100, 2) if paper_hits_group else 0)
 
-st.subheader("Live Ready Profit Curve")
-st.line_chart(live_rows["live_profit_group_check"].reset_index(drop=True))
+st.subheader("Live Bet Stats")
+l1, l2, l3, l4 = st.columns(4)
+l1.metric("Live Profit Group", live_profit_group)
+l2.metric("Live Profit Color", live_profit_color)
+l3.metric("Live Profit Total", live_profit_total)
+l4.metric("Live Trades", len(live_hits_group))
 
-st.subheader("Current Phase Stats")
+l5, l6 = st.columns(2)
+l5.metric("Live WR Group %", round(np.mean(live_hits_group) * 100, 2) if live_hits_group else 0)
+l6.metric("Live WR Color %", round(np.mean(live_hits_color) * 100, 2) if live_hits_color else 0)
+
+st.subheader("Live Profit Curve")
+st.line_chart(hist_display["live_profit_total"].reset_index(drop=True))
+
+st.subheader("Current Phase Live Stats")
 s1, s2, s3, s4 = st.columns(4)
-s1.metric("Phase Profit Group", phase_profit_group)
-s2.metric("Phase Profit Color", phase_profit_color)
-s3.metric("Phase Profit Total", phase_profit_total)
-s4.metric("Phase Trades", len(phase_hits_group))
+s1.metric("Phase Live Profit Group", phase_live_profit_group)
+s2.metric("Phase Live Profit Color", phase_live_profit_color)
+s3.metric("Phase Live Profit Total", phase_live_profit_total)
+s4.metric("Phase Live Trades", len(phase_live_hits_group))
 
 s5, s6, s7 = st.columns(3)
-s5.metric("Phase WR Group %", round(np.mean(phase_hits_group) * 100, 2) if phase_hits_group else 0)
-s6.metric("Phase WR Color %", round(np.mean(phase_hits_color) * 100, 2) if phase_hits_color else 0)
-s7.metric("Phase Loss Streak", phase_loss_streak)
-
-st.subheader("Session Stats")
-t1, t2, t3, t4 = st.columns(4)
-t1.metric("Total Profit Group", total_profit_group)
-t2.metric("Total Profit Color", total_profit_color)
-t3.metric("Total Profit All", total_profit_all_phase)
-t4.metric("Last Trade Round", last_trade + 1 if last_trade > 0 else "-")
-
-t5, t6, t7 = st.columns(3)
-t5.metric("Total Trades", len(total_hits_group))
-t6.metric("Total WR Group %", round(np.mean(total_hits_group) * 100, 2) if total_hits_group else 0)
-t7.metric("Total WR Color %", round(np.mean(total_hits_color) * 100, 2) if total_hits_color else 0)
-
-st.subheader("Phase Profit Total Curve")
-current_phase_df = hist_display[hist_display["phase"] == phase_index].copy()
-if not current_phase_df.empty:
-    st.line_chart(current_phase_df["phase_profit_total"].reset_index(drop=True))
-
-st.subheader("Total Profit Curve")
-st.line_chart(hist_display["total_profit_all_phase"].reset_index(drop=True))
+s5.metric("Phase Live WR Group %", round(np.mean(phase_live_hits_group) * 100, 2) if phase_live_hits_group else 0)
+s6.metric("Phase Live WR Color %", round(np.mean(phase_live_hits_color) * 100, 2) if phase_live_hits_color else 0)
+s7.metric("Phase Live Loss Streak", phase_live_loss_streak)
 
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
@@ -1359,21 +1311,24 @@ st.subheader("History")
 history_view = hist_display.iloc[::-1].head(SHOW_HISTORY_ROWS).copy()
 st.dataframe(history_view, use_container_width=True)
 
-with st.expander("Live Ready History"):
+with st.expander("Live Bet History"):
     cols = [
         "round",
         "number",
         "group",
         "final_vote_group",
         "signal",
-        "trade",
-        "prev_round_pnl_group",
-        "prev_round_profit_filter",
-        "hit_group",
-        "pnl_group",
+        "signal_hit_group",
+        "signal_pnl_group",
+        "prev_signal_pnl_group",
+        "prev_signal_profit_filter",
+        "live_trade",
+        "live_hit_group",
+        "live_pnl_group",
         "live_profit_group",
+        "live_profit_total",
         "state",
     ]
 
-    show_cols = [c for c in cols if c in live_rows.columns]
-    st.dataframe(live_rows[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS), use_container_width=True)
+    show_cols = [c for c in cols if c in hist_display.columns]
+    st.dataframe(hist_display[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS), use_container_width=True)
