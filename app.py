@@ -29,8 +29,8 @@ LOSS_GROUP = -1.0
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-PHASE_STOP_WIN = 6
-PHASE_STOP_LOSS = -5.0
+PHASE_STOP_WIN = 3.5
+PHASE_STOP_LOSS = -2.0
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
@@ -60,14 +60,14 @@ SHOW_HISTORY_ROWS = 40
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
-DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
+DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
 TELEGRAM_SEND_MODE = "READY_ONLY"
-SENT_FILE = "/tmp/telegram_sent_rounds_full_engine_live_profit.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_phase_profit_filter.json"
 
 
 def telegram_enabled():
@@ -196,12 +196,15 @@ def compute_profit_path(results, win_value, loss_value):
 def compute_max_drawdown(results, win_value, loss_value):
     if not results:
         return 0.0
+
     path = compute_profit_path(results, win_value, loss_value)
     peak = -10**18
     max_dd = 0.0
+
     for x in path:
         peak = max(peak, x)
         max_dd = min(max_dd, x - peak)
+
     return float(max_dd)
 
 
@@ -226,6 +229,7 @@ def compute_streak_metrics(results):
     max_loss_streak = 0
     count_hit_streak_ge2 = 0
     count_loss_streak_ge2 = 0
+
     cur_val = results[0]
     cur_len = 1
 
@@ -1048,12 +1052,11 @@ relock_count = sim["relock_count"]
 last_relock_trigger_round = sim["last_relock_trigger_round"]
 phase_summary_df = sim["phase_summary_df"]
 
-# ================= LIVE READY PROFIT CALCULATE BEFORE NEXT STATUS =================
 live_rows = hist.copy()
 
 if not live_rows.empty:
-    live_rows["previous_signal_filter"] = live_rows["signal"].shift(1).fillna(False).astype(bool)
-    live_rows["live_ready"] = live_rows["signal"].astype(bool) & live_rows["previous_signal_filter"]
+    live_rows["phase_profit_group_filter"] = live_rows["phase_profit_group"] > 0
+    live_rows["live_ready"] = live_rows["signal"].astype(bool) & live_rows["phase_profit_group_filter"].astype(bool)
 
     live_rows["live_hit_group"] = np.where(
         live_rows["live_ready"] & (live_rows["group"] == live_rows["final_vote_group"]),
@@ -1075,13 +1078,12 @@ else:
             "live_hit_group",
             "live_pnl_group",
             "live_profit_group",
-            "previous_signal_filter",
+            "phase_profit_group_filter",
         ]
     )
 
 live_ready_trades = int(live_rows["live_ready"].sum()) if not live_rows.empty else 0
 live_profit_group = float(live_rows["live_profit_group"].iloc[-1]) if not live_rows.empty else 0.0
-live_profit_filter = live_profit_group > 0
 
 live_wr_group = (
     round(live_rows.loc[live_rows["live_ready"], "live_hit_group"].mean() * 100, 2)
@@ -1089,7 +1091,6 @@ live_wr_group = (
     else 0.0
 )
 
-# ================= CURRENT LOCK CHECK =================
 scan_range_bt = {
     "trades": 0,
     "profit_group": 0.0,
@@ -1123,7 +1124,6 @@ if locked_windows and selected_mode is not None:
         len(groups),
     )
 
-# ================= NEXT STATUS =================
 next_round = len(groups)
 current_round = len(numbers)
 
@@ -1159,10 +1159,7 @@ used_keep_next = False
 final_vote_group = vote_group
 final_vote_color = vote_color
 
-if not hist.empty and "signal" in hist.columns:
-    previous_signal_filter = bool(hist.iloc[-1]["signal"])
-else:
-    previous_signal_filter = False
+phase_profit_group_filter = phase_profit_group > 0
 
 if session_stop:
     signal = False
@@ -1187,7 +1184,7 @@ else:
 
     can_bet_group = (
         signal
-        and live_profit_filter
+        and phase_profit_group_filter
         and distance >= GAP
         and next_round > LOCK_ROUND_END
     )
@@ -1199,8 +1196,8 @@ else:
 
     if can_bet:
         next_state = "READY"
-    elif signal and not live_profit_filter:
-        next_state = "WAIT_LIVE_PROFIT_NOT_POSITIVE"
+    elif signal and not phase_profit_group_filter:
+        next_state = "WAIT_PHASE_PROFIT_GROUP_NOT_POSITIVE"
     elif not signal:
         next_state = "WAIT_NO_SIGNAL"
     else:
@@ -1222,8 +1219,7 @@ next_row = {
     "new_signal": new_signal,
     "color_signal": color_signal,
     "used_keep": used_keep_next,
-    "previous_signal_filter": previous_signal_filter,
-    "live_profit_filter": live_profit_filter,
+    "phase_profit_group_filter": phase_profit_group_filter,
     "live_profit_group": live_profit_group,
     "keep_group": next_keep_bet_group,
     "keep_left": next_keep_rounds_left,
@@ -1254,7 +1250,6 @@ next_row = {
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
-# ================= TELEGRAM =================
 if telegram_enabled() and can_bet and final_vote_group is not None:
     ready_msg = (
         f"READY DOUBLE BET\n"
@@ -1266,8 +1261,9 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"Bet Color: {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
         f"Vote Group Strength: {confidence_group}\n"
+        f"Phase Profit Group: {phase_profit_group}\n"
+        f"Phase Profit Group Filter: {phase_profit_group_filter}\n"
         f"Live Profit Group: {live_profit_group}\n"
-        f"Live Profit Filter: {live_profit_filter}\n"
         f"Total Profit All: {total_profit_all_phase}\n"
         f"Stop Reason: {session_stop_reason}"
     )
@@ -1278,8 +1274,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         msg=ready_msg,
     )
 
-# ================= UI =================
-st.title("Auto Relock Engine | Live Profit READY Filter")
+st.title("Auto Relock Engine | Phase Profit Group READY Filter")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", current_number if current_number is not None else "-")
@@ -1295,9 +1290,9 @@ st.write("Window Range:", f'{selected_mode["window_min"]}-{selected_mode["window
 st.write("Group Vote Strength:", confidence_group)
 st.write("Color Vote Strength:", confidence_color)
 st.write("Signal:", signal)
-st.write("Previous Signal Filter:", previous_signal_filter)
-st.write("Live Profit Group:", live_profit_group)
-st.write("Live Profit Filter:", live_profit_filter)
+st.write("Phase Profit Group:", phase_profit_group)
+st.write("Phase Profit Group Filter:", phase_profit_group_filter)
+st.write("Live Ready Profit Group:", live_profit_group)
 st.write("Can Bet:", can_bet)
 st.write("State:", next_state)
 st.write("Double Bet Color:", ENABLE_DOUBLE_BET_COLOR)
@@ -1324,15 +1319,15 @@ elif can_bet and final_vote_group is not None:
         <div style="background:#ff4b4b;padding:22px;border-radius:10px;text-align:center;font-size:28px;color:white;font-weight:bold;">
         READY DOUBLE BET<br>
         GROUP {final_vote_group} | COLOR {color_icon(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else "OFF"}<br>
-        LIVE PROFIT GROUP -> {live_profit_group}<br>
+        PHASE PROFIT GROUP -> {phase_profit_group}<br>
         MODE -> {selected_mode["name"] if selected_mode else "-"}
         </div>
         """,
         unsafe_allow_html=True,
     )
 else:
-    if signal and not live_profit_filter:
-        st.info("WAIT | LIVE READY PROFIT GROUP <= 0")
+    if signal and not phase_profit_group_filter:
+        st.info("WAIT | PHASE PROFIT GROUP <= 0")
     elif not signal:
         st.info("WAIT | NO SIGNAL")
     else:
@@ -1424,7 +1419,8 @@ with st.expander("Live Ready History"):
             "group",
             "final_vote_group",
             "signal",
-            "previous_signal_filter",
+            "phase_profit_group",
+            "phase_profit_group_filter",
             "live_ready",
             "live_hit_group",
             "live_pnl_group",
