@@ -9,8 +9,10 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# ================= REFRESH =================
 st_autorefresh(interval=5000, key="refresh")
 
+# ================= CONFIG =================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 LOCK_ROUND_START = 168
@@ -26,11 +28,12 @@ GAP = 1
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
+
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 
-PHASE_STOP_WIN = 6.5
-PHASE_STOP_LOSS = -6.0
+PHASE_STOP_WIN = 3.5
+PHASE_STOP_LOSS = -2.0
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
@@ -61,6 +64,7 @@ SHOW_HISTORY_ROWS = 40
 ENABLE_DOUBLE_BET_COLOR = True
 REQUIRE_COLOR_CONFIRM = False
 
+# ================= TELEGRAM =================
 DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
@@ -125,6 +129,7 @@ def send_signal_once(signal_name, current_round, msg):
     return ok
 
 
+# ================= LOAD DATA =================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
@@ -185,6 +190,7 @@ if len(groups) < LOCK_ROUND_START:
     st.stop()
 
 
+# ================= HELPERS =================
 def compute_profit_path(results, win_value, loss_value):
     p = 0.0
     out = []
@@ -197,18 +203,22 @@ def compute_profit_path(results, win_value, loss_value):
 def compute_max_drawdown(results, win_value, loss_value):
     if not results:
         return 0.0
+
     path = compute_profit_path(results, win_value, loss_value)
     peak = -10**18
     max_dd = 0.0
+
     for x in path:
         peak = max(peak, x)
         max_dd = min(max_dd, x - peak)
+
     return float(max_dd)
 
 
 def compute_recent_profit(results, recent_n, win_value, loss_value):
     if not results:
         return 0.0
+
     tail = results[-recent_n:]
     return float(sum(win_value if r == 1 else loss_value for r in tail))
 
@@ -295,6 +305,7 @@ def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     return out
 
 
+# ================= BACKTEST GROUP ONLY =================
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
     results_group = []
     trades = 0
@@ -601,6 +612,12 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
+def allow_trade_by_previous_group_profit(last_trade_pnl_group):
+    if last_trade_pnl_group is None:
+        return True
+    return last_trade_pnl_group > 0
+
+
 def simulate_engine(numbers, groups, colors):
     result = {
         "hist": pd.DataFrame(),
@@ -734,11 +751,7 @@ def simulate_engine(numbers, groups, colors):
                 used_keep = True
 
         final_signal = new_signal or used_keep
-
-        profit_group_filter = (
-            last_trade_pnl_group is not None
-            or last_trade_pnl_group > 0
-        )
+        profit_group_filter = allow_trade_by_previous_group_profit(last_trade_pnl_group)
 
         can_trade_group = (
             final_signal
@@ -909,7 +922,9 @@ def simulate_engine(numbers, groups, colors):
                     last_trade_was_loss = False
                     consecutive_losses = 0
                     phase_loss_streak = 0
+
                     last_trade_pnl_group = None
+
                     phase_index += 1
 
         else:
@@ -1036,6 +1051,7 @@ def cached_simulate_engine(numbers_tuple):
     return simulate_engine(nums, grps, cols)
 
 
+# ================= RUN ENGINE =================
 sim = cached_simulate_engine(tuple(numbers))
 
 hist = sim["hist"]
@@ -1074,6 +1090,7 @@ last_relock_trigger_round = sim["last_relock_trigger_round"]
 phase_summary_df = sim["phase_summary_df"]
 last_trade_pnl_group = sim["last_trade_pnl_group"]
 
+# ================= CURRENT LOCK CHECK =================
 scan_range_bt = {
     "trades": 0,
     "profit_group": 0.0,
@@ -1107,6 +1124,7 @@ if locked_windows and selected_mode is not None:
         len(groups),
     )
 
+# ================= NEXT STATUS =================
 next_round = len(groups)
 current_round = len(numbers)
 
@@ -1142,10 +1160,7 @@ used_keep_next = False
 final_vote_group = vote_group
 final_vote_color = vote_color
 
-profit_group_filter = (
-    last_trade_pnl_group is not None
-    and last_trade_pnl_group > 0
-)
+profit_group_filter = allow_trade_by_previous_group_profit(last_trade_pnl_group)
 
 if session_stop:
     signal = False
@@ -1234,6 +1249,7 @@ next_row = {
 
 hist_display = pd.concat([hist, pd.DataFrame([next_row])], ignore_index=True)
 
+# ================= TELEGRAM NOTIFY =================
 if telegram_enabled() and can_bet and final_vote_group is not None:
     ready_msg = (
         f"READY DOUBLE BET\n"
@@ -1258,6 +1274,7 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         msg=ready_msg,
     )
 
+# ================= UI =================
 st.title("Auto Relock Engine | Previous Group Profit Filter")
 
 c1, c2, c3, c4 = st.columns(4)
@@ -1314,7 +1331,7 @@ elif can_bet and final_vote_group is not None:
     )
 else:
     if not profit_group_filter:
-        st.info("WAIT | PREVIOUS GROUP TRADE NOT WIN OR NO PREVIOUS TRADE")
+        st.info("WAIT | PREVIOUS GROUP TRADE LOST")
     else:
         st.info("WAIT")
 
