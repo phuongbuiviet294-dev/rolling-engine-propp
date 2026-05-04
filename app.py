@@ -737,7 +737,7 @@ def simulate_engine(numbers, groups, colors):
 
         profit_group_filter = (
             last_trade_pnl_group is not None
-            and last_trade_pnl_group > 0
+            or last_trade_pnl_group > 0
         )
 
         can_trade_group = (
