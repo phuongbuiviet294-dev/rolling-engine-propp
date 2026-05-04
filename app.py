@@ -97,6 +97,7 @@ def run_engine(numbers):
 
     last_live_trade = -999
     live_profit = 0
+    paper_profit = 0
 
     for i in range(LOCK_ROUND_END, len(groups)):
         preds = [groups[i - w] for w in windows if i - w >= 0]
@@ -108,9 +109,7 @@ def run_engine(numbers):
 
         signal = conf >= VOTE_REQUIRED
 
-        # =====================
-        # SIGNAL PNL (ALWAYS CALCULATED)
-        # =====================
+        # ===== SIGNAL PROFIT =====
         if signal:
             if groups[i] == vote:
                 signal_pnl = WIN
@@ -119,9 +118,9 @@ def run_engine(numbers):
         else:
             signal_pnl = 0
 
-        # =====================
-        # PREV SIGNAL
-        # =====================
+        paper_profit += signal_pnl
+
+        # ===== PREVIOUS SIGNAL =====
         if len(hist) > 0:
             prev_signal_pnl = hist[-1]["signal_pnl"]
         else:
@@ -129,9 +128,7 @@ def run_engine(numbers):
 
         distance = i - last_live_trade
 
-        # =====================
-        # LIVE BET RULE
-        # =====================
+        # ===== LIVE RULE =====
         live_trade = (
             signal
             and prev_signal_pnl > 0
@@ -158,10 +155,12 @@ def run_engine(numbers):
             "confidence": conf,
             "signal": signal,
             "signal_pnl": signal_pnl,
+            "paper_profit": paper_profit,
             "prev_signal_pnl": prev_signal_pnl,
             "live_trade": live_trade,
             "live_pnl": live_pnl,
-            "live_profit": live_profit
+            "live_profit": live_profit,
+            "profit_gap": paper_profit - live_profit
         })
 
     return pd.DataFrame(hist), windows
@@ -171,7 +170,6 @@ def run_engine(numbers):
 # RUN
 # =========================
 numbers = load_numbers()
-
 result = run_engine(numbers)
 
 if result is None:
@@ -206,7 +204,7 @@ can_bet = signal and prev_signal_pnl > 0 and distance >= GAP
 # =========================
 # UI
 # =========================
-st.title("SAFE LIVE ENGINE")
+st.title("SAFE LIVE ENGINE FINAL")
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Current", numbers[-1])
@@ -224,10 +222,33 @@ if can_bet:
 else:
     st.warning("WAIT")
 
-st.subheader("Live Profit")
-st.metric("Live Profit", hist["live_profit"].iloc[-1])
+# =========================
+# PROFIT COMPARE
+# =========================
+st.subheader("Profit Compare")
 
-st.line_chart(hist["live_profit"])
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Paper Profit", round(hist["paper_profit"].iloc[-1], 2))
+p2.metric("Live Profit", round(hist["live_profit"].iloc[-1], 2))
+p3.metric("Profit Gap", round(hist["profit_gap"].iloc[-1], 2))
+p4.metric("Live Trades", int(hist["live_trade"].sum()))
 
+# =========================
+# STATS
+# =========================
+s1, s2, s3 = st.columns(3)
+s1.metric("Signal Count", int(hist["signal"].sum()))
+s2.metric("Signal Win", int((hist["signal_pnl"] > 0).sum()))
+s3.metric("Signal Lose", int((hist["signal_pnl"] < 0).sum()))
+
+# =========================
+# CHART
+# =========================
+st.subheader("Profit Curve")
+st.line_chart(hist[["paper_profit", "live_profit"]])
+
+# =========================
+# HISTORY
+# =========================
 st.subheader("History")
 st.dataframe(hist.iloc[::-1].head(50))
