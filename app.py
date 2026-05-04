@@ -273,4 +273,39 @@ st.subheader("Profit Compare")
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("Paper Profit", round(float(hist["paper_profit"].iloc[-1]), 2))
 p2.metric("Live Profit", round(float(hist["live_profit"].iloc[-1]), 2))
-p3.metric("Profit Gap", round(float(hist["
+p3.metric("Profit Gap", round(float(hist["profit_gap"].iloc[-1]), 2))
+p4.metric("Live Trades", int(hist["live_trade"].sum()))
+
+s1, s2, s3, s4 = st.columns(4)
+s1.metric("Signal Count", int(hist["signal"].sum()))
+s2.metric("Signal Win", int((hist["signal_pnl"] > 0).sum()))
+s3.metric("Signal Lose", int((hist["signal_pnl"] < 0).sum()))
+s4.metric("Live WR %", round(hist.loc[hist["live_trade"], "live_hit"].mean() * 100, 2) if hist["live_trade"].sum() > 0 else 0)
+
+st.subheader("Profit Curve")
+st.line_chart(hist[["paper_profit", "live_profit"]])
+
+with st.expander("Scan Window Detail"):
+    st.dataframe(scan_df, use_container_width=True)
+
+st.subheader("History")
+show_cols = [
+    "round",
+    "number",
+    "group",
+    "prev_group",
+    "vote",
+    "confidence",
+    "signal",
+    "signal_hit",
+    "signal_pnl",
+    "prev_signal_pnl",
+    "paper_profit",
+    "live_trade",
+    "live_hit",
+    "live_pnl",
+    "live_profit",
+    "profit_gap",
+    "valid_preds",
+]
+st.dataframe(hist[show_cols].iloc[::-1].head(100), use_container_width=True)
