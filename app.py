@@ -25,7 +25,6 @@ MODES = [
 ]
 
 GAP = 1
-
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
@@ -62,7 +61,7 @@ DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
-SENT_FILE = "/tmp/telegram_sent_rounds_phase_live_compare.json"
+SENT_FILE = "/tmp/telegram_sent_phase_live_final.json"
 
 
 def telegram_enabled():
@@ -247,6 +246,7 @@ def evaluate_window_group(seq_groups, w):
 
     for i in range(w, len(seq_groups)):
         pred = seq_groups[i - w]
+
         if seq_groups[i - 1] != pred:
             trades += 1
             if seq_groups[i] == pred:
@@ -305,7 +305,6 @@ def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     out = []
     if df_sorted.empty:
         return out
-
     for _, row in df_sorted.iterrows():
         w = int(row["window"])
         if all(abs(w - x) >= min_spacing for x in out):
@@ -650,7 +649,6 @@ def simulate_engine(numbers, groups):
             break
 
         vote_required = current_mode["vote_required"]
-
         preds_group = get_valid_group_preds(groups, i, locked_windows)
 
         if preds_group:
@@ -667,16 +665,16 @@ def simulate_engine(numbers, groups):
         if signal:
             if groups[i] == vote_group:
                 phase_hit_group = 1
-                phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
                 raw_signal_pnl_group = WIN_GROUP
+                phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
             else:
                 phase_hit_group = 0
-                phase_pnl_group = LOSS_GROUP * PHASE_BET_UNIT
                 raw_signal_pnl_group = LOSS_GROUP
+                phase_pnl_group = LOSS_GROUP * PHASE_BET_UNIT
         else:
             phase_hit_group = None
-            phase_pnl_group = 0.0
             raw_signal_pnl_group = 0.0
+            phase_pnl_group = 0.0
 
         distance = i - last_live_trade_idx
 
@@ -723,10 +721,10 @@ def simulate_engine(numbers, groups):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_live_profit_group <= PHASE_STOP_LOSS:
+        if phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
-            relock_reason_now = "PHASE_LIVE_GROUP_STOP_LOSS"
-            state = "AUTO_RELOCK_LIVE_GROUP_LOSS"
+            relock_reason_now = "PHASE_BET_GROUP_STOP_LOSS"
+            state = "AUTO_RELOCK_PHASE_BET_GROUP_LOSS"
 
         phase_age = round_no - phase_start_round + 1
 
@@ -734,10 +732,10 @@ def simulate_engine(numbers, groups):
             not relock_triggered_now
             and ENABLE_TIMEOUT_RELOCK
             and phase_age >= TIMEOUT_RELOCK_ROUNDS
-            and phase_live_profit_group <= 0
+            and phase_profit_group <= 0
         ):
             relock_triggered_now = True
-            relock_reason_now = "TIMEOUT_RELOCK_LIVE_GROUP_NOT_POSITIVE"
+            relock_reason_now = "TIMEOUT_RELOCK_PHASE_BET_NOT_POSITIVE"
             state = "AUTO_RELOCK_TIMEOUT"
 
         history_rows.append(
@@ -752,24 +750,20 @@ def simulate_engine(numbers, groups):
                 "vote_group": vote_group,
                 "confidence_group": confidence_group,
                 "signal": signal,
-
                 "PHASE_BET": signal,
                 "phase_bet_group": vote_group if signal else None,
                 "phase_hit_group": phase_hit_group,
                 "phase_pnl_group": phase_pnl_group,
                 "phase_profit_group": phase_profit_group,
                 "total_phase_profit_group": total_phase_profit_group,
-
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
                 "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
-
                 "LIVE_BET": live_trade,
                 "live_bet_group": vote_group if live_trade else None,
                 "live_hit_group": live_hit_group,
                 "live_pnl_group": live_pnl_group,
                 "phase_live_profit_group": phase_live_profit_group,
                 "total_profit_group": total_profit_group,
-
                 "phase_age": phase_age,
                 "state": state,
                 "locked_windows": ", ".join(map(str, locked_windows)),
@@ -902,6 +896,10 @@ groups = [group_of(n) for n in numbers]
 if len(groups) < LOCK_ROUND_START:
     st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
     st.stop()
+
+if st.sidebar.button("Clear cache & rerun"):
+    st.cache_data.clear()
+    st.rerun()
 
 sim = cached_simulate_engine(tuple(numbers))
 hist = sim["hist"]
@@ -1054,6 +1052,7 @@ st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
 st.write("Relock Count:", relock_count)
+st.write("Relock Rule:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
 st.write("Previous Signal Round In Phase:", last_signal_round_in_phase)
 st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
 st.write("State:", next_state)
@@ -1120,24 +1119,20 @@ history_cols = [
     "vote_group",
     "confidence_group",
     "signal",
-
     "PHASE_BET",
     "phase_bet_group",
     "phase_hit_group",
     "phase_pnl_group",
     "phase_profit_group",
     "total_phase_profit_group",
-
     "prev_signal_round_in_phase",
     "prev_signal_pnl_in_phase",
-
     "LIVE_BET",
     "live_bet_group",
     "live_hit_group",
     "live_pnl_group",
     "phase_live_profit_group",
     "total_profit_group",
-
     "state",
     "locked_windows",
     "relock_triggered_now",
