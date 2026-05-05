@@ -1,5 +1,6 @@
 import time
 from collections import Counter
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -10,8 +11,9 @@ st_autorefresh(interval=5000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 LOCK_ROUND_END = 180
+
 WINDOW_MIN = 6
-WINDOW_MAX = 20
+WINDOW_MAX = 22
 TOP_WINDOWS = 4
 VOTE_REQUIRED = 3
 
@@ -25,6 +27,10 @@ def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&t={time.time()}"
     df = pd.read_csv(url)
     df.columns = [c.lower().strip() for c in df.columns]
+
+    if "number" not in df.columns:
+        raise ValueError("Sheet phải có cột number")
+
     nums = pd.to_numeric(df["number"], errors="coerce").dropna().astype(int).tolist()
     return [x for x in nums if 1 <= x <= 12]
 
@@ -41,6 +47,7 @@ def group_of(n):
 
 def get_valid_preds(groups, i, windows):
     preds = []
+
     for w in windows:
         if i - w >= 0 and i - 1 >= 0:
             pred = groups[i - w]
@@ -106,10 +113,8 @@ def run_engine(numbers):
 
     hist = []
 
-    paper_profit_total = 0.0
-    phase_paper_profit = 0.0
+    paper_profit = 0.0
     live_profit = 0.0
-
     last_live_trade_idx = -999999
 
     for i in range(LOCK_ROUND_END, len(groups)):
@@ -123,16 +128,19 @@ def run_engine(numbers):
             confidence = 0
             signal = False
 
-        # Profit phase TRƯỚC ván hiện tại
-        prev_phase_profit = phase_paper_profit
+        # Lấy signal_pnl của ván trước
+        prev_signal_pnl = float(hist[-1]["signal_pnl"]) if len(hist) > 0 else 0.0
 
         distance = i - last_live_trade_idx
 
-        # RULE CHUẨN:
-        # Ván hiện tại chỉ live bet nếu phase profit trước đó > 0
+        # LIVE RULE CHUẨN
+        # Ván hiện tại chỉ BET nếu:
+        # 1. Ván hiện tại có signal
+        # 2. Ván trước signal thắng
+        # 3. Qua GAP
         live_trade = (
             signal
-            and prev_phase_profit > 0
+            and prev_signal_pnl > 0
             and distance >= GAP
         )
 
@@ -147,6 +155,8 @@ def run_engine(numbers):
         else:
             signal_hit = None
             signal_pnl = 0.0
+
+        paper_profit += signal_pnl
 
         # Live profit chỉ tính khi live_trade = True
         if live_trade:
@@ -164,10 +174,6 @@ def run_engine(numbers):
             live_hit = None
             live_pnl = 0.0
 
-        # Sau khi quyết định xong mới cộng signal_pnl vào phase
-        phase_paper_profit += signal_pnl
-        paper_profit_total += signal_pnl
-
         hist.append({
             "round": i + 1,
             "number": numbers[i],
@@ -176,20 +182,19 @@ def run_engine(numbers):
             "vote": vote,
             "confidence": confidence,
             "valid_preds": preds,
+
             "signal": signal,
             "signal_hit": signal_hit,
             "signal_pnl": signal_pnl,
-
-            "prev_phase_profit": prev_phase_profit,
-            "phase_paper_profit": phase_paper_profit,
-            "paper_profit_total": paper_profit_total,
+            "prev_signal_pnl": prev_signal_pnl,
+            "paper_profit": paper_profit,
 
             "live_trade": live_trade,
             "live_hit": live_hit,
             "live_pnl": live_pnl,
             "live_profit": live_profit,
 
-            "profit_gap": paper_profit_total - live_profit,
+            "profit_gap": paper_profit - live_profit,
         })
 
     return pd.DataFrame(hist), windows, scan_df
@@ -204,7 +209,9 @@ if hist is None:
     st.error(f"Chưa đủ dữ liệu. Hiện có {len(numbers)}, cần tối thiểu {LOCK_ROUND_END}.")
     st.stop()
 
+# =========================
 # NEXT ROUND
+# =========================
 i = len(groups)
 preds = get_valid_preds(groups, i, windows)
 
@@ -216,7 +223,7 @@ else:
     next_confidence = 0
     next_signal = False
 
-prev_phase_profit = float(hist.iloc[-1]["phase_paper_profit"]) if not hist.empty else 0.0
+prev_signal_pnl = float(hist.iloc[-1]["signal_pnl"]) if not hist.empty else 0.0
 
 last_live_rows = hist[hist["live_trade"] == True]
 last_live_round = int(last_live_rows["round"].max()) if len(last_live_rows) > 0 else -999999
@@ -226,11 +233,14 @@ distance = next_round - last_live_round
 
 can_bet = (
     next_signal
-    and prev_phase_profit > 0
+    and prev_signal_pnl > 0
     and distance >= GAP
 )
 
-st.title("SAFE LIVE ENGINE - PHASE PROFIT FILTER")
+# =========================
+# UI
+# =========================
+st.title("SAFE LIVE ENGINE - PREVIOUS SIGNAL WIN FILTER")
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Current Number", numbers[-1])
@@ -241,7 +251,7 @@ st.write("Windows:", windows)
 st.write("Valid Preds:", preds)
 st.write("Signal:", next_signal)
 st.write("Vote Strength:", next_confidence)
-st.write("Previous Phase Profit:", prev_phase_profit)
+st.write("Previous Signal PNL:", prev_signal_pnl)
 st.write("Distance:", distance)
 st.write("Can Bet:", can_bet)
 
@@ -253,9 +263,9 @@ else:
 st.subheader("Profit Compare")
 
 p1, p2, p3, p4 = st.columns(4)
-p1.metric("Paper Total Profit", round(float(hist["paper_profit_total"].iloc[-1]), 2))
-p2.metric("Phase Paper Profit", round(float(hist["phase_paper_profit"].iloc[-1]), 2))
-p3.metric("Live Profit", round(float(hist["live_profit"].iloc[-1]), 2))
+p1.metric("Paper Profit", round(float(hist["paper_profit"].iloc[-1]), 2))
+p2.metric("Live Profit", round(float(hist["live_profit"].iloc[-1]), 2))
+p3.metric("Profit Gap", round(float(hist["profit_gap"].iloc[-1]), 2))
 p4.metric("Live Trades", int(hist["live_trade"].sum()))
 
 s1, s2, s3, s4 = st.columns(4)
@@ -269,7 +279,7 @@ s4.metric(
 )
 
 st.subheader("Profit Curve")
-st.line_chart(hist[["paper_profit_total", "phase_paper_profit", "live_profit"]])
+st.line_chart(hist[["paper_profit", "live_profit"]])
 
 with st.expander("Scan Window Detail"):
     st.dataframe(scan_df, use_container_width=True)
@@ -286,9 +296,8 @@ show_cols = [
     "signal",
     "signal_hit",
     "signal_pnl",
-    "prev_phase_profit",
-    "phase_paper_profit",
-    "paper_profit_total",
+    "prev_signal_pnl",
+    "paper_profit",
     "live_trade",
     "live_hit",
     "live_pnl",
