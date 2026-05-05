@@ -31,20 +31,22 @@ LOSS_GROUP = -1.0
 PHASE_BET_UNIT = 1.0
 LIVE_BET_UNIT = 1.0
 
+# ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -4.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
-PHASE_LOSS_STREAK_RELOCK = 2
+ENABLE_TIMEOUT_RELOCK = True
+TIMEOUT_RELOCK_ROUNDS = 60
+
+MIN_PHASE_PROFIT_TO_LIVE = -1.0
+RECENT_PHASE_CHECK = 5
+MIN_RECENT_PHASE_PNL = -2.0
+
+PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
-
-ENABLE_TIMEOUT_RELOCK = True
-TIMEOUT_RELOCK_ROUNDS = 100
-
-MIN_PHASE_PROFIT_TO_LIVE = 0.0
-RECENT_PHASE_CHECK = 3
-MIN_RECENT_PHASE_PNL = -1.0
 
 MIN_FALLBACK_SCORE = -5.0
 
@@ -69,7 +71,7 @@ DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
-SENT_FILE = "/tmp/telegram_sent_phase_live_soft_optimize_2loss.json"
+SENT_FILE = "/tmp/telegram_sent_phase_live_optimized_v2.json"
 
 
 def telegram_enabled():
@@ -272,12 +274,12 @@ def evaluate_window_group(seq_groups, w):
 
     if trades > 0:
         score = (
-            profit
+            profit * 0.8
             + winrate * 8.0
             + np.log(trades + 1) * 1.2
-            + recent_profit * 0.8
-            - abs(max_drawdown) * 0.7
-            + streak_metrics["streak_score"] * 1.2
+            + recent_profit * 1.5
+            - abs(max_drawdown) * 0.8
+            + streak_metrics["streak_score"] * 1.0
         )
     else:
         score = -999999.0
@@ -509,15 +511,15 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             )
 
             final_score = (
-                train_bt["profit_group"]
-                + train_bt["winrate_group"] * 10.0
-                + train_bt["recent_profit_group"]
-                - abs(train_bt["max_drawdown_group"])
-                + train_bt["streak_score"] * 1.5
-                + validate_bt["profit_group"] * 2.0
-                + validate_bt["winrate_group"] * 8.0
-                - abs(validate_bt["max_drawdown_group"])
-                + validate_bt["streak_score"] * 1.5
+                train_bt["profit_group"] * 0.8
+                + train_bt["winrate_group"] * 8.0
+                + train_bt["recent_profit_group"] * 1.5
+                - abs(train_bt["max_drawdown_group"]) * 0.8
+                + train_bt["streak_score"] * 1.0
+                + validate_bt["profit_group"] * 3.0
+                + validate_bt["winrate_group"] * 10.0
+                - abs(validate_bt["max_drawdown_group"]) * 1.5
+                + validate_bt["streak_score"] * 1.0
             )
 
             if final_score > local_fallback_score:
@@ -670,10 +672,21 @@ def simulate_engine(numbers, groups):
             confidence_group = 0
             signal = False
 
+        if len(history_rows) >= RECENT_PHASE_CHECK:
+            recent_phase_pnl = sum(
+                float(x["phase_pnl_group"])
+                for x in history_rows[-RECENT_PHASE_CHECK:]
+                if int(x["phase"]) == phase_index
+            )
+        else:
+            recent_phase_pnl = phase_profit_group
+
+        phase_trade_allowed = signal and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+
         prev_signal_pnl_in_phase = last_signal_pnl_in_phase
         prev_signal_round_in_phase = last_signal_round_in_phase
 
-        if signal:
+        if phase_trade_allowed:
             if groups[i] == vote_group:
                 phase_hit_group = 1
                 raw_signal_pnl_group = WIN_GROUP
@@ -690,15 +703,6 @@ def simulate_engine(numbers, groups):
             phase_pnl_group = 0.0
 
         distance = i - last_live_trade_idx
-
-        if len(history_rows) >= RECENT_PHASE_CHECK:
-            recent_phase_pnl = sum(
-                float(x["phase_pnl_group"])
-                for x in history_rows[-RECENT_PHASE_CHECK:]
-                if int(x["phase"]) == phase_index
-            )
-        else:
-            recent_phase_pnl = phase_profit_group
 
         live_trade = (
             signal
@@ -727,7 +731,9 @@ def simulate_engine(numbers, groups):
             live_hit_group = None
             live_pnl_group = 0.0
 
-            if signal and prev_signal_pnl_in_phase <= 0:
+            if signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
+                state = "PHASE_BLOCKED_RECENT_TOO_WEAK"
+            elif signal and prev_signal_pnl_in_phase <= 0:
                 state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
             elif signal and phase_profit_group < MIN_PHASE_PROFIT_TO_LIVE:
                 state = "PHASE_BET_ONLY_WAIT_PHASE_PROFIT_LOW"
@@ -741,7 +747,7 @@ def simulate_engine(numbers, groups):
         phase_profit_group += phase_pnl_group
         total_phase_profit_group += phase_pnl_group
 
-        if signal:
+        if phase_trade_allowed:
             phase_hits_group.append(phase_hit_group)
             last_signal_pnl_in_phase = raw_signal_pnl_group
             last_signal_round_in_phase = round_no
@@ -749,10 +755,10 @@ def simulate_engine(numbers, groups):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and phase_profit_group < 0:
             relock_triggered_now = True
-            relock_reason_now = "PHASE_2_SIGNAL_LOSS_STREAK"
-            state = "AUTO_RELOCK_2_SIGNAL_LOSS"
+            relock_reason_now = "PHASE_3_SIGNAL_LOSS_AND_NEGATIVE"
+            state = "AUTO_RELOCK_3_SIGNAL_LOSS_NEGATIVE"
 
         elif phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
@@ -783,8 +789,8 @@ def simulate_engine(numbers, groups):
                 "vote_group": vote_group,
                 "confidence_group": confidence_group,
                 "signal": signal,
-                "PHASE_BET": signal,
-                "phase_bet_group": vote_group if signal else None,
+                "PHASE_BET": phase_trade_allowed,
+                "phase_bet_group": vote_group if phase_trade_allowed else None,
                 "phase_hit_group": phase_hit_group,
                 "phase_pnl_group": phase_pnl_group,
                 "phase_profit_group": phase_profit_group,
@@ -1011,12 +1017,17 @@ can_live_bet = (
     and next_round > LOCK_ROUND_END
 )
 
+phase_next_allowed = signal and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
+
 if session_stop:
     signal = False
+    phase_next_allowed = False
     can_live_bet = False
     next_state = session_stop_reason
 elif can_live_bet:
     next_state = "READY_LIVE_BET"
+elif signal and not phase_next_allowed:
+    next_state = "NEXT_PHASE_BLOCKED_RECENT_TOO_WEAK"
 elif signal and last_signal_pnl_in_phase <= 0:
     next_state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
 elif signal and phase_profit_group < MIN_PHASE_PROFIT_TO_LIVE:
@@ -1035,7 +1046,7 @@ if telegram_enabled() and can_live_bet and vote_group is not None:
         f"Current Number: {numbers[-1]}\n"
         f"Current Group: {groups[-1]}\n"
         f"Live Bet Group: {vote_group}\n"
-        f"Phase Bet Group: {vote_group if signal else '-'}\n"
+        f"Phase Bet Group: {vote_group if phase_next_allowed else '-'}\n"
         f"Vote Strength: {confidence_group}/{vote_required}\n"
         f"Prev Signal Round: {last_signal_round_in_phase}\n"
         f"Prev Signal PNL: {last_signal_pnl_in_phase}\n"
@@ -1047,7 +1058,7 @@ if telegram_enabled() and can_live_bet and vote_group is not None:
     )
     send_signal_once("READY", current_round, ready_msg)
 
-st.title("Auto Relock Engine | PHASE BET vs LIVE BET | 2 LOSS RELOCK")
+st.title("Auto Relock Engine | Optimized Phase + Live")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1070,8 +1081,8 @@ st.write("Last State:", str(last["state"]))
 st.subheader("NEXT ROUND BET")
 
 b1, b2, b3, b4 = st.columns(4)
-b1.metric("NEXT PHASE BET", "YES" if signal else "NO")
-b2.metric("NEXT PHASE GROUP", vote_group if signal else "-")
+b1.metric("NEXT PHASE BET", "YES" if phase_next_allowed else "NO")
+b2.metric("NEXT PHASE GROUP", vote_group if phase_next_allowed else "-")
 b3.metric("NEXT LIVE BET", "YES" if can_live_bet else "NO")
 b4.metric("NEXT LIVE GROUP", vote_group if can_live_bet else "-")
 
@@ -1089,7 +1100,7 @@ if can_live_bet and vote_group is not None:
         """,
         unsafe_allow_html=True,
     )
-elif signal and vote_group is not None:
+elif phase_next_allowed and vote_group is not None:
     st.markdown(
         f"""
         <div style="background:#1f77b4;padding:24px;border-radius:14px;text-align:center;
@@ -1129,6 +1140,9 @@ st.write("Phase Profit Now:", phase_profit_group)
 st.write("Phase Consecutive Losses:", phase_consecutive_losses)
 st.write("Relock By Loss Streak:", f"{phase_consecutive_losses}/{PHASE_LOSS_STREAK_RELOCK}")
 st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
+st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
+st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
+st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
 st.write("Can Live Bet:", can_live_bet)
 st.write("Next State:", next_state)
 
@@ -1144,8 +1158,9 @@ st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
-st.write("Relock Rule 1:", f"phase_consecutive_losses >= {PHASE_LOSS_STREAK_RELOCK}")
+st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND phase_profit < 0")
 st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
+st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase profit <= 0")
 st.write("Telegram Enabled:", telegram_enabled())
 
 st.subheader("Profit Compare")
