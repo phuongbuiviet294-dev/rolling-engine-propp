@@ -11,6 +11,9 @@ from streamlit_autorefresh import st_autorefresh
 
 st_autorefresh(interval=5000, key="refresh")
 
+# =========================
+# CONFIG
+# =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 LOCK_ROUND_START = 168
@@ -23,7 +26,7 @@ MODES = [
     {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
-GAP = 1
+GAP = 0
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
@@ -64,9 +67,12 @@ DEFAULT_CHAT_ID = "6655585286"
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
 
-SENT_FILE = "/tmp/telegram_sent_rounds_live_bet_prev_round_fix.json"
+SENT_FILE = "/tmp/telegram_sent_rounds_live_bet_last_signal_fix.json"
 
 
+# =========================
+# TELEGRAM
+# =========================
 def telegram_enabled():
     return bool(BOT_TOKEN and CHAT_ID)
 
@@ -118,6 +124,9 @@ def send_signal_once(signal_name, current_round, msg):
     return ok
 
 
+# =========================
+# DATA
+# =========================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
@@ -160,13 +169,19 @@ def color_text(c):
     return "-"
 
 
+# =========================
+# PREDICT LOGIC
+# =========================
 def get_valid_group_preds(seq_groups, i, windows):
     preds = []
     for w in windows:
         if i - w >= 0 and i - 1 >= 0:
             pred = seq_groups[i - w]
+
+            # Logic scan/live giống nhau
             if seq_groups[i - 1] != pred:
                 preds.append(pred)
+
     return preds
 
 
@@ -178,6 +193,9 @@ def get_color_preds(seq_colors, i, windows):
     return preds
 
 
+# =========================
+# METRICS
+# =========================
 def compute_profit_path(results, win_value, loss_value):
     p = 0.0
     out = []
@@ -267,6 +285,9 @@ def compute_streak_metrics(results):
     }
 
 
+# =========================
+# WINDOW SCAN
+# =========================
 def evaluate_window_group(seq_groups, w):
     profit = 0.0
     trades = 0
@@ -609,6 +630,9 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
+# =========================
+# ENGINE
+# =========================
 def simulate_engine(numbers, groups, colors):
     result = {
         "hist": pd.DataFrame(),
@@ -640,6 +664,8 @@ def simulate_engine(numbers, groups, colors):
         "phase_summary_df": pd.DataFrame(),
         "phase_signal_profit": 0.0,
         "phase_start_round": None,
+        "last_signal_pnl_in_phase": 0.0,
+        "last_signal_round_in_phase": None,
     }
 
     (
@@ -671,6 +697,10 @@ def simulate_engine(numbers, groups, colors):
     total_hits_color = []
 
     last_trade = -999999
+
+    last_signal_pnl_in_phase = 0.0
+    last_signal_round_in_phase = None
+
     phase_index = 1
     relock_count = 0
     last_relock_trigger_round = None
@@ -717,20 +747,15 @@ def simulate_engine(numbers, groups, colors):
         final_vote_group = vote_group
         final_vote_color = vote_color
 
-        # FIX CHÍNH: lấy đúng ván liền kề trước đó trong cùng phase
-        if len(history_rows) > 0 and int(history_rows[-1]["phase"]) == phase_index:
-            prev_round_signal = bool(history_rows[-1]["signal"])
-            prev_round_signal_pnl = float(history_rows[-1]["signal_pnl_group"])
-        else:
-            prev_round_signal = False
-            prev_round_signal_pnl = 0.0
+        # FIX: dùng signal gần nhất trong phase, không dùng round liền kề
+        prev_signal_pnl_in_phase = last_signal_pnl_in_phase
+        prev_signal_round_in_phase = last_signal_round_in_phase
 
         distance = i - last_trade
 
         can_trade_group = (
             final_signal
-            and prev_round_signal
-            and prev_round_signal_pnl > 0
+            and prev_signal_pnl_in_phase > 0
             and distance >= GAP
             and round_no > LOCK_ROUND_END
         )
@@ -797,10 +822,8 @@ def simulate_engine(numbers, groups, colors):
 
             state = "LIVE_BET"
         else:
-            if final_signal and not prev_round_signal:
-                state = "WAIT_PREV_ROUND_NO_SIGNAL"
-            elif final_signal and prev_round_signal_pnl <= 0:
-                state = "WAIT_PREV_ROUND_SIGNAL_LOSS"
+            if final_signal and prev_signal_pnl_in_phase <= 0:
+                state = "WAIT_PREV_SIGNAL_IN_PHASE_NOT_POSITIVE"
             elif final_signal:
                 state = "SIGNAL_ONLY"
             else:
@@ -808,6 +831,11 @@ def simulate_engine(numbers, groups, colors):
 
         phase_signal_profit += signal_pnl_group
         total_signal_profit += signal_pnl_group
+
+        # Sau khi tính xong signal hiện tại mới update signal gần nhất trong phase
+        if final_signal:
+            last_signal_pnl_in_phase = signal_pnl_group
+            last_signal_round_in_phase = round_no
 
         relock_triggered_now = False
         relock_reason_now = None
@@ -852,8 +880,8 @@ def simulate_engine(numbers, groups, colors):
                 "signal": final_signal,
                 "signal_hit_group": signal_hit_group,
                 "signal_pnl_group": signal_pnl_group,
-                "prev_round_signal": prev_round_signal,
-                "prev_round_signal_pnl": prev_round_signal_pnl,
+                "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
+                "prev_signal_round_in_phase": prev_signal_round_in_phase,
                 "phase_signal_profit": phase_signal_profit,
                 "total_signal_profit": total_signal_profit,
                 "trade": trade,
@@ -942,6 +970,8 @@ def simulate_engine(numbers, groups, colors):
                 phase_hits_color = []
 
                 phase_signal_profit = 0.0
+                last_signal_pnl_in_phase = 0.0
+                last_signal_round_in_phase = None
 
                 last_trade = i
 
@@ -989,6 +1019,8 @@ def simulate_engine(numbers, groups, colors):
             "phase_summary_df": phase_summary_df,
             "phase_signal_profit": phase_signal_profit,
             "phase_start_round": phase_start_round,
+            "last_signal_pnl_in_phase": last_signal_pnl_in_phase,
+            "last_signal_round_in_phase": last_signal_round_in_phase,
         }
     )
 
@@ -1003,6 +1035,9 @@ def cached_simulate_engine(numbers_tuple):
     return simulate_engine(nums, grps, cols)
 
 
+# =========================
+# RUN
+# =========================
 numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
@@ -1049,6 +1084,8 @@ last_relock_trigger_round = sim["last_relock_trigger_round"]
 phase_summary_df = sim["phase_summary_df"]
 phase_signal_profit = sim["phase_signal_profit"]
 phase_start_round = sim["phase_start_round"]
+last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
+last_signal_round_in_phase = sim["last_signal_round_in_phase"]
 
 live_rows = hist.copy()
 live_rows["live_ready"] = live_rows["trade"].astype(bool)
@@ -1064,7 +1101,9 @@ live_wr_group = (
     else 0.0
 )
 
-# NEXT ROUND
+# =========================
+# NEXT ROUND LIVE BET
+# =========================
 next_idx = len(groups)
 next_round = len(groups) + 1
 current_round = len(numbers)
@@ -1091,13 +1130,8 @@ current_color = colors[-1] if colors else None
 signal = confidence_group >= vote_required if vote_group is not None else False
 color_signal = confidence_color >= vote_required if vote_color is not None else False
 
-# NEXT FIX: lấy đúng ván liền kề trước đó trong cùng phase
-if not hist.empty and int(hist.iloc[-1]["phase"]) == phase_index:
-    prev_round_signal = bool(hist.iloc[-1]["signal"])
-    prev_round_signal_pnl = float(hist.iloc[-1]["signal_pnl_group"])
-else:
-    prev_round_signal = False
-    prev_round_signal_pnl = 0.0
+prev_signal_pnl_in_phase = last_signal_pnl_in_phase
+prev_signal_round_in_phase = last_signal_round_in_phase
 
 last_trade_rows = hist[hist["trade"] == True]
 if len(last_trade_rows) > 0:
@@ -1112,8 +1146,7 @@ final_vote_color = vote_color
 
 can_bet_group = (
     signal
-    and prev_round_signal
-    and prev_round_signal_pnl > 0
+    and prev_signal_pnl_in_phase > 0
     and distance >= GAP
     and next_round > LOCK_ROUND_END
 )
@@ -1129,10 +1162,8 @@ if session_stop:
     next_state = session_stop_reason
 elif can_bet:
     next_state = "READY"
-elif signal and not prev_round_signal:
-    next_state = "WAIT_PREV_ROUND_NO_SIGNAL"
-elif signal and prev_round_signal_pnl <= 0:
-    next_state = "WAIT_PREV_ROUND_SIGNAL_LOSS"
+elif signal and prev_signal_pnl_in_phase <= 0:
+    next_state = "WAIT_PREV_SIGNAL_IN_PHASE_NOT_POSITIVE"
 elif not signal:
     next_state = "WAIT_NO_SIGNAL"
 else:
@@ -1151,8 +1182,8 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         f"Bet Color: {color_text(final_vote_color) if ENABLE_DOUBLE_BET_COLOR else 'OFF'}\n"
         f"Mode: {selected_mode['name'] if selected_mode else '-'}\n"
         f"Vote Group Strength: {confidence_group}/{vote_required}\n"
-        f"Previous Round Signal: {prev_round_signal}\n"
-        f"Previous Round Signal PNL: {prev_round_signal_pnl}\n"
+        f"Prev Signal Round In Phase: {prev_signal_round_in_phase}\n"
+        f"Prev Signal PNL In Phase: {prev_signal_pnl_in_phase}\n"
         f"Live Profit Group: {live_profit_group}\n"
         f"Total Profit Group: {total_profit_group}\n"
         f"Total Profit All: {total_profit_all}"
@@ -1164,7 +1195,10 @@ if telegram_enabled() and can_bet and final_vote_group is not None:
         msg=ready_msg,
     )
 
-st.title("Auto Relock Engine | LIVE BET PREV ROUND FIX")
+# =========================
+# UI
+# =========================
+st.title("Auto Relock Engine | LIVE BET LAST SIGNAL FIX")
 
 st.subheader("LIVE BET NOW")
 
@@ -1172,7 +1206,7 @@ b1, b2, b3, b4 = st.columns(4)
 b1.metric("LIVE STATUS", "READY" if can_bet else "WAIT")
 b2.metric("BET GROUP", final_vote_group if can_bet else "-")
 b3.metric("Vote Strength", f"{confidence_group}/{vote_required}")
-b4.metric("Prev Round PNL", prev_round_signal_pnl)
+b4.metric("Prev Signal PNL", prev_signal_pnl_in_phase)
 
 if can_bet and final_vote_group is not None:
     st.markdown(
@@ -1182,7 +1216,7 @@ if can_bet and final_vote_group is not None:
         READY BET<br>
         GROUP {final_vote_group}<br>
         VOTE {confidence_group}/{vote_required}<br>
-        PREV ROUND SIGNAL PNL = {prev_round_signal_pnl}
+        PREV SIGNAL PNL IN PHASE = {prev_signal_pnl_in_phase}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1195,8 +1229,8 @@ else:
         WAIT<br>
         STATE: {next_state}<br>
         SIGNAL = {signal}<br>
-        PREV ROUND SIGNAL = {prev_round_signal}<br>
-        PREV ROUND PNL = {prev_round_signal_pnl}
+        PREV SIGNAL ROUND = {prev_signal_round_in_phase}<br>
+        PREV SIGNAL PNL = {prev_signal_pnl_in_phase}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1218,8 +1252,8 @@ st.write("Window Range:", f'{selected_mode["window_min"]}-{selected_mode["window
 st.write("Group Vote Strength:", confidence_group)
 st.write("Color Vote Strength:", confidence_color)
 st.write("Signal:", signal)
-st.write("Previous Round Signal:", prev_round_signal)
-st.write("Previous Round Signal PNL:", prev_round_signal_pnl)
+st.write("Prev Signal Round In Phase:", prev_signal_round_in_phase)
+st.write("Prev Signal PNL In Phase:", prev_signal_pnl_in_phase)
 st.write("Phase Signal Profit:", phase_signal_profit)
 st.write("Total Signal Profit:", total_signal_profit)
 st.write("Can Bet:", can_bet)
@@ -1306,8 +1340,8 @@ history_cols = [
     "signal",
     "signal_hit_group",
     "signal_pnl_group",
-    "prev_round_signal",
-    "prev_round_signal_pnl",
+    "prev_signal_round_in_phase",
+    "prev_signal_pnl_in_phase",
     "phase_signal_profit",
     "total_signal_profit",
     "trade",
@@ -1335,8 +1369,8 @@ with st.expander("Live Bet History"):
         "vote_group",
         "confidence_group",
         "signal",
-        "prev_round_signal",
-        "prev_round_signal_pnl",
+        "prev_signal_round_in_phase",
+        "prev_signal_pnl_in_phase",
         "trade",
         "bet_group",
         "hit_group",
