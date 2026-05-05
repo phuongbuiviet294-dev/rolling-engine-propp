@@ -583,6 +583,652 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
+    def simulate_engine(numbers, groups):
+    result = {
+        "hist": pd.DataFrame(),
+        "phase_profit_group": 0.0,
+        "phase_live_profit_group": 0.0,
+        "total_profit_group": 0.0,
+        "total_phase_profit_group": 0.0,
+        "locked_windows": [],
+        "selected_lock_round": None,
+        "selected_mode": None,
+        "lock_mode": "",
+        "scan_df_all": pd.DataFrame(),
+        "scan_df_filtered": pd.DataFrame(),
+        "round_eval_df": pd.DataFrame(),
+        "lock_scan_start": None,
+        "lock_scan_end": None,
+        "phase_index": 1,
+        "phase_summary_df": pd.DataFrame(),
+        "relock_count": 0,
+        "session_stop": False,
+        "session_stop_reason": None,
+        "last_signal_pnl_in_phase": 0.0,
+        "last_signal_round_in_phase": None,
+    }
+
+    (
+        selected_lock_round,
+        locked_windows,
+        selected_mode,
+        scan_df_all,
+        scan_df_filtered,
+        round_eval_df,
+        lock_mode,
+    ) = find_best_auto_mode_in_range(groups, LOCK_ROUND_START, LOCK_ROUND_END)
+
+    if selected_lock_round is None or selected_mode is None:
+        return result
+
+    phase_profit_group = 0.0
+    phase_live_profit_group = 0.0
+    total_profit_group = 0.0
+    total_phase_profit_group = 0.0
+
+    phase_hits_group = []
+    live_hits_group = []
+
+    last_signal_pnl_in_phase = 0.0
+    last_signal_round_in_phase = None
+    last_live_trade_idx = -999999
+
+    phase_index = 1
+    relock_count = 0
+
+    lock_scan_start = LOCK_ROUND_START
+    lock_scan_end = LOCK_ROUND_END
+
+    history_rows = []
+    phase_summary_rows = []
+
+    start_replay = max(LOCK_ROUND_END, REPLAY_FROM)
+    phase_start_round = start_replay + 1
+    current_mode = selected_mode
+
+    for i in range(start_replay, len(groups)):
+        round_no = i + 1
+
+        if total_profit_group >= SESSION_STOP_WIN:
+            break
+        if total_profit_group <= SESSION_STOP_LOSS:
+            break
+
+        vote_required = current_mode["vote_required"]
+        preds_group = get_valid_group_preds(groups, i, locked_windows)
+
+        if preds_group:
+            vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+            signal = confidence_group >= vote_required
+        else:
+            vote_group = None
+            confidence_group = 0
+            signal = False
+
+        prev_signal_pnl_in_phase = last_signal_pnl_in_phase
+        prev_signal_round_in_phase = last_signal_round_in_phase
+
+        if signal:
+            if groups[i] == vote_group:
+                phase_hit_group = 1
+                raw_signal_pnl_group = WIN_GROUP
+                phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
+            else:
+                phase_hit_group = 0
+                raw_signal_pnl_group = LOSS_GROUP
+                phase_pnl_group = LOSS_GROUP * PHASE_BET_UNIT
+        else:
+            phase_hit_group = None
+            raw_signal_pnl_group = 0.0
+            phase_pnl_group = 0.0
+
+        distance = i - last_live_trade_idx
+
+        if len(history_rows) >= RECENT_PHASE_CHECK:
+            recent_phase_pnl = sum(
+                float(x["phase_pnl_group"])
+                for x in history_rows[-RECENT_PHASE_CHECK:]
+                if int(x["phase"]) == phase_index
+            )
+        else:
+            recent_phase_pnl = phase_profit_group
+
+        live_trade = (
+            signal
+            and prev_signal_pnl_in_phase > 0
+            and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
+            and recent_phase_pnl >= MIN_RECENT_PHASE_PNL
+            and distance >= GAP
+            and round_no > LOCK_ROUND_END
+        )
+
+        if live_trade:
+            last_live_trade_idx = i
+
+            if groups[i] == vote_group:
+                live_hit_group = 1
+                live_pnl_group = WIN_GROUP * LIVE_BET_UNIT
+            else:
+                live_hit_group = 0
+                live_pnl_group = LOSS_GROUP * LIVE_BET_UNIT
+
+            phase_live_profit_group += live_pnl_group
+            total_profit_group += live_pnl_group
+            live_hits_group.append(live_hit_group)
+            state = "LIVE_BET"
+        else:
+            live_hit_group = None
+            live_pnl_group = 0.0
+
+            if signal and prev_signal_pnl_in_phase <= 0:
+                state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
+            elif signal and phase_profit_group < MIN_PHASE_PROFIT_TO_LIVE:
+                state = "PHASE_BET_ONLY_WAIT_PHASE_PROFIT_LOW"
+            elif signal and recent_phase_pnl < MIN_RECENT_PHASE_PNL:
+                state = "PHASE_BET_ONLY_WAIT_RECENT_PHASE_WEAK"
+            elif signal:
+                state = "PHASE_BET_ONLY"
+            else:
+                state = "WAIT_NO_SIGNAL"
+
+        phase_profit_group += phase_pnl_group
+        total_phase_profit_group += phase_pnl_group
+
+        if signal:
+            phase_hits_group.append(phase_hit_group)
+            last_signal_pnl_in_phase = raw_signal_pnl_group
+            last_signal_round_in_phase = round_no
+
+        relock_triggered_now = False
+        relock_reason_now = None
+
+        if phase_profit_group <= PHASE_STOP_LOSS:
+            relock_triggered_now = True
+            relock_reason_now = "PHASE_BET_GROUP_STOP_LOSS"
+            state = "AUTO_RELOCK_PHASE_BET_GROUP_LOSS"
+
+        phase_age = round_no - phase_start_round + 1
+
+        if (
+            not relock_triggered_now
+            and ENABLE_TIMEOUT_RELOCK
+            and phase_age >= TIMEOUT_RELOCK_ROUNDS
+            and phase_profit_group <= 0
+        ):
+            relock_triggered_now = True
+            relock_reason_now = "TIMEOUT_RELOCK_PHASE_BET_NOT_POSITIVE"
+            state = "AUTO_RELOCK_TIMEOUT"
+
+        history_rows.append(
+            {
+                "phase": phase_index,
+                "round": round_no,
+                "number": numbers[i],
+                "group": groups[i],
+                "mode": current_mode["name"],
+                "vote_required": vote_required,
+                "top_windows": current_mode["top_windows"],
+                "vote_group": vote_group,
+                "confidence_group": confidence_group,
+                "signal": signal,
+                "PHASE_BET": signal,
+                "phase_bet_group": vote_group if signal else None,
+                "phase_hit_group": phase_hit_group,
+                "phase_pnl_group": phase_pnl_group,
+                "phase_profit_group": phase_profit_group,
+                "recent_phase_pnl": recent_phase_pnl,
+                "total_phase_profit_group": total_phase_profit_group,
+                "prev_signal_round_in_phase": prev_signal_round_in_phase,
+                "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
+                "LIVE_BET": live_trade,
+                "live_bet_group": vote_group if live_trade else None,
+                "live_hit_group": live_hit_group,
+                "live_pnl_group": live_pnl_group,
+                "phase_live_profit_group": phase_live_profit_group,
+                "total_profit_group": total_profit_group,
+                "phase_age": phase_age,
+                "state": state,
+                "locked_windows": ", ".join(map(str, locked_windows)),
+                "lock_mode": lock_mode,
+                "lock_scan_start": lock_scan_start,
+                "lock_scan_end": lock_scan_end,
+                "relock_triggered_now": relock_triggered_now,
+                "relock_reason": relock_reason_now,
+            }
+        )
+
+        if relock_triggered_now:
+            phase_summary_rows.append(
+                {
+                    "phase": phase_index,
+                    "start_round": phase_start_round,
+                    "end_round": round_no,
+                    "reason": relock_reason_now,
+                    "mode": current_mode["name"],
+                    "vote_required": vote_required,
+                    "top_windows": current_mode["top_windows"],
+                    "locked_windows": ", ".join(map(str, locked_windows)),
+                    "lock_mode": lock_mode,
+                    "lock_scan_start": lock_scan_start,
+                    "lock_scan_end": lock_scan_end,
+                    "lock_round": selected_lock_round,
+                    "phase_age": phase_age,
+                    "phase_bet_trades": len(phase_hits_group),
+                    "phase_bet_profit": phase_profit_group,
+                    "phase_bet_wr": round(np.mean(phase_hits_group) * 100, 2) if phase_hits_group else 0.0,
+                    "live_trades": len(live_hits_group),
+                    "live_profit": phase_live_profit_group,
+                    "live_wr": round(np.mean(live_hits_group) * 100, 2) if live_hits_group else 0.0,
+                    "total_live_profit_after_phase": total_profit_group,
+                    "total_phase_profit_after_phase": total_phase_profit_group,
+                }
+            )
+
+            scan_end = i
+            scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
+
+            (
+                new_selected_lock_round,
+                new_locked_windows,
+                new_selected_mode,
+                new_scan_df_all,
+                new_scan_df_filtered,
+                new_round_eval_df,
+                new_lock_mode,
+            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end)
+
+            if new_selected_lock_round is not None and new_selected_mode is not None:
+                relock_count += 1
+
+                locked_windows = new_locked_windows
+                selected_lock_round = round_no
+                selected_mode = new_selected_mode
+                current_mode = new_selected_mode
+                scan_df_all = new_scan_df_all
+                scan_df_filtered = new_scan_df_filtered
+                round_eval_df = new_round_eval_df
+                lock_mode = new_lock_mode
+                lock_scan_start = scan_start
+                lock_scan_end = scan_end
+
+                phase_index += 1
+                phase_start_round = round_no + 1
+
+                phase_profit_group = 0.0
+                phase_live_profit_group = 0.0
+                phase_hits_group = []
+                live_hits_group = []
+
+                last_signal_pnl_in_phase = 0.0
+                last_signal_round_in_phase = None
+                last_live_trade_idx = i
+
+    hist = pd.DataFrame(history_rows)
+    phase_summary_df = pd.DataFrame(phase_summary_rows)
+
+    session_stop = total_profit_group >= SESSION_STOP_WIN or total_profit_group <= SESSION_STOP_LOSS
+
+    session_stop_reason = (
+        "SESSION_STOP_WIN"
+        if total_profit_group >= SESSION_STOP_WIN
+        else "SESSION_STOP_LOSS"
+        if total_profit_group <= SESSION_STOP_LOSS
+        else None
+    )
+
+    result.update(
+        {
+            "hist": hist,
+            "phase_profit_group": phase_profit_group,
+            "phase_live_profit_group": phase_live_profit_group,
+            "total_profit_group": total_profit_group,
+            "total_phase_profit_group": total_phase_profit_group,
+            "locked_windows": locked_windows,
+            "selected_lock_round": selected_lock_round,
+            "selected_mode": selected_mode,
+            "lock_mode": lock_mode,
+            "scan_df_all": scan_df_all,
+            "scan_df_filtered": scan_df_filtered,
+            "round_eval_df": round_eval_df,
+            "lock_scan_start": lock_scan_start,
+            "lock_scan_end": lock_scan_end,
+            "phase_index": phase_index,
+            "phase_summary_df": phase_summary_df,
+            "relock_count": relock_count,
+            "session_stop": session_stop,
+            "session_stop_reason": session_stop_reason,
+            "last_signal_pnl_in_phase": last_signal_pnl_in_phase,
+            "last_signal_round_in_phase": last_signal_round_in_phase,
+        }
+    )
+
+    return result
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def cached_simulate_engine(numbers_tuple):
+    nums = list(numbers_tuple)
+    grps = [group_of(n) for n in nums]
+    return simulate_engine(nums, grps)
+
+
+numbers = load_numbers()
+groups = [group_of(n) for n in numbers]
+
+if len(groups) < LOCK_ROUND_START:
+    st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
+    st.stop()
+
+if st.sidebar.button("Clear cache & rerun"):
+    st.cache_data.clear()
+    st.rerun()
+
+sim = cached_simulate_engine(tuple(numbers))
+hist = sim["hist"]
+
+if hist.empty:
+    st.error("Không tìm được bộ lock phù hợp.")
+    st.stop()
+
+phase_profit_group = sim["phase_profit_group"]
+phase_live_profit_group = sim["phase_live_profit_group"]
+total_profit_group = sim["total_profit_group"]
+total_phase_profit_group = sim["total_phase_profit_group"]
+
+locked_windows = sim["locked_windows"]
+selected_mode = sim["selected_mode"]
+selected_lock_round = sim["selected_lock_round"]
+lock_mode = sim["lock_mode"]
+lock_scan_start = sim["lock_scan_start"]
+lock_scan_end = sim["lock_scan_end"]
+scan_df_all = sim["scan_df_all"]
+round_eval_df = sim["round_eval_df"]
+scan_df_filtered = sim["scan_df_filtered"]
+
+phase_summary_df = sim["phase_summary_df"]
+relock_count = sim["relock_count"]
+session_stop = sim["session_stop"]
+session_stop_reason = sim["session_stop_reason"]
+
+last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
+last_signal_round_in_phase = sim["last_signal_round_in_phase"]
+
+next_idx = len(groups)
+next_round = len(groups) + 1
+current_round = len(numbers)
+
+preds_group = get_valid_group_preds(groups, next_idx, locked_windows)
+
+if preds_group and selected_mode is not None:
+    vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+    vote_required = selected_mode["vote_required"]
+else:
+    vote_group, confidence_group = None, 0
+    vote_required = 0
+
+signal = confidence_group >= vote_required if vote_group is not None else False
+
+last_live_rows = hist[hist["LIVE_BET"] == True]
+if len(last_live_rows) > 0:
+    last_live_round = int(last_live_rows["round"].max())
+else:
+    last_live_round = -999999
+
+distance = next_round - last_live_round
+
+if len(hist) >= RECENT_PHASE_CHECK:
+    current_phase = int(hist.iloc[-1]["phase"])
+    recent_df = hist.iloc[-RECENT_PHASE_CHECK:]
+    recent_phase_pnl_next = float(
+        recent_df[recent_df["phase"] == current_phase]["phase_pnl_group"].sum()
+    )
+else:
+    recent_phase_pnl_next = phase_profit_group
+
+can_live_bet = (
+    signal
+    and last_signal_pnl_in_phase > 0
+    and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
+    and recent_phase_pnl_next >= MIN_RECENT_PHASE_PNL
+    and distance >= GAP
+    and next_round > LOCK_ROUND_END
+)
+
+if session_stop:
+    signal = False
+    can_live_bet = False
+    next_state = session_stop_reason
+elif can_live_bet:
+    next_state = "READY_LIVE_BET"
+elif signal and last_signal_pnl_in_phase <= 0:
+    next_state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
+elif signal and phase_profit_group < MIN_PHASE_PROFIT_TO_LIVE:
+    next_state = "PHASE_BET_ONLY_WAIT_PHASE_PROFIT_LOW"
+elif signal and recent_phase_pnl_next < MIN_RECENT_PHASE_PNL:
+    next_state = "PHASE_BET_ONLY_WAIT_RECENT_PHASE_WEAK"
+elif signal:
+    next_state = "PHASE_BET_ONLY"
+else:
+    next_state = "WAIT_NO_SIGNAL"
+
+if telegram_enabled() and can_live_bet and vote_group is not None:
+    ready_msg = (
+        f"READY LIVE BET\n"
+        f"Round: {current_round}\n"
+        f"Current Number: {numbers[-1]}\n"
+        f"Current Group: {groups[-1]}\n"
+        f"Live Bet Group: {vote_group}\n"
+        f"Phase Bet Group: {vote_group if signal else '-'}\n"
+        f"Vote Strength: {confidence_group}/{vote_required}\n"
+        f"Prev Signal Round: {last_signal_round_in_phase}\n"
+        f"Prev Signal PNL: {last_signal_pnl_in_phase}\n"
+        f"Phase Profit: {phase_profit_group}\n"
+        f"Recent Phase PNL: {recent_phase_pnl_next}\n"
+        f"Total Live Profit: {total_profit_group}\n"
+        f"Total Phase Profit: {total_phase_profit_group}"
+    )
+    send_signal_once("READY", current_round, ready_msg)
+
+st.title("Auto Relock Engine | PHASE BET vs LIVE BET OPTIMIZED")
+
+st.subheader("LAST ROUND RESULT")
+
+last = hist.iloc[-1]
+
+r1, r2, r3, r4 = st.columns(4)
+r1.metric("Last Round", int(last["round"]))
+r2.metric("Last Signal", "YES" if bool(last["signal"]) else "NO")
+r3.metric("Last Phase Bet", "YES" if bool(last["PHASE_BET"]) else "NO")
+r4.metric("Last Live Bet", "YES" if bool(last["LIVE_BET"]) else "NO")
+
+r5, r6, r7, r8 = st.columns(4)
+r5.metric("Last Phase PNL", float(last["phase_pnl_group"]))
+r6.metric("Last Live PNL", float(last["live_pnl_group"]))
+r7.metric("Phase Profit Now", phase_profit_group)
+r8.metric("Live Profit Now", phase_live_profit_group)
+
+st.write("Last State:", str(last["state"]))
+
+st.subheader("NEXT ROUND BET")
+
+b1, b2, b3, b4 = st.columns(4)
+b1.metric("NEXT PHASE BET", "YES" if signal else "NO")
+b2.metric("NEXT PHASE GROUP", vote_group if signal else "-")
+b3.metric("NEXT LIVE BET", "YES" if can_live_bet else "NO")
+b4.metric("NEXT LIVE GROUP", vote_group if can_live_bet else "-")
+
+if can_live_bet and vote_group is not None:
+    st.markdown(
+        f"""
+        <div style="background:#ff3333;padding:26px;border-radius:14px;text-align:center;
+        font-size:32px;color:white;font-weight:bold;">
+        NEXT LIVE READY BET<br>
+        GROUP {vote_group}<br>
+        PREV SIGNAL PNL = {last_signal_pnl_in_phase}<br>
+        PHASE PROFIT NOW = {phase_profit_group}<br>
+        RECENT PHASE PNL = {recent_phase_pnl_next}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+elif signal and vote_group is not None:
+    st.markdown(
+        f"""
+        <div style="background:#1f77b4;padding:24px;border-radius:14px;text-align:center;
+        font-size:28px;color:white;font-weight:bold;">
+        NEXT PHASE BET ONLY<br>
+        GROUP {vote_group}<br>
+        NEXT LIVE WAIT<br>
+        REASON: {next_state}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        f"""
+        <div style="background:#333;padding:22px;border-radius:14px;text-align:center;
+        font-size:26px;color:white;font-weight:bold;">
+        NEXT WAIT<br>
+        STATE: {next_state}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.subheader("NEXT ROUND DEBUG")
+
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("Next Round", next_round)
+d2.metric("Next Signal", "YES" if signal else "NO")
+d3.metric("Vote Strength", f"{confidence_group}/{vote_required}")
+d4.metric("Distance", distance)
+
+st.write("Next Vote Group:", vote_group if vote_group is not None else "-")
+st.write("Previous Signal Round In Phase:", last_signal_round_in_phase)
+st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
+st.write("Phase Profit Now:", phase_profit_group)
+st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
+st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
+st.write("RECENT_PHASE_CHECK:", RECENT_PHASE_CHECK)
+st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
+st.write("Can Live Bet:", can_live_bet)
+st.write("Next State:", next_state)
+
+st.subheader("Lock Info")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Current Number", numbers[-1])
+c2.metric("Current Group", groups[-1])
+c3.metric("Selected Mode", selected_mode["name"] if selected_mode else "-")
+c4.metric("Relock Count", relock_count)
+
+st.write("Locked Windows:", locked_windows)
+st.write("Best Lock Round:", selected_lock_round)
+st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
+st.write("Lock Mode:", lock_mode)
+st.write("Relock Rule:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
+st.write("Telegram Enabled:", telegram_enabled())
+
+st.subheader("Profit Compare")
+
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Phase Current Profit", phase_profit_group)
+p2.metric("Live Current Profit", phase_live_profit_group)
+p3.metric("Total Phase Profit", total_phase_profit_group)
+p4.metric("Total Live Profit", total_profit_group)
+
+st.subheader("Trade Stats")
+
+phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+live_trades = int(hist["LIVE_BET"].sum()) if "LIVE_BET" in hist.columns else 0
+
+phase_wr = (
+    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    if phase_trades > 0
+    else 0
+)
+
+live_wr = (
+    round(hist.loc[hist["LIVE_BET"], "live_hit_group"].mean() * 100, 2)
+    if live_trades > 0
+    else 0
+)
+
+s1, s2, s3, s4 = st.columns(4)
+s1.metric("Phase Trades", phase_trades)
+s2.metric("Phase WR %", phase_wr)
+s3.metric("Live Trades", live_trades)
+s4.metric("Live WR %", live_wr)
+
+st.subheader("Profit Curve")
+
+chart_cols = [
+    "phase_profit_group",
+    "phase_live_profit_group",
+    "total_phase_profit_group",
+    "total_profit_group",
+]
+
+exist_chart_cols = [c for c in chart_cols if c in hist.columns]
+
+if exist_chart_cols:
+    st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
+
+with st.expander("Phase Summary"):
+    st.dataframe(phase_summary_df, use_container_width=True)
+
+with st.expander("Current Locked Window Detail"):
+    if not scan_df_all.empty and locked_windows:
+        st.dataframe(
+            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
+            use_container_width=True,
+        )
+
+if SHOW_DEBUG_TABLES:
+    with st.expander("Round Evaluation"):
+        st.dataframe(round_eval_df, use_container_width=True)
+
+    with st.expander("Filtered Windows"):
+        st.dataframe(scan_df_filtered.head(25), use_container_width=True)
+
+st.subheader("History")
+
+history_cols = [
+    "round",
+    "phase",
+    "number",
+    "group",
+    "vote_group",
+    "confidence_group",
+    "signal",
+    "PHASE_BET",
+    "phase_bet_group",
+    "phase_hit_group",
+    "phase_pnl_group",
+    "phase_profit_group",
+    "recent_phase_pnl",
+    "total_phase_profit_group",
+    "prev_signal_round_in_phase",
+    "prev_signal_pnl_in_phase",
+    "LIVE_BET",
+    "live_bet_group",
+    "live_hit_group",
+    "live_pnl_group",
+    "phase_live_profit_group",
+    "total_profit_group",
+    "state",
+    "locked_windows",
+    "relock_triggered_now",
+    "relock_reason",
+]
+
+show_cols = [c for c in history_cols if c in hist.columns]
+
+st.dataframe(
+    hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS),
+    use_container_width=True,
+)
 
 
 # phần simulate_engine + UI giữ nguyên từ bản bạn đang chạy
