@@ -583,7 +583,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
-    def simulate_engine(numbers, groups):
+    
+def simulate_engine(numbers, groups):
     result = {
         "hist": pd.DataFrame(),
         "phase_profit_group": 0.0,
