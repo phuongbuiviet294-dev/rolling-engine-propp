@@ -10,7 +10,7 @@ st_autorefresh(interval=5000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
-LOCK_ROUND_END = 180
+LOCK_ROUND_END = 174
 
 WINDOW_MIN = 6
 WINDOW_MAX = 22
