@@ -32,7 +32,9 @@ PHASE_BET_UNIT = 1.0
 LIVE_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -3.0
+PHASE_STOP_LOSS = -4.0
+
+PHASE_LOSS_STREAK_RELOCK = 2
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
@@ -40,13 +42,11 @@ SESSION_STOP_LOSS = -200.0
 ENABLE_TIMEOUT_RELOCK = True
 TIMEOUT_RELOCK_ROUNDS = 100
 
-# LIVE mềm hơn để có nhiều lệnh hơn
 MIN_PHASE_PROFIT_TO_LIVE = 0.0
 RECENT_PHASE_CHECK = 3
 MIN_RECENT_PHASE_PNL = -1.0
 
-# Không tắt fallback, chỉ chặn fallback quá xấu
-MIN_FALLBACK_SCORE = -3.0
+MIN_FALLBACK_SCORE = -5.0
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
@@ -69,7 +69,7 @@ DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
-SENT_FILE = "/tmp/telegram_sent_phase_live_soft_optimize.json"
+SENT_FILE = "/tmp/telegram_sent_phase_live_soft_optimize_2loss.json"
 
 
 def telegram_enabled():
@@ -583,7 +583,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
-    
+
+
 def simulate_engine(numbers, groups):
     result = {
         "hist": pd.DataFrame(),
@@ -607,6 +608,7 @@ def simulate_engine(numbers, groups):
         "session_stop_reason": None,
         "last_signal_pnl_in_phase": 0.0,
         "last_signal_round_in_phase": None,
+        "phase_consecutive_losses": 0,
     }
 
     (
@@ -633,6 +635,8 @@ def simulate_engine(numbers, groups):
     last_signal_pnl_in_phase = 0.0
     last_signal_round_in_phase = None
     last_live_trade_idx = -999999
+
+    phase_consecutive_losses = 0
 
     phase_index = 1
     relock_count = 0
@@ -674,10 +678,12 @@ def simulate_engine(numbers, groups):
                 phase_hit_group = 1
                 raw_signal_pnl_group = WIN_GROUP
                 phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
+                phase_consecutive_losses = 0
             else:
                 phase_hit_group = 0
                 raw_signal_pnl_group = LOSS_GROUP
                 phase_pnl_group = LOSS_GROUP * PHASE_BET_UNIT
+                phase_consecutive_losses += 1
         else:
             phase_hit_group = None
             raw_signal_pnl_group = 0.0
@@ -743,7 +749,12 @@ def simulate_engine(numbers, groups):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_profit_group <= PHASE_STOP_LOSS:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            relock_triggered_now = True
+            relock_reason_now = "PHASE_2_SIGNAL_LOSS_STREAK"
+            state = "AUTO_RELOCK_2_SIGNAL_LOSS"
+
+        elif phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
             relock_reason_now = "PHASE_BET_GROUP_STOP_LOSS"
             state = "AUTO_RELOCK_PHASE_BET_GROUP_LOSS"
@@ -777,6 +788,7 @@ def simulate_engine(numbers, groups):
                 "phase_hit_group": phase_hit_group,
                 "phase_pnl_group": phase_pnl_group,
                 "phase_profit_group": phase_profit_group,
+                "phase_consecutive_losses": phase_consecutive_losses,
                 "recent_phase_pnl": recent_phase_pnl,
                 "total_phase_profit_group": total_phase_profit_group,
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
@@ -814,6 +826,7 @@ def simulate_engine(numbers, groups):
                     "lock_scan_end": lock_scan_end,
                     "lock_round": selected_lock_round,
                     "phase_age": phase_age,
+                    "phase_loss_streak": phase_consecutive_losses,
                     "phase_bet_trades": len(phase_hits_group),
                     "phase_bet_profit": phase_profit_group,
                     "phase_bet_wr": round(np.mean(phase_hits_group) * 100, 2) if phase_hits_group else 0.0,
@@ -860,6 +873,7 @@ def simulate_engine(numbers, groups):
                 phase_hits_group = []
                 live_hits_group = []
 
+                phase_consecutive_losses = 0
                 last_signal_pnl_in_phase = 0.0
                 last_signal_round_in_phase = None
                 last_live_trade_idx = i
@@ -900,6 +914,7 @@ def simulate_engine(numbers, groups):
             "session_stop_reason": session_stop_reason,
             "last_signal_pnl_in_phase": last_signal_pnl_in_phase,
             "last_signal_round_in_phase": last_signal_round_in_phase,
+            "phase_consecutive_losses": phase_consecutive_losses,
         }
     )
 
@@ -953,6 +968,7 @@ session_stop_reason = sim["session_stop_reason"]
 
 last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
 last_signal_round_in_phase = sim["last_signal_round_in_phase"]
+phase_consecutive_losses = sim["phase_consecutive_losses"]
 
 next_idx = len(groups)
 next_round = len(groups) + 1
@@ -1024,13 +1040,14 @@ if telegram_enabled() and can_live_bet and vote_group is not None:
         f"Prev Signal Round: {last_signal_round_in_phase}\n"
         f"Prev Signal PNL: {last_signal_pnl_in_phase}\n"
         f"Phase Profit: {phase_profit_group}\n"
+        f"Phase Loss Streak: {phase_consecutive_losses}\n"
         f"Recent Phase PNL: {recent_phase_pnl_next}\n"
         f"Total Live Profit: {total_profit_group}\n"
         f"Total Phase Profit: {total_phase_profit_group}"
     )
     send_signal_once("READY", current_round, ready_msg)
 
-st.title("Auto Relock Engine | PHASE BET vs LIVE BET OPTIMIZED")
+st.title("Auto Relock Engine | PHASE BET vs LIVE BET | 2 LOSS RELOCK")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1046,7 +1063,7 @@ r5, r6, r7, r8 = st.columns(4)
 r5.metric("Last Phase PNL", float(last["phase_pnl_group"]))
 r6.metric("Last Live PNL", float(last["live_pnl_group"]))
 r7.metric("Phase Profit Now", phase_profit_group)
-r8.metric("Live Profit Now", phase_live_profit_group)
+r8.metric("Phase Loss Streak", phase_consecutive_losses)
 
 st.write("Last State:", str(last["state"]))
 
@@ -1109,10 +1126,9 @@ st.write("Next Vote Group:", vote_group if vote_group is not None else "-")
 st.write("Previous Signal Round In Phase:", last_signal_round_in_phase)
 st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
 st.write("Phase Profit Now:", phase_profit_group)
+st.write("Phase Consecutive Losses:", phase_consecutive_losses)
+st.write("Relock By Loss Streak:", f"{phase_consecutive_losses}/{PHASE_LOSS_STREAK_RELOCK}")
 st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
-st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
-st.write("RECENT_PHASE_CHECK:", RECENT_PHASE_CHECK)
-st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
 st.write("Can Live Bet:", can_live_bet)
 st.write("Next State:", next_state)
 
@@ -1128,7 +1144,8 @@ st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
-st.write("Relock Rule:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
+st.write("Relock Rule 1:", f"phase_consecutive_losses >= {PHASE_LOSS_STREAK_RELOCK}")
+st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
 st.write("Telegram Enabled:", telegram_enabled())
 
 st.subheader("Profit Compare")
@@ -1208,6 +1225,7 @@ history_cols = [
     "phase_hit_group",
     "phase_pnl_group",
     "phase_profit_group",
+    "phase_consecutive_losses",
     "recent_phase_pnl",
     "total_phase_profit_group",
     "prev_signal_round_in_phase",
@@ -1230,6 +1248,3 @@ st.dataframe(
     hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS),
     use_container_width=True,
 )
-
-
-# phần simulate_engine + UI giữ nguyên từ bản bạn đang chạy
