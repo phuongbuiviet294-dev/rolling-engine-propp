@@ -40,6 +40,10 @@ SESSION_STOP_LOSS = -200.0
 ENABLE_TIMEOUT_RELOCK = True
 TIMEOUT_RELOCK_ROUNDS = 80
 
+MIN_PHASE_PROFIT_TO_LIVE = 1.5
+RECENT_PHASE_CHECK = 5
+MIN_RECENT_PHASE_PNL = 0.0
+
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
 MIN_WINDOW_SPACING = 5
@@ -61,7 +65,7 @@ DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
-SENT_FILE = "/tmp/telegram_sent_phase_live_final.json"
+SENT_FILE = "/tmp/telegram_sent_phase_live_final_optimize.json"
 
 
 def telegram_enabled():
@@ -678,9 +682,20 @@ def simulate_engine(numbers, groups):
 
         distance = i - last_live_trade_idx
 
+        if len(history_rows) >= RECENT_PHASE_CHECK:
+            recent_phase_pnl = sum(
+                float(x["phase_pnl_group"])
+                for x in history_rows[-RECENT_PHASE_CHECK:]
+                if int(x["phase"]) == phase_index
+            )
+        else:
+            recent_phase_pnl = phase_profit_group
+
         live_trade = (
             signal
             and prev_signal_pnl_in_phase > 0
+            and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
+            and recent_phase_pnl >= MIN_RECENT_PHASE_PNL
             and distance >= GAP
             and round_no > LOCK_ROUND_END
         )
@@ -705,6 +720,10 @@ def simulate_engine(numbers, groups):
 
             if signal and prev_signal_pnl_in_phase <= 0:
                 state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
+            elif signal and phase_profit_group < MIN_PHASE_PROFIT_TO_LIVE:
+                state = "PHASE_BET_ONLY_WAIT_PHASE_PROFIT_LOW"
+            elif signal and recent_phase_pnl < MIN_RECENT_PHASE_PNL:
+                state = "PHASE_BET_ONLY_WAIT_RECENT_PHASE_WEAK"
             elif signal:
                 state = "PHASE_BET_ONLY"
             else:
@@ -755,6 +774,7 @@ def simulate_engine(numbers, groups):
                 "phase_hit_group": phase_hit_group,
                 "phase_pnl_group": phase_pnl_group,
                 "phase_profit_group": phase_profit_group,
+                "recent_phase_pnl": recent_phase_pnl,
                 "total_phase_profit_group": total_phase_profit_group,
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
                 "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
@@ -954,9 +974,20 @@ else:
 
 distance = next_round - last_live_round
 
+if len(hist) >= RECENT_PHASE_CHECK:
+    current_phase = int(hist.iloc[-1]["phase"])
+    recent_df = hist.iloc[-RECENT_PHASE_CHECK:]
+    recent_phase_pnl_next = float(
+        recent_df[recent_df["phase"] == current_phase]["phase_pnl_group"].sum()
+    )
+else:
+    recent_phase_pnl_next = phase_profit_group
+
 can_live_bet = (
     signal
     and last_signal_pnl_in_phase > 0
+    and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
+    and recent_phase_pnl_next >= MIN_RECENT_PHASE_PNL
     and distance >= GAP
     and next_round > LOCK_ROUND_END
 )
@@ -969,6 +1000,10 @@ elif can_live_bet:
     next_state = "READY_LIVE_BET"
 elif signal and last_signal_pnl_in_phase <= 0:
     next_state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
+elif signal and phase_profit_group < MIN_PHASE_PROFIT_TO_LIVE:
+    next_state = "PHASE_BET_ONLY_WAIT_PHASE_PROFIT_LOW"
+elif signal and recent_phase_pnl_next < MIN_RECENT_PHASE_PNL:
+    next_state = "PHASE_BET_ONLY_WAIT_RECENT_PHASE_WEAK"
 elif signal:
     next_state = "PHASE_BET_ONLY"
 else:
@@ -985,30 +1020,51 @@ if telegram_enabled() and can_live_bet and vote_group is not None:
         f"Vote Strength: {confidence_group}/{vote_required}\n"
         f"Prev Signal Round: {last_signal_round_in_phase}\n"
         f"Prev Signal PNL: {last_signal_pnl_in_phase}\n"
+        f"Phase Profit: {phase_profit_group}\n"
+        f"Recent Phase PNL: {recent_phase_pnl_next}\n"
         f"Total Live Profit: {total_profit_group}\n"
         f"Total Phase Profit: {total_phase_profit_group}"
     )
     send_signal_once("READY", current_round, ready_msg)
 
-st.title("Auto Relock Engine | PHASE BET vs LIVE BET")
+st.title("Auto Relock Engine | PHASE BET vs LIVE BET OPTIMIZED")
 
-st.subheader("BET NOW")
+st.subheader("LAST ROUND RESULT")
+
+last = hist.iloc[-1]
+
+r1, r2, r3, r4 = st.columns(4)
+r1.metric("Last Round", int(last["round"]))
+r2.metric("Last Signal", "YES" if bool(last["signal"]) else "NO")
+r3.metric("Last Phase Bet", "YES" if bool(last["PHASE_BET"]) else "NO")
+r4.metric("Last Live Bet", "YES" if bool(last["LIVE_BET"]) else "NO")
+
+r5, r6, r7, r8 = st.columns(4)
+r5.metric("Last Phase PNL", float(last["phase_pnl_group"]))
+r6.metric("Last Live PNL", float(last["live_pnl_group"]))
+r7.metric("Phase Profit Now", phase_profit_group)
+r8.metric("Live Profit Now", phase_live_profit_group)
+
+st.write("Last State:", str(last["state"]))
+
+st.subheader("NEXT ROUND BET")
 
 b1, b2, b3, b4 = st.columns(4)
-b1.metric("PHASE BET", "YES" if signal else "NO")
-b2.metric("PHASE GROUP", vote_group if signal else "-")
-b3.metric("LIVE BET", "YES" if can_live_bet else "NO")
-b4.metric("LIVE GROUP", vote_group if can_live_bet else "-")
+b1.metric("NEXT PHASE BET", "YES" if signal else "NO")
+b2.metric("NEXT PHASE GROUP", vote_group if signal else "-")
+b3.metric("NEXT LIVE BET", "YES" if can_live_bet else "NO")
+b4.metric("NEXT LIVE GROUP", vote_group if can_live_bet else "-")
 
 if can_live_bet and vote_group is not None:
     st.markdown(
         f"""
         <div style="background:#ff3333;padding:26px;border-radius:14px;text-align:center;
         font-size:32px;color:white;font-weight:bold;">
-        LIVE READY BET<br>
+        NEXT LIVE READY BET<br>
         GROUP {vote_group}<br>
-        PHASE BET UNIT = {PHASE_BET_UNIT} | LIVE BET UNIT = {LIVE_BET_UNIT}<br>
-        PREV SIGNAL PNL = {last_signal_pnl_in_phase}
+        PREV SIGNAL PNL = {last_signal_pnl_in_phase}<br>
+        PHASE PROFIT NOW = {phase_profit_group}<br>
+        RECENT PHASE PNL = {recent_phase_pnl_next}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1018,9 +1074,9 @@ elif signal and vote_group is not None:
         f"""
         <div style="background:#1f77b4;padding:24px;border-radius:14px;text-align:center;
         font-size:28px;color:white;font-weight:bold;">
-        PHASE BET ONLY<br>
+        NEXT PHASE BET ONLY<br>
         GROUP {vote_group}<br>
-        LIVE WAIT<br>
+        NEXT LIVE WAIT<br>
         REASON: {next_state}
         </div>
         """,
@@ -1031,31 +1087,45 @@ else:
         f"""
         <div style="background:#333;padding:22px;border-radius:14px;text-align:center;
         font-size:26px;color:white;font-weight:bold;">
-        WAIT<br>
+        NEXT WAIT<br>
         STATE: {next_state}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-st.subheader("Current Signal")
+st.subheader("NEXT ROUND DEBUG")
+
+d1, d2, d3, d4 = st.columns(4)
+d1.metric("Next Round", next_round)
+d2.metric("Next Signal", "YES" if signal else "NO")
+d3.metric("Vote Strength", f"{confidence_group}/{vote_required}")
+d4.metric("Distance", distance)
+
+st.write("Next Vote Group:", vote_group if vote_group is not None else "-")
+st.write("Previous Signal Round In Phase:", last_signal_round_in_phase)
+st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
+st.write("Phase Profit Now:", phase_profit_group)
+st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
+st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
+st.write("RECENT_PHASE_CHECK:", RECENT_PHASE_CHECK)
+st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
+st.write("Can Live Bet:", can_live_bet)
+st.write("Next State:", next_state)
+
+st.subheader("Lock Info")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Number", numbers[-1])
 c2.metric("Current Group", groups[-1])
-c3.metric("Vote Strength", f"{confidence_group}/{vote_required}")
-c4.metric("Next Group", vote_group if vote_group is not None else "-")
+c3.metric("Selected Mode", selected_mode["name"] if selected_mode else "-")
+c4.metric("Relock Count", relock_count)
 
-st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
-st.write("Relock Count:", relock_count)
 st.write("Relock Rule:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
-st.write("Previous Signal Round In Phase:", last_signal_round_in_phase)
-st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
-st.write("State:", next_state)
 st.write("Telegram Enabled:", telegram_enabled())
 
 st.subheader("Profit Compare")
@@ -1070,8 +1140,18 @@ st.subheader("Trade Stats")
 
 phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
 live_trades = int(hist["LIVE_BET"].sum()) if "LIVE_BET" in hist.columns else 0
-phase_wr = round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2) if phase_trades > 0 else 0
-live_wr = round(hist.loc[hist["LIVE_BET"], "live_hit_group"].mean() * 100, 2) if live_trades > 0 else 0
+
+phase_wr = (
+    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    if phase_trades > 0
+    else 0
+)
+
+live_wr = (
+    round(hist.loc[hist["LIVE_BET"], "live_hit_group"].mean() * 100, 2)
+    if live_trades > 0
+    else 0
+)
 
 s1, s2, s3, s4 = st.columns(4)
 s1.metric("Phase Trades", phase_trades)
@@ -1089,6 +1169,7 @@ chart_cols = [
 ]
 
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
+
 if exist_chart_cols:
     st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
 
@@ -1124,6 +1205,7 @@ history_cols = [
     "phase_hit_group",
     "phase_pnl_group",
     "phase_profit_group",
+    "recent_phase_pnl",
     "total_phase_profit_group",
     "prev_signal_round_in_phase",
     "prev_signal_pnl_in_phase",
@@ -1140,4 +1222,8 @@ history_cols = [
 ]
 
 show_cols = [c for c in history_cols if c in hist.columns]
-st.dataframe(hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS), use_container_width=True)
+
+st.dataframe(
+    hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS),
+    use_container_width=True,
+)
