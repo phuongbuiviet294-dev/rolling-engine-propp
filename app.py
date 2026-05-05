@@ -504,6 +504,12 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
             )
 
+            phase_quality_pass = (
+                train_bt["profit_group"] >= MIN_PHASE_BACKTEST_PROFIT
+                and train_bt["winrate_group"] >= MIN_PHASE_BACKTEST_WR
+                and train_bt["max_drawdown_group"] >= MAX_PHASE_BACKTEST_DD
+            )
+
             final_score = (
                 train_bt["profit_group"]
                 + train_bt["winrate_group"] * 10.0
@@ -523,13 +529,13 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 local_fallback_scan_df = df_all
                 local_fallback_filtered_df = filtered_df
 
-            if validate_pass and final_score > local_best_score:
+            if validate_pass and phase_quality_pass and final_score > local_best_score:
                 local_best_score = final_score
                 local_best_windows = selected_windows
                 local_best_mode = mode
                 local_best_scan_df = df_all
                 local_best_filtered_df = filtered_df
-                local_lock_mode = "validated"
+                local_lock_mode = "validated_phase_quality"
 
         if local_best_mode is not None:
             round_eval_rows.append(
