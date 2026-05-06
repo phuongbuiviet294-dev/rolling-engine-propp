@@ -34,16 +34,18 @@ LIVE_BET_UNIT = 1.0
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -4.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 2
 
 ENABLE_TIMEOUT_RELOCK = True
-TIMEOUT_RELOCK_ROUNDS = 60
+TIMEOUT_RELOCK_ROUNDS = 40
 
-MIN_PHASE_PROFIT_TO_LIVE = -1.0
-RECENT_PHASE_CHECK = 5
-MIN_RECENT_PHASE_PNL = -2.0
+MIN_PHASE_PROFIT_TO_LIVE = 0.0
+RECENT_PHASE_CHECK = 4
+MIN_RECENT_PHASE_PNL = 0.5
 
 PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
+LIVE_MAX_LOSS_STREAK = 2
+MIN_CONSECUTIVE_SIGNAL_WIN = 2
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
@@ -52,7 +54,7 @@ MIN_FALLBACK_SCORE = -5.0
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 5
+MIN_WINDOW_SPACING = 6
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
@@ -704,14 +706,27 @@ def simulate_engine(numbers, groups):
 
         distance = i - last_live_trade_idx
 
+        phase_consecutive_win_ok = False
+        if len(phase_hits_group) >= MIN_CONSECUTIVE_SIGNAL_WIN:
+            last_phase_hits = phase_hits_group[-MIN_CONSECUTIVE_SIGNAL_WIN:]
+            phase_consecutive_win_ok = all(x == 1 for x in last_phase_hits)
+
         live_trade = (
             signal
-            and prev_signal_pnl_in_phase > 0
+            and phase_consecutive_win_ok
             and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
             and recent_phase_pnl >= MIN_RECENT_PHASE_PNL
             and distance >= GAP
             and round_no > LOCK_ROUND_END
         )
+
+        # LIVE protection: nếu live thua liên tiếp thì tạm dừng live để tránh đu ngược trend
+        live_loss_streak_block = False
+        if live_trade and len(live_hits_group) >= LIVE_MAX_LOSS_STREAK:
+            last_live_hits = live_hits_group[-LIVE_MAX_LOSS_STREAK:]
+            if all(x == 0 for x in last_live_hits):
+                live_trade = False
+                live_loss_streak_block = True
 
         if live_trade:
             last_live_trade_idx = i
@@ -731,7 +746,11 @@ def simulate_engine(numbers, groups):
             live_hit_group = None
             live_pnl_group = 0.0
 
-            if signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
+            if signal and live_loss_streak_block:
+                state = "LIVE_BLOCKED_BY_LOSS_STREAK"
+            elif signal and not phase_consecutive_win_ok:
+                state = "LIVE_WAIT_PHASE_NOT_CONSECUTIVE_WIN"
+            elif signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
                 state = "PHASE_BLOCKED_RECENT_TOO_WEAK"
             elif signal and prev_signal_pnl_in_phase <= 0:
                 state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
@@ -799,6 +818,7 @@ def simulate_engine(numbers, groups):
                 "total_phase_profit_group": total_phase_profit_group,
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
                 "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
+                "phase_consecutive_win_ok": phase_consecutive_win_ok,
                 "LIVE_BET": live_trade,
                 "live_bet_group": vote_group if live_trade else None,
                 "live_hit_group": live_hit_group,
@@ -1008,9 +1028,16 @@ if len(hist) >= RECENT_PHASE_CHECK:
 else:
     recent_phase_pnl_next = phase_profit_group
 
+phase_consecutive_win_ok_next = False
+if "phase_hit_group" in hist.columns:
+    cur_phase = int(hist.iloc[-1]["phase"])
+    phase_hit_series = hist[(hist["phase"] == cur_phase) & (hist["PHASE_BET"] == True)]["phase_hit_group"].dropna().astype(int).tolist()
+    if len(phase_hit_series) >= MIN_CONSECUTIVE_SIGNAL_WIN:
+        phase_consecutive_win_ok_next = all(x == 1 for x in phase_hit_series[-MIN_CONSECUTIVE_SIGNAL_WIN:])
+
 can_live_bet = (
     signal
-    and last_signal_pnl_in_phase > 0
+    and phase_consecutive_win_ok_next
     and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
     and recent_phase_pnl_next >= MIN_RECENT_PHASE_PNL
     and distance >= GAP
@@ -1026,6 +1053,8 @@ if session_stop:
     next_state = session_stop_reason
 elif can_live_bet:
     next_state = "READY_LIVE_BET"
+elif signal and not phase_consecutive_win_ok_next:
+    next_state = "LIVE_WAIT_PHASE_NOT_CONSECUTIVE_WIN"
 elif signal and not phase_next_allowed:
     next_state = "NEXT_PHASE_BLOCKED_RECENT_TOO_WEAK"
 elif signal and last_signal_pnl_in_phase <= 0:
@@ -1143,6 +1172,9 @@ st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
 st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
 st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
 st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
+st.write("LIVE_MAX_LOSS_STREAK:", LIVE_MAX_LOSS_STREAK)
+st.write("MIN_CONSECUTIVE_SIGNAL_WIN:", MIN_CONSECUTIVE_SIGNAL_WIN)
+st.write("Phase Consecutive Win OK Next:", phase_consecutive_win_ok_next)
 st.write("Can Live Bet:", can_live_bet)
 st.write("Next State:", next_state)
 
@@ -1245,6 +1277,7 @@ history_cols = [
     "total_phase_profit_group",
     "prev_signal_round_in_phase",
     "prev_signal_pnl_in_phase",
+    "phase_consecutive_win_ok",
     "LIVE_BET",
     "live_bet_group",
     "live_hit_group",
