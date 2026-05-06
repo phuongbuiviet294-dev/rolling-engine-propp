@@ -1050,7 +1050,7 @@ elif signal:
 else:
     next_state = "WAIT_NO_SIGNAL"
 
-if telegram_enabled() and can_live_bet and vote_group is not None:
+if telegram_enabled() and phase_next_allowed and vote_group is not None:
     ready_msg = (
         f"READY LIVE BET\n"
         f"Round: {current_round}\n"
