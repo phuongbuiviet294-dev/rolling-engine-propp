@@ -21,7 +21,7 @@ MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
@@ -33,7 +33,7 @@ LIVE_BET_UNIT = 1.0
 
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -4.0
+PHASE_STOP_LOSS = -3.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
 ENABLE_TIMEOUT_RELOCK = True
@@ -53,7 +53,7 @@ MIN_FALLBACK_SCORE = -5.0
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 6
+MIN_WINDOW_SPACING = 5
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
