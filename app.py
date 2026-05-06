@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=5000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -33,18 +33,22 @@ LIVE_BET_UNIT = 1.0
 
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -3.0
+PHASE_STOP_LOSS = -4.0
 PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_RELOCK_IF_3_LOSS_IN_5 = True
+PHASE_SIDEWAY_ROUNDS = 12
+PHASE_SIDEWAY_RANGE = 1.5
 
 ENABLE_TIMEOUT_RELOCK = True
-TIMEOUT_RELOCK_ROUNDS = 60
+TIMEOUT_RELOCK_ROUNDS = 40
 
-MIN_PHASE_PROFIT_TO_LIVE = -1.0
-RECENT_PHASE_CHECK = 5
-MIN_RECENT_PHASE_PNL = -0.5
+MIN_PHASE_PROFIT_TO_LIVE = 0.0
+RECENT_PHASE_CHECK = 4
+MIN_RECENT_PHASE_PNL = 0.5
 
-PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
 LIVE_MAX_LOSS_STREAK = 2
+MIN_CONSECUTIVE_SIGNAL_WIN = 2
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
@@ -52,14 +56,14 @@ SESSION_STOP_LOSS = -200.0
 MIN_FALLBACK_SCORE = -5.0
 
 MIN_TRADES_PER_WINDOW = 16
-RECENT_WINDOW_SIZE = 20
+RECENT_WINDOW_SIZE = 26
 MIN_WINDOW_SPACING = 6
 MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 18
+VALIDATE_LEN = 24
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -4.0
+VALIDATE_MIN_DRAWDOWN = -6.0
 
 RELOCK_SCAN_LEN = 6
 RELOCK_BUFFER = 0
@@ -67,7 +71,7 @@ RELOCK_BUFFER = 0
 SHOW_HISTORY_ROWS = 120
 SHOW_DEBUG_TABLES = False
 
-DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
+DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
@@ -588,6 +592,32 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
+
+def count_losses_in_last_phase_signals(phase_hits_group, n=5):
+    if not phase_hits_group:
+        return 0
+    tail = phase_hits_group[-n:]
+    return sum(1 for x in tail if x == 0)
+
+
+def is_phase_sideway(history_rows, phase_index, rounds=12, range_limit=1.5):
+    if not history_rows:
+        return False, 0.0
+
+    phase_rows = [x for x in history_rows if int(x.get("phase", -1)) == int(phase_index)]
+    if len(phase_rows) < rounds:
+        return False, 0.0
+
+    tail = phase_rows[-rounds:]
+    vals = [float(x.get("phase_profit_group", 0.0)) for x in tail]
+
+    if not vals:
+        return False, 0.0
+
+    movement_range = max(vals) - min(vals)
+    return movement_range <= range_limit, float(movement_range)
+
+
 def simulate_engine(numbers, groups):
     result = {
         "hist": pd.DataFrame(),
@@ -612,6 +642,8 @@ def simulate_engine(numbers, groups):
         "last_signal_pnl_in_phase": 0.0,
         "last_signal_round_in_phase": None,
         "phase_consecutive_losses": 0,
+        "phase_recent_5_losses": 0,
+        "phase_sideway_range": 0.0,
     }
 
     (
@@ -705,9 +737,14 @@ def simulate_engine(numbers, groups):
 
         distance = i - last_live_trade_idx
 
+        phase_consecutive_win_ok = False
+        if len(phase_hits_group) >= MIN_CONSECUTIVE_SIGNAL_WIN:
+            last_phase_hits = phase_hits_group[-MIN_CONSECUTIVE_SIGNAL_WIN:]
+            phase_consecutive_win_ok = all(x == 1 for x in last_phase_hits)
+
         live_trade = (
             signal
-            and prev_signal_pnl_in_phase > 0
+            and phase_consecutive_win_ok
             and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
             and recent_phase_pnl >= MIN_RECENT_PHASE_PNL
             and distance >= GAP
@@ -742,6 +779,8 @@ def simulate_engine(numbers, groups):
 
             if signal and live_loss_streak_block:
                 state = "LIVE_BLOCKED_BY_LOSS_STREAK"
+            elif signal and not phase_consecutive_win_ok:
+                state = "LIVE_WAIT_PHASE_NOT_CONSECUTIVE_WIN"
             elif signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
                 state = "PHASE_BLOCKED_RECENT_TOO_WEAK"
             elif signal and prev_signal_pnl_in_phase <= 0:
@@ -766,7 +805,29 @@ def simulate_engine(numbers, groups):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and phase_profit_group < 0:
+        phase_recent_5_losses = count_losses_in_last_phase_signals(phase_hits_group, 5)
+        phase_sideway_now, phase_sideway_range = is_phase_sideway(
+            history_rows,
+            phase_index,
+            PHASE_SIDEWAY_ROUNDS,
+            PHASE_SIDEWAY_RANGE,
+        )
+
+        if (
+            PHASE_RELOCK_IF_3_LOSS_IN_5
+            and phase_recent_5_losses >= 3
+            and phase_profit_group < 0
+        ):
+            relock_triggered_now = True
+            relock_reason_now = "PHASE_3_LOSS_IN_5_AND_NEGATIVE"
+            state = "AUTO_RELOCK_3_LOSS_IN_5_NEGATIVE"
+
+        elif phase_sideway_now:
+            relock_triggered_now = True
+            relock_reason_now = "PHASE_SIDEWAY_RELOCK"
+            state = "AUTO_RELOCK_SIDEWAY"
+
+        elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and phase_profit_group < 0:
             relock_triggered_now = True
             relock_reason_now = "PHASE_3_SIGNAL_LOSS_AND_NEGATIVE"
             state = "AUTO_RELOCK_3_SIGNAL_LOSS_NEGATIVE"
@@ -806,10 +867,13 @@ def simulate_engine(numbers, groups):
                 "phase_pnl_group": phase_pnl_group,
                 "phase_profit_group": phase_profit_group,
                 "phase_consecutive_losses": phase_consecutive_losses,
+                "phase_recent_5_losses": phase_recent_5_losses,
+                "phase_sideway_range": phase_sideway_range,
                 "recent_phase_pnl": recent_phase_pnl,
                 "total_phase_profit_group": total_phase_profit_group,
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
                 "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
+                "phase_consecutive_win_ok": phase_consecutive_win_ok,
                 "LIVE_BET": live_trade,
                 "live_bet_group": vote_group if live_trade else None,
                 "live_hit_group": live_hit_group,
@@ -986,6 +1050,8 @@ session_stop_reason = sim["session_stop_reason"]
 last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
 last_signal_round_in_phase = sim["last_signal_round_in_phase"]
 phase_consecutive_losses = sim["phase_consecutive_losses"]
+phase_recent_5_losses = sim.get("phase_recent_5_losses", 0)
+phase_sideway_range = sim.get("phase_sideway_range", 0.0)
 
 next_idx = len(groups)
 next_round = len(groups) + 1
@@ -1019,9 +1085,16 @@ if len(hist) >= RECENT_PHASE_CHECK:
 else:
     recent_phase_pnl_next = phase_profit_group
 
+phase_consecutive_win_ok_next = False
+if "phase_hit_group" in hist.columns:
+    cur_phase = int(hist.iloc[-1]["phase"])
+    phase_hit_series = hist[(hist["phase"] == cur_phase) & (hist["PHASE_BET"] == True)]["phase_hit_group"].dropna().astype(int).tolist()
+    if len(phase_hit_series) >= MIN_CONSECUTIVE_SIGNAL_WIN:
+        phase_consecutive_win_ok_next = all(x == 1 for x in phase_hit_series[-MIN_CONSECUTIVE_SIGNAL_WIN:])
+
 can_live_bet = (
     signal
-    and last_signal_pnl_in_phase > 0
+    and phase_consecutive_win_ok_next
     and phase_profit_group >= MIN_PHASE_PROFIT_TO_LIVE
     and recent_phase_pnl_next >= MIN_RECENT_PHASE_PNL
     and distance >= GAP
@@ -1037,6 +1110,8 @@ if session_stop:
     next_state = session_stop_reason
 elif can_live_bet:
     next_state = "READY_LIVE_BET"
+elif signal and not phase_consecutive_win_ok_next:
+    next_state = "LIVE_WAIT_PHASE_NOT_CONSECUTIVE_WIN"
 elif signal and not phase_next_allowed:
     next_state = "NEXT_PHASE_BLOCKED_RECENT_TOO_WEAK"
 elif signal and last_signal_pnl_in_phase <= 0:
@@ -1150,11 +1225,18 @@ st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
 st.write("Phase Profit Now:", phase_profit_group)
 st.write("Phase Consecutive Losses:", phase_consecutive_losses)
 st.write("Relock By Loss Streak:", f"{phase_consecutive_losses}/{PHASE_LOSS_STREAK_RELOCK}")
+st.write("PHASE_RELOCK_IF_3_LOSS_IN_5:", PHASE_RELOCK_IF_3_LOSS_IN_5)
+st.write("Recent 5 Phase Losses:", phase_recent_5_losses)
+st.write("PHASE_SIDEWAY_ROUNDS:", PHASE_SIDEWAY_ROUNDS)
+st.write("PHASE_SIDEWAY_RANGE:", PHASE_SIDEWAY_RANGE)
+st.write("Current Phase Sideway Range:", phase_sideway_range)
 st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
 st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
 st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
 st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
 st.write("LIVE_MAX_LOSS_STREAK:", LIVE_MAX_LOSS_STREAK)
+st.write("MIN_CONSECUTIVE_SIGNAL_WIN:", MIN_CONSECUTIVE_SIGNAL_WIN)
+st.write("Phase Consecutive Win OK Next:", phase_consecutive_win_ok_next)
 st.write("Can Live Bet:", can_live_bet)
 st.write("Next State:", next_state)
 
@@ -1172,6 +1254,8 @@ st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND phase_profit < 0")
 st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
+st.write("Relock Rule 3:", "3 losses in last 5 signals AND phase_profit < 0")
+st.write("Relock Rule 4:", f"sideway {PHASE_SIDEWAY_ROUNDS} rounds with range <= {PHASE_SIDEWAY_RANGE}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase profit <= 0")
 st.write("Telegram Enabled:", telegram_enabled())
 
@@ -1253,10 +1337,13 @@ history_cols = [
     "phase_pnl_group",
     "phase_profit_group",
     "phase_consecutive_losses",
+    "phase_recent_5_losses",
+    "phase_sideway_range",
     "recent_phase_pnl",
     "total_phase_profit_group",
     "prev_signal_round_in_phase",
     "prev_signal_pnl_in_phase",
+    "phase_consecutive_win_ok",
     "LIVE_BET",
     "live_bet_group",
     "live_hit_group",
