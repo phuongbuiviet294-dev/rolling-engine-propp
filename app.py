@@ -29,7 +29,7 @@ GAP = 1
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-ENABLE_COLOR_BET = True
+ENABLE_COLOR_BET = False
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 COLOR_VOTE_OFFSET = 0  # color_vote_required = max(2, vote_required + offset)
