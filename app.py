@@ -19,9 +19,9 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 4, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
@@ -39,7 +39,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 1
 
 ENABLE_TIMEOUT_RELOCK = True
 TIMEOUT_RELOCK_ROUNDS = 40
