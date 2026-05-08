@@ -827,7 +827,7 @@ def simulate_engine(numbers, groups):
             relock_reason_now = "PHASE_SIDEWAY_RELOCK"
             state = "AUTO_RELOCK_SIDEWAY"
 
-        elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and phase_profit_group < 0:
+        elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK :
             relock_triggered_now = True
             relock_reason_now = "PHASE_3_SIGNAL_LOSS_AND_NEGATIVE"
             state = "AUTO_RELOCK_3_SIGNAL_LOSS_NEGATIVE"
