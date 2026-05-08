@@ -14,8 +14,8 @@ st_autorefresh(interval=1000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 LOCK_ROUND_START = 168
-LOCK_ROUND_END = 180
-REPLAY_FROM = 180
+LOCK_ROUND_END = 204
+REPLAY_FROM = 204
 
 MODES = [
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
