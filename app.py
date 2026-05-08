@@ -41,10 +41,10 @@ PHASE_STOP_LOSS = -3.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 ENABLE_TIMEOUT_RELOCK = False
-TIMEOUT_RELOCK_ROUNDS = 30
+TIMEOUT_RELOCK_ROUNDS = 20
 
-RECENT_PHASE_CHECK = 6
-PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
+RECENT_PHASE_CHECK = 4
+PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
 
 KEEP_AFTER_LOSS_ROUNDS = 0
 
@@ -53,23 +53,25 @@ SESSION_STOP_LOSS = -6.0
 
 MIN_FALLBACK_SCORE = -3.0
 
-MIN_TRADES_PER_WINDOW = 18
-RECENT_WINDOW_SIZE = 30
-MIN_WINDOW_SPACING = 1
+MIN_TRADES_PER_WINDOW = 16
+RECENT_WINDOW_SIZE = 24
+MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 26
+VALIDATE_LEN = 18
+AUTO_SCAN_VALIDATE_LEN = True
+VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -4.0
 
-RELOCK_SCAN_LEN = 0
+RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 120
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -487,148 +489,161 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     round_eval_rows = []
 
-    for r in range(scan_start, effective_scan_end + 1):
-        if r < VALIDATE_LEN + MIN_TRAIN_LEN:
+    validate_values = VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else [VALIDATE_LEN]
+
+    for validate_len in validate_values:
+        if validate_len < 0:
             continue
 
-        train_end = r - VALIDATE_LEN
-        validate_start = train_end
-        validate_end = r
+        for r in range(scan_start, effective_scan_end + 1):
+            if r < validate_len + MIN_TRAIN_LEN:
+                continue
 
-        train_groups = all_groups[:train_end]
-        validate_groups = all_groups[:validate_end]
+            train_end = r - validate_len
+            validate_start = train_end
+            validate_end = r
 
-        local_best_score = -999999.0
-        local_best_windows = []
-        local_best_mode = None
-        local_best_scan_df = pd.DataFrame()
-        local_best_filtered_df = pd.DataFrame()
-        local_lock_mode = "not_found"
+            train_groups = all_groups[:train_end]
+            validate_groups = all_groups[:validate_end]
 
-        local_fallback_score = -999999.0
-        local_fallback_windows = []
-        local_fallback_mode = None
-        local_fallback_scan_df = pd.DataFrame()
-        local_fallback_filtered_df = pd.DataFrame()
+            local_best_score = -999999.0
+            local_best_windows = []
+            local_best_mode = None
+            local_best_scan_df = pd.DataFrame()
+            local_best_filtered_df = pd.DataFrame()
+            local_lock_mode = "not_found"
 
-        for mode in MODES:
-            top_windows = mode["top_windows"]
-            vote_required = mode["vote_required"]
+            local_fallback_score = -999999.0
+            local_fallback_windows = []
+            local_fallback_mode = None
+            local_fallback_scan_df = pd.DataFrame()
+            local_fallback_filtered_df = pd.DataFrame()
 
-            spacing_values = (
-                range(WINDOW_SPACING_MIN, WINDOW_SPACING_MAX + 1)
-                if AUTO_SCAN_WINDOW_SPACING
-                else [MIN_WINDOW_SPACING]
-            )
+            for mode in MODES:
+                top_windows = mode["top_windows"]
+                vote_required = mode["vote_required"]
 
-            for spacing in spacing_values:
-                candidate_windows, df_all, filtered_df = build_window_tables(
-                    train_groups,
-                    mode["window_min"],
-                    mode["window_max"],
-                    min_window_spacing=spacing,
+                spacing_values = (
+                    range(WINDOW_SPACING_MIN, WINDOW_SPACING_MAX + 1)
+                    if AUTO_SCAN_WINDOW_SPACING
+                    else [MIN_WINDOW_SPACING]
                 )
 
-                if len(candidate_windows) < top_windows:
-                    continue
+                for spacing in spacing_values:
+                    candidate_windows, df_all, filtered_df = build_window_tables(
+                        train_groups,
+                        mode["window_min"],
+                        mode["window_max"],
+                        min_window_spacing=spacing,
+                    )
 
-                selected_windows = candidate_windows[:top_windows]
+                    if len(candidate_windows) < top_windows:
+                        continue
 
-                train_bt = backtest_bundle_vote_range(
-                    train_groups,
-                    selected_windows,
-                    vote_required,
-                    0,
-                    len(train_groups),
+                    selected_windows = candidate_windows[:top_windows]
+
+                    train_bt = backtest_bundle_vote_range(
+                        train_groups,
+                        selected_windows,
+                        vote_required,
+                        0,
+                        len(train_groups),
+                    )
+
+                    validate_bt = backtest_bundle_vote_range(
+                        validate_groups,
+                        selected_windows,
+                        vote_required,
+                        validate_start,
+                        validate_end,
+                    )
+
+                    validate_pass = (
+                        validate_bt["trades"] >= MIN_VALIDATE_TRADES
+                        and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+                    )
+
+                    final_score = (
+                        train_bt["profit_group"] * 0.8
+                        + train_bt["winrate_group"] * 8.0
+                        + train_bt["recent_profit_group"] * 1.5
+                        - abs(train_bt["max_drawdown_group"]) * 0.8
+                        + train_bt["streak_score"] * 1.0
+                        + validate_bt["profit_group"] * 3.0
+                        + validate_bt["winrate_group"] * 10.0
+                        - abs(validate_bt["max_drawdown_group"]) * 1.5
+                        + validate_bt["streak_score"] * 1.0
+                    )
+
+                    mode_with_params = dict(mode)
+                    mode_with_params["spacing"] = spacing
+                    mode_with_params["validate_len"] = validate_len
+
+                    if final_score > local_fallback_score:
+                        local_fallback_score = final_score
+                        local_fallback_windows = selected_windows
+                        local_fallback_mode = mode_with_params
+                        local_fallback_scan_df = df_all.copy()
+                        local_fallback_scan_df["selected_spacing"] = spacing
+                        local_fallback_scan_df["selected_validate_len"] = validate_len
+                        local_fallback_filtered_df = filtered_df.copy()
+                        local_fallback_filtered_df["selected_spacing"] = spacing
+                        local_fallback_filtered_df["selected_validate_len"] = validate_len
+
+                    if validate_pass and final_score > local_best_score:
+                        local_best_score = final_score
+                        local_best_windows = selected_windows
+                        local_best_mode = mode_with_params
+                        local_best_scan_df = df_all.copy()
+                        local_best_scan_df["selected_spacing"] = spacing
+                        local_best_scan_df["selected_validate_len"] = validate_len
+                        local_best_filtered_df = filtered_df.copy()
+                        local_best_filtered_df["selected_spacing"] = spacing
+                        local_best_filtered_df["selected_validate_len"] = validate_len
+                        local_lock_mode = "validated"
+
+            if local_best_mode is not None:
+                round_eval_rows.append(
+                    {
+                        "lock_round": r,
+                        "mode": local_best_mode["name"],
+                        "selected_windows": ", ".join(map(str, local_best_windows)),
+                        "spacing": local_best_mode.get("spacing", MIN_WINDOW_SPACING),
+                        "validate_len": local_best_mode.get("validate_len", VALIDATE_LEN),
+                        "bundle_score": local_best_score,
+                        "lock_mode": local_lock_mode,
+                    }
                 )
 
-                validate_bt = backtest_bundle_vote_range(
-                    validate_groups,
-                    selected_windows,
-                    vote_required,
-                    validate_start,
-                    validate_end,
+                if local_best_score > best_score:
+                    best_score = local_best_score
+                    best_round = r
+                    best_windows = local_best_windows
+                    best_mode = local_best_mode
+                    best_scan_df = local_best_scan_df
+                    best_filtered_df = local_best_filtered_df
+                    best_lock_mode = local_lock_mode
+
+            elif local_fallback_mode is not None and local_fallback_score >= MIN_FALLBACK_SCORE:
+                round_eval_rows.append(
+                    {
+                        "lock_round": r,
+                        "mode": local_fallback_mode["name"],
+                        "selected_windows": ", ".join(map(str, local_fallback_windows)),
+                        "spacing": local_fallback_mode.get("spacing", MIN_WINDOW_SPACING),
+                        "validate_len": local_fallback_mode.get("validate_len", VALIDATE_LEN),
+                        "bundle_score": local_fallback_score,
+                        "lock_mode": "fallback_soft",
+                    }
                 )
 
-                validate_pass = (
-                    validate_bt["trades"] >= MIN_VALIDATE_TRADES
-                    and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
-                )
-
-                final_score = (
-                    train_bt["profit_group"] * 0.8
-                    + train_bt["winrate_group"] * 8.0
-                    + train_bt["recent_profit_group"] * 1.5
-                    - abs(train_bt["max_drawdown_group"]) * 0.8
-                    + train_bt["streak_score"] * 1.0
-                    + validate_bt["profit_group"] * 3.0
-                    + validate_bt["winrate_group"] * 10.0
-                    - abs(validate_bt["max_drawdown_group"]) * 1.5
-                    + validate_bt["streak_score"] * 1.0
-                )
-
-                mode_with_spacing = dict(mode)
-                mode_with_spacing["spacing"] = spacing
-
-                if final_score > local_fallback_score:
-                    local_fallback_score = final_score
-                    local_fallback_windows = selected_windows
-                    local_fallback_mode = mode_with_spacing
-                    local_fallback_scan_df = df_all.copy()
-                    local_fallback_scan_df["selected_spacing"] = spacing
-                    local_fallback_filtered_df = filtered_df.copy()
-                    local_fallback_filtered_df["selected_spacing"] = spacing
-
-                if validate_pass and final_score > local_best_score:
-                    local_best_score = final_score
-                    local_best_windows = selected_windows
-                    local_best_mode = mode_with_spacing
-                    local_best_scan_df = df_all.copy()
-                    local_best_scan_df["selected_spacing"] = spacing
-                    local_best_filtered_df = filtered_df.copy()
-                    local_best_filtered_df["selected_spacing"] = spacing
-                    local_lock_mode = "validated"
-
-        if local_best_mode is not None:
-            round_eval_rows.append(
-                {
-                    "lock_round": r,
-                    "mode": local_best_mode["name"],
-                    "selected_windows": ", ".join(map(str, local_best_windows)),
-                    "spacing": local_best_mode.get("spacing", MIN_WINDOW_SPACING),
-                    "bundle_score": local_best_score,
-                    "lock_mode": local_lock_mode,
-                }
-            )
-
-            if local_best_score > best_score:
-                best_score = local_best_score
-                best_round = r
-                best_windows = local_best_windows
-                best_mode = local_best_mode
-                best_scan_df = local_best_scan_df
-                best_filtered_df = local_best_filtered_df
-                best_lock_mode = local_lock_mode
-
-        elif local_fallback_mode is not None and local_fallback_score >= MIN_FALLBACK_SCORE:
-            round_eval_rows.append(
-                {
-                    "lock_round": r,
-                    "mode": local_fallback_mode["name"],
-                    "selected_windows": ", ".join(map(str, local_fallback_windows)),
-                    "spacing": local_fallback_mode.get("spacing", MIN_WINDOW_SPACING),
-                    "bundle_score": local_fallback_score,
-                    "lock_mode": "fallback_soft",
-                }
-            )
-
-            if local_fallback_score > fallback_score:
-                fallback_score = local_fallback_score
-                fallback_round = r
-                fallback_windows = local_fallback_windows
-                fallback_mode = local_fallback_mode
-                fallback_scan_df = local_fallback_scan_df
-                fallback_filtered_df = local_fallback_filtered_df
+                if local_fallback_score > fallback_score:
+                    fallback_score = local_fallback_score
+                    fallback_round = r
+                    fallback_windows = local_fallback_windows
+                    fallback_mode = local_fallback_mode
+                    fallback_scan_df = local_fallback_scan_df
+                    fallback_filtered_df = local_fallback_filtered_df
 
     round_eval_df = pd.DataFrame(round_eval_rows)
 
@@ -639,7 +654,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
-
 
 def simulate_engine(numbers, groups, colors):
     result = {
@@ -942,6 +956,7 @@ def simulate_engine(numbers, groups, colors):
                     "vote_required": vote_required,
                     "top_windows": current_mode["top_windows"],
                     "spacing": current_mode.get("spacing", MIN_WINDOW_SPACING),
+                    "validate_len": current_mode.get("validate_len", VALIDATE_LEN),
                     "locked_windows": ", ".join(map(str, locked_windows)),
                     "lock_mode": lock_mode,
                     "lock_scan_start": lock_scan_start,
@@ -1273,6 +1288,8 @@ c4.metric("Relock Count", relock_count)
 
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Selected Window Spacing:", selected_mode.get("spacing", MIN_WINDOW_SPACING) if selected_mode else "-")
+st.write("Selected Validate Len:", selected_mode.get("validate_len", VALIDATE_LEN) if selected_mode else "-")
+st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
 st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
