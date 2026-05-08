@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -21,7 +21,7 @@ MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
@@ -34,39 +34,40 @@ LIVE_BET_UNIT = 1.0
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 1
 
 ENABLE_TIMEOUT_RELOCK = True
-TIMEOUT_RELOCK_ROUNDS = 20
+TIMEOUT_RELOCK_ROUNDS = 30
 
-MIN_PHASE_PROFIT_TO_LIVE = -1.0
-RECENT_PHASE_CHECK = 5
-MIN_RECENT_PHASE_PNL = -2.0
+MIN_PHASE_PROFIT_TO_LIVE = 0.0
+RECENT_PHASE_CHECK = 4
+MIN_RECENT_PHASE_PNL = 0.5
 
 PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
+LIVE_MAX_LOSS_STREAK = 2
 
 SESSION_STOP_WIN = 200.0
 SESSION_STOP_LOSS = -200.0
 
-MIN_FALLBACK_SCORE = -5.0
+MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 16
-RECENT_WINDOW_SIZE = 29
+RECENT_WINDOW_SIZE = 26
 MIN_WINDOW_SPACING = 5
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -3.0
 
 RELOCK_SCAN_LEN = 6
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 120
 SHOW_DEBUG_TABLES = False
 
-DEFAULT_BOT_TOKEN = ""
+DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
@@ -713,6 +714,14 @@ def simulate_engine(numbers, groups):
             and round_no > LOCK_ROUND_END
         )
 
+        # LIVE protection: nếu live thua liên tiếp thì tạm dừng live để tránh đu ngược trend
+        live_loss_streak_block = False
+        if live_trade and len(live_hits_group) >= LIVE_MAX_LOSS_STREAK:
+            last_live_hits = live_hits_group[-LIVE_MAX_LOSS_STREAK:]
+            if all(x == 0 for x in last_live_hits):
+                live_trade = False
+                live_loss_streak_block = True
+
         if live_trade:
             last_live_trade_idx = i
 
@@ -731,7 +740,9 @@ def simulate_engine(numbers, groups):
             live_hit_group = None
             live_pnl_group = 0.0
 
-            if signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
+            if signal and live_loss_streak_block:
+                state = "LIVE_BLOCKED_BY_LOSS_STREAK"
+            elif signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
                 state = "PHASE_BLOCKED_RECENT_TOO_WEAK"
             elif signal and prev_signal_pnl_in_phase <= 0:
                 state = "PHASE_BET_ONLY_WAIT_PREV_SIGNAL_NOT_POSITIVE"
@@ -755,7 +766,7 @@ def simulate_engine(numbers, groups):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -1:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2:
             relock_triggered_now = True
             relock_reason_now = "PHASE_3_SIGNAL_LOSS_AND_NEGATIVE"
             state = "AUTO_RELOCK_3_SIGNAL_LOSS_NEGATIVE"
@@ -1039,7 +1050,7 @@ elif signal:
 else:
     next_state = "WAIT_NO_SIGNAL"
 
-if telegram_enabled() and can_live_bet and vote_group is not None:
+if telegram_enabled() and phase_next_allowed and vote_group is not None:
     ready_msg = (
         f"READY LIVE BET\n"
         f"Round: {current_round}\n"
@@ -1143,6 +1154,7 @@ st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
 st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
 st.write("MIN_PHASE_PROFIT_TO_LIVE:", MIN_PHASE_PROFIT_TO_LIVE)
 st.write("MIN_RECENT_PHASE_PNL:", MIN_RECENT_PHASE_PNL)
+st.write("LIVE_MAX_LOSS_STREAK:", LIVE_MAX_LOSS_STREAK)
 st.write("Can Live Bet:", can_live_bet)
 st.write("Next State:", next_state)
 
