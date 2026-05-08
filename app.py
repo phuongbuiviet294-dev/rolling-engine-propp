@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=3000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -59,7 +59,7 @@ MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 24
-MIN_WINDOW_SPACING = 5
+MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
