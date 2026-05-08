@@ -22,6 +22,7 @@ MODES = [
    
    
     {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "9v5", "top_windows": 9, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
