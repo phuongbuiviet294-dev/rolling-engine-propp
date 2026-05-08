@@ -18,7 +18,7 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    {"name": "3v2", "top_windows": 3, "vote_required": 2, "window_min": 6, "window_max": 22},
+   
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
    
    
@@ -58,7 +58,7 @@ MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 26
-MIN_WINDOW_SPACING = 5
+MIN_WINDOW_SPACING = 7
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
