@@ -836,7 +836,7 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and phase_profit_group < 0:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK :
             relock_triggered_now = True
             relock_reason_now = "PHASE_LOSS_STREAK_AND_NEGATIVE"
             state = "AUTO_RELOCK_LOSS_STREAK_NEGATIVE"
