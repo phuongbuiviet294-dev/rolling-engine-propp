@@ -41,19 +41,23 @@ PHASE_STOP_LOSS = -3.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 ENABLE_TIMEOUT_RELOCK = False
-TIMEOUT_RELOCK_ROUNDS = 40
+TIMEOUT_RELOCK_ROUNDS = 20
 
 RECENT_PHASE_CHECK = 4
-PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
+
+MIN_PHASE_AGE_TO_TRADE = 3
+MAX_PHASE_TRADES = 4
+VOTE_DOMINANCE_RATIO = 0.7
 
 KEEP_AFTER_LOSS_ROUNDS = 0
 
-SESSION_STOP_WIN = 66.0
-SESSION_STOP_LOSS = -66.0
+SESSION_STOP_WIN = 6.0
+SESSION_STOP_LOSS = -6.0
 
 MIN_FALLBACK_SCORE = -3.0
 
-MIN_TRADES_PER_WINDOW = 16
+MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 24
 MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
@@ -66,12 +70,12 @@ AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -4.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 120
+SHOW_HISTORY_ROWS = 10
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -173,6 +177,13 @@ def color_text(c):
     if c == 3:
         return "BLUE"
     return "-"
+
+
+def vote_dominance_ok(preds, confidence, min_ratio):
+    if not preds:
+        return False, 0.0
+    ratio = confidence / len(preds)
+    return ratio >= min_ratio, float(ratio)
 
 
 def get_valid_group_preds(seq_groups, i, windows):
@@ -750,10 +761,17 @@ def simulate_engine(numbers, groups, colors):
 
         if preds_group:
             vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
-            signal_group = confidence_group >= vote_required
+            dominance_ok, dominance_ratio = vote_dominance_ok(
+                preds_group,
+                confidence_group,
+                VOTE_DOMINANCE_RATIO,
+            )
+            signal_group = confidence_group >= vote_required and dominance_ok
         else:
             vote_group = None
             confidence_group = 0
+            dominance_ratio = 0.0
+            dominance_ok = False
             signal_group = False
 
         if preds_color:
@@ -765,6 +783,8 @@ def simulate_engine(numbers, groups, colors):
             signal_color = False
 
         signal = signal_group
+
+        phase_age = round_no - phase_start_round + 1
 
         if len(history_rows) >= RECENT_PHASE_CHECK:
             recent_phase_pnl = sum(
@@ -789,6 +809,15 @@ def simulate_engine(numbers, groups, colors):
             phase_trade_allowed = recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
         else:
             phase_trade_allowed = signal_group and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+
+        phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
+        max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
+
+        if phase_trade_allowed and phase_warmup_block:
+            phase_trade_allowed = False
+
+        if phase_trade_allowed and max_phase_trades_block:
+            phase_trade_allowed = False
 
         distance = i - last_phase_trade_idx
         if phase_trade_allowed and distance < GAP:
@@ -862,7 +891,13 @@ def simulate_engine(numbers, groups, colors):
             phase_pnl_color = 0.0
             phase_pnl_total = 0.0
 
-            if signal_group and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
+            if signal_group and phase_warmup_block:
+                state = "WAIT_PHASE_WARMUP"
+            elif signal_group and max_phase_trades_block:
+                state = "WAIT_MAX_PHASE_TRADES"
+            elif vote_group is not None and not dominance_ok:
+                state = "WAIT_VOTE_DOMINANCE_WEAK"
+            elif signal_group and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
                 state = "PHASE_BLOCKED_RECENT_TOO_WEAK"
             elif not signal_group:
                 state = "WAIT_NO_GROUP_SIGNAL"
@@ -872,7 +907,7 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
             relock_triggered_now = True
             relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
             state = "AUTO_RELOCK_LOSS_STREAK"
@@ -882,7 +917,10 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "PHASE_GROUP_STOP_LOSS"
             state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-        phase_age = round_no - phase_start_round + 1
+        elif len(phase_hits_group) >= MAX_PHASE_TRADES:
+            relock_triggered_now = True
+            relock_reason_now = "MAX_PHASE_TRADES_RELOCK"
+            state = "AUTO_RELOCK_MAX_PHASE_TRADES"
 
         if (
             not relock_triggered_now
@@ -907,7 +945,11 @@ def simulate_engine(numbers, groups, colors):
                 "top_windows": current_mode["top_windows"],
                 "vote_group": vote_group,
                 "confidence_group": confidence_group,
+                "dominance_ratio": dominance_ratio,
+                "dominance_ok": dominance_ok,
                 "signal_group": signal_group,
+                "phase_warmup_block": phase_warmup_block,
+                "max_phase_trades_block": max_phase_trades_block,
                 "vote_color": color_text(vote_color),
                 "confidence_color": confidence_color,
                 "signal_color": signal_color,
@@ -964,6 +1006,8 @@ def simulate_engine(numbers, groups, colors):
                     "lock_round": selected_lock_round,
                     "phase_age": phase_age,
                     "phase_loss_streak": phase_consecutive_losses,
+                    "max_phase_trades": MAX_PHASE_TRADES,
+                    "min_phase_age_to_trade": MIN_PHASE_AGE_TO_TRADE,
                     "phase_bet_trades": len(phase_hits_group),
                     "phase_group_profit": phase_profit_group,
                     "phase_color_profit": phase_profit_color,
@@ -1137,15 +1181,21 @@ preds_color = get_valid_color_preds(colors, next_idx, locked_windows)
 
 if preds_group and selected_mode is not None:
     vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+    dominance_ok_next, dominance_ratio_next = vote_dominance_ok(
+        preds_group,
+        confidence_group,
+        VOTE_DOMINANCE_RATIO,
+    )
 else:
     vote_group, confidence_group = None, 0
+    dominance_ok_next, dominance_ratio_next = False, 0.0
 
 if preds_color:
     vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
 else:
     vote_color, confidence_color = None, 0
 
-signal_group = confidence_group >= vote_required if vote_group is not None else False
+signal_group = (confidence_group >= vote_required and dominance_ok_next) if vote_group is not None else False
 signal_color = confidence_color >= color_vote_required if vote_color is not None else False
 
 if len(hist) >= RECENT_PHASE_CHECK:
@@ -1161,6 +1211,12 @@ used_keep_phase_next = False
 final_phase_group_next = vote_group
 final_phase_color_next = vote_color if signal_color else None
 
+current_phase_age_next = int(hist.iloc[-1]["phase_age"]) + 1 if "phase_age" in hist.columns else 1
+current_phase_trade_count = int(hist[hist["phase"] == int(hist.iloc[-1]["phase"])]["PHASE_BET"].sum())
+
+phase_warmup_block_next = current_phase_age_next < MIN_PHASE_AGE_TO_TRADE
+max_phase_trades_block_next = current_phase_trade_count >= MAX_PHASE_TRADES
+
 if last_phase_bet_was_loss and keep_phase_left > 0 and keep_phase_group is not None:
     used_keep_phase_next = True
     final_phase_group_next = keep_phase_group
@@ -1168,6 +1224,12 @@ if last_phase_bet_was_loss and keep_phase_left > 0 and keep_phase_group is not N
     phase_next_allowed = recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
 else:
     phase_next_allowed = signal_group and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
+
+if phase_next_allowed and phase_warmup_block_next:
+    phase_next_allowed = False
+
+if phase_next_allowed and max_phase_trades_block_next:
+    phase_next_allowed = False
 
 if session_stop:
     signal_group = False
@@ -1177,6 +1239,12 @@ elif phase_next_allowed and used_keep_phase_next:
     next_state = "READY_PHASE_KEEP_BET"
 elif phase_next_allowed:
     next_state = "READY_PHASE_BET"
+elif signal_group and phase_warmup_block_next:
+    next_state = "WAIT_PHASE_WARMUP"
+elif signal_group and max_phase_trades_block_next:
+    next_state = "WAIT_MAX_PHASE_TRADES"
+elif vote_group is not None and not dominance_ok_next:
+    next_state = "WAIT_VOTE_DOMINANCE_WEAK"
 elif signal_group and recent_phase_pnl_next < PHASE_MIN_RECENT_PNL_TO_TRADE:
     next_state = "NEXT_PHASE_BLOCKED_RECENT_TOO_WEAK"
 elif not signal_group:
@@ -1263,7 +1331,7 @@ st.subheader("NEXT ROUND DEBUG")
 d1, d2, d3, d4 = st.columns(4)
 d1.metric("Next Round", next_round)
 d2.metric("Group Vote", f"{confidence_group}/{vote_required}")
-d3.metric("Color Vote", f"{confidence_color}/{color_vote_required}")
+d3.metric("Dominance", round(dominance_ratio_next, 2))
 d4.metric("Recent Phase PNL", recent_phase_pnl_next)
 
 st.write("Next Group Vote:", vote_group if vote_group is not None else "-")
@@ -1276,6 +1344,12 @@ st.write("Keep Phase Color:", color_text(keep_phase_color))
 st.write("Keep Phase Left:", keep_phase_left)
 st.write("Last Phase Bet Was Loss:", last_phase_bet_was_loss)
 st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
+st.write("MIN_PHASE_AGE_TO_TRADE:", MIN_PHASE_AGE_TO_TRADE)
+st.write("Current Phase Age Next:", current_phase_age_next)
+st.write("MAX_PHASE_TRADES:", MAX_PHASE_TRADES)
+st.write("Current Phase Trade Count:", current_phase_trade_count)
+st.write("VOTE_DOMINANCE_RATIO:", VOTE_DOMINANCE_RATIO)
+st.write("Dominance OK Next:", dominance_ok_next)
 st.write("Next State:", next_state)
 
 st.subheader("Lock Info")
@@ -1296,6 +1370,7 @@ st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK}")
+st.write("Relock Rule 3:", f"max_phase_trades >= {MAX_PHASE_TRADES}")
 st.write("Relock Rule 2:", f"phase_group_profit <= {PHASE_STOP_LOSS}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group profit <= 0")
 st.write("Telegram Enabled:", telegram_enabled())
@@ -1369,7 +1444,11 @@ history_cols = [
     "color",
     "vote_group",
     "confidence_group",
+    "dominance_ratio",
+    "dominance_ok",
     "signal_group",
+    "phase_warmup_block",
+    "max_phase_trades_block",
     "vote_color",
     "confidence_color",
     "signal_color",
