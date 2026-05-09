@@ -52,8 +52,8 @@ VOTE_DOMINANCE_RATIO = 0.7
 
 KEEP_AFTER_LOSS_ROUNDS = 0
 
-SESSION_STOP_WIN = 66.0
-SESSION_STOP_LOSS = -66.0
+SESSION_STOP_WIN = 6.0
+SESSION_STOP_LOSS = -6.0
 
 MIN_FALLBACK_SCORE = -3.0
 
@@ -78,6 +78,7 @@ RELOCK_BUFFER = 0
 SHOW_HISTORY_ROWS = 10
 CHART_HISTORY_ROWS = 250
 SHOW_DEBUG_TABLES = False
+STRICT_PROFIT_ACCOUNTING = True  # WAIT không bao giờ tính profit/loss
 
 DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
@@ -857,23 +858,29 @@ def simulate_engine(numbers, groups, colors):
         if phase_trade_allowed and distance < GAP:
             phase_trade_allowed = False
 
-        if phase_trade_allowed:
+        # ===== STRICT BET ACCOUNTING =====
+        # Chỉ khi PHASE_BET=True mới được tính WIN/LOSS.
+        # WAIT / BLOCK / NO_SIGNAL tuyệt đối không cộng -1.
+        did_trade_group = bool(phase_trade_allowed and final_phase_group is not None)
+
+        if did_trade_group:
             last_phase_trade_idx = i
 
-            if groups[i] == final_phase_group:
-                phase_hit_group = 1
-                phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
-            else:
-                phase_hit_group = 0
-                phase_pnl_group = LOSS_GROUP * PHASE_BET_UNIT
+            phase_hit_group = 1 if groups[i] == final_phase_group else 0
+            phase_pnl_group = (
+                WIN_GROUP * PHASE_BET_UNIT
+                if phase_hit_group == 1
+                else LOSS_GROUP * PHASE_BET_UNIT
+            )
 
-            if ENABLE_COLOR_BET and final_phase_color is not None:
-                if colors[i] == final_phase_color:
-                    phase_hit_color = 1
-                    phase_pnl_color = WIN_COLOR * COLOR_BET_UNIT
-                else:
-                    phase_hit_color = 0
-                    phase_pnl_color = LOSS_COLOR * COLOR_BET_UNIT
+            did_trade_color = bool(ENABLE_COLOR_BET and final_phase_color is not None)
+            if did_trade_color:
+                phase_hit_color = 1 if colors[i] == final_phase_color else 0
+                phase_pnl_color = (
+                    WIN_COLOR * COLOR_BET_UNIT
+                    if phase_hit_color == 1
+                    else LOSS_COLOR * COLOR_BET_UNIT
+                )
             else:
                 phase_hit_color = None
                 phase_pnl_color = 0.0
@@ -896,7 +903,6 @@ def simulate_engine(numbers, groups, colors):
             last_signal_pnl_in_phase = raw_signal_pnl_group
             last_signal_round_in_phase = round_no
 
-            # KEEP rule: nếu group fail thì vòng sau giữ lại cùng group/color 1 lần.
             if phase_hit_group == 1:
                 phase_consecutive_losses = 0
                 last_phase_bet_was_loss = False
@@ -919,6 +925,7 @@ def simulate_engine(numbers, groups, colors):
             state = "PHASE_KEEP_BET" if used_keep_phase else "PHASE_BET"
 
         else:
+            did_trade_color = False
             phase_hit_group = None
             phase_hit_color = None
             phase_pnl_group = 0.0
@@ -987,10 +994,12 @@ def simulate_engine(numbers, groups, colors):
                 "vote_color": color_text(vote_color),
                 "confidence_color": confidence_color,
                 "signal_color": signal_color,
-                "PHASE_BET": phase_trade_allowed,
+                "PHASE_BET": did_trade_group,
+                "did_trade_group": did_trade_group,
+                "did_trade_color": did_trade_color,
                 "used_keep_phase": used_keep_phase,
-                "phase_bet_group": final_phase_group if phase_trade_allowed else None,
-                "phase_bet_color": color_text(final_phase_color) if phase_trade_allowed else "-",
+                "phase_bet_group": final_phase_group if did_trade_group else None,
+                "phase_bet_color": color_text(final_phase_color) if did_trade_color else "-",
                 "phase_hit_group": phase_hit_group,
                 "phase_hit_color": phase_hit_color,
                 "phase_pnl_group": phase_pnl_group,
@@ -1004,6 +1013,8 @@ def simulate_engine(numbers, groups, colors):
                 "keep_phase_color": color_text(keep_phase_color),
                 "keep_phase_left": keep_phase_left,
                 "last_phase_bet_was_loss": last_phase_bet_was_loss,
+            "accounting_check_total_group": accounting_check_total_group,
+            "accounting_check_total_all": accounting_check_total_all,
                 "recent_phase_pnl": recent_phase_pnl,
                 "total_phase_profit_group": total_phase_profit_group,
                 "total_phase_profit_color": total_phase_profit_color,
@@ -1098,6 +1109,15 @@ def simulate_engine(numbers, groups, colors):
                 last_phase_trade_idx = i
 
     hist = pd.DataFrame(history_rows)
+
+    # Accounting sanity check: total group profit phải bằng tổng phase_pnl_group của các lệnh thật.
+    if not hist.empty and "did_trade_group" in hist.columns:
+        accounting_check_total_group = float(hist.loc[hist["did_trade_group"] == True, "phase_pnl_group"].sum())
+        accounting_check_total_all = float(hist.loc[hist["did_trade_group"] == True, "phase_pnl_total"].sum())
+    else:
+        accounting_check_total_group = 0.0
+        accounting_check_total_all = 0.0
+
     phase_summary_df = pd.DataFrame(phase_summary_rows)
 
     session_stop = total_phase_profit_all >= SESSION_STOP_WIN or total_phase_profit_all <= SESSION_STOP_LOSS
@@ -1202,6 +1222,8 @@ keep_phase_group = sim.get("keep_phase_group", None)
 keep_phase_color = sim.get("keep_phase_color", None)
 keep_phase_left = sim.get("keep_phase_left", 0)
 last_phase_bet_was_loss = sim.get("last_phase_bet_was_loss", False)
+accounting_check_total_group = sim.get("accounting_check_total_group", 0.0)
+accounting_check_total_all = sim.get("accounting_check_total_all", 0.0)
 
 next_idx = len(groups)
 next_round = len(groups) + 1
@@ -1412,6 +1434,8 @@ st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
 
 st.subheader("Profit Compare")
+st.write("Accounting Check Group:", accounting_check_total_group)
+st.write("Accounting Check All:", accounting_check_total_all)
 
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("Phase Group Profit", phase_profit_group)
@@ -1421,15 +1445,15 @@ p4.metric("Total Phase All", total_phase_profit_all)
 
 st.subheader("Trade Stats")
 
-phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+phase_trades = int(hist["did_trade_group"].sum()) if "did_trade_group" in hist.columns else int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
 
 phase_group_wr = (
-    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    round(hist.loc[hist["did_trade_group"] == True, "phase_hit_group"].mean() * 100, 2)
     if phase_trades > 0
     else 0
 )
 
-color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
+color_hit_df = hist[(hist.get("did_trade_color", False) == True) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
 
 s1, s2, s3, s4 = st.columns(4)
@@ -1442,8 +1466,8 @@ st.subheader("Profit Curve")
 
 chart_cols = [
     "phase_profit_group",
-    "phase_profit_color",
     "phase_profit_total",
+    "total_phase_profit_group",
     "total_phase_profit_all",
 ]
 
@@ -1488,6 +1512,8 @@ history_cols = [
     "confidence_color",
     "signal_color",
     "PHASE_BET",
+    "did_trade_group",
+    "did_trade_color",
     "used_keep_phase",
     "phase_bet_group",
     "phase_bet_color",
