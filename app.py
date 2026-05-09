@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=20000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -70,7 +70,7 @@ AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -2.0
+VALIDATE_MIN_DRAWDOWN = -1.0
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
@@ -691,7 +691,7 @@ def simulate_engine(numbers, groups, colors):
         "session_stop_reason": None,
         "last_signal_pnl_in_phase": 0.0,
         "last_signal_round_in_phase": None,
-        "phase_consecutive_losses": 0,
+        "phase_consecutive_": 0,
         "keep_phase_group": None,
         "keep_phase_color": None,
         "keep_phase_left": 0,
@@ -725,7 +725,7 @@ def simulate_engine(numbers, groups, colors):
     last_signal_pnl_in_phase = 0.0
     last_signal_round_in_phase = None
 
-    phase_consecutive_losses = 0
+    phase_consecutive_ = 0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -864,13 +864,13 @@ def simulate_engine(numbers, groups, colors):
 
             # KEEP rule: nếu group fail thì vòng sau giữ lại cùng group/color 1 lần.
             if phase_hit_group == 1:
-                phase_consecutive_losses = 0
+                phase_consecutive_ = 0
                 last_phase_bet_was_loss = False
                 keep_phase_group = None
                 keep_phase_color = None
                 keep_phase_left = 0
             else:
-                phase_consecutive_losses += 1
+                phase_consecutive_ += 1
                 if used_keep_phase:
                     last_phase_bet_was_loss = False
                     keep_phase_group = None
@@ -907,7 +907,7 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2:
             relock_triggered_now = True
             relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
             state = "AUTO_RELOCK_LOSS_STREAK"
