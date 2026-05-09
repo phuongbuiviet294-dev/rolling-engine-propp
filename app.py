@@ -19,7 +19,7 @@ REPLAY_FROM = 180
 
 MODES = [
    
-    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     
 ]
 
@@ -72,7 +72,7 @@ MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 3
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 12
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
