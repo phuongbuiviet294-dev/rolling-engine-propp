@@ -35,40 +35,40 @@ PHASE_BET_UNIT = 1.0
 COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -2.0
-PHASE_TAKE_PROFIT_RELOCK = 4.5
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_LOSS = -4.0
+PHASE_TAKE_PROFIT_RELOCK = 7.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 4
-PHASE_MIN_RECENT_PNL_TO_TRADE = -0.5
+PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
 
-MIN_PHASE_AGE_TO_TRADE = 2
-MAX_PHASE_TRADES = 3
-VOTE_DOMINANCE_RATIO = 0.65
+MIN_PHASE_AGE_TO_TRADE = 1
+MAX_PHASE_TRADES = 6
+VOTE_DOMINANCE_RATIO = 0.55
 
 KEEP_AFTER_LOSS_ROUNDS = 0
 
-SESSION_STOP_WIN = 4.5
-SESSION_STOP_LOSS = -3.0
+SESSION_STOP_WIN = 7.0
+SESSION_STOP_LOSS = -5.0
 
 MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 29
-RECENT_WINDOW_SIZE_LIST = [12, 16, 20, 24]
-MIN_TRADES_PER_WINDOW_LIST = [8, 12, 16]
+RECENT_WINDOW_SIZE_LIST = [14, 18, 24, 30]
+MIN_TRADES_PER_WINDOW_LIST = [6, 10, 14]
 MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 5
+WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 18
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [12, 16, 20]
+VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -1.0
@@ -1411,7 +1411,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     send_signal_once("READY_PHASE", current_round, ready_msg)
 
 st.title("Auto Relock Engine | 6v4 Dynamic Window Relock | GROUP ONLY")
-st.caption("6v4 only | Anti-negative-day config: take profit 4.5, stop loss -3, spacing=1..5, validate=[12,16,20].")
+st.caption("6v4 balanced config: không cắt lỗ quá sớm, cho phase đủ thời gian hồi. TP=7, SL=-5, spacing=1..6, validate=[12,16,20,24].")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1506,7 +1506,8 @@ st.write("Selected Min Trades Per Window:", selected_mode.get("min_trades_per_wi
 st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
 st.write("Dynamic Selection:", "Mode fixed 6v4, auto choose spacing + validate_len + windows")
-st.write("Anti Negative Config:", f"TP={SESSION_STOP_WIN}, SL={SESSION_STOP_LOSS}, phase TP relock={PHASE_TAKE_PROFIT_RELOCK}, phase SL={PHASE_STOP_LOSS}")
+st.write("Reason:", "Bản này nới stop-loss để tránh ngày nào cũng dừng ở -3")
+st.write("Balanced Config:", f"Session TP={SESSION_STOP_WIN}, Session SL={SESSION_STOP_LOSS}, phase TP relock={PHASE_TAKE_PROFIT_RELOCK}, phase SL={PHASE_STOP_LOSS}")
 st.write("Dynamic Recent Window:", RECENT_WINDOW_SIZE_LIST)
 st.write("Dynamic Min Trades:", MIN_TRADES_PER_WINDOW_LIST)
 st.write("Locked Windows:", locked_windows)
