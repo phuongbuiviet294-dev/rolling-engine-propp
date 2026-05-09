@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=10000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -18,9 +18,7 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-
-    {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
-  
+    {"name": "6v4_DYNAMIC", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
@@ -37,27 +35,27 @@ PHASE_BET_UNIT = 1.0
 COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -4.0
+PHASE_STOP_LOSS = -3.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 ENABLE_TIMEOUT_RELOCK = False
-TIMEOUT_RELOCK_ROUNDS = 30
+TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 4
 PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
 
 MIN_PHASE_AGE_TO_TRADE = 3
 MAX_PHASE_TRADES = 44
-VOTE_DOMINANCE_RATIO = 0.7
+VOTE_DOMINANCE_RATIO = 0.6
 
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 6.0
 SESSION_STOP_LOSS = -6.0
 
-MIN_FALLBACK_SCORE = -1.0
+MIN_FALLBACK_SCORE = -3.0
 
-MIN_TRADES_PER_WINDOW = 24
+MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 29
 MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
@@ -65,17 +63,20 @@ WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 12
+VALIDATE_LEN = 18
 AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 8
+RELOCK_SCAN_LEN = 24
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
+CHART_HISTORY_ROWS = 250
+MAX_SOURCE_ROWS = 360  # chống treo khi Google Sheet có quá nhiều dòng
+LOAD_TIMEOUT_SECONDS = 10
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -139,8 +140,16 @@ def send_signal_once(signal_name, current_round, msg):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
-    df = pd.read_csv(url)
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={int(time.time() // 30)}"
+
+    try:
+        r = requests.get(url, timeout=LOAD_TIMEOUT_SECONDS)
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Cannot load Google Sheet within {LOAD_TIMEOUT_SECONDS}s: {e}")
+
+    from io import StringIO
+    df = pd.read_csv(StringIO(r.text))
     df.columns = [str(c).strip().lower() for c in df.columns]
 
     if "number" not in df.columns:
@@ -148,7 +157,14 @@ def load_numbers():
 
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     nums = df["number"].dropna().astype(int).tolist()
-    return [x for x in nums if 1 <= x <= 12]
+    nums = [x for x in nums if 1 <= x <= 12]
+
+    # Chống loading mãi khi sheet quá dài: chỉ dùng phần gần nhất.
+    # LOCK_ROUND_START=168 nên 420 dòng vẫn đủ train/validate/replay.
+    if MAX_SOURCE_ROWS and len(nums) > MAX_SOURCE_ROWS:
+        nums = nums[-MAX_SOURCE_ROWS:]
+
+    return nums
 
 
 def group_of(n):
@@ -371,56 +387,95 @@ def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     return out
 
 
-def build_window_tables(train_groups, window_min, window_max, min_window_spacing=None):
-    if min_window_spacing is None:
-        min_window_spacing = MIN_WINDOW_SPACING
+def build_window_tables(train_groups, window_min, window_max, min_window_spacing=MIN_WINDOW_SPACING):
+    best_candidate_windows = []
+    best_df_all = pd.DataFrame()
+    best_filtered_df = pd.DataFrame()
+    best_score = -999999.0
 
-    rows = [evaluate_window_group(train_groups, w) for w in range(window_min, window_max + 1)]
-    df = pd.DataFrame(rows)
+    for dynamic_recent_window in RECENT_WINDOW_SIZE_LIST:
+        for dynamic_min_trades in MIN_TRADES_PER_WINDOW_LIST:
 
-    df_all = df.sort_values(
-        ["score", "streak_score", "recent_profit", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False, False, False],
-    ).reset_index(drop=True)
+            rows = []
 
-    filtered_df = df[
-        (df["trades"] >= MIN_TRADES_PER_WINDOW)
-        & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
-    ].copy()
+            for w in range(window_min, window_max + 1):
+                row = evaluate_window_group(train_groups, w)
 
-    filtered_df = filtered_df.sort_values(
-        ["streak_score", "score", "recent_profit", "profit", "winrate", "trades", "max_loss_streak"],
-        ascending=[False, False, False, False, False, False, True],
-    ).reset_index(drop=True)
+                # dynamic override
+                row["dynamic_recent_window"] = dynamic_recent_window
+                row["dynamic_min_trades"] = dynamic_min_trades
 
-    if filtered_df.empty:
-        filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
+                rows.append(row)
 
-    selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
+            df = pd.DataFrame(rows)
 
-    candidate_df = selected_seed.sort_values(
-        ["streak_score", "score", "recent_profit", "profit", "winrate", "trades"],
-        ascending=[False, False, False, False, False, False],
-    ).reset_index(drop=True)
+            df_all = df.sort_values(
+                ["score", "streak_score", "recent_profit", "profit", "winrate", "trades"],
+                ascending=[False, False, False, False, False, False],
+            ).reset_index(drop=True)
 
-    spaced_candidate_df = pick_spaced_windows(candidate_df, MAX_CANDIDATE_WINDOWS, min_window_spacing)
+            filtered_df = df[
+                (df["trades"] >= dynamic_min_trades)
+                & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
+                & (df["max_loss_streak"] <= 6)
+            ].copy()
 
-    if not spaced_candidate_df.empty and "window" in spaced_candidate_df.columns:
-        candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
-    else:
-        candidate_windows = []
+            filtered_df = filtered_df.sort_values(
+                ["streak_score", "score", "recent_profit", "profit", "winrate", "trades", "max_loss_streak"],
+                ascending=[False, False, False, False, False, False, True],
+            ).reset_index(drop=True)
 
-    need = max(m["top_windows"] for m in MODES)
+            if filtered_df.empty:
+                filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
 
-    if len(candidate_windows) < need:
-        candidate_windows = enforce_spacing_from_df(selected_seed, need, min_window_spacing)
+            selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
 
-    if len(candidate_windows) < need:
-        candidate_windows = enforce_spacing_from_df(df_all, need, 1)
+            candidate_df = selected_seed.sort_values(
+                ["streak_score", "score", "recent_profit", "profit", "winrate", "trades"],
+                ascending=[False, False, False, False, False, False],
+            ).reset_index(drop=True)
 
-    return candidate_windows, df_all, filtered_df
+            spaced_candidate_df = pick_spaced_windows(
+                candidate_df,
+                MAX_CANDIDATE_WINDOWS,
+                min_window_spacing,
+            )
 
+            if not spaced_candidate_df.empty and "window" in spaced_candidate_df.columns:
+                candidate_windows = spaced_candidate_df["window"].astype(int).tolist()
+            else:
+                candidate_windows = []
+
+            need = max(m["top_windows"] for m in MODES)
+
+            if len(candidate_windows) < need:
+                candidate_windows = enforce_spacing_from_df(
+                    selected_seed,
+                    need,
+                    min_window_spacing,
+                )
+
+            if len(candidate_windows) < need:
+                candidate_windows = enforce_spacing_from_df(df_all, need, 1)
+
+            dynamic_score = (
+                filtered_df["score"].head(6).sum()
+                if not filtered_df.empty
+                else -999999.0
+            )
+
+            if dynamic_score > best_score:
+                best_score = dynamic_score
+                best_candidate_windows = candidate_windows
+                best_df_all = df_all.copy()
+                best_df_all["selected_recent_window"] = dynamic_recent_window
+                best_df_all["selected_min_trades"] = dynamic_min_trades
+
+                best_filtered_df = filtered_df.copy()
+                best_filtered_df["selected_recent_window"] = dynamic_recent_window
+                best_filtered_df["selected_min_trades"] = dynamic_min_trades
+
+    return best_candidate_windows, best_df_all, best_filtered_df
 
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
     results_group = []
@@ -500,6 +555,40 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     round_eval_rows = []
 
+    # ===== SPEED CACHE, giữ nguyên logic =====
+    window_table_cache = {}
+    backtest_cache = {}
+
+    def get_window_tables_cached(train_end, window_min, window_max, spacing):
+        key = (int(train_end), int(window_min), int(window_max), int(spacing))
+        if key not in window_table_cache:
+            window_table_cache[key] = build_window_tables(
+                all_groups[:train_end],
+                window_min,
+                window_max,
+                min_window_spacing=spacing,
+            )
+        return window_table_cache[key]
+
+    def get_backtest_cached(kind, seq_end, windows, vote_required, start_idx, end_idx):
+        key = (
+            kind,
+            int(seq_end),
+            tuple(int(x) for x in windows),
+            int(vote_required),
+            int(start_idx),
+            int(end_idx),
+        )
+        if key not in backtest_cache:
+            backtest_cache[key] = backtest_bundle_vote_range(
+                all_groups[:seq_end],
+                windows,
+                vote_required,
+                start_idx,
+                end_idx,
+            )
+        return backtest_cache[key]
+
     validate_values = VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else [VALIDATE_LEN]
 
     for validate_len in validate_values:
@@ -513,9 +602,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             train_end = r - validate_len
             validate_start = train_end
             validate_end = r
-
-            train_groups = all_groups[:train_end]
-            validate_groups = all_groups[:validate_end]
 
             local_best_score = -999999.0
             local_best_windows = []
@@ -541,11 +627,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 )
 
                 for spacing in spacing_values:
-                    candidate_windows, df_all, filtered_df = build_window_tables(
-                        train_groups,
+                    candidate_windows, df_all, filtered_df = get_window_tables_cached(
+                        train_end,
                         mode["window_min"],
                         mode["window_max"],
-                        min_window_spacing=spacing,
+                        spacing,
                     )
 
                     if len(candidate_windows) < top_windows:
@@ -553,16 +639,18 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
                     selected_windows = candidate_windows[:top_windows]
 
-                    train_bt = backtest_bundle_vote_range(
-                        train_groups,
+                    train_bt = get_backtest_cached(
+                        "train",
+                        train_end,
                         selected_windows,
                         vote_required,
                         0,
-                        len(train_groups),
+                        train_end,
                     )
 
-                    validate_bt = backtest_bundle_vote_range(
-                        validate_groups,
+                    validate_bt = get_backtest_cached(
+                        "validate",
+                        validate_end,
                         selected_windows,
                         vote_required,
                         validate_start,
@@ -907,10 +995,10 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK :
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2 :
             relock_triggered_now = True
-            relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
-            state = "AUTO_RELOCK_LOSS_STREAK"
+            relock_reason_now = "PHASE_FAIL_LOSS_STREAK_AND_TOTAL_GROUP_LT_MINUS_2"
+            state = "AUTO_RELOCK_PHASE_FAIL"
 
         elif phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
@@ -1021,6 +1109,7 @@ def simulate_engine(numbers, groups, colors):
             scan_end = i
             scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
 
+            # Guard chống loading: chỉ relock scan khi còn đủ dữ liệu train/validate tối thiểu.
             (
                 new_selected_lock_round,
                 new_locked_windows,
@@ -1053,6 +1142,8 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_total = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
+
+                phase_consecutive_losses = 0
 
                 phase_consecutive_losses = 0
                 keep_phase_group = None
@@ -1112,7 +1203,7 @@ def simulate_engine(numbers, groups, colors):
     return result
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def cached_simulate_engine(numbers_tuple):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
@@ -1120,7 +1211,14 @@ def cached_simulate_engine(numbers_tuple):
     return simulate_engine(nums, grps, cols)
 
 
-numbers = load_numbers()
+try:
+    numbers = load_numbers()
+except Exception as e:
+    st.error(f"Lỗi load dữ liệu Google Sheet: {e}")
+    st.stop()
+
+st.caption(f"Loaded recent rows: {len(numbers)} / MAX_SOURCE_ROWS={MAX_SOURCE_ROWS}")
+
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
@@ -1132,7 +1230,13 @@ if st.sidebar.button("Clear cache & rerun"):
     st.cache_data.clear()
     st.rerun()
 
-sim = cached_simulate_engine(tuple(numbers))
+try:
+    with st.spinner("Đang scan window/backtest, vui lòng chờ..."):
+        sim = cached_simulate_engine(tuple(numbers))
+except Exception as e:
+    st.error(f"Lỗi khi simulate_engine: {type(e).__name__}: {e}")
+    st.stop()
+
 hist = sim["hist"]
 
 if hist.empty:
@@ -1212,7 +1316,7 @@ final_phase_group_next = vote_group
 final_phase_color_next = vote_color if signal_color else None
 
 current_phase_age_next = int(hist.iloc[-1]["phase_age"]) + 1 if "phase_age" in hist.columns else 1
-current_phase_trade_count = int(hist[hist["phase"] == int(hist.iloc[-1]["phase"])]["PHASE_BET"].sum())
+current_phase_trade_count = int(hist[hist["phase"] == int(hist.iloc[-1]["phase"])]["PHASE_BET"].fillna(False).astype(bool).sum())
 
 phase_warmup_block_next = current_phase_age_next < MIN_PHASE_AGE_TO_TRADE
 max_phase_trades_block_next = current_phase_trade_count >= MAX_PHASE_TRADES
@@ -1273,7 +1377,8 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     )
     send_signal_once("READY_PHASE", current_round, ready_msg)
 
-st.title("Auto Relock Engine | PHASE GROUP + COLOR | NO LIVE")
+st.title("Auto Relock Engine | 6v4 Dynamic Window Relock | GROUP ONLY")
+st.caption("6v4 only: top_windows=6, vote_required=4. Auto scan spacing=1..6, validate=[12,16,20,24], relock_scan=24.")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1365,11 +1470,14 @@ st.write("Selected Window Spacing:", selected_mode.get("spacing", MIN_WINDOW_SPA
 st.write("Selected Validate Len:", selected_mode.get("validate_len", VALIDATE_LEN) if selected_mode else "-")
 st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
+st.write("Dynamic Selection:", "Mode fixed 6v4, auto choose spacing + validate_len + windows")
+st.write("Dynamic Recent Window:", RECENT_WINDOW_SIZE_LIST)
+st.write("Dynamic Min Trades:", MIN_TRADES_PER_WINDOW_LIST)
 st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
-st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK}")
+st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND total_phase_profit_group < -2")
 st.write("Relock Rule 3:", f"max_phase_trades >= {MAX_PHASE_TRADES}")
 st.write("Relock Rule 2:", f"phase_group_profit <= {PHASE_STOP_LOSS}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group profit <= 0")
@@ -1386,15 +1494,15 @@ p4.metric("Total Phase All", total_phase_profit_all)
 
 st.subheader("Trade Stats")
 
-phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+phase_trades = int(hist["PHASE_BET"].fillna(False).astype(bool).sum()) if "PHASE_BET" in hist.columns else 0
 
 phase_group_wr = (
-    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    round(hist.loc[hist["PHASE_BET"].fillna(False).astype(bool), "phase_hit_group"].mean() * 100, 2)
     if phase_trades > 0
     else 0
 )
 
-color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
+color_hit_df = hist[(hist["PHASE_BET"].fillna(False).astype(bool)) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
 
 s1, s2, s3, s4 = st.columns(4)
@@ -1415,7 +1523,7 @@ chart_cols = [
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 
 if exist_chart_cols:
-    st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
+    st.line_chart(hist[exist_chart_cols].tail(CHART_HISTORY_ROWS).reset_index(drop=True))
 
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
