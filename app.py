@@ -51,7 +51,7 @@ SESSION_STOP_LOSS = -4.0
 
 MIN_FALLBACK_SCORE = -1.0
 
-MIN_TRADES_PER_WINDOW = 16
+MIN_TRADES_PER_WINDOW = 24
 RECENT_WINDOW_SIZE = 30
 MIN_WINDOW_SPACING = 5
 MAX_CANDIDATE_WINDOWS = 10
@@ -59,7 +59,7 @@ MAX_CANDIDATE_WINDOWS = 10
 VALIDATE_LEN = 24
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 6
 RELOCK_BUFFER = 0
@@ -766,7 +766,7 @@ def simulate_engine(numbers, groups):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -1:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK :
             relock_triggered_now = True
             relock_reason_now = "PHASE_3_SIGNAL_LOSS_AND_NEGATIVE"
             state = "AUTO_RELOCK_3_SIGNAL_LOSS_NEGATIVE"
