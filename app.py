@@ -77,6 +77,8 @@ RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
 CHART_HISTORY_ROWS = 250
+MAX_SOURCE_ROWS = 420  # chống treo khi Google Sheet có quá nhiều dòng
+LOAD_TIMEOUT_SECONDS = 10
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -140,8 +142,16 @@ def send_signal_once(signal_name, current_round, msg):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_numbers():
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
-    df = pd.read_csv(url)
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={int(time.time() // 30)}"
+
+    try:
+        r = requests.get(url, timeout=LOAD_TIMEOUT_SECONDS)
+        r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Cannot load Google Sheet within {LOAD_TIMEOUT_SECONDS}s: {e}")
+
+    from io import StringIO
+    df = pd.read_csv(StringIO(r.text))
     df.columns = [str(c).strip().lower() for c in df.columns]
 
     if "number" not in df.columns:
@@ -149,7 +159,14 @@ def load_numbers():
 
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     nums = df["number"].dropna().astype(int).tolist()
-    return [x for x in nums if 1 <= x <= 12]
+    nums = [x for x in nums if 1 <= x <= 12]
+
+    # Chống loading mãi khi sheet quá dài: chỉ dùng phần gần nhất.
+    # LOCK_ROUND_START=168 nên 420 dòng vẫn đủ train/validate/replay.
+    if MAX_SOURCE_ROWS and len(nums) > MAX_SOURCE_ROWS:
+        nums = nums[-MAX_SOURCE_ROWS:]
+
+    return nums
 
 
 def group_of(n):
@@ -941,7 +958,7 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losseslosses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2 :
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2 :
             relock_triggered_now = True
             relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
             state = "AUTO_RELOCK_LOSS_STREAK"
@@ -999,7 +1016,7 @@ def simulate_engine(numbers, groups, colors):
                 "phase_profit_group": phase_profit_group,
                 "phase_profit_color": phase_profit_color,
                 "phase_profit_total": phase_profit_total,
-                "phase_consecutive_losseslosses": phase_consecutive_losseslosses,
+                "phase_consecutive_losses": phase_consecutive_losses,
                 "keep_phase_group": keep_phase_group,
                 "keep_phase_color": color_text(keep_phase_color),
                 "keep_phase_left": keep_phase_left,
@@ -1039,7 +1056,7 @@ def simulate_engine(numbers, groups, colors):
                     "lock_scan_end": lock_scan_end,
                     "lock_round": selected_lock_round,
                     "phase_age": phase_age,
-                    "phase_loss_streak": phase_consecutive_losseslosses,
+                    "phase_loss_streak": phase_consecutive_losses,
                     "max_phase_trades": MAX_PHASE_TRADES,
                     "min_phase_age_to_trade": MIN_PHASE_AGE_TO_TRADE,
                     "phase_bet_trades": len(phase_hits_group),
@@ -1088,7 +1105,9 @@ def simulate_engine(numbers, groups, colors):
                 phase_hits_group = []
                 phase_hits_color = []
 
-                phase_consecutive_losseslosses = 0
+                phase_consecutive_losses = 0
+
+                phase_consecutive_losses = 0
                 keep_phase_group = None
                 keep_phase_color = None
                 keep_phase_left = 0
@@ -1135,7 +1154,7 @@ def simulate_engine(numbers, groups, colors):
             "session_stop_reason": session_stop_reason,
             "last_signal_pnl_in_phase": last_signal_pnl_in_phase,
             "last_signal_round_in_phase": last_signal_round_in_phase,
-            "phase_consecutive_losseslosses": phase_consecutive_losseslosses,
+            "phase_consecutive_losses": phase_consecutive_losses,
             "keep_phase_group": keep_phase_group,
             "keep_phase_color": keep_phase_color,
             "keep_phase_left": keep_phase_left,
@@ -1146,7 +1165,7 @@ def simulate_engine(numbers, groups, colors):
     return result
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_simulate_engine(numbers_tuple):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
@@ -1154,7 +1173,14 @@ def cached_simulate_engine(numbers_tuple):
     return simulate_engine(nums, grps, cols)
 
 
-numbers = load_numbers()
+try:
+    numbers = load_numbers()
+except Exception as e:
+    st.error(f"Lỗi load dữ liệu Google Sheet: {e}")
+    st.stop()
+
+st.caption(f"Loaded recent rows: {len(numbers)} / MAX_SOURCE_ROWS={MAX_SOURCE_ROWS}")
+
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
@@ -1166,7 +1192,8 @@ if st.sidebar.button("Clear cache & rerun"):
     st.cache_data.clear()
     st.rerun()
 
-sim = cached_simulate_engine(tuple(numbers))
+with st.spinner("Đang scan window/backtest, vui lòng chờ..."):
+    sim = cached_simulate_engine(tuple(numbers))
 hist = sim["hist"]
 
 if hist.empty:
@@ -1197,7 +1224,7 @@ session_stop_reason = sim["session_stop_reason"]
 
 last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
 last_signal_round_in_phase = sim["last_signal_round_in_phase"]
-phase_consecutive_losseslosses = sim["phase_consecutive_losseslosses"]
+phase_consecutive_losses = sim["phase_consecutive_losses"]
 keep_phase_group = sim.get("keep_phase_group", None)
 keep_phase_color = sim.get("keep_phase_color", None)
 keep_phase_left = sim.get("keep_phase_left", 0)
@@ -1246,7 +1273,7 @@ final_phase_group_next = vote_group
 final_phase_color_next = vote_color if signal_color else None
 
 current_phase_age_next = int(hist.iloc[-1]["phase_age"]) + 1 if "phase_age" in hist.columns else 1
-current_phase_trade_count = int(hist[hist["phase"] == int(hist.iloc[-1]["phase"])]["PHASE_BET"].sum())
+current_phase_trade_count = int(hist[hist["phase"] == int(hist.iloc[-1]["phase"])]["PHASE_BET"].fillna(False).astype(bool).sum())
 
 phase_warmup_block_next = current_phase_age_next < MIN_PHASE_AGE_TO_TRADE
 max_phase_trades_block_next = current_phase_trade_count >= MAX_PHASE_TRADES
@@ -1308,7 +1335,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     send_signal_once("READY_PHASE", current_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | NO LIVE")
-st.caption("Fixed: phase_consecutive_losses variable + fast cached scan/backtest.")
+st.caption("Fixed: phase_consecutive_losses variable + fast cached scan/backtest. Performance Cap: dùng tối đa MAX_SOURCE_ROWS dòng gần nhất.")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1324,7 +1351,7 @@ r5, r6, r7, r8 = st.columns(4)
 r5.metric("Last Group PNL", float(last["phase_pnl_group"]))
 r6.metric("Last Color PNL", float(last["phase_pnl_color"]))
 r7.metric("Last Total PNL", float(last["phase_pnl_total"]))
-r8.metric("Loss Streak", phase_consecutive_losseslosses)
+r8.metric("Loss Streak", phase_consecutive_losses)
 
 st.write("Last State:", str(last["state"]))
 
@@ -1421,15 +1448,15 @@ p4.metric("Total Phase All", total_phase_profit_all)
 
 st.subheader("Trade Stats")
 
-phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+phase_trades = int(hist["PHASE_BET"].fillna(False).astype(bool).sum()) if "PHASE_BET" in hist.columns else 0
 
 phase_group_wr = (
-    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    round(hist.loc[hist["PHASE_BET"].fillna(False).astype(bool), "phase_hit_group"].mean() * 100, 2)
     if phase_trades > 0
     else 0
 )
 
-color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
+color_hit_df = hist[(hist["PHASE_BET"].fillna(False).astype(bool)) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
 
 s1, s2, s3, s4 = st.columns(4)
@@ -1499,7 +1526,7 @@ history_cols = [
     "phase_profit_group",
     "phase_profit_color",
     "phase_profit_total",
-    "phase_consecutive_losseslosses",
+    "phase_consecutive_losses",
     "keep_phase_group",
     "keep_phase_color",
     "keep_phase_left",
