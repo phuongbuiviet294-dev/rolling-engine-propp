@@ -38,7 +38,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 1
+PHASE_LOSS_STREAK_RELOCK = 2
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 20
@@ -907,7 +907,7 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2:
             relock_triggered_now = True
             relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
             state = "AUTO_RELOCK_LOSS_STREAK"
