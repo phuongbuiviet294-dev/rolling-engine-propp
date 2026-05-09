@@ -57,6 +57,8 @@ MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 29
+RECENT_WINDOW_SIZE_LIST = [18, 24, 30]
+MIN_TRADES_PER_WINDOW_LIST = [8, 12, 16]
 MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
@@ -393,8 +395,11 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     best_filtered_df = pd.DataFrame()
     best_score = -999999.0
 
-    for dynamic_recent_window in RECENT_WINDOW_SIZE_LIST:
-        for dynamic_min_trades in MIN_TRADES_PER_WINDOW_LIST:
+    recent_window_list = globals().get('RECENT_WINDOW_SIZE_LIST', [RECENT_WINDOW_SIZE])
+    min_trades_list = globals().get('MIN_TRADES_PER_WINDOW_LIST', [MIN_TRADES_PER_WINDOW])
+
+    for dynamic_recent_window in recent_window_list:
+        for dynamic_min_trades in min_trades_list:
 
             rows = []
 
