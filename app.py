@@ -35,49 +35,50 @@ PHASE_BET_UNIT = 1.0
 COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_STOP_LOSS = -2.0
+PHASE_TAKE_PROFIT_RELOCK = 4.5
+PHASE_LOSS_STREAK_RELOCK = 2
 
 ENABLE_TIMEOUT_RELOCK = False
-TIMEOUT_RELOCK_ROUNDS = 30
+TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 4
-PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = -0.5
 
-MIN_PHASE_AGE_TO_TRADE = 3
-MAX_PHASE_TRADES = 44
-VOTE_DOMINANCE_RATIO = 0.7
+MIN_PHASE_AGE_TO_TRADE = 2
+MAX_PHASE_TRADES = 3
+VOTE_DOMINANCE_RATIO = 0.65
 
-KEEP_AFTER_LOSS_ROUNDS = 1
+KEEP_AFTER_LOSS_ROUNDS = 0
 
-SESSION_STOP_WIN = 66.0
-SESSION_STOP_LOSS = -66.0
+SESSION_STOP_WIN = 4.5
+SESSION_STOP_LOSS = -3.0
 
-MIN_FALLBACK_SCORE = -1.0
+MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 29
-RECENT_WINDOW_SIZE_LIST = [18, 24, 30]
+RECENT_WINDOW_SIZE_LIST = [12, 16, 20, 24]
 MIN_TRADES_PER_WINDOW_LIST = [8, 12, 16]
 MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
+WINDOW_SPACING_MAX = 5
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 18
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [12, 16, 20, 24]
+VALIDATE_LEN_LIST = [12, 16, 20]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 12
+RELOCK_SCAN_LEN = 24
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
-CHART_HISTORY_ROWS = 20
-MAX_SOURCE_ROWS = 460  # chống treo khi Google Sheet có quá nhiều dòng
+CHART_HISTORY_ROWS = 250
+MAX_SOURCE_ROWS = 360  # chống treo khi Google Sheet có quá nhiều dòng
 LOAD_TIMEOUT_SECONDS = 10
 SHOW_DEBUG_TABLES = False
 
@@ -313,7 +314,7 @@ def compute_streak_metrics(results):
     }
 
 
-def evaluate_window_group(seq_groups, w):
+def evaluate_window_group(seq_groups, w, recent_window_size=None):
     profit = 0.0
     trades = 0
     wins = 0
@@ -334,7 +335,9 @@ def evaluate_window_group(seq_groups, w):
 
     winrate = wins / trades if trades > 0 else 0.0
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
-    recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+    if recent_window_size is None:
+        recent_window_size = RECENT_WINDOW_SIZE
+    recent_profit = compute_recent_profit(results, recent_window_size, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
 
     if trades > 0:
@@ -404,7 +407,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
             rows = []
 
             for w in range(window_min, window_max + 1):
-                row = evaluate_window_group(train_groups, w)
+                row = evaluate_window_group(train_groups, w, recent_window_size=dynamic_recent_window)
 
                 # dynamic override
                 row["dynamic_recent_window"] = dynamic_recent_window
@@ -463,11 +466,17 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
             if len(candidate_windows) < need:
                 candidate_windows = enforce_spacing_from_df(df_all, need, 1)
 
-            dynamic_score = (
-                filtered_df["score"].head(6).sum()
-                if not filtered_df.empty
-                else -999999.0
-            )
+            if not filtered_df.empty:
+                top_df = filtered_df.head(6)
+                dynamic_score = (
+                    top_df["score"].sum()
+                    + top_df["recent_profit"].sum() * 0.5
+                    + top_df["profit"].sum() * 0.3
+                    - top_df["max_drawdown"].abs().sum() * 0.5
+                    + np.log(top_df["trades"].sum() + 1) * 2.0
+                )
+            else:
+                dynamic_score = -999999.0
 
             if dynamic_score > best_score:
                 best_score = dynamic_score
@@ -682,6 +691,14 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     mode_with_params = dict(mode)
                     mode_with_params["spacing"] = spacing
                     mode_with_params["validate_len"] = validate_len
+                    if "selected_recent_window" in df_all.columns and len(df_all) > 0:
+                        mode_with_params["recent_window_size"] = int(df_all["selected_recent_window"].iloc[0])
+                    else:
+                        mode_with_params["recent_window_size"] = RECENT_WINDOW_SIZE
+                    if "selected_min_trades" in df_all.columns and len(df_all) > 0:
+                        mode_with_params["min_trades_per_window"] = int(df_all["selected_min_trades"].iloc[0])
+                    else:
+                        mode_with_params["min_trades_per_window"] = MIN_TRADES_PER_WINDOW
 
                     if final_score > local_fallback_score:
                         local_fallback_score = final_score
@@ -714,6 +731,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         "selected_windows": ", ".join(map(str, local_best_windows)),
                         "spacing": local_best_mode.get("spacing", MIN_WINDOW_SPACING),
                         "validate_len": local_best_mode.get("validate_len", VALIDATE_LEN),
+                        "recent_window_size": local_best_mode.get("recent_window_size", RECENT_WINDOW_SIZE),
+                        "min_trades_per_window": local_best_mode.get("min_trades_per_window", MIN_TRADES_PER_WINDOW),
                         "bundle_score": local_best_score,
                         "lock_mode": local_lock_mode,
                     }
@@ -736,6 +755,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         "selected_windows": ", ".join(map(str, local_fallback_windows)),
                         "spacing": local_fallback_mode.get("spacing", MIN_WINDOW_SPACING),
                         "validate_len": local_fallback_mode.get("validate_len", VALIDATE_LEN),
+                        "recent_window_size": local_fallback_mode.get("recent_window_size", RECENT_WINDOW_SIZE),
+                        "min_trades_per_window": local_fallback_mode.get("min_trades_per_window", MIN_TRADES_PER_WINDOW),
                         "bundle_score": local_fallback_score,
                         "lock_mode": "fallback_soft",
                     }
@@ -1005,6 +1026,11 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "PHASE_FAIL_LOSS_STREAK_AND_TOTAL_GROUP_LT_MINUS_2"
             state = "AUTO_RELOCK_PHASE_FAIL"
 
+        elif phase_profit_group >= PHASE_TAKE_PROFIT_RELOCK:
+            relock_triggered_now = True
+            relock_reason_now = "PHASE_TAKE_PROFIT_RELOCK"
+            state = "AUTO_RELOCK_PHASE_TAKE_PROFIT"
+
         elif phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
             relock_reason_now = "PHASE_GROUP_STOP_LOSS"
@@ -1092,6 +1118,8 @@ def simulate_engine(numbers, groups, colors):
                     "top_windows": current_mode["top_windows"],
                     "spacing": current_mode.get("spacing", MIN_WINDOW_SPACING),
                     "validate_len": current_mode.get("validate_len", VALIDATE_LEN),
+                    "recent_window_size": current_mode.get("recent_window_size", RECENT_WINDOW_SIZE),
+                    "min_trades_per_window": current_mode.get("min_trades_per_window", MIN_TRADES_PER_WINDOW),
                     "locked_windows": ", ".join(map(str, locked_windows)),
                     "lock_mode": lock_mode,
                     "lock_scan_start": lock_scan_start,
@@ -1383,7 +1411,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     send_signal_once("READY_PHASE", current_round, ready_msg)
 
 st.title("Auto Relock Engine | 6v4 Dynamic Window Relock | GROUP ONLY")
-st.caption("6v4 only: top_windows=6, vote_required=4. Auto scan spacing=1..6, validate=[12,16,20,24], relock_scan=24.")
+st.caption("6v4 only | Anti-negative-day config: take profit 4.5, stop loss -3, spacing=1..5, validate=[12,16,20].")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1473,15 +1501,19 @@ c4.metric("Relock Count", relock_count)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Selected Window Spacing:", selected_mode.get("spacing", MIN_WINDOW_SPACING) if selected_mode else "-")
 st.write("Selected Validate Len:", selected_mode.get("validate_len", VALIDATE_LEN) if selected_mode else "-")
+st.write("Selected Recent Window Size:", selected_mode.get("recent_window_size", RECENT_WINDOW_SIZE) if selected_mode else "-")
+st.write("Selected Min Trades Per Window:", selected_mode.get("min_trades_per_window", MIN_TRADES_PER_WINDOW) if selected_mode else "-")
 st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
 st.write("Dynamic Selection:", "Mode fixed 6v4, auto choose spacing + validate_len + windows")
+st.write("Anti Negative Config:", f"TP={SESSION_STOP_WIN}, SL={SESSION_STOP_LOSS}, phase TP relock={PHASE_TAKE_PROFIT_RELOCK}, phase SL={PHASE_STOP_LOSS}")
 st.write("Dynamic Recent Window:", RECENT_WINDOW_SIZE_LIST)
 st.write("Dynamic Min Trades:", MIN_TRADES_PER_WINDOW_LIST)
 st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
+st.write("Relock Rule 0:", f"phase_group_profit >= {PHASE_TAKE_PROFIT_RELOCK}")
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND total_phase_profit_group < -2")
 st.write("Relock Rule 3:", f"max_phase_trades >= {MAX_PHASE_TRADES}")
 st.write("Relock Rule 2:", f"phase_group_profit <= {PHASE_STOP_LOSS}")
