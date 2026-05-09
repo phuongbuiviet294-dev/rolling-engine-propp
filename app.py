@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=10000, key="refresh")
+st_autorefresh(interval=1000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -48,7 +48,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
 
 MIN_PHASE_AGE_TO_TRADE = 3
 MAX_PHASE_TRADES = 4
-VOTE_DOMINANCE_RATIO = 0.6
+VOTE_DOMINANCE_RATIO = 0.7
 
 KEEP_AFTER_LOSS_ROUNDS = 0
 
@@ -59,7 +59,7 @@ MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 24
-MIN_WINDOW_SPACING = 1
+MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
@@ -70,12 +70,13 @@ AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
+CHART_HISTORY_ROWS = 250
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -500,6 +501,40 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     round_eval_rows = []
 
+    # CACHE nội bộ để tăng tốc, không đổi logic chọn window
+    window_table_cache = {}
+    backtest_cache = {}
+
+    def get_window_tables_cached(train_end, window_min, window_max, spacing):
+        key = (int(train_end), int(window_min), int(window_max), int(spacing))
+        if key not in window_table_cache:
+            window_table_cache[key] = build_window_tables(
+                all_groups[:train_end],
+                window_min,
+                window_max,
+                min_window_spacing=spacing,
+            )
+        return window_table_cache[key]
+
+    def get_backtest_cached(kind, seq_end, windows, vote_required, start_idx, end_idx):
+        key = (
+            kind,
+            int(seq_end),
+            tuple(int(x) for x in windows),
+            int(vote_required),
+            int(start_idx),
+            int(end_idx),
+        )
+        if key not in backtest_cache:
+            backtest_cache[key] = backtest_bundle_vote_range(
+                all_groups[:seq_end],
+                windows,
+                vote_required,
+                start_idx,
+                end_idx,
+            )
+        return backtest_cache[key]
+
     validate_values = VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else [VALIDATE_LEN]
 
     for validate_len in validate_values:
@@ -513,9 +548,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             train_end = r - validate_len
             validate_start = train_end
             validate_end = r
-
-            train_groups = all_groups[:train_end]
-            validate_groups = all_groups[:validate_end]
 
             local_best_score = -999999.0
             local_best_windows = []
@@ -541,11 +573,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 )
 
                 for spacing in spacing_values:
-                    candidate_windows, df_all, filtered_df = build_window_tables(
-                        train_groups,
+                    candidate_windows, df_all, filtered_df = get_window_tables_cached(
+                        train_end,
                         mode["window_min"],
                         mode["window_max"],
-                        min_window_spacing=spacing,
+                        spacing,
                     )
 
                     if len(candidate_windows) < top_windows:
@@ -553,16 +585,18 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
                     selected_windows = candidate_windows[:top_windows]
 
-                    train_bt = backtest_bundle_vote_range(
-                        train_groups,
+                    train_bt = get_backtest_cached(
+                        "train",
+                        train_end,
                         selected_windows,
                         vote_required,
                         0,
-                        len(train_groups),
+                        train_end,
                     )
 
-                    validate_bt = backtest_bundle_vote_range(
-                        validate_groups,
+                    validate_bt = get_backtest_cached(
+                        "validate",
+                        validate_end,
                         selected_windows,
                         vote_required,
                         validate_start,
@@ -1274,6 +1308,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     send_signal_once("READY_PHASE", current_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | NO LIVE")
+st.caption("Fast mode: cache nội bộ scan/backtest, giữ nguyên logic chọn window.")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1415,7 +1450,7 @@ chart_cols = [
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 
 if exist_chart_cols:
-    st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
+    st.line_chart(hist[exist_chart_cols].tail(CHART_HISTORY_ROWS).reset_index(drop=True))
 
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
