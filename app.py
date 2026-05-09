@@ -76,6 +76,7 @@ RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
+CHART_HISTORY_ROWS = 250
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -500,6 +501,40 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     round_eval_rows = []
 
+    # ===== SPEED CACHE, giữ nguyên logic =====
+    window_table_cache = {}
+    backtest_cache = {}
+
+    def get_window_tables_cached(train_end, window_min, window_max, spacing):
+        key = (int(train_end), int(window_min), int(window_max), int(spacing))
+        if key not in window_table_cache:
+            window_table_cache[key] = build_window_tables(
+                all_groups[:train_end],
+                window_min,
+                window_max,
+                min_window_spacing=spacing,
+            )
+        return window_table_cache[key]
+
+    def get_backtest_cached(kind, seq_end, windows, vote_required, start_idx, end_idx):
+        key = (
+            kind,
+            int(seq_end),
+            tuple(int(x) for x in windows),
+            int(vote_required),
+            int(start_idx),
+            int(end_idx),
+        )
+        if key not in backtest_cache:
+            backtest_cache[key] = backtest_bundle_vote_range(
+                all_groups[:seq_end],
+                windows,
+                vote_required,
+                start_idx,
+                end_idx,
+            )
+        return backtest_cache[key]
+
     validate_values = VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else [VALIDATE_LEN]
 
     for validate_len in validate_values:
@@ -513,9 +548,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             train_end = r - validate_len
             validate_start = train_end
             validate_end = r
-
-            train_groups = all_groups[:train_end]
-            validate_groups = all_groups[:validate_end]
 
             local_best_score = -999999.0
             local_best_windows = []
@@ -541,11 +573,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 )
 
                 for spacing in spacing_values:
-                    candidate_windows, df_all, filtered_df = build_window_tables(
-                        train_groups,
+                    candidate_windows, df_all, filtered_df = get_window_tables_cached(
+                        train_end,
                         mode["window_min"],
                         mode["window_max"],
-                        min_window_spacing=spacing,
+                        spacing,
                     )
 
                     if len(candidate_windows) < top_windows:
@@ -553,16 +585,18 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
                     selected_windows = candidate_windows[:top_windows]
 
-                    train_bt = backtest_bundle_vote_range(
-                        train_groups,
+                    train_bt = get_backtest_cached(
+                        "train",
+                        train_end,
                         selected_windows,
                         vote_required,
                         0,
-                        len(train_groups),
+                        train_end,
                     )
 
-                    validate_bt = backtest_bundle_vote_range(
-                        validate_groups,
+                    validate_bt = get_backtest_cached(
+                        "validate",
+                        validate_end,
                         selected_windows,
                         vote_required,
                         validate_start,
@@ -691,7 +725,7 @@ def simulate_engine(numbers, groups, colors):
         "session_stop_reason": None,
         "last_signal_pnl_in_phase": 0.0,
         "last_signal_round_in_phase": None,
-        "phase_consecutive_": 0,
+        "phase_consecutive_losses": 0,
         "keep_phase_group": None,
         "keep_phase_color": None,
         "keep_phase_left": 0,
@@ -725,7 +759,7 @@ def simulate_engine(numbers, groups, colors):
     last_signal_pnl_in_phase = 0.0
     last_signal_round_in_phase = None
 
-    phase_consecutive_ = 0
+    phase_consecutive_losses = 0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -864,13 +898,13 @@ def simulate_engine(numbers, groups, colors):
 
             # KEEP rule: nếu group fail thì vòng sau giữ lại cùng group/color 1 lần.
             if phase_hit_group == 1:
-                phase_consecutive_ = 0
+                phase_consecutive_losses = 0
                 last_phase_bet_was_loss = False
                 keep_phase_group = None
                 keep_phase_color = None
                 keep_phase_left = 0
             else:
-                phase_consecutive_ += 1
+                phase_consecutive_losses += 1
                 if used_keep_phase:
                     last_phase_bet_was_loss = False
                     keep_phase_group = None
@@ -907,7 +941,7 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2 :
+        if phase_consecutive_losseslosses >= PHASE_LOSS_STREAK_RELOCK and total_phase_profit_group < -2 :
             relock_triggered_now = True
             relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
             state = "AUTO_RELOCK_LOSS_STREAK"
@@ -965,7 +999,7 @@ def simulate_engine(numbers, groups, colors):
                 "phase_profit_group": phase_profit_group,
                 "phase_profit_color": phase_profit_color,
                 "phase_profit_total": phase_profit_total,
-                "phase_consecutive_losses": phase_consecutive_losses,
+                "phase_consecutive_losseslosses": phase_consecutive_losseslosses,
                 "keep_phase_group": keep_phase_group,
                 "keep_phase_color": color_text(keep_phase_color),
                 "keep_phase_left": keep_phase_left,
@@ -1005,7 +1039,7 @@ def simulate_engine(numbers, groups, colors):
                     "lock_scan_end": lock_scan_end,
                     "lock_round": selected_lock_round,
                     "phase_age": phase_age,
-                    "phase_loss_streak": phase_consecutive_losses,
+                    "phase_loss_streak": phase_consecutive_losseslosses,
                     "max_phase_trades": MAX_PHASE_TRADES,
                     "min_phase_age_to_trade": MIN_PHASE_AGE_TO_TRADE,
                     "phase_bet_trades": len(phase_hits_group),
@@ -1054,7 +1088,7 @@ def simulate_engine(numbers, groups, colors):
                 phase_hits_group = []
                 phase_hits_color = []
 
-                phase_consecutive_losses = 0
+                phase_consecutive_losseslosses = 0
                 keep_phase_group = None
                 keep_phase_color = None
                 keep_phase_left = 0
@@ -1101,7 +1135,7 @@ def simulate_engine(numbers, groups, colors):
             "session_stop_reason": session_stop_reason,
             "last_signal_pnl_in_phase": last_signal_pnl_in_phase,
             "last_signal_round_in_phase": last_signal_round_in_phase,
-            "phase_consecutive_losses": phase_consecutive_losses,
+            "phase_consecutive_losseslosses": phase_consecutive_losseslosses,
             "keep_phase_group": keep_phase_group,
             "keep_phase_color": keep_phase_color,
             "keep_phase_left": keep_phase_left,
@@ -1163,7 +1197,7 @@ session_stop_reason = sim["session_stop_reason"]
 
 last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
 last_signal_round_in_phase = sim["last_signal_round_in_phase"]
-phase_consecutive_losses = sim["phase_consecutive_losses"]
+phase_consecutive_losseslosses = sim["phase_consecutive_losseslosses"]
 keep_phase_group = sim.get("keep_phase_group", None)
 keep_phase_color = sim.get("keep_phase_color", None)
 keep_phase_left = sim.get("keep_phase_left", 0)
@@ -1274,6 +1308,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     send_signal_once("READY_PHASE", current_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | NO LIVE")
+st.caption("Fixed: phase_consecutive_losses variable + fast cached scan/backtest.")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1289,7 +1324,7 @@ r5, r6, r7, r8 = st.columns(4)
 r5.metric("Last Group PNL", float(last["phase_pnl_group"]))
 r6.metric("Last Color PNL", float(last["phase_pnl_color"]))
 r7.metric("Last Total PNL", float(last["phase_pnl_total"]))
-r8.metric("Loss Streak", phase_consecutive_losses)
+r8.metric("Loss Streak", phase_consecutive_losseslosses)
 
 st.write("Last State:", str(last["state"]))
 
@@ -1369,7 +1404,7 @@ st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
-st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK}")
+st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND total_phase_profit_group < -2")
 st.write("Relock Rule 3:", f"max_phase_trades >= {MAX_PHASE_TRADES}")
 st.write("Relock Rule 2:", f"phase_group_profit <= {PHASE_STOP_LOSS}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group profit <= 0")
@@ -1415,7 +1450,7 @@ chart_cols = [
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 
 if exist_chart_cols:
-    st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
+    st.line_chart(hist[exist_chart_cols].tail(CHART_HISTORY_ROWS).reset_index(drop=True))
 
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
@@ -1464,7 +1499,7 @@ history_cols = [
     "phase_profit_group",
     "phase_profit_color",
     "phase_profit_total",
-    "phase_consecutive_losses",
+    "phase_consecutive_losseslosses",
     "keep_phase_group",
     "keep_phase_color",
     "keep_phase_left",
