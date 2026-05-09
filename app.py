@@ -19,7 +19,7 @@ REPLAY_FROM = 180
 
 MODES = [
    
-    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     
 ]
 
@@ -58,7 +58,7 @@ SESSION_STOP_LOSS = -6.0
 MIN_FALLBACK_SCORE = -3.0
 
 MIN_TRADES_PER_WINDOW = 12
-RECENT_WINDOW_SIZE = 24
+RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 5
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
