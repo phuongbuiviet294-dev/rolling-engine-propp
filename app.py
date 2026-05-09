@@ -76,8 +76,8 @@ RELOCK_SCAN_LEN = 24
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 10
-CHART_HISTORY_ROWS = 250
-MAX_SOURCE_ROWS = 360  # chống treo khi Google Sheet có quá nhiều dòng
+CHART_HISTORY_ROWS = 20
+MAX_SOURCE_ROWS = 460  # chống treo khi Google Sheet có quá nhiều dòng
 LOAD_TIMEOUT_SECONDS = 10
 SHOW_DEBUG_TABLES = False
 
