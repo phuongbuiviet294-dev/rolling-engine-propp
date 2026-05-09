@@ -18,9 +18,7 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
+
     {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
 ]
 
@@ -34,7 +32,7 @@ LIVE_BET_UNIT = 1.0
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 1
+PHASE_LOSS_STREAK_RELOCK = 3
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 30
