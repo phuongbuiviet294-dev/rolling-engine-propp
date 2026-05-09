@@ -137,7 +137,7 @@ def send_signal_once(signal_name, current_round, msg):
     return ok
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
