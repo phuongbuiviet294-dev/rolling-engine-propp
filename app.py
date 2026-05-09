@@ -19,7 +19,7 @@ REPLAY_FROM = 180
 
 MODES = [
    
-    {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
     
 ]
 
