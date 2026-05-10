@@ -26,14 +26,14 @@ PATTERN_LEN_MAX = 6
 # =========================================================
 # OPTIMIZED CONFIG
 # =========================================================
-MIN_TRADES = 6
-MIN_WR = 0.36
-MIN_PROFIT = 2.5
-MIN_SCORE = 12.0
+MIN_TRADES = 5
+MIN_WR = 0.30
+MIN_PROFIT = 2
+MIN_SCORE = 10.0
 
 RECENT_ROUNDS = 80
 RECENT_MIN_PROFIT = 1.0
-RECENT_WR_MIN = 0.35
+RECENT_WR_MIN = 0.30
 
 PATTERN_BREAK_STREAK_LIMIT = 1
 MAX_LOSS_STREAK_ALLOWED = 2
