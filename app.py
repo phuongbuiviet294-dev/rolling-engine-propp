@@ -17,7 +17,7 @@ PATTERN_RULES = {
     "AAAAB": "A",
     "BBAAB": "B",
     "AABBA": "A",
-    "AAABBB": "A",
+    "BBBAAAB": "B",
     "AAABBBA": "A",
     "ABABA": "B",
 }
