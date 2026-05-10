@@ -6,7 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Live Pattern Engine Lock 75", layout="wide")
+st.set_page_config(page_title="Live Group Pattern Engine Optimized", layout="wide")
 st_autorefresh(interval=3000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -14,8 +14,8 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # =========================================================
 # LIVE CONFIG
 # =========================================================
-LOCK_ROWS = 75          # 75 ván đầu chỉ để học
-LIVE_FROM = 75          # từ ván 76 trở đi mới tính live profit
+LOCK_ROWS = 75
+LIVE_FROM = 75
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
@@ -34,18 +34,24 @@ PATTERN_LIST = [
     "ABABA",
 ]
 
+# Pattern không dùng để BET LIVE, nhưng vẫn show trong thống kê
+DISABLED_LIVE_PATTERNS = {
+    "AABB",
+}
+
 # =========================================================
 # FILTER CONFIG
 # =========================================================
-MIN_TRADES = 3
-MIN_WR = 0.30
-MIN_PROFIT = 0.0
-MIN_SCORE = -999.0
+MIN_TRADES = 1
+MIN_WR = 0.25
+MIN_PROFIT = -1.0
+MIN_SCORE = 0.5
 
 RECENT_ROUNDS = 120
-RECENT_MIN_PROFIT = -3.0
+RECENT_MIN_PROFIT = -2.0
 
-MAX_LOSS_STREAK_ALLOW = 99
+MAX_CURRENT_LOSS_STREAK = 3
+MAX_LOSS_STREAK_ALLOW_IF_PROFIT_NEGATIVE = 2
 
 SHOW_HISTORY_ROWS = 80
 
@@ -96,6 +102,10 @@ def groups_to_ab(seq):
     return "".join(out), reverse
 
 
+def labels_in_pattern(pattern):
+    return sorted(set(pattern))
+
+
 def calc_stats(groups, pattern, bet_label):
     L = len(pattern)
 
@@ -127,7 +137,7 @@ def calc_stats(groups, pattern, bet_label):
 
     wr = wins / trades if trades > 0 else 0.0
 
-    loss_streak = 0
+    current_loss_streak = 0
     max_loss_streak = 0
     cur_loss = 0
 
@@ -140,7 +150,7 @@ def calc_stats(groups, pattern, bet_label):
 
     for r in reversed(results):
         if r == 0:
-            loss_streak += 1
+            current_loss_streak += 1
         else:
             break
 
@@ -149,34 +159,52 @@ def calc_stats(groups, pattern, bet_label):
         "wins": wins,
         "wr": wr,
         "profit": profit,
-        "loss_streak": loss_streak,
+        "current_loss_streak": current_loss_streak,
         "max_loss_streak": max_loss_streak,
     }
 
 
 def recent_stats(groups, pattern, bet_label):
-    return calc_stats(groups[-RECENT_ROUNDS:], pattern, bet_label)
+    recent_groups = groups[-RECENT_ROUNDS:]
+    return calc_stats(recent_groups, pattern, bet_label)
 
 
 def score_pattern(stat, recent):
+    trades = stat["trades"]
+    wr = stat["wr"]
+    profit = stat["profit"]
+    recent_profit = recent["profit"]
+
+    # confidence mềm theo số lần xuất hiện, không chặn cứng
+    trade_confidence = min(trades, 5) / 5.0
+
+    # Pattern mới xuất hiện 1 lần mà win 1 lần thì trừ nhẹ để tránh overfit
+    low_sample_penalty = 0.0
+    if trades == 1 and wr >= 1.0:
+        low_sample_penalty = 2.0
+    elif trades == 1:
+        low_sample_penalty = 1.0
+    elif trades == 2:
+        low_sample_penalty = 0.5
+
     return (
-        stat["profit"] * 1.5
-        + stat["wr"] * 10.0
-        + recent["profit"] * 1.2
-        + stat["trades"] * 0.10
-        - stat["loss_streak"] * 1.0
+        profit * 1.4
+        + wr * 8.0
+        + recent_profit * 1.2
+        + trade_confidence * 2.0
+        - stat["current_loss_streak"] * 1.5
         - stat["max_loss_streak"] * 0.2
+        - low_sample_penalty
     )
 
 
-def labels_in_pattern(pattern):
-    return sorted(set(pattern))
-
-
-def matched_patterns(groups):
+def matched_patterns(groups, for_live=True):
     rows = []
 
     for pattern in PATTERN_LIST:
+        if for_live and pattern in DISABLED_LIVE_PATTERNS:
+            continue
+
         L = len(pattern)
 
         if len(groups) < L:
@@ -188,7 +216,6 @@ def matched_patterns(groups):
         if ab != pattern:
             continue
 
-        # auto side: thử cả A/B trong pattern
         for bet_label in labels_in_pattern(pattern):
             if bet_label not in reverse:
                 continue
@@ -207,7 +234,7 @@ def matched_patterns(groups):
                 "wr": stat["wr"],
                 "profit": stat["profit"],
                 "recent_profit": recent["profit"],
-                "loss_streak": stat["loss_streak"],
+                "current_loss_streak": stat["current_loss_streak"],
                 "max_loss_streak": stat["max_loss_streak"],
                 "score": sc,
             })
@@ -216,8 +243,8 @@ def matched_patterns(groups):
     return rows
 
 
-def choose_signal(groups):
-    matches = matched_patterns(groups)
+def choose_signal(groups, for_live=True):
+    matches = matched_patterns(groups, for_live=for_live)
 
     if not matches:
         return None, "WAIT_NO_PATTERN", matches
@@ -235,8 +262,13 @@ def choose_signal(groups):
         if m["recent_profit"] < RECENT_MIN_PROFIT:
             continue
 
-        # Nếu profit dương thì không loại vì max loss streak cũ
-        if m["profit"] <= 0 and m["max_loss_streak"] > MAX_LOSS_STREAK_ALLOW:
+        if m["current_loss_streak"] >= MAX_CURRENT_LOSS_STREAK:
+            continue
+
+        if (
+            m["profit"] < 0
+            and m["max_loss_streak"] > MAX_LOSS_STREAK_ALLOW_IF_PROFIT_NEGATIVE
+        ):
             continue
 
         if m["score"] < MIN_SCORE:
@@ -259,12 +291,13 @@ def all_pattern_stats(groups):
             rows.append({
                 "pattern": pattern,
                 "bet": bet_label,
+                "disabled_live": pattern in DISABLED_LIVE_PATTERNS,
                 "trades": stat["trades"],
                 "wins": stat["wins"],
                 "wr": round(stat["wr"] * 100, 2),
                 "profit": round(stat["profit"], 2),
                 "recent_profit": round(recent["profit"], 2),
-                "loss_streak": stat["loss_streak"],
+                "current_loss_streak": stat["current_loss_streak"],
                 "max_loss_streak": stat["max_loss_streak"],
                 "score": round(sc, 2),
             })
@@ -273,15 +306,15 @@ def all_pattern_stats(groups):
 
     if not df.empty:
         df = df.sort_values(
-            ["score", "profit", "wr", "trades"],
-            ascending=[False, False, False, False],
+            ["disabled_live", "score", "profit", "wr", "trades"],
+            ascending=[True, False, False, False, False],
         ).reset_index(drop=True)
 
     return df
 
 
 # =========================================================
-# LIVE SIMULATION FROM LOCK 75
+# LIVE SIMULATION FROM LOCK
 # =========================================================
 def simulate_live_from_lock(groups):
     rows = []
@@ -291,11 +324,10 @@ def simulate_live_from_lock(groups):
     start_idx = max(LOCK_ROWS, max_len)
 
     for target_idx in range(start_idx, len(groups)):
-        # chỉ dùng dữ liệu quá khứ trước target_idx
         train_groups = groups[:target_idx]
         actual_group = groups[target_idx]
 
-        sig, state, matches = choose_signal(train_groups)
+        sig, state, _ = choose_signal(train_groups, for_live=True)
 
         trade = sig is not None
         pred_group = None
@@ -326,6 +358,7 @@ def simulate_live_from_lock(groups):
             "wr": round(sig["wr"] * 100, 2) if sig else None,
             "pattern_profit": round(sig["profit"], 2) if sig else None,
             "recent_profit": round(sig["recent_profit"], 2) if sig else None,
+            "current_loss_streak": sig["current_loss_streak"] if sig else None,
         })
 
     return pd.DataFrame(rows)
@@ -345,10 +378,7 @@ if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
-# signal hiện tại dùng toàn bộ dữ liệu hiện có để báo bet ván tiếp theo
-signal, state, matches = choose_signal(groups)
-
-# live profit chỉ tính từ ván 76
+signal, state, matches = choose_signal(groups, for_live=True)
 hist = simulate_live_from_lock(groups)
 
 live_profit = round(hist["live_profit"].iloc[-1], 2) if not hist.empty else 0.0
@@ -358,7 +388,7 @@ live_wr = round(hist.loc[hist["trade"], "hit"].mean() * 100, 2) if live_trades >
 # =========================================================
 # UI
 # =========================================================
-st.title("LIVE GROUP PATTERN ENGINE | LOCK 75")
+st.title("LIVE GROUP PATTERN ENGINE | LOCK 75 OPTIMIZED")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", len(groups))
@@ -374,8 +404,12 @@ p4.metric("State", state)
 
 st.write("LOCK_ROWS:", LOCK_ROWS)
 st.write("LIVE_FROM:", LIVE_FROM)
-st.write("WIN_GROUP:", WIN_GROUP)
-st.write("LOSS_GROUP:", LOSS_GROUP)
+st.write("DISABLED_LIVE_PATTERNS:", list(DISABLED_LIVE_PATTERNS))
+st.write("MIN_TRADES:", MIN_TRADES)
+st.write("MIN_WR:", MIN_WR)
+st.write("MIN_PROFIT:", MIN_PROFIT)
+st.write("RECENT_MIN_PROFIT:", RECENT_MIN_PROFIT)
+st.write("MIN_SCORE:", MIN_SCORE)
 
 if signal:
     st.success(
@@ -399,11 +433,11 @@ if signal:
     st.write("WR %:", round(signal["wr"] * 100, 2))
     st.write("Profit:", round(signal["profit"], 2))
     st.write("Recent Profit:", round(signal["recent_profit"], 2))
-    st.write("Loss Streak:", signal["loss_streak"])
+    st.write("Current Loss Streak:", signal["current_loss_streak"])
     st.write("Max Loss Streak:", signal["max_loss_streak"])
     st.write("Score:", round(signal["score"], 2))
 
-st.subheader("Matched Patterns Ranking")
+st.subheader("Matched Patterns Ranking For Live")
 
 if matches:
     match_df = pd.DataFrame(matches)
