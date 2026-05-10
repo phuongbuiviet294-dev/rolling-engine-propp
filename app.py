@@ -15,7 +15,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # LIVE CONFIG
 # =========================================================
 LOCK_ROWS = 75
-MAX_SOURCE_ROWS = 240
+MAX_SOURCE_ROWS = 300
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
@@ -23,18 +23,18 @@ LOSS_GROUP = -1.0
 # =========================================================
 # PATTERN CONFIG - FAST
 # =========================================================
-PATTERN_LEN_MIN = 3
-PATTERN_LEN_MAX = 5
+PATTERN_LEN_MIN = 4
+PATTERN_LEN_MAX = 6
 
-MIN_TRADES = 1
-MIN_WR = 0.25
-MIN_PROFIT = -1.0
-MIN_SCORE = 0.5
+MIN_TRADES = 3
+MIN_WR = 0.34
+MIN_PROFIT = 1.5
+MIN_SCORE = 8
 
 RECENT_ROUNDS = 80
-RECENT_MIN_PROFIT = -2.0
+RECENT_MIN_PROFIT = 1.5
 
-PATTERN_BREAK_STREAK_LIMIT = 2
+PATTERN_BREAK_STREAK_LIMIT = 1
 ONLY_BET_IF_NOT_BROKEN = True
 
 SHOW_HISTORY_ROWS = 30
