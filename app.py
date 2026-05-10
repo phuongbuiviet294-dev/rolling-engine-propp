@@ -33,8 +33,8 @@ LIVE_BET_UNIT = 1.0
 
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -2.0
-PHASE_LOSS_STREAK_RELOCK = 1
+PHASE_STOP_LOSS = -3.0
+PHASE_LOSS_STREAK_RELOCK = 2
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 30
@@ -46,8 +46,8 @@ MIN_RECENT_PHASE_PNL = 0.5
 PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
 LIVE_MAX_LOSS_STREAK = 2
 
-SESSION_STOP_WIN = 4
-SESSION_STOP_LOSS = -200.0
+SESSION_STOP_WIN = 6.0
+SESSION_STOP_LOSS = -6.0
 
 MIN_FALLBACK_SCORE = -3.0
 
@@ -61,23 +61,29 @@ MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-# ===== TREND FILTER FOR LOCK WINDOW =====
-# Chỉ lock window nếu đoạn validate cho thấy phase đang hồi/tăng.
+# ===== STRICT LOCK TREND FILTER =====
 REQUIRE_VALIDATE_TREND_UP = True
 MIN_VALIDATE_PHASE_PROFIT = 0.5
 MIN_VALIDATE_TREND_FROM_MIN = 1.0
 MIN_VALIDATE_RECENT_PROFIT = 0.0
 
+# ===== SHADOW PHASE VALIDATE =====
+# Sau khi lock/relock, không bet thật ngay.
+# Chạy shadow trước, nếu shadow profit tăng mới active phase bet thật.
+ENABLE_SHADOW_PHASE_VALIDATE = True
+SHADOW_VALIDATE_TRADES = 2
+SHADOW_MIN_PROFIT_TO_ACTIVATE = 1.5
+SHADOW_MAX_LOSS_TO_RELOCK = -1.0
+
 # ===== ANTI RELOCK CHURN =====
-# Tránh relock liên tục khi phase vừa mới đổi, chưa đủ dữ liệu đánh giá.
 MIN_PHASE_AGE_BEFORE_RELOCK = 3
 RELOCK_COOLDOWN_ROUNDS = 3
 
 
-RELOCK_SCAN_LEN = 6
+RELOCK_SCAN_LEN = 12
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 30
+SHOW_HISTORY_ROWS = 40
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -584,9 +590,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     "mode": local_best_mode["name"],
                     "selected_windows": ", ".join(map(str, local_best_windows)),
                     "bundle_score": local_best_score,
-                    "validate_profit": validate_bt["profit_group"],
-                    "validate_recent_profit": validate_bt["validate_recent_profit_group"],
-                    "validate_trend_from_min": validate_bt["trend_from_min_group"],
                     "lock_mode": local_lock_mode,
                 }
             )
@@ -600,16 +603,17 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 best_filtered_df = local_best_filtered_df
                 best_lock_mode = local_lock_mode
 
-        elif local_fallback_mode is not None and local_fallback_score >= MIN_FALLBACK_SCORE:
+        elif (
+            not REQUIRE_VALIDATE_TREND_UP
+            and local_fallback_mode is not None
+            and local_fallback_score >= MIN_FALLBACK_SCORE
+        ):
             round_eval_rows.append(
                 {
                     "lock_round": r,
                     "mode": local_fallback_mode["name"],
                     "selected_windows": ", ".join(map(str, local_fallback_windows)),
                     "bundle_score": local_fallback_score,
-                    "validate_profit": validate_bt["profit_group"] if "validate_bt" in locals() else None,
-                    "validate_recent_profit": validate_bt["validate_recent_profit_group"] if "validate_bt" in locals() else None,
-                    "validate_trend_from_min": validate_bt["trend_from_min_group"] if "validate_bt" in locals() else None,
                     "lock_mode": "fallback_soft",
                 }
             )
@@ -627,7 +631,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     if best_round is not None:
         return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
-    if fallback_round is not None and fallback_score >= MIN_FALLBACK_SCORE:
+    if (
+        not REQUIRE_VALIDATE_TREND_UP
+        and fallback_round is not None
+        and fallback_score >= MIN_FALLBACK_SCORE
+    ):
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
@@ -686,6 +694,11 @@ def simulate_engine(numbers, groups):
 
     phase_consecutive_losses = 0
 
+    phase_active = not ENABLE_SHADOW_PHASE_VALIDATE
+    shadow_hits_group = []
+    shadow_profit_group = 0.0
+    shadow_trades = 0
+
     phase_index = 1
     relock_count = 0
 
@@ -727,10 +740,37 @@ def simulate_engine(numbers, groups):
         else:
             recent_phase_pnl = phase_profit_group
 
-        phase_trade_allowed = signal and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+        raw_phase_signal_allowed = signal and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
 
         prev_signal_pnl_in_phase = last_signal_pnl_in_phase
         prev_signal_round_in_phase = last_signal_round_in_phase
+
+        shadow_trade = False
+        shadow_hit_group = None
+        shadow_pnl_group = 0.0
+
+        # SHADOW VALIDATE:
+        # Nếu phase mới chưa active thì chỉ test tín hiệu, không cộng profit thật.
+        if raw_phase_signal_allowed and not phase_active:
+            shadow_trade = True
+            shadow_hit_group = 1 if groups[i] == vote_group else 0
+            shadow_pnl_group = WIN_GROUP if shadow_hit_group == 1 else LOSS_GROUP
+            shadow_hits_group.append(shadow_hit_group)
+            shadow_profit_group += shadow_pnl_group
+            shadow_trades += 1
+
+            if (
+                shadow_trades >= SHADOW_VALIDATE_TRADES
+                and shadow_profit_group >= SHADOW_MIN_PROFIT_TO_ACTIVATE
+            ):
+                phase_active = True
+                state_shadow = "SHADOW_PASS_ACTIVATE_NEXT"
+            elif shadow_profit_group <= SHADOW_MAX_LOSS_TO_RELOCK:
+                state_shadow = "SHADOW_FAIL_RELOCK"
+            else:
+                state_shadow = "SHADOW_VALIDATING"
+
+        phase_trade_allowed = raw_phase_signal_allowed and phase_active
 
         if phase_trade_allowed:
             if groups[i] == vote_group:
@@ -785,7 +825,11 @@ def simulate_engine(numbers, groups):
             live_hit_group = None
             live_pnl_group = 0.0
 
-            if signal and live_loss_streak_block:
+            if shadow_trade:
+                state = state_shadow
+            elif signal and not phase_active:
+                state = "WAIT_PHASE_NOT_ACTIVE_SHADOW_REQUIRED"
+            elif signal and live_loss_streak_block:
                 state = "LIVE_BLOCKED_BY_LOSS_STREAK"
             elif signal and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
                 state = "PHASE_BLOCKED_RECENT_TOO_WEAK"
@@ -809,22 +853,24 @@ def simulate_engine(numbers, groups):
             last_signal_round_in_phase = round_no
 
         phase_age = round_no - phase_start_round + 1
-        rounds_since_phase_start = phase_age
-        can_relock_now = (
-            phase_age >= MIN_PHASE_AGE_BEFORE_RELOCK
-            and rounds_since_phase_start >= RELOCK_COOLDOWN_ROUNDS
-        )
+        can_relock_now = phase_age >= MIN_PHASE_AGE_BEFORE_RELOCK
 
         relock_triggered_now = False
         relock_reason_now = None
 
-        if (
+        if shadow_trade and state == "SHADOW_FAIL_RELOCK":
+            relock_triggered_now = True
+            relock_reason_now = "SHADOW_PHASE_NOT_TREND_UP"
+            state = "AUTO_RELOCK_SHADOW_PHASE_FAIL"
+
+        elif (
             can_relock_now
             and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
+            and phase_profit_group < 0
         ):
             relock_triggered_now = True
-            relock_reason_now = "PHASE_SIGNAL_LOSS_STREAK_RELOCK"
-            state = "AUTO_RELOCK_SIGNAL_LOSS_STREAK"
+            relock_reason_now = "PHASE_SIGNAL_LOSS_STREAK_AND_NEGATIVE"
+            state = "AUTO_RELOCK_SIGNAL_LOSS_STREAK_NEGATIVE"
 
         elif can_relock_now and phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
@@ -855,11 +901,20 @@ def simulate_engine(numbers, groups):
                 "confidence_group": confidence_group,
                 "signal": signal,
                 "PHASE_BET": phase_trade_allowed,
+                "phase_active": phase_active,
+                "SHADOW_TRADE": shadow_trade,
+                "shadow_hit_group": shadow_hit_group,
+                "shadow_pnl_group": shadow_pnl_group,
+                "shadow_profit_group": shadow_profit_group,
+                "shadow_trades": shadow_trades,
                 "phase_bet_group": vote_group if phase_trade_allowed else None,
                 "phase_hit_group": phase_hit_group,
                 "phase_pnl_group": phase_pnl_group,
                 "phase_profit_group": phase_profit_group,
                 "phase_consecutive_losses": phase_consecutive_losses,
+            "phase_active": phase_active,
+            "shadow_profit_group": shadow_profit_group,
+            "shadow_trades": shadow_trades,
                 "recent_phase_pnl": recent_phase_pnl,
                 "total_phase_profit_group": total_phase_profit_group,
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
@@ -897,6 +952,9 @@ def simulate_engine(numbers, groups):
                     "lock_scan_end": lock_scan_end,
                     "lock_round": selected_lock_round,
                     "phase_age": phase_age,
+                    "phase_active": phase_active,
+                    "shadow_trades": shadow_trades,
+                    "shadow_profit_group": shadow_profit_group,
                     "phase_loss_streak": phase_consecutive_losses,
                     "phase_bet_trades": len(phase_hits_group),
                     "phase_bet_profit": phase_profit_group,
@@ -945,6 +1003,10 @@ def simulate_engine(numbers, groups):
                 live_hits_group = []
 
                 phase_consecutive_losses = 0
+                phase_active = not ENABLE_SHADOW_PHASE_VALIDATE
+                shadow_hits_group = []
+                shadow_profit_group = 0.0
+                shadow_trades = 0
                 last_signal_pnl_in_phase = 0.0
                 last_signal_round_in_phase = None
                 last_live_trade_idx = i
@@ -1040,6 +1102,9 @@ session_stop_reason = sim["session_stop_reason"]
 last_signal_pnl_in_phase = sim["last_signal_pnl_in_phase"]
 last_signal_round_in_phase = sim["last_signal_round_in_phase"]
 phase_consecutive_losses = sim["phase_consecutive_losses"]
+phase_active = sim.get("phase_active", True)
+shadow_profit_group = sim.get("shadow_profit_group", 0.0)
+shadow_trades = sim.get("shadow_trades", 0)
 
 next_idx = len(groups)
 next_round = len(groups) + 1
@@ -1082,7 +1147,7 @@ can_live_bet = (
     and next_round > LOCK_ROUND_END
 )
 
-phase_next_allowed = signal and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
+phase_next_allowed = signal and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE and phase_active
 
 if session_stop:
     signal = False
@@ -1091,6 +1156,8 @@ if session_stop:
     next_state = session_stop_reason
 elif can_live_bet:
     next_state = "READY_LIVE_BET"
+elif signal and not phase_active:
+    next_state = "NEXT_SHADOW_VALIDATE_REQUIRED"
 elif signal and not phase_next_allowed:
     next_state = "NEXT_PHASE_BLOCKED_RECENT_TOO_WEAK"
 elif signal and last_signal_pnl_in_phase <= 0:
@@ -1123,7 +1190,7 @@ if telegram_enabled() and phase_next_allowed and vote_group is not None:
     )
     send_signal_once("READY", current_round, ready_msg)
 
-st.title("Auto Relock Engine | Phase Trend Lock Filter + Live")
+st.title("Auto Relock Engine | Shadow Phase Trend Validate + Live")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1203,6 +1270,9 @@ st.write("Previous Signal Round In Phase:", last_signal_round_in_phase)
 st.write("Previous Signal PNL In Phase:", last_signal_pnl_in_phase)
 st.write("Phase Profit Now:", phase_profit_group)
 st.write("Phase Consecutive Losses:", phase_consecutive_losses)
+st.write("Phase Active:", phase_active)
+st.write("Shadow Trades:", shadow_trades)
+st.write("Shadow Profit:", shadow_profit_group)
 st.write("Relock By Loss Streak:", f"{phase_consecutive_losses}/{PHASE_LOSS_STREAK_RELOCK}")
 st.write("Recent Phase PNL Next:", recent_phase_pnl_next)
 st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
@@ -1226,13 +1296,9 @@ st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND phase_profit < 0")
 st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
+st.write("Shadow Validate:", f"{SHADOW_VALIDATE_TRADES} trades, min profit {SHADOW_MIN_PROFIT_TO_ACTIVATE}, fail <= {SHADOW_MAX_LOSS_TO_RELOCK}")
+st.write("Strict Validate Trend:", REQUIRE_VALIDATE_TREND_UP)
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase profit <= 0")
-st.write("Validate Trend Filter:", REQUIRE_VALIDATE_TREND_UP)
-st.write("MIN_VALIDATE_PHASE_PROFIT:", MIN_VALIDATE_PHASE_PROFIT)
-st.write("MIN_VALIDATE_TREND_FROM_MIN:", MIN_VALIDATE_TREND_FROM_MIN)
-st.write("MIN_VALIDATE_RECENT_PROFIT:", MIN_VALIDATE_RECENT_PROFIT)
-st.write("MIN_PHASE_AGE_BEFORE_RELOCK:", MIN_PHASE_AGE_BEFORE_RELOCK)
-st.write("RELOCK_COOLDOWN_ROUNDS:", RELOCK_COOLDOWN_ROUNDS)
 st.write("Telegram Enabled:", telegram_enabled())
 
 st.subheader("Profit Compare")
@@ -1308,6 +1374,12 @@ history_cols = [
     "confidence_group",
     "signal",
     "PHASE_BET",
+    "phase_active",
+    "SHADOW_TRADE",
+    "shadow_hit_group",
+    "shadow_pnl_group",
+    "shadow_profit_group",
+    "shadow_trades",
     "phase_bet_group",
     "phase_hit_group",
     "phase_pnl_group",
