@@ -64,19 +64,19 @@ WIDE_RELOCK_MIN_SCAN_LEN = 12
 WIDE_RELOCK_MAX_CANDIDATES = 16
 
 NO_TRADE_WHEN_NO_EDGE = True
-MIN_LOCK_TRAIN_PROFIT = -0.5
-MIN_LOCK_TRAIN_WR = 0.28
-MIN_LOCK_TRAIN_RECENT_PROFIT = -1.0
-MIN_LOCK_VALIDATE_PROFIT = -1.0
-MIN_LOCK_VALIDATE_WR = 0.28
-MIN_LOCK_VALIDATE_RECENT_PROFIT = -1.0
-MIN_LOCK_BUNDLE_SCORE = -1.0
-MIN_POSITIVE_WINDOWS = 1
+MIN_LOCK_TRAIN_PROFIT = 0.5
+MIN_LOCK_TRAIN_WR = 0.32
+MIN_LOCK_TRAIN_RECENT_PROFIT = 0.0
+MIN_LOCK_VALIDATE_PROFIT = 0.0
+MIN_LOCK_VALIDATE_WR = 0.30
+MIN_LOCK_VALIDATE_RECENT_PROFIT = 0.0
+MIN_LOCK_BUNDLE_SCORE = 0.0
 
 # Lọc từng window ứng viên trước khi bundle vote.
 WINDOW_MIN_PROFIT = -1.0
 WINDOW_MIN_RECENT_PROFIT = -0.5
 WINDOW_MAX_LOSS_STREAK = 12
+MIN_EDGE_WINDOWS = 3  # cần tối thiểu 3 window đạt edge, không cần tất cả window dương
 
 
 MIN_TRADES_PER_WINDOW = 16
@@ -91,9 +91,9 @@ VALIDATE_MIN_DRAWDOWN = -2.0
 
 # ===== STRICT LOCK TREND FILTER =====
 REQUIRE_VALIDATE_TREND_UP = True
-MIN_VALIDATE_PHASE_PROFIT = -0.5
-MIN_VALIDATE_TREND_FROM_MIN = -1.0
-MIN_VALIDATE_RECENT_PROFIT = -1.0
+MIN_VALIDATE_PHASE_PROFIT = 0.5
+MIN_VALIDATE_TREND_FROM_MIN = 1.0
+MIN_VALIDATE_RECENT_PROFIT = 0.0
 
 # ===== SHADOW PHASE VALIDATE =====
 # Sau khi lock/relock, không bet thật ngay.
@@ -390,33 +390,40 @@ def build_window_tables(train_groups, window_min, window_max):
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
-    base_mask = (
+    edge_mask = (
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= WINDOW_MAX_LOSS_STREAK)
+        & (df["profit"] >= WINDOW_MIN_PROFIT)
+        & (df["recent_profit"] >= WINDOW_MIN_RECENT_PROFIT)
     )
 
-    if STRICT_EDGE_FILTER:
-        base_mask = (
-            base_mask
-            & (df["profit"] >= WINDOW_MIN_PROFIT)
-            & (df["recent_profit"] >= WINDOW_MIN_RECENT_PROFIT)
-        )
+    edge_df = df[edge_mask].copy()
 
-    filtered_df = df[base_mask].copy()
-
-    filtered_df = filtered_df.sort_values(
+    edge_df = edge_df.sort_values(
         ["streak_score", "score", "recent_profit", "profit", "winrate", "trades", "max_loss_streak"],
         ascending=[False, False, False, False, False, False, True],
     ).reset_index(drop=True)
 
-    if filtered_df.empty:
-        if STRICT_EDGE_FILTER:
-            # Không có window đạt edge: trả empty để tầng trên chuyển NO_TRADE.
-            return [], df_all, filtered_df
-        filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
+    # Không cần tất cả window dương.
+    # Chỉ cần tối thiểu MIN_EDGE_WINDOWS window đạt điều kiện edge.
+    if STRICT_EDGE_FILTER and len(edge_df) < MIN_EDGE_WINDOWS:
+        return [], df_all, edge_df
 
-    selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
+    selected_seed = edge_df.head(MAX_CANDIDATE_WINDOWS).copy()
+
+    need = max(m["top_windows"] for m in MODES)
+
+    # Nếu window đạt edge chưa đủ top_windows thì fill thêm window tốt nhất còn lại.
+    if len(selected_seed) < need:
+        used_windows = set(selected_seed["window"].astype(int).tolist()) if not selected_seed.empty else set()
+        filler = df_all[~df_all["window"].astype(int).isin(used_windows)].head(MAX_CANDIDATE_WINDOWS).copy()
+        selected_seed = pd.concat([selected_seed, filler], ignore_index=True)
+
+    if selected_seed.empty:
+        if STRICT_EDGE_FILTER:
+            return [], df_all, edge_df
+        selected_seed = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
 
     candidate_df = selected_seed.sort_values(
         ["streak_score", "score", "recent_profit", "profit", "winrate", "trades"],
@@ -430,15 +437,20 @@ def build_window_tables(train_groups, window_min, window_max):
     else:
         candidate_windows = []
 
-    need = max(m["top_windows"] for m in MODES)
-
     if len(candidate_windows) < need:
         candidate_windows = enforce_spacing_from_df(selected_seed, need, MIN_WINDOW_SPACING)
 
     if len(candidate_windows) < need:
         candidate_windows = enforce_spacing_from_df(df_all, need, 1)
 
-    return candidate_windows, df_all, filtered_df
+    debug_df = selected_seed.copy()
+    if not debug_df.empty and "window" in debug_df.columns:
+        edge_set = set(edge_df["window"].astype(int).tolist()) if not edge_df.empty else set()
+        debug_df["is_edge_window"] = debug_df["window"].astype(int).apply(lambda x: x in edge_set)
+        debug_df["edge_window_count"] = len(edge_set)
+        debug_df["min_edge_windows_required"] = MIN_EDGE_WINDOWS
+
+    return candidate_windows, df_all, debug_df
 
 
 def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, end_idx):
@@ -1226,7 +1238,7 @@ sim = cached_simulate_engine(tuple(numbers))
 hist = sim["hist"]
 
 if hist.empty:
-    st.title("Auto Relock Engine | WIDE RELOCK SEARCH + NO TRADE")
+    st.title("Auto Relock Engine | WIDE RELOCK + MIN 3 EDGE WINDOWS")
     st.error(sim.get("no_trade_reason", "Không tìm được bộ lock phù hợp."))
     st.write("Lý do: hệ thống đã scan range hiện tại và quét lùi wide relock search nhưng chưa tìm được window đạt edge dương.")
     st.write("STRICT_EDGE_FILTER:", STRICT_EDGE_FILTER)
@@ -1242,6 +1254,7 @@ if hist.empty:
     st.write("WINDOW_MIN_PROFIT:", WINDOW_MIN_PROFIT)
     st.write("WINDOW_MIN_RECENT_PROFIT:", WINDOW_MIN_RECENT_PROFIT)
     st.write("WINDOW_MAX_LOSS_STREAK:", WINDOW_MAX_LOSS_STREAK)
+    st.write("MIN_EDGE_WINDOWS:", MIN_EDGE_WINDOWS)
     st.stop()
 
 phase_profit_group = sim["phase_profit_group"]
@@ -1460,6 +1473,7 @@ st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
 st.write("Wide Relock Search:", ENABLE_WIDE_RELOCK_SEARCH)
+st.write("MIN_EDGE_WINDOWS:", MIN_EDGE_WINDOWS)
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND phase_profit < 0")
 st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
 st.write("Shadow Validate:", f"{SHADOW_VALIDATE_TRADES} trades, min profit {SHADOW_MIN_PROFIT_TO_ACTIVATE}, fail <= {SHADOW_MAX_LOSS_TO_RELOCK}")
