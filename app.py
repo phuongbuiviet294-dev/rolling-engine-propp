@@ -19,7 +19,7 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "4v3", "top_windows": 4, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+   
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
     {"name": "7v4", "top_windows": 7, "vote_required": 4, "window_min": 6, "window_max": 22},
 ]
@@ -34,7 +34,7 @@ LIVE_BET_UNIT = 1.0
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
 PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 1
+PHASE_LOSS_STREAK_RELOCK = 3
 
 ENABLE_TIMEOUT_RELOCK = True
 TIMEOUT_RELOCK_ROUNDS = 30
@@ -46,7 +46,7 @@ MIN_RECENT_PHASE_PNL = 0.5
 PHASE_MIN_RECENT_PNL_TO_TRADE = -2.0
 LIVE_MAX_LOSS_STREAK = 2
 
-SESSION_STOP_WIN = 200.0
+SESSION_STOP_WIN = 4
 SESSION_STOP_LOSS = -200.0
 
 MIN_FALLBACK_SCORE = -3.0
@@ -59,7 +59,7 @@ MAX_CANDIDATE_WINDOWS = 10
 VALIDATE_LEN = 24
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
-VALIDATE_MIN_DRAWDOWN = -3.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 6
 RELOCK_BUFFER = 0
@@ -67,7 +67,7 @@ RELOCK_BUFFER = 0
 SHOW_HISTORY_ROWS = 120
 SHOW_DEBUG_TABLES = False
 
-DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
+DEFAULT_BOT_TOKEN = ""
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
