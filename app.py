@@ -54,6 +54,15 @@ MIN_FALLBACK_SCORE = -3.0
 # ===== STRICT EDGE / NO TRADE FILTER =====
 # Nếu không có edge thật thì KHÔNG BET, không cố chọn window âm.
 STRICT_EDGE_FILTER = True
+
+# ===== WIDE RELOCK SEARCH =====
+# Nếu scan hiện tại không có edge, tự quét lùi nhiều range gần đây để tìm window tốt hơn.
+ENABLE_WIDE_RELOCK_SEARCH = True
+WIDE_RELOCK_LOOKBACK = 96
+WIDE_RELOCK_STEP = 6
+WIDE_RELOCK_MIN_SCAN_LEN = 12
+WIDE_RELOCK_MAX_CANDIDATES = 16
+
 NO_TRADE_WHEN_NO_EDGE = True
 MIN_LOCK_TRAIN_PROFIT = 1.5
 MIN_LOCK_TRAIN_WR = 0.32
@@ -492,7 +501,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     }
 
 
-def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
+def _find_best_auto_mode_in_range_core(all_groups, scan_start, scan_end):
     effective_scan_end = min(scan_end, len(all_groups) - 1)
 
     if effective_scan_end < scan_start:
@@ -698,6 +707,85 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
+
+
+
+
+def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
+    """
+    Tìm window:
+    1. Scan range hiện tại.
+    2. Nếu không có edge, wide search quét lùi nhiều range gần đây.
+    3. Nếu vẫn không có edge thì NO_TRADE.
+    """
+    best = _find_best_auto_mode_in_range_core(all_groups, scan_start, scan_end)
+
+    if not ENABLE_WIDE_RELOCK_SEARCH:
+        return best
+
+    best_round, best_windows, best_mode, best_scan_df, best_filtered_df, best_round_eval_df, best_lock_mode = best
+
+    if best_round is not None and best_mode is not None:
+        return best
+
+    effective_end = min(scan_end, len(all_groups) - 1)
+    min_start = max(LOCK_ROUND_START, effective_end - WIDE_RELOCK_LOOKBACK)
+
+    candidates = []
+    count = 0
+    cur_end = effective_end
+
+    while cur_end >= min_start and count < WIDE_RELOCK_MAX_CANDIDATES:
+        scan_len = max(WIDE_RELOCK_MIN_SCAN_LEN, RELOCK_SCAN_LEN)
+        cur_start = max(LOCK_ROUND_START, cur_end - scan_len + 1)
+
+        if cur_start < cur_end:
+            cand = _find_best_auto_mode_in_range_core(all_groups, cur_start, cur_end)
+            cand_round, cand_windows, cand_mode, cand_scan_df, cand_filtered_df, cand_eval_df, cand_lock_mode = cand
+
+            if cand_round is not None and cand_mode is not None:
+                if cand_eval_df is not None and not cand_eval_df.empty and "bundle_score" in cand_eval_df.columns:
+                    cand_score = float(cand_eval_df["bundle_score"].max())
+                else:
+                    cand_score = 0.0
+
+                candidates.append((cand_score, cand, cur_start, cur_end))
+
+        cur_end -= WIDE_RELOCK_STEP
+        count += 1
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        cand_score, cand, cur_start, cur_end = candidates[0]
+
+        (
+            cand_round,
+            cand_windows,
+            cand_mode,
+            cand_scan_df,
+            cand_filtered_df,
+            cand_eval_df,
+            cand_lock_mode,
+        ) = cand
+
+        if cand_eval_df is not None and not cand_eval_df.empty:
+            cand_eval_df = cand_eval_df.copy()
+            cand_eval_df["wide_search_used"] = True
+            cand_eval_df["wide_scan_start"] = cur_start
+            cand_eval_df["wide_scan_end"] = cur_end
+            cand_eval_df["wide_score"] = cand_score
+
+        return (
+            cand_round,
+            cand_windows,
+            cand_mode,
+            cand_scan_df,
+            cand_filtered_df,
+            cand_eval_df,
+            "wide_" + str(cand_lock_mode),
+        )
+
+    return best
 
 
 def simulate_engine(numbers, groups):
@@ -1137,10 +1225,15 @@ sim = cached_simulate_engine(tuple(numbers))
 hist = sim["hist"]
 
 if hist.empty:
-    st.title("Auto Relock Engine | NO TRADE - MARKET WEAK")
+    st.title("Auto Relock Engine | WIDE RELOCK SEARCH + NO TRADE")
     st.error(sim.get("no_trade_reason", "Không tìm được bộ lock phù hợp."))
-    st.write("Lý do: toàn bộ window/candidate không đạt điều kiện edge dương nên hệ thống không vào bet.")
+    st.write("Lý do: hệ thống đã scan range hiện tại và quét lùi wide relock search nhưng chưa tìm được window đạt edge dương.")
     st.write("STRICT_EDGE_FILTER:", STRICT_EDGE_FILTER)
+    st.write("ENABLE_WIDE_RELOCK_SEARCH:", ENABLE_WIDE_RELOCK_SEARCH)
+    st.write("WIDE_RELOCK_LOOKBACK:", WIDE_RELOCK_LOOKBACK)
+    st.write("WIDE_RELOCK_STEP:", WIDE_RELOCK_STEP)
+    st.write("WIDE_RELOCK_MIN_SCAN_LEN:", WIDE_RELOCK_MIN_SCAN_LEN)
+    st.write("WIDE_RELOCK_MAX_CANDIDATES:", WIDE_RELOCK_MAX_CANDIDATES)
     st.write("MIN_LOCK_TRAIN_PROFIT:", MIN_LOCK_TRAIN_PROFIT)
     st.write("MIN_LOCK_TRAIN_WR:", MIN_LOCK_TRAIN_WR)
     st.write("MIN_LOCK_VALIDATE_PROFIT:", MIN_LOCK_VALIDATE_PROFIT)
@@ -1365,6 +1458,7 @@ st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
+st.write("Wide Relock Search:", ENABLE_WIDE_RELOCK_SEARCH)
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND phase_profit < 0")
 st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
 st.write("Shadow Validate:", f"{SHADOW_VALIDATE_TRADES} trades, min profit {SHADOW_MIN_PROFIT_TO_ACTIVATE}, fail <= {SHADOW_MAX_LOSS_TO_RELOCK}")
