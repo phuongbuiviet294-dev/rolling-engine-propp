@@ -33,7 +33,7 @@ LIVE_BET_UNIT = 1.0
 
 # ===== OPTIMIZED CONFIG: nhiều lệnh nhưng tránh phase chết =====
 PHASE_STOP_WIN = 999999.0
-PHASE_STOP_LOSS = -3.0
+PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
 ENABLE_TIMEOUT_RELOCK = False
@@ -53,7 +53,7 @@ MIN_FALLBACK_SCORE = -3.0
 
 # ===== STRICT EDGE / NO TRADE FILTER =====
 # Nếu không có edge thật thì KHÔNG BET, không cố chọn window âm.
-STRICT_EDGE_FILTER = True
+STRICT_EDGE_FILTER = False
 
 # ===== WIDE RELOCK SEARCH =====
 # Nếu scan hiện tại không có edge, tự quét lùi nhiều range gần đây để tìm window tốt hơn.
@@ -64,19 +64,21 @@ WIDE_RELOCK_MIN_SCAN_LEN = 12
 WIDE_RELOCK_MAX_CANDIDATES = 16
 
 NO_TRADE_WHEN_NO_EDGE = True
-MIN_LOCK_TRAIN_PROFIT = 0.5
-MIN_LOCK_TRAIN_WR = 0.32
+MIN_LOCK_TRAIN_PROFIT = -1.0
+MIN_LOCK_TRAIN_WR = 0.28
 MIN_LOCK_TRAIN_RECENT_PROFIT = 0.0
-MIN_LOCK_VALIDATE_PROFIT = 0.0
-MIN_LOCK_VALIDATE_WR = 0.30
+MIN_LOCK_VALIDATE_PROFIT = -1.0
+MIN_LOCK_VALIDATE_WR = 0.260
 MIN_LOCK_VALIDATE_RECENT_PROFIT = 0.0
 MIN_LOCK_BUNDLE_SCORE = 0.0
 
 # Lọc từng window ứng viên trước khi bundle vote.
-WINDOW_MIN_PROFIT = -1.0
-WINDOW_MIN_RECENT_PROFIT = -0.5
-WINDOW_MAX_LOSS_STREAK = 12
-MIN_EDGE_WINDOWS = 3  # cần tối thiểu 3 window đạt edge, không cần tất cả window dương
+WINDOW_MIN_PROFIT = -2.0
+WINDOW_MIN_RECENT_PROFIT = -1.5
+WINDOW_MAX_LOSS_STREAK = 20
+MIN_EDGE_WINDOWS = 2  # cần tối thiểu 2 window đạt edge, không cần tất cả window dương
+ALLOW_NEGATIVE_VALIDATE_IF_RECENT_GREEN = True
+MIN_RECENT_GREEN_VALIDATE_PROFIT = 1.5
 
 
 MIN_TRADES_PER_WINDOW = 16
@@ -619,6 +621,15 @@ def _find_best_auto_mode_in_range_core(all_groups, scan_start, scan_end):
                 and validate_bt["winrate_group"] >= MIN_LOCK_VALIDATE_WR
                 and validate_bt["validate_recent_profit_group"] >= MIN_LOCK_VALIDATE_RECENT_PROFIT
             )
+
+            # Cho phép validate tổng hơi âm nhưng recent validate đang hồi xanh.
+            recent_green_validate_pass = (
+                ALLOW_NEGATIVE_VALIDATE_IF_RECENT_GREEN
+                and validate_bt["validate_recent_profit_group"] >= MIN_RECENT_GREEN_VALIDATE_PROFIT
+                and validate_bt["winrate_group"] >= MIN_LOCK_VALIDATE_WR
+            )
+
+            validate_edge_pass = validate_edge_pass or recent_green_validate_pass
 
             edge_pass = (train_edge_pass and validate_edge_pass) if STRICT_EDGE_FILTER else True
 
@@ -1238,7 +1249,7 @@ sim = cached_simulate_engine(tuple(numbers))
 hist = sim["hist"]
 
 if hist.empty:
-    st.title("Auto Relock Engine | WIDE RELOCK + MIN 3 EDGE WINDOWS")
+    st.title("Auto Relock Engine | WIDE RELOCK + SOFT EDGE FILTER")
     st.error(sim.get("no_trade_reason", "Không tìm được bộ lock phù hợp."))
     st.write("Lý do: hệ thống đã scan range hiện tại và quét lùi wide relock search nhưng chưa tìm được window đạt edge dương.")
     st.write("STRICT_EDGE_FILTER:", STRICT_EDGE_FILTER)
@@ -1255,6 +1266,10 @@ if hist.empty:
     st.write("WINDOW_MIN_RECENT_PROFIT:", WINDOW_MIN_RECENT_PROFIT)
     st.write("WINDOW_MAX_LOSS_STREAK:", WINDOW_MAX_LOSS_STREAK)
     st.write("MIN_EDGE_WINDOWS:", MIN_EDGE_WINDOWS)
+    st.write("Soft Validate Recent Green:", ALLOW_NEGATIVE_VALIDATE_IF_RECENT_GREEN)
+    st.write("MIN_RECENT_GREEN_VALIDATE_PROFIT:", MIN_RECENT_GREEN_VALIDATE_PROFIT)
+    st.write("ALLOW_NEGATIVE_VALIDATE_IF_RECENT_GREEN:", ALLOW_NEGATIVE_VALIDATE_IF_RECENT_GREEN)
+    st.write("MIN_RECENT_GREEN_VALIDATE_PROFIT:", MIN_RECENT_GREEN_VALIDATE_PROFIT)
     st.stop()
 
 phase_profit_group = sim["phase_profit_group"]
