@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st_autorefresh(interval=1000, key="refresh")
+st_autorefresh(interval=5000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -50,6 +50,24 @@ SESSION_STOP_WIN = 6.0
 SESSION_STOP_LOSS = -6.0
 
 MIN_FALLBACK_SCORE = -3.0
+
+# ===== STRICT EDGE / NO TRADE FILTER =====
+# Nếu không có edge thật thì KHÔNG BET, không cố chọn window âm.
+STRICT_EDGE_FILTER = True
+NO_TRADE_WHEN_NO_EDGE = True
+MIN_LOCK_TRAIN_PROFIT = 1.5
+MIN_LOCK_TRAIN_WR = 0.32
+MIN_LOCK_TRAIN_RECENT_PROFIT = 0.0
+MIN_LOCK_VALIDATE_PROFIT = 0.5
+MIN_LOCK_VALIDATE_WR = 0.30
+MIN_LOCK_VALIDATE_RECENT_PROFIT = 0.0
+MIN_LOCK_BUNDLE_SCORE = 0.0
+
+# Lọc từng window ứng viên trước khi bundle vote.
+WINDOW_MIN_PROFIT = 0.0
+WINDOW_MIN_RECENT_PROFIT = 0.0
+WINDOW_MAX_LOSS_STREAK = 8
+
 
 MIN_TRADES_PER_WINDOW = 16
 RECENT_WINDOW_SIZE = 26
@@ -362,11 +380,20 @@ def build_window_tables(train_groups, window_min, window_max):
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
-    filtered_df = df[
+    base_mask = (
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
-    ].copy()
+        & (df["max_loss_streak"] <= WINDOW_MAX_LOSS_STREAK)
+    )
+
+    if STRICT_EDGE_FILTER:
+        base_mask = (
+            base_mask
+            & (df["profit"] >= WINDOW_MIN_PROFIT)
+            & (df["recent_profit"] >= WINDOW_MIN_RECENT_PROFIT)
+        )
+
+    filtered_df = df[base_mask].copy()
 
     filtered_df = filtered_df.sort_values(
         ["streak_score", "score", "recent_profit", "profit", "winrate", "trades", "max_loss_streak"],
@@ -374,6 +401,9 @@ def build_window_tables(train_groups, window_min, window_max):
     ).reset_index(drop=True)
 
     if filtered_df.empty:
+        if STRICT_EDGE_FILTER:
+            # Không có window đạt edge: trả empty để tầng trên chuyển NO_TRADE.
+            return [], df_all, filtered_df
         filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
 
     selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
@@ -556,6 +586,20 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 and (validate_trend_pass if REQUIRE_VALIDATE_TREND_UP else True)
             )
 
+            train_edge_pass = (
+                train_bt["profit_group"] >= MIN_LOCK_TRAIN_PROFIT
+                and train_bt["winrate_group"] >= MIN_LOCK_TRAIN_WR
+                and train_bt["recent_profit_group"] >= MIN_LOCK_TRAIN_RECENT_PROFIT
+            )
+
+            validate_edge_pass = (
+                validate_bt["profit_group"] >= MIN_LOCK_VALIDATE_PROFIT
+                and validate_bt["winrate_group"] >= MIN_LOCK_VALIDATE_WR
+                and validate_bt["validate_recent_profit_group"] >= MIN_LOCK_VALIDATE_RECENT_PROFIT
+            )
+
+            edge_pass = (train_edge_pass and validate_edge_pass) if STRICT_EDGE_FILTER else True
+
             final_score = (
                 train_bt["profit_group"] * 0.8
                 + train_bt["winrate_group"] * 8.0
@@ -575,7 +619,12 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 local_fallback_scan_df = df_all
                 local_fallback_filtered_df = filtered_df
 
-            if validate_pass and final_score > local_best_score:
+            if (
+                validate_pass
+                and edge_pass
+                and final_score >= MIN_LOCK_BUNDLE_SCORE
+                and final_score > local_best_score
+            ):
                 local_best_score = final_score
                 local_best_windows = selected_windows
                 local_best_mode = mode
@@ -590,6 +639,14 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     "mode": local_best_mode["name"],
                     "selected_windows": ", ".join(map(str, local_best_windows)),
                     "bundle_score": local_best_score,
+                    "train_profit": train_bt["profit_group"],
+                    "train_wr": train_bt["winrate_group"],
+                    "train_recent_profit": train_bt["recent_profit_group"],
+                    "validate_profit": validate_bt["profit_group"],
+                    "validate_wr": validate_bt["winrate_group"],
+                    "validate_recent_profit": validate_bt["validate_recent_profit_group"],
+                    "validate_trend_from_min": validate_bt["trend_from_min_group"],
+                    "edge_pass": edge_pass,
                     "lock_mode": local_lock_mode,
                 }
             )
@@ -604,7 +661,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 best_lock_mode = local_lock_mode
 
         elif (
-            not REQUIRE_VALIDATE_TREND_UP
+            not STRICT_EDGE_FILTER
+            and not REQUIRE_VALIDATE_TREND_UP
             and local_fallback_mode is not None
             and local_fallback_score >= MIN_FALLBACK_SCORE
         ):
@@ -632,7 +690,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
         return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
     if (
-        not REQUIRE_VALIDATE_TREND_UP
+        not STRICT_EDGE_FILTER
+        and not REQUIRE_VALIDATE_TREND_UP
         and fallback_round is not None
         and fallback_score >= MIN_FALLBACK_SCORE
     ):
@@ -665,6 +724,7 @@ def simulate_engine(numbers, groups):
         "last_signal_pnl_in_phase": 0.0,
         "last_signal_round_in_phase": None,
         "phase_consecutive_losses": 0,
+        "no_trade_reason": None,
     }
 
     (
@@ -678,6 +738,7 @@ def simulate_engine(numbers, groups):
     ) = find_best_auto_mode_in_range(groups, LOCK_ROUND_START, LOCK_ROUND_END)
 
     if selected_lock_round is None or selected_mode is None:
+        result["no_trade_reason"] = "NO_TRADE_MARKET_WEAK_NO_EDGE_WINDOW"
         return result
 
     phase_profit_group = 0.0
@@ -1076,7 +1137,17 @@ sim = cached_simulate_engine(tuple(numbers))
 hist = sim["hist"]
 
 if hist.empty:
-    st.error("Không tìm được bộ lock phù hợp.")
+    st.title("Auto Relock Engine | NO TRADE - MARKET WEAK")
+    st.error(sim.get("no_trade_reason", "Không tìm được bộ lock phù hợp."))
+    st.write("Lý do: toàn bộ window/candidate không đạt điều kiện edge dương nên hệ thống không vào bet.")
+    st.write("STRICT_EDGE_FILTER:", STRICT_EDGE_FILTER)
+    st.write("MIN_LOCK_TRAIN_PROFIT:", MIN_LOCK_TRAIN_PROFIT)
+    st.write("MIN_LOCK_TRAIN_WR:", MIN_LOCK_TRAIN_WR)
+    st.write("MIN_LOCK_VALIDATE_PROFIT:", MIN_LOCK_VALIDATE_PROFIT)
+    st.write("MIN_LOCK_VALIDATE_WR:", MIN_LOCK_VALIDATE_WR)
+    st.write("WINDOW_MIN_PROFIT:", WINDOW_MIN_PROFIT)
+    st.write("WINDOW_MIN_RECENT_PROFIT:", WINDOW_MIN_RECENT_PROFIT)
+    st.write("WINDOW_MAX_LOSS_STREAK:", WINDOW_MAX_LOSS_STREAK)
     st.stop()
 
 phase_profit_group = sim["phase_profit_group"]
