@@ -28,7 +28,7 @@ PATTERN_LEN_MAX = 6
 
 # Filter vừa phải: loại rác trước, không siết quá làm mất win
 MIN_TRADES = 5
-MIN_WR = 0.34
+MIN_WR = 0.33
 MIN_PROFIT = 2
 MIN_SCORE = 8.0
 
