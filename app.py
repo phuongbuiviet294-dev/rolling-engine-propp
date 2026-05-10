@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="ABCD Pattern Live Engine Final", layout="wide")
+st.set_page_config(page_title="ABCD Pattern Live Engine Optimized", layout="wide")
 st_autorefresh(interval=10000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -23,44 +23,63 @@ MAX_SOURCE_ROWS = 300
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-# Pattern length 4-6 để tránh pattern quá ngắn gây trade dày
 PATTERN_LEN_MIN = 4
 PATTERN_LEN_MAX = 6
 
-# Lọc pattern mạnh
-MIN_TRADES = 8
-MIN_WR = 0.4
-MIN_PROFIT = 4.0
-MIN_SCORE = 22.0
+# =========================================================
+# OPTIMIZED FILTER CONFIG
+# Loại pattern rác trước, sau đó nới filter để không bỏ sót win
+# =========================================================
+MIN_TRADES = 5
+MIN_WR = 0.34
+MIN_PROFIT = 1.5
+MIN_SCORE = 10.0
 
 RECENT_ROUNDS = 80
-RECENT_MIN_PROFIT = 2.0
-RECENT_WR_MIN = 0.45
+RECENT_MIN_PROFIT = 0.5
+RECENT_WR_MIN = 0.30
 
-# Pattern gãy
-PATTERN_BREAK_STREAK_LIMIT = 1
-MAX_LOSS_STREAK_ALLOWED = 2
+PATTERN_BREAK_STREAK_LIMIT = 2
+MAX_LOSS_STREAK_ALLOWED = 3
 
-# Chống conflict side
-DOMINANCE_MIN = 0.12
-PROFIT_GAP_MIN = 2.5
+DOMINANCE_MIN = 0.05
+PROFIT_GAP_MIN = 1.0
 
-# Transition thực tế theo tail group
 ENABLE_TRANSITION_FILTER = True
 TRANSITION_MIN_COUNT = 3
-TRANSITION_DOMINANCE_MIN = 0.10
+TRANSITION_DOMINANCE_MIN = 0.08
 
-# Chặn live yếu
+# Chặn live yếu, nhưng không quá chặt
 LIVE_RECENT_N = 6
-LIVE_RECENT_STOP = -1.5
+LIVE_RECENT_STOP = -3.0
 
-# Stop phiên giữ profit
-SESSION_PROFIT_TARGET = 8.0
-SESSION_STOP_LOSS = -4.0
-SESSION_MAX_DRAWDOWN_FROM_PEAK = 2.5
+# Stop phiên bảo toàn profit
+SESSION_PROFIT_TARGET = 10.0
+SESSION_STOP_LOSS = -6.0
+SESSION_MAX_DRAWDOWN_FROM_PEAK = 5.0
 
-SHOW_HISTORY_ROWS = 30
-SHOW_TOP_PATTERNS = 25
+SHOW_HISTORY_ROWS = 40
+SHOW_TOP_PATTERNS = 30
+
+# =========================================================
+# MANUAL BAD PATTERN SIDE BLACKLIST
+# Chỉ loại side xấu, không loại cả pattern nếu side khác còn tốt
+# =========================================================
+BAD_PATTERN_SIDES = {
+    ("AABB", "B"),
+    ("AABB", "D"),
+
+    ("ABAACC", "A"),
+    ("ABAACC", "B"),
+
+    ("ABBCC", "A"),
+    ("ABBCC", "C"),
+
+    ("ABBAA", "B"),
+
+    # Nếu test live thấy side này âm thì giữ blacklist
+    ("ABBC", "A"),
+}
 
 
 # =========================================================
@@ -125,6 +144,8 @@ def calc_pattern_stats(groups, pattern, bet_label):
     wins = 0
     profit = 0.0
     results = []
+    equity = []
+    running = 0.0
 
     for i in range(L - 1, len(groups) - 1):
         tail = groups[i - L + 1:i + 1]
@@ -145,7 +166,9 @@ def calc_pattern_stats(groups, pattern, bet_label):
         trades += 1
         wins += hit
         profit += pnl
+        running += pnl
         results.append(hit)
+        equity.append(running)
 
     wr = wins / trades if trades > 0 else 0.0
 
@@ -166,6 +189,10 @@ def calc_pattern_stats(groups, pattern, bet_label):
         else:
             break
 
+    min_equity = min(equity) if equity else 0.0
+    max_equity = max(equity) if equity else 0.0
+    end_equity = equity[-1] if equity else 0.0
+
     return {
         "trades": trades,
         "wins": wins,
@@ -175,6 +202,9 @@ def calc_pattern_stats(groups, pattern, bet_label):
         "current_loss_streak": current_loss_streak,
         "max_loss_streak": max_loss_streak,
         "last_result": results[-1] if results else None,
+        "min_equity": min_equity,
+        "max_equity": max_equity,
+        "end_equity": end_equity,
     }
 
 
@@ -242,36 +272,38 @@ def score_pattern(stat, recent, transition):
     profit = stat["profit"]
     recent_wr = recent["wr"]
     recent_profit = recent["profit"]
-    max_loss_streak = stat["max_loss_streak"]
 
-    # Trade factor: tránh trades=1,2,3 bị score ảo
-    trade_factor = math.log1p(trades)
+    trade_factor = math.log1p(max(trades, 0))
 
-    # Phạt sample thấp cực mạnh
     low_sample_penalty = 0.0
     if trades < MIN_TRADES:
-        low_sample_penalty = (MIN_TRADES - trades) * 8.0
+        low_sample_penalty = (MIN_TRADES - trades) * 5.0
 
-    # Fake WR 100% với sample nhỏ
     fake_wr_penalty = 0.0
-    if trades <= 8 and wr >= 0.80:
-        fake_wr_penalty = 10.0
+    if trades <= 7 and wr >= 0.80:
+        fake_wr_penalty = 6.0
 
-    broken_penalty = 12.0 if stat["current_loss_streak"] >= PATTERN_BREAK_STREAK_LIMIT else 0.0
+    broken_penalty = 8.0 if stat["current_loss_streak"] >= PATTERN_BREAK_STREAK_LIMIT else 0.0
 
     transition_bonus = 0.0
     if transition["transition_ok"]:
-        transition_bonus = transition["transition_dominance"] * 12.0
+        transition_bonus = transition["transition_dominance"] * 10.0
+
+    stability_bonus = 0.0
+    if stat["min_equity"] >= 0:
+        stability_bonus = 2.0
 
     score = (
-        recent_profit * 5.0
-        + profit * 1.5
-        + recent_wr * 10.0
+        recent_profit * 4.0
+        + profit * 1.3
+        + recent_wr * 8.0
         + wr * 4.0
-        + trade_factor * 4.0
+        + trade_factor * 3.0
         + transition_bonus
-        - max_loss_streak * 2.5
-        - stat["current_loss_streak"] * 4.0
+        + stability_bonus
+        - stat["max_loss_streak"] * 1.5
+        - stat["current_loss_streak"] * 3.0
+        - abs(min(stat["min_equity"], 0)) * 0.8
         - low_sample_penalty
         - fake_wr_penalty
         - broken_penalty
@@ -300,7 +332,7 @@ def add_dominance_fields(rows):
         for r in items:
             r["profit_gap"] = best_profit - second_profit if r["profit"] == best_profit else 0.0
             r["dominance"] = best_wr - second_wr if r["wr"] == best_wr else 0.0
-            r["is_best_side"] = r["profit"] == best_profit and r["wr"] == best_wr
+            r["is_best_side"] = r["profit"] == best_profit
 
     return rows
 
@@ -320,6 +352,9 @@ def current_tail_candidates(groups):
 
         for bet_label in labels_in_pattern(pattern):
             if bet_label not in reverse:
+                continue
+
+            if (pattern, bet_label) in BAD_PATTERN_SIDES:
                 continue
 
             bet_group = reverse[bet_label]
@@ -345,6 +380,8 @@ def current_tail_candidates(groups):
                 "current_loss_streak": stat["current_loss_streak"],
                 "max_loss_streak": stat["max_loss_streak"],
                 "last_result": stat["last_result"],
+                "min_equity": stat["min_equity"],
+                "max_equity": stat["max_equity"],
                 "broken": broken,
                 "transition_count": trans["transition_count"],
                 "transition_top_group": trans["transition_top_group"],
@@ -397,6 +434,18 @@ def choose_signal(groups):
         if m["max_loss_streak"] > MAX_LOSS_STREAK_ALLOWED:
             continue
 
+        if m["profit"] <= 0:
+            continue
+
+        if m["recent_profit"] < 0:
+            continue
+
+        if m["current_loss_streak"] >= PATTERN_BREAK_STREAK_LIMIT:
+            continue
+
+        if m["min_equity"] <= -5:
+            continue
+
         if ENABLE_TRANSITION_FILTER:
             if m["transition_count"] >= TRANSITION_MIN_COUNT and not m["transition_ok"]:
                 continue
@@ -410,7 +459,7 @@ def choose_signal(groups):
 
 
 # =========================================================
-# LIVE SIMULATION WITH STOP
+# LIVE SIMULATION WITH SESSION STOP
 # =========================================================
 @st.cache_data(ttl=20, show_spinner=False)
 def simulate_live_from_lock_cached(groups_tuple):
@@ -486,6 +535,7 @@ def simulate_live_from_lock_cached(groups_tuple):
             "recent_profit": round(sig["recent_profit"], 2) if sig else None,
             "dominance": round(sig["dominance"], 3) if sig else None,
             "profit_gap": round(sig["profit_gap"], 2) if sig else None,
+            "min_equity": round(sig["min_equity"], 2) if sig else None,
             "current_loss_streak": sig["current_loss_streak"] if sig else None,
             "max_loss_streak": sig["max_loss_streak"] if sig else None,
             "transition_count": sig["transition_count"] if sig else None,
@@ -515,12 +565,16 @@ def discover_top_patterns_cached(groups_tuple):
 
     for pattern in sorted(pattern_set):
         for bet_label in labels_in_pattern(pattern):
+            if (pattern, bet_label) in BAD_PATTERN_SIDES:
+                continue
+
             stat = calc_pattern_stats(groups, pattern, bet_label)
             recent = recent_stats(groups, pattern, bet_label)
             dummy_trans = {
                 "transition_ok": False,
                 "transition_dominance": 0.0,
             }
+
             sc = score_pattern(stat, recent, dummy_trans)
             broken = pattern_is_broken(stat, recent)
 
@@ -536,6 +590,7 @@ def discover_top_patterns_cached(groups_tuple):
                 "recent_profit": round(recent["profit"], 2),
                 "current_loss_streak": stat["current_loss_streak"],
                 "max_loss_streak": stat["max_loss_streak"],
+                "min_equity": round(stat["min_equity"], 2),
                 "broken": broken,
                 "score": round(sc, 2),
             })
@@ -569,7 +624,6 @@ if st.sidebar.button("Clear cache"):
 signal, state, matches = choose_signal(groups)
 hist = simulate_live_from_lock_cached(tuple(groups))
 
-# Chặn live nếu recent trade đang xấu
 recent_live_profit = 0.0
 if not hist.empty and int(hist["trade"].sum()) >= LIVE_RECENT_N:
     recent_live_profit = hist[hist["trade"] == True].tail(LIVE_RECENT_N)["pnl"].sum()
@@ -587,7 +641,7 @@ drawdown_now = round(hist["drawdown_from_peak"].iloc[-1], 2) if not hist.empty e
 # =========================================================
 # UI
 # =========================================================
-st.title("ABCD PATTERN LIVE ENGINE | FINAL STRICT")
+st.title("ABCD PATTERN LIVE ENGINE | OPTIMIZED CLEAN")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", len(groups))
@@ -604,23 +658,27 @@ p4.metric("State", state)
 q1, q2, q3 = st.columns(3)
 q1.metric("Peak Profit", peak_profit)
 q2.metric("Drawdown Now", drawdown_now)
-q3.metric("Recent Live Profit", recent_live_profit)
+q3.metric("Recent Live Profit", round(recent_live_profit, 2))
 
-st.write("LOCK_ROWS:", LOCK_ROWS)
-st.write("MAX_SOURCE_ROWS:", MAX_SOURCE_ROWS)
-st.write("PATTERN_LEN:", f"{PATTERN_LEN_MIN} → {PATTERN_LEN_MAX}")
-st.write("MIN_TRADES:", MIN_TRADES)
-st.write("MIN_WR:", MIN_WR)
-st.write("MIN_PROFIT:", MIN_PROFIT)
-st.write("RECENT_MIN_PROFIT:", RECENT_MIN_PROFIT)
-st.write("RECENT_WR_MIN:", RECENT_WR_MIN)
-st.write("DOMINANCE_MIN:", DOMINANCE_MIN)
-st.write("PROFIT_GAP_MIN:", PROFIT_GAP_MIN)
-st.write("MAX_LOSS_STREAK_ALLOWED:", MAX_LOSS_STREAK_ALLOWED)
-st.write("MIN_SCORE:", MIN_SCORE)
-st.write("SESSION_PROFIT_TARGET:", SESSION_PROFIT_TARGET)
-st.write("SESSION_STOP_LOSS:", SESSION_STOP_LOSS)
-st.write("SESSION_MAX_DRAWDOWN_FROM_PEAK:", SESSION_MAX_DRAWDOWN_FROM_PEAK)
+with st.expander("CONFIG"):
+    st.write("LOCK_ROWS:", LOCK_ROWS)
+    st.write("MAX_SOURCE_ROWS:", MAX_SOURCE_ROWS)
+    st.write("PATTERN_LEN:", f"{PATTERN_LEN_MIN} → {PATTERN_LEN_MAX}")
+    st.write("MIN_TRADES:", MIN_TRADES)
+    st.write("MIN_WR:", MIN_WR)
+    st.write("MIN_PROFIT:", MIN_PROFIT)
+    st.write("RECENT_MIN_PROFIT:", RECENT_MIN_PROFIT)
+    st.write("RECENT_WR_MIN:", RECENT_WR_MIN)
+    st.write("DOMINANCE_MIN:", DOMINANCE_MIN)
+    st.write("PROFIT_GAP_MIN:", PROFIT_GAP_MIN)
+    st.write("MAX_LOSS_STREAK_ALLOWED:", MAX_LOSS_STREAK_ALLOWED)
+    st.write("MIN_SCORE:", MIN_SCORE)
+    st.write("LIVE_RECENT_N:", LIVE_RECENT_N)
+    st.write("LIVE_RECENT_STOP:", LIVE_RECENT_STOP)
+    st.write("SESSION_PROFIT_TARGET:", SESSION_PROFIT_TARGET)
+    st.write("SESSION_STOP_LOSS:", SESSION_STOP_LOSS)
+    st.write("SESSION_MAX_DRAWDOWN_FROM_PEAK:", SESSION_MAX_DRAWDOWN_FROM_PEAK)
+    st.write("BAD_PATTERN_SIDES:", sorted(list(BAD_PATTERN_SIDES)))
 
 st.subheader("NEXT BET")
 
@@ -648,6 +706,7 @@ if signal:
     st.write("Recent Profit:", round(signal["recent_profit"], 2))
     st.write("Dominance:", round(signal["dominance"], 3))
     st.write("Profit Gap:", round(signal["profit_gap"], 2))
+    st.write("Min Equity:", round(signal["min_equity"], 2))
     st.write("Current Loss Streak:", signal["current_loss_streak"])
     st.write("Max Loss Streak:", signal["max_loss_streak"])
     st.write("Transition Count:", signal["transition_count"])
@@ -669,6 +728,7 @@ if matches:
     match_df["dominance"] = match_df["dominance"].round(3)
     match_df["profit_gap"] = match_df["profit_gap"].round(2)
     match_df["transition_dominance"] = match_df["transition_dominance"].round(3)
+    match_df["min_equity"] = match_df["min_equity"].round(2)
     st.dataframe(match_df, use_container_width=True)
 else:
     st.info("Không có pattern nào match tail hiện tại.")
