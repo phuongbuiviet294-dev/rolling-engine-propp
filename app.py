@@ -6,23 +6,24 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # APP CONFIG
 # =========================================================
-st.set_page_config(page_title="Auto Mirror Pattern Engine", layout="wide")
+st.set_page_config(page_title="Live Pattern Engine Lock 75", layout="wide")
 st_autorefresh(interval=3000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 # =========================================================
-# PROFIT CONFIG
+# LIVE CONFIG
 # =========================================================
+LOCK_ROWS = 75          # 75 ván đầu chỉ để học
+LIVE_FROM = 75          # từ ván 76 trở đi mới tính live profit
+
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
 # =========================================================
-# BASE PATTERN LIST
-# Chỉ cần khai báo pattern gốc.
-# Code sẽ tự sinh pattern đảo A<->B.
+# PATTERN CONFIG
 # =========================================================
-BASE_PATTERN_LIST = [
+PATTERN_LIST = [
     "AAA",
     "AAAB",
     "AAAAB",
@@ -39,14 +40,15 @@ BASE_PATTERN_LIST = [
 MIN_TRADES = 3
 MIN_WR = 0.30
 MIN_PROFIT = 0.0
-MIN_SCORE = 1.0
+MIN_SCORE = -999.0
 
 RECENT_ROUNDS = 120
-RECENT_MIN_PROFIT = -1.0
+RECENT_MIN_PROFIT = -3.0
 
-MAX_LOSS_STREAK_ALLOW = 4
+MAX_LOSS_STREAK_ALLOW = 99
 
 SHOW_HISTORY_ROWS = 80
+
 
 # =========================================================
 # LOAD DATA
@@ -55,7 +57,6 @@ SHOW_HISTORY_ROWS = 80
 def load_data():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&t={int(time.time())}"
     df = pd.read_csv(url)
-
     df.columns = [str(c).strip().lower() for c in df.columns]
 
     if "number" not in df.columns:
@@ -63,14 +64,9 @@ def load_data():
         st.stop()
 
     nums = pd.to_numeric(df["number"], errors="coerce").dropna().astype(int).tolist()
-    nums = [x for x in nums if 1 <= x <= 12]
-
-    return nums
+    return [x for x in nums if 1 <= x <= 12]
 
 
-# =========================================================
-# GROUP
-# =========================================================
 def group_of(n):
     if n <= 3:
         return 1
@@ -84,80 +80,23 @@ def group_of(n):
 # =========================================================
 # PATTERN TOOLS
 # =========================================================
-def invert_pattern(pattern):
-    """
-    AABBA -> BBAAB
-    AAAB  -> BBBA
-    AABB  -> BBAA
-    ABABA -> BABAB
-    """
-    out = []
-    for ch in pattern:
-        if ch == "A":
-            out.append("B")
-        elif ch == "B":
-            out.append("A")
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
-def build_pattern_list():
-    """
-    Tự sinh cả pattern gốc và pattern đảo.
-    Loại trùng.
-    """
-    out = []
-
-    for p in BASE_PATTERN_LIST:
-        out.append(p)
-
-        inv = invert_pattern(p)
-        if inv not in out:
-            out.append(inv)
-
-    return out
-
-
-PATTERN_LIST = build_pattern_list()
-
-
 def groups_to_ab(seq):
-    """
-    Convert group sequence thành pattern A/B/C theo thứ tự xuất hiện.
-
-    Ví dụ:
-    [3,3,4,4] -> AABB, reverse A=3, B=4
-    [4,4,3,3] -> AABB, reverse A=4, B=3
-
-    Chú ý:
-    Do convert theo thứ tự xuất hiện, thực tế pattern đảo vẫn cần để scan
-    các dạng đảo khi user muốn phân tích theo cấu trúc đảo.
-    """
     mapping = {}
     reverse = {}
     labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    result = []
+    out = []
 
     for g in seq:
         if g not in mapping:
             label = labels[len(mapping)]
             mapping[g] = label
             reverse[label] = g
-        result.append(mapping[g])
+        out.append(mapping[g])
 
-    return "".join(result), reverse
+    return "".join(out), reverse
 
 
 def calc_stats(groups, pattern, bet_label):
-    """
-    Tính thống kê cho pattern và side bet_label.
-    Bet ở vòng kế tiếp sau khi pattern xuất hiện.
-
-    groups:
-    index 0-based.
-    nếu pattern kết thúc tại i thì actual là groups[i+1].
-    """
     L = len(pattern)
 
     trades = 0
@@ -179,7 +118,7 @@ def calc_stats(groups, pattern, bet_label):
         actual_group = groups[i + 1]
 
         hit = 1 if pred_group == actual_group else 0
-        pnl = WIN_GROUP if hit == 1 else LOSS_GROUP
+        pnl = WIN_GROUP if hit else LOSS_GROUP
 
         trades += 1
         wins += hit
@@ -216,21 +155,17 @@ def calc_stats(groups, pattern, bet_label):
 
 
 def recent_stats(groups, pattern, bet_label):
-    recent_groups = groups[-RECENT_ROUNDS:]
-    return calc_stats(recent_groups, pattern, bet_label)
+    return calc_stats(groups[-RECENT_ROUNDS:], pattern, bet_label)
 
 
 def score_pattern(stat, recent):
-    """
-    Score càng cao càng tốt.
-    """
     return (
         stat["profit"] * 1.5
         + stat["wr"] * 10.0
-        + recent["profit"] * 1.5
+        + recent["profit"] * 1.2
         + stat["trades"] * 0.10
-        - stat["loss_streak"] * 2.0
-        - stat["max_loss_streak"] * 0.5
+        - stat["loss_streak"] * 1.0
+        - stat["max_loss_streak"] * 0.2
     )
 
 
@@ -238,45 +173,7 @@ def labels_in_pattern(pattern):
     return sorted(set(pattern))
 
 
-def all_pattern_stats(groups):
-    rows = []
-
-    for pattern in PATTERN_LIST:
-        for bet_label in labels_in_pattern(pattern):
-            stat = calc_stats(groups, pattern, bet_label)
-            recent = recent_stats(groups, pattern, bet_label)
-            sc = score_pattern(stat, recent)
-
-            rows.append({
-                "pattern": pattern,
-                "bet": bet_label,
-                "trades": stat["trades"],
-                "wins": stat["wins"],
-                "wr": round(stat["wr"] * 100, 2),
-                "profit": round(stat["profit"], 2),
-                "recent_profit": round(recent["profit"], 2),
-                "loss_streak": stat["loss_streak"],
-                "max_loss_streak": stat["max_loss_streak"],
-                "score": round(sc, 2),
-            })
-
-    df = pd.DataFrame(rows)
-
-    if not df.empty:
-        df = df.sort_values(
-            ["score", "profit", "wr", "trades"],
-            ascending=[False, False, False, False],
-        ).reset_index(drop=True)
-
-    return df
-
-
 def matched_patterns(groups):
-    """
-    Lấy tất cả pattern match với tail hiện tại.
-    Không break sớm.
-    Tính luôn side A/B nào tốt hơn.
-    """
     rows = []
 
     for pattern in PATTERN_LIST:
@@ -291,6 +188,7 @@ def matched_patterns(groups):
         if ab != pattern:
             continue
 
+        # auto side: thử cả A/B trong pattern
         for bet_label in labels_in_pattern(pattern):
             if bet_label not in reverse:
                 continue
@@ -337,7 +235,8 @@ def choose_signal(groups):
         if m["recent_profit"] < RECENT_MIN_PROFIT:
             continue
 
-        if m["max_loss_streak"] > MAX_LOSS_STREAK_ALLOW:
+        # Nếu profit dương thì không loại vì max loss streak cũ
+        if m["profit"] <= 0 and m["max_loss_streak"] > MAX_LOSS_STREAK_ALLOW:
             continue
 
         if m["score"] < MIN_SCORE:
@@ -348,23 +247,55 @@ def choose_signal(groups):
     return None, "WAIT_PATTERN_WEAK", matches
 
 
-def simulate(groups):
-    """
-    Backtest:
-    Với mỗi target_idx:
-    - chỉ dùng dữ liệu trước target_idx để chọn signal
-    - actual là groups[target_idx]
-    """
+def all_pattern_stats(groups):
     rows = []
-    total_profit = 0.0
+
+    for pattern in PATTERN_LIST:
+        for bet_label in labels_in_pattern(pattern):
+            stat = calc_stats(groups, pattern, bet_label)
+            recent = recent_stats(groups, pattern, bet_label)
+            sc = score_pattern(stat, recent)
+
+            rows.append({
+                "pattern": pattern,
+                "bet": bet_label,
+                "trades": stat["trades"],
+                "wins": stat["wins"],
+                "wr": round(stat["wr"] * 100, 2),
+                "profit": round(stat["profit"], 2),
+                "recent_profit": round(recent["profit"], 2),
+                "loss_streak": stat["loss_streak"],
+                "max_loss_streak": stat["max_loss_streak"],
+                "score": round(sc, 2),
+            })
+
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df = df.sort_values(
+            ["score", "profit", "wr", "trades"],
+            ascending=[False, False, False, False],
+        ).reset_index(drop=True)
+
+    return df
+
+
+# =========================================================
+# LIVE SIMULATION FROM LOCK 75
+# =========================================================
+def simulate_live_from_lock(groups):
+    rows = []
+    live_profit = 0.0
 
     max_len = max(len(p) for p in PATTERN_LIST)
+    start_idx = max(LOCK_ROWS, max_len)
 
-    for target_idx in range(max_len, len(groups)):
+    for target_idx in range(start_idx, len(groups)):
+        # chỉ dùng dữ liệu quá khứ trước target_idx
         train_groups = groups[:target_idx]
         actual_group = groups[target_idx]
 
-        sig, state, _ = choose_signal(train_groups)
+        sig, state, matches = choose_signal(train_groups)
 
         trade = sig is not None
         pred_group = None
@@ -374,24 +305,26 @@ def simulate(groups):
         if trade:
             pred_group = sig["bet_group"]
             hit = 1 if pred_group == actual_group else 0
-            pnl = WIN_GROUP if hit == 1 else LOSS_GROUP
-            total_profit += pnl
-            state = "TRADE"
+            pnl = WIN_GROUP if hit else LOSS_GROUP
+            live_profit += pnl
+            state = "LIVE_TRADE"
 
         rows.append({
             "round": target_idx + 1,
+            "train_until_round": target_idx,
             "actual_group": actual_group,
             "pattern": sig["pattern"] if sig else None,
+            "tail": str(sig["tail"]) if sig else None,
             "bet_label": sig["bet_label"] if sig else None,
             "bet_group": pred_group,
             "trade": trade,
             "hit": hit,
             "pnl": pnl,
-            "total_profit": total_profit,
+            "live_profit": live_profit,
             "state": state,
             "score": round(sig["score"], 2) if sig else None,
             "wr": round(sig["wr"] * 100, 2) if sig else None,
-            "profit": round(sig["profit"], 2) if sig else None,
+            "pattern_profit": round(sig["profit"], 2) if sig else None,
             "recent_profit": round(sig["recent_profit"], 2) if sig else None,
         })
 
@@ -404,30 +337,45 @@ def simulate(groups):
 numbers = load_data()
 groups = [group_of(n) for n in numbers]
 
-if len(groups) < 20:
-    st.error("Chưa đủ dữ liệu")
+if len(groups) < LOCK_ROWS + 5:
+    st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} ván, cần ít nhất {LOCK_ROWS + 5}.")
     st.stop()
 
 if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
+# signal hiện tại dùng toàn bộ dữ liệu hiện có để báo bet ván tiếp theo
 signal, state, matches = choose_signal(groups)
-hist = simulate(groups)
 
-total_profit = round(hist["total_profit"].iloc[-1], 2) if not hist.empty else 0.0
+# live profit chỉ tính từ ván 76
+hist = simulate_live_from_lock(groups)
+
+live_profit = round(hist["live_profit"].iloc[-1], 2) if not hist.empty else 0.0
+live_trades = int(hist["trade"].sum()) if not hist.empty else 0
+live_wr = round(hist.loc[hist["trade"], "hit"].mean() * 100, 2) if live_trades > 0 else 0.0
 
 # =========================================================
 # UI
 # =========================================================
-st.title("AUTO MIRROR GROUP PATTERN ENGINE")
+st.title("LIVE GROUP PATTERN ENGINE | LOCK 75")
 
 c1, c2, c3, c4 = st.columns(4)
+c1.metric("Current Round", len(groups))
+c2.metric("Current Number", numbers[-1])
+c3.metric("Current Group", groups[-1])
+c4.metric("Next Round", len(groups) + 1)
 
-c1.metric("Current Number", numbers[-1])
-c2.metric("Current Group", groups[-1])
-c3.metric("State", state)
-c4.metric("Total Profit", total_profit)
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Live Profit", live_profit)
+p2.metric("Live Trades", live_trades)
+p3.metric("Live WR %", live_wr)
+p4.metric("State", state)
+
+st.write("LOCK_ROWS:", LOCK_ROWS)
+st.write("LIVE_FROM:", LIVE_FROM)
+st.write("WIN_GROUP:", WIN_GROUP)
+st.write("LOSS_GROUP:", LOSS_GROUP)
 
 if signal:
     st.success(
@@ -439,7 +387,7 @@ if signal:
 else:
     st.warning("WAIT - không có pattern đủ tin cậy")
 
-st.subheader("Best Signal")
+st.subheader("Best Signal For Next Round")
 
 if signal:
     st.write("Pattern:", signal["pattern"])
@@ -467,17 +415,17 @@ if matches:
 else:
     st.info("Không có pattern nào match tail hiện tại.")
 
-st.subheader("All Pattern Stats Auto Mirror Side")
+st.subheader("All Pattern Stats")
 
 stats_df = all_pattern_stats(groups)
 st.dataframe(stats_df, use_container_width=True)
 
-st.subheader("Profit Curve")
+st.subheader("Live Profit Curve From Round 76")
 
 if not hist.empty:
-    st.line_chart(hist[["total_profit"]])
+    st.line_chart(hist[["live_profit"]])
 
-st.subheader("History")
+st.subheader("Live History")
 
 if not hist.empty:
     st.dataframe(
