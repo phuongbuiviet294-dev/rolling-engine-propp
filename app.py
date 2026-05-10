@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="REAL LIVE LOCK 75 ENGINE", layout="wide")
+st.set_page_config(page_title="REAL LIVE LOCK 75 ENGINE OPTIMIZED", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -23,14 +23,17 @@ LOSS_GROUP = -1.0
 PATTERN_LEN_MIN = 4
 PATTERN_LEN_MAX = 6
 
-MIN_TRADES = 5
-MIN_WR = 0.33
-MIN_PROFIT = 2
-MIN_SCORE = 10.0
+# =========================================================
+# OPTIMIZED CONFIG
+# =========================================================
+MIN_TRADES = 6
+MIN_WR = 0.36
+MIN_PROFIT = 2.5
+MIN_SCORE = 12.0
 
 RECENT_ROUNDS = 80
-RECENT_MIN_PROFIT = 0.0
-RECENT_WR_MIN = 0.31
+RECENT_MIN_PROFIT = 1.0
+RECENT_WR_MIN = 0.35
 
 PATTERN_BREAK_STREAK_LIMIT = 1
 MAX_LOSS_STREAK_ALLOWED = 2
@@ -42,7 +45,12 @@ ENABLE_TRANSITION_FILTER = True
 TRANSITION_MIN_COUNT = 3
 TRANSITION_DOMINANCE_MIN = 0.08
 
+SESSION_PROFIT_TARGET = 5.0
+SESSION_STOP_LOSS = -5.0
+SESSION_MAX_DRAWDOWN_FROM_PEAK = 2.5
+
 SHOW_HISTORY_ROWS = 50
+SHOW_TOP_PATTERNS = 30
 
 BAD_PATTERN_SIDES = {
     ("AABB", "B"),
@@ -53,6 +61,8 @@ BAD_PATTERN_SIDES = {
     ("ABBCC", "C"),
     ("ABBAA", "B"),
     ("ABBC", "A"),
+    ("ABCCDD", "C"),
+    ("ABCCDD", "D"),
 }
 
 
@@ -380,6 +390,8 @@ def choose_signal(groups):
             continue
         if m["recent_profit"] < RECENT_MIN_PROFIT:
             continue
+        if m["recent_profit"] <= 0:
+            continue
         if m["recent_wr"] < RECENT_WR_MIN:
             continue
         if m["dominance"] < DOMINANCE_MIN:
@@ -392,11 +404,9 @@ def choose_signal(groups):
             continue
         if m["profit"] <= 0:
             continue
-        if m["recent_profit"] < 0:
-            continue
         if m["current_loss_streak"] >= PATTERN_BREAK_STREAK_LIMIT:
             continue
-        if m["min_equity"] <= -5:
+        if m["min_equity"] <= -4:
             continue
 
         if ENABLE_TRANSITION_FILTER:
@@ -416,6 +426,9 @@ def simulate_lock75_backtest(groups_tuple):
     groups = list(groups_tuple)
     rows = []
     live_profit = 0.0
+    peak_profit = 0.0
+    stopped = False
+    stop_reason = None
 
     start_idx = max(LOCK_ROWS, PATTERN_LEN_MAX)
 
@@ -423,19 +436,38 @@ def simulate_lock75_backtest(groups_tuple):
         train_groups = groups[:target_idx]
         actual_group = groups[target_idx]
 
-        sig, state, _ = choose_signal(train_groups)
-
-        trade = sig is not None
+        sig = None
+        state = "WAIT"
+        trade = False
         pred_group = None
         hit = None
         pnl = 0.0
 
-        if trade:
-            pred_group = sig["bet_group"]
-            hit = 1 if pred_group == actual_group else 0
-            pnl = WIN_GROUP if hit else LOSS_GROUP
-            live_profit += pnl
-            state = "LIVE_TRADE"
+        if stopped:
+            state = stop_reason
+        else:
+            sig, state, _ = choose_signal(train_groups)
+
+            if sig is not None:
+                trade = True
+                pred_group = sig["bet_group"]
+                hit = 1 if pred_group == actual_group else 0
+                pnl = WIN_GROUP if hit else LOSS_GROUP
+                live_profit += pnl
+                peak_profit = max(peak_profit, live_profit)
+                state = "LIVE_TRADE"
+
+                drawdown = peak_profit - live_profit
+
+                if live_profit >= SESSION_PROFIT_TARGET:
+                    stopped = True
+                    stop_reason = "STOP_PROFIT_TARGET"
+                elif live_profit <= SESSION_STOP_LOSS:
+                    stopped = True
+                    stop_reason = "STOP_SESSION_LOSS"
+                elif drawdown >= SESSION_MAX_DRAWDOWN_FROM_PEAK:
+                    stopped = True
+                    stop_reason = "STOP_DRAWDOWN_FROM_PEAK"
 
         rows.append({
             "row": target_idx + 1,
@@ -446,6 +478,8 @@ def simulate_lock75_backtest(groups_tuple):
             "hit": hit,
             "pnl": pnl,
             "live_profit": live_profit,
+            "peak_profit": peak_profit,
+            "drawdown": peak_profit - live_profit,
             "state": state,
         })
 
@@ -465,8 +499,8 @@ def settle_pending_if_ready(state, groups, round_ids, current_round):
         if target_round in round_ids:
             idx = round_ids.index(target_round)
             actual_group = groups[idx]
-
             bet_group = pending["bet_group"]
+
             hit = 1 if actual_group == bet_group else 0
             pnl = WIN_GROUP if hit else LOSS_GROUP
 
@@ -495,9 +529,7 @@ def create_pending_if_signal(state, signal, current_round):
     if signal is None:
         return state
 
-    pending = state.get("pending_bet")
-
-    if pending is None:
+    if state.get("pending_bet") is None:
         state["pending_bet"] = {
             "created_round": current_round,
             "target_round": current_round + 1,
@@ -537,7 +569,7 @@ state_data = settle_pending_if_ready(state_data, groups, round_ids, current_roun
 
 signal, state, matches = choose_signal(groups)
 
-# Chỉ tạo pending nếu đã qua LOCK_ROWS
+# Chỉ tạo lệnh pending nếu đủ sau lock 75
 if current_round >= LOCK_ROWS and signal is not None:
     state_data = create_pending_if_signal(state_data, signal, current_round)
 
@@ -547,11 +579,10 @@ hist = simulate_lock75_backtest(tuple(groups))
 backtest_profit = round(hist["live_profit"].iloc[-1], 2) if not hist.empty else 0.0
 backtest_trades = int(hist["trade"].sum()) if not hist.empty else 0
 backtest_wr = round(hist.loc[hist["trade"], "hit"].mean() * 100, 2) if backtest_trades > 0 else 0.0
+peak_profit = round(hist["peak_profit"].max(), 2) if not hist.empty else 0.0
+drawdown_now = round(hist["drawdown"].iloc[-1], 2) if not hist.empty else 0.0
 
-# =========================================================
-# UI
-# =========================================================
-st.title("REAL LIVE LOCK 75 GROUP PATTERN ENGINE")
+st.title("REAL LIVE LOCK 75 GROUP PATTERN ENGINE | OPTIMIZED")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Real Round", current_round)
@@ -565,6 +596,11 @@ p2.metric("Backtest Profit From 76", backtest_profit)
 p3.metric("Backtest Trades", backtest_trades)
 p4.metric("State", state)
 
+q1, q2, q3 = st.columns(3)
+q1.metric("Backtest WR %", backtest_wr)
+q2.metric("Peak Profit", peak_profit)
+q3.metric("Drawdown Now", drawdown_now)
+
 st.subheader("REAL LIVE LEDGER")
 st.write("Pending Bet:", state_data.get("pending_bet"))
 st.write("Settled Rounds:", state_data.get("settled_rounds", [])[-20:])
@@ -574,6 +610,20 @@ if state_data.get("real_live_history"):
         pd.DataFrame(state_data["real_live_history"]).iloc[::-1].head(30),
         use_container_width=True,
     )
+
+with st.expander("CONFIG"):
+    st.write("LOCK_ROWS:", LOCK_ROWS)
+    st.write("MAX_SOURCE_ROWS:", MAX_SOURCE_ROWS)
+    st.write("PATTERN_LEN:", f"{PATTERN_LEN_MIN} → {PATTERN_LEN_MAX}")
+    st.write("MIN_TRADES:", MIN_TRADES)
+    st.write("MIN_WR:", MIN_WR)
+    st.write("MIN_PROFIT:", MIN_PROFIT)
+    st.write("RECENT_MIN_PROFIT:", RECENT_MIN_PROFIT)
+    st.write("RECENT_WR_MIN:", RECENT_WR_MIN)
+    st.write("MIN_SCORE:", MIN_SCORE)
+    st.write("SESSION_PROFIT_TARGET:", SESSION_PROFIT_TARGET)
+    st.write("SESSION_STOP_LOSS:", SESSION_STOP_LOSS)
+    st.write("SESSION_MAX_DRAWDOWN_FROM_PEAK:", SESSION_MAX_DRAWDOWN_FROM_PEAK)
 
 st.subheader("NEXT BET")
 
