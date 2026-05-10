@@ -27,7 +27,7 @@ PATTERN_LEN_MIN = 4
 PATTERN_LEN_MAX = 6
 
 # Core filter - tối ưu theo dữ liệu hiện tại
-MIN_TRADES = 4
+MIN_TRADES = 5
 MIN_WR = 0.33
 MIN_PROFIT = 2.0
 MIN_SCORE = 8.0
