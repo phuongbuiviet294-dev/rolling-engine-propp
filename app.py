@@ -1,14 +1,13 @@
 import time
-import math
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # =========================================================
-# APP CONFIG
+# APP CONFIG - MOBILE FAST VERSION
 # =========================================================
-st.set_page_config(page_title="Auto ABCD Pattern Live Engine", layout="wide")
-st_autorefresh(interval=3000, key="refresh")
+st.set_page_config(page_title="Fast ABCD Pattern Live Engine", layout="wide")
+st_autorefresh(interval=10000, key="refresh")
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -16,38 +15,35 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # LIVE CONFIG
 # =========================================================
 LOCK_ROWS = 75
-LIVE_FROM = 75
+MAX_SOURCE_ROWS = 240
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
 # =========================================================
-# AUTO PATTERN CONFIG
+# PATTERN CONFIG - FAST
 # =========================================================
 PATTERN_LEN_MIN = 3
-PATTERN_LEN_MAX = 8
+PATTERN_LEN_MAX = 5
 
 MIN_TRADES = 1
 MIN_WR = 0.25
 MIN_PROFIT = -1.0
 MIN_SCORE = 0.5
 
-RECENT_ROUNDS = 120
+RECENT_ROUNDS = 80
 RECENT_MIN_PROFIT = -2.0
 
 PATTERN_BREAK_STREAK_LIMIT = 2
 ONLY_BET_IF_NOT_BROKEN = True
 
-SHOW_HISTORY_ROWS = 80
-SHOW_TOP_PATTERNS = 50
+SHOW_HISTORY_ROWS = 30
+SHOW_TOP_PATTERNS = 20
 
 
-# =========================================================
-# LOAD DATA
-# =========================================================
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def load_data():
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&t={int(time.time())}"
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&t={int(time.time() // 20)}"
     df = pd.read_csv(url)
     df.columns = [str(c).strip().lower() for c in df.columns]
 
@@ -56,7 +52,12 @@ def load_data():
         st.stop()
 
     nums = pd.to_numeric(df["number"], errors="coerce").dropna().astype(int).tolist()
-    return [x for x in nums if 1 <= x <= 12]
+    nums = [x for x in nums if 1 <= x <= 12]
+
+    if len(nums) > MAX_SOURCE_ROWS:
+        nums = nums[-MAX_SOURCE_ROWS:]
+
+    return nums
 
 
 def group_of(n):
@@ -69,17 +70,7 @@ def group_of(n):
     return 4
 
 
-# =========================================================
-# PATTERN TOOLS
-# =========================================================
 def groups_to_pattern(seq):
-    """
-    Convert group thật thành pattern A/B/C/D theo thứ tự xuất hiện.
-
-    Ví dụ:
-    [2,4,2,1,2,4] -> ABACAB
-    reverse: A=2, B=4, C=1
-    """
     mapping = {}
     reverse = {}
     labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -100,12 +91,7 @@ def labels_in_pattern(pattern):
 
 
 def calc_pattern_stats(groups, pattern, bet_label):
-    """
-    Nếu pattern kết thúc tại i thì bet vòng i+1.
-    Không dùng dữ liệu tương lai trong live simulate.
-    """
     L = len(pattern)
-
     trades = 0
     wins = 0
     profit = 0.0
@@ -200,10 +186,6 @@ def score_pattern(stat, recent):
 
 
 def pattern_is_broken(stat, recent):
-    """
-    Chuỗi gãy 2 lần liên tiếp thì coi là broken.
-    Nếu recent profit đã hồi dương thì cho phép mở lại.
-    """
     if stat["current_loss_streak"] >= PATTERN_BREAK_STREAK_LIMIT:
         if recent["profit"] <= 0:
             return True
@@ -211,10 +193,6 @@ def pattern_is_broken(stat, recent):
 
 
 def current_tail_candidates(groups):
-    """
-    Từ tail hiện tại, tạo tất cả pattern candidate length 3-8.
-    Ví dụ tail 6 group -> ABACAB.
-    """
     rows = []
 
     for L in range(PATTERN_LEN_MIN, PATTERN_LEN_MAX + 1):
@@ -224,7 +202,6 @@ def current_tail_candidates(groups):
         tail = groups[-L:]
         pattern, reverse = groups_to_pattern(tail)
 
-        # Chỉ xét pattern có ít nhất 1 label và không quá 4 group khác nhau
         if len(set(pattern)) > 4:
             continue
 
@@ -289,60 +266,9 @@ def choose_signal(groups):
     return None, "WAIT_PATTERN_WEAK_OR_BROKEN", matches
 
 
-def discover_all_patterns(groups):
-    """
-    Scan toàn bộ dữ liệu, tự discover mọi pattern length 3-8.
-    Dùng để show bảng thống kê.
-    """
-    pattern_set = set()
-
-    for L in range(PATTERN_LEN_MIN, PATTERN_LEN_MAX + 1):
-        for i in range(L - 1, len(groups)):
-            tail = groups[i - L + 1:i + 1]
-            pattern, _ = groups_to_pattern(tail)
-
-            if len(set(pattern)) <= 4:
-                pattern_set.add(pattern)
-
-    rows = []
-
-    for pattern in sorted(pattern_set):
-        for bet_label in labels_in_pattern(pattern):
-            stat = calc_pattern_stats(groups, pattern, bet_label)
-            recent = recent_stats(groups, pattern, bet_label)
-            sc = score_pattern(stat, recent)
-            broken = pattern_is_broken(stat, recent)
-
-            rows.append({
-                "pattern": pattern,
-                "len": len(pattern),
-                "bet": bet_label,
-                "trades": stat["trades"],
-                "wins": stat["wins"],
-                "wr": round(stat["wr"] * 100, 2),
-                "profit": round(stat["profit"], 2),
-                "recent_profit": round(recent["profit"], 2),
-                "current_loss_streak": stat["current_loss_streak"],
-                "max_loss_streak": stat["max_loss_streak"],
-                "broken": broken,
-                "score": round(sc, 2),
-            })
-
-    df = pd.DataFrame(rows)
-
-    if not df.empty:
-        df = df.sort_values(
-            ["score", "profit", "wr", "trades"],
-            ascending=[False, False, False, False],
-        ).reset_index(drop=True)
-
-    return df
-
-
-# =========================================================
-# LIVE SIMULATION FROM LOCK 75
-# =========================================================
-def simulate_live_from_lock(groups):
+@st.cache_data(ttl=20, show_spinner=False)
+def simulate_live_from_lock_cached(groups_tuple):
+    groups = list(groups_tuple)
     rows = []
     live_profit = 0.0
 
@@ -391,9 +317,55 @@ def simulate_live_from_lock(groups):
     return pd.DataFrame(rows)
 
 
-# =========================================================
-# MAIN
-# =========================================================
+@st.cache_data(ttl=30, show_spinner=False)
+def discover_top_patterns_cached(groups_tuple):
+    groups = list(groups_tuple)
+    groups = groups[-200:]
+
+    pattern_set = set()
+
+    for L in range(PATTERN_LEN_MIN, PATTERN_LEN_MAX + 1):
+        for i in range(L - 1, len(groups)):
+            tail = groups[i - L + 1:i + 1]
+            pattern, _ = groups_to_pattern(tail)
+            if len(set(pattern)) <= 4:
+                pattern_set.add(pattern)
+
+    rows = []
+
+    for pattern in sorted(pattern_set):
+        for bet_label in labels_in_pattern(pattern):
+            stat = calc_pattern_stats(groups, pattern, bet_label)
+            recent = recent_stats(groups, pattern, bet_label)
+            sc = score_pattern(stat, recent)
+            broken = pattern_is_broken(stat, recent)
+
+            rows.append({
+                "pattern": pattern,
+                "len": len(pattern),
+                "bet": bet_label,
+                "trades": stat["trades"],
+                "wins": stat["wins"],
+                "wr": round(stat["wr"] * 100, 2),
+                "profit": round(stat["profit"], 2),
+                "recent_profit": round(recent["profit"], 2),
+                "current_loss_streak": stat["current_loss_streak"],
+                "max_loss_streak": stat["max_loss_streak"],
+                "broken": broken,
+                "score": round(sc, 2),
+            })
+
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df = df.sort_values(
+            ["score", "profit", "wr", "trades"],
+            ascending=[False, False, False, False],
+        ).reset_index(drop=True)
+
+    return df.head(SHOW_TOP_PATTERNS)
+
+
 numbers = load_data()
 groups = [group_of(n) for n in numbers]
 
@@ -405,17 +377,15 @@ if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
-signal, state, matches = choose_signal(groups)
-hist = simulate_live_from_lock(groups)
+with st.spinner("Đang tính signal..."):
+    signal, state, matches = choose_signal(groups)
+    hist = simulate_live_from_lock_cached(tuple(groups))
 
 live_profit = round(hist["live_profit"].iloc[-1], 2) if not hist.empty else 0.0
 live_trades = int(hist["trade"].sum()) if not hist.empty else 0
 live_wr = round(hist.loc[hist["trade"], "hit"].mean() * 100, 2) if live_trades > 0 else 0.0
 
-# =========================================================
-# UI
-# =========================================================
-st.title("AUTO ABCD PATTERN LIVE ENGINE | LOCK 75")
+st.title("FAST ABCD PATTERN LIVE ENGINE | LOCK 75")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", len(groups))
@@ -430,6 +400,7 @@ p3.metric("Live WR %", live_wr)
 p4.metric("State", state)
 
 st.write("LOCK_ROWS:", LOCK_ROWS)
+st.write("MAX_SOURCE_ROWS:", MAX_SOURCE_ROWS)
 st.write("PATTERN_LEN_MIN:", PATTERN_LEN_MIN)
 st.write("PATTERN_LEN_MAX:", PATTERN_LEN_MAX)
 st.write("MIN_TRADES:", MIN_TRADES)
@@ -480,15 +451,14 @@ if matches:
 else:
     st.info("Không có pattern nào match tail hiện tại.")
 
-st.subheader("Discovered Pattern Stats")
-
-stats_df = discover_all_patterns(groups)
-st.dataframe(stats_df.head(SHOW_TOP_PATTERNS), use_container_width=True)
+with st.expander("Discovered Top Patterns"):
+    stats_df = discover_top_patterns_cached(tuple(groups))
+    st.dataframe(stats_df, use_container_width=True)
 
 st.subheader("Live Profit Curve From Round 76")
 
 if not hist.empty:
-    st.line_chart(hist[["live_profit"]])
+    st.line_chart(hist[["live_profit"]].tail(150).reset_index(drop=True))
 
 st.subheader("Live History")
 
