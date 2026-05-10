@@ -61,10 +61,23 @@ MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 2
 VALIDATE_MIN_DRAWDOWN = -2.0
 
+# ===== TREND FILTER FOR LOCK WINDOW =====
+# Chỉ lock window nếu đoạn validate cho thấy phase đang hồi/tăng.
+REQUIRE_VALIDATE_TREND_UP = True
+MIN_VALIDATE_PHASE_PROFIT = 0.5
+MIN_VALIDATE_TREND_FROM_MIN = 1.0
+MIN_VALIDATE_RECENT_PROFIT = 0.0
+
+# ===== ANTI RELOCK CHURN =====
+# Tránh relock liên tục khi phase vừa mới đổi, chưa đủ dữ liệu đánh giá.
+MIN_PHASE_AGE_BEFORE_RELOCK = 3
+RELOCK_COOLDOWN_ROUNDS = 3
+
+
 RELOCK_SCAN_LEN = 6
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 120
+SHOW_HISTORY_ROWS = 30
 SHOW_DEBUG_TABLES = False
 
 DEFAULT_BOT_TOKEN = ""
@@ -189,6 +202,15 @@ def compute_recent_profit(results, recent_n, win_value, loss_value):
         return 0.0
     tail = results[-recent_n:]
     return float(sum(win_value if r == 1 else loss_value for r in tail))
+
+
+def compute_trend_from_min(results, win_value, loss_value):
+    if not results:
+        return 0.0
+    path = compute_profit_path(results, win_value, loss_value)
+    if not path:
+        return 0.0
+    return float(path[-1] - min(path))
 
 
 def compute_streak_metrics(results):
@@ -386,6 +408,8 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
             "winrate_group": 0.0,
             "max_drawdown_group": 0.0,
             "recent_profit_group": 0.0,
+            "validate_recent_profit_group": 0.0,
+            "trend_from_min_group": 0.0,
             "max_hit_streak": 0,
             "max_loss_streak": 0,
             "count_hit_streak_ge2": 0,
@@ -413,6 +437,8 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     winrate_group = wins_group / trades if trades > 0 else 0.0
     max_drawdown_group = compute_max_drawdown(results_group, WIN_GROUP, LOSS_GROUP)
     recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+    validate_recent_profit_group = compute_recent_profit(results_group, min(5, len(results_group)), WIN_GROUP, LOSS_GROUP)
+    trend_from_min_group = compute_trend_from_min(results_group, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results_group)
 
     return {
@@ -421,6 +447,8 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         "winrate_group": winrate_group,
         "max_drawdown_group": max_drawdown_group,
         "recent_profit_group": recent_profit_group,
+        "validate_recent_profit_group": validate_recent_profit_group,
+        "trend_from_min_group": trend_from_min_group,
         "max_hit_streak": streak_metrics["max_hit_streak"],
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
@@ -506,9 +534,20 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                 validate_end,
             )
 
-            validate_pass = (
+            validate_base_pass = (
                 validate_bt["trades"] >= MIN_VALIDATE_TRADES
                 and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+            )
+
+            validate_trend_pass = (
+                validate_bt["profit_group"] >= MIN_VALIDATE_PHASE_PROFIT
+                and validate_bt["trend_from_min_group"] >= MIN_VALIDATE_TREND_FROM_MIN
+                and validate_bt["validate_recent_profit_group"] >= MIN_VALIDATE_RECENT_PROFIT
+            )
+
+            validate_pass = (
+                validate_base_pass
+                and (validate_trend_pass if REQUIRE_VALIDATE_TREND_UP else True)
             )
 
             final_score = (
@@ -545,6 +584,9 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     "mode": local_best_mode["name"],
                     "selected_windows": ", ".join(map(str, local_best_windows)),
                     "bundle_score": local_best_score,
+                    "validate_profit": validate_bt["profit_group"],
+                    "validate_recent_profit": validate_bt["validate_recent_profit_group"],
+                    "validate_trend_from_min": validate_bt["trend_from_min_group"],
                     "lock_mode": local_lock_mode,
                 }
             )
@@ -565,6 +607,9 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     "mode": local_fallback_mode["name"],
                     "selected_windows": ", ".join(map(str, local_fallback_windows)),
                     "bundle_score": local_fallback_score,
+                    "validate_profit": validate_bt["profit_group"] if "validate_bt" in locals() else None,
+                    "validate_recent_profit": validate_bt["validate_recent_profit_group"] if "validate_bt" in locals() else None,
+                    "validate_trend_from_min": validate_bt["trend_from_min_group"] if "validate_bt" in locals() else None,
                     "lock_mode": "fallback_soft",
                 }
             )
@@ -763,23 +808,32 @@ def simulate_engine(numbers, groups):
             last_signal_pnl_in_phase = raw_signal_pnl_group
             last_signal_round_in_phase = round_no
 
+        phase_age = round_no - phase_start_round + 1
+        rounds_since_phase_start = phase_age
+        can_relock_now = (
+            phase_age >= MIN_PHASE_AGE_BEFORE_RELOCK
+            and rounds_since_phase_start >= RELOCK_COOLDOWN_ROUNDS
+        )
+
         relock_triggered_now = False
         relock_reason_now = None
 
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK :
+        if (
+            can_relock_now
+            and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
+        ):
             relock_triggered_now = True
-            relock_reason_now = "PHASE_3_SIGNAL_LOSS_AND_NEGATIVE"
-            state = "AUTO_RELOCK_3_SIGNAL_LOSS_NEGATIVE"
+            relock_reason_now = "PHASE_SIGNAL_LOSS_STREAK_RELOCK"
+            state = "AUTO_RELOCK_SIGNAL_LOSS_STREAK"
 
-        elif phase_profit_group <= PHASE_STOP_LOSS:
+        elif can_relock_now and phase_profit_group <= PHASE_STOP_LOSS:
             relock_triggered_now = True
             relock_reason_now = "PHASE_BET_GROUP_STOP_LOSS"
             state = "AUTO_RELOCK_PHASE_BET_GROUP_LOSS"
 
-        phase_age = round_no - phase_start_round + 1
-
         if (
             not relock_triggered_now
+            and can_relock_now
             and ENABLE_TIMEOUT_RELOCK
             and phase_age >= TIMEOUT_RELOCK_ROUNDS
             and phase_profit_group <= 0
@@ -1069,7 +1123,7 @@ if telegram_enabled() and phase_next_allowed and vote_group is not None:
     )
     send_signal_once("READY", current_round, ready_msg)
 
-st.title("Auto Relock Engine | Optimized Phase + Live")
+st.title("Auto Relock Engine | Phase Trend Lock Filter + Live")
 
 st.subheader("LAST ROUND RESULT")
 
@@ -1173,6 +1227,12 @@ st.write("Lock Mode:", lock_mode)
 st.write("Relock Rule 1:", f"loss_streak >= {PHASE_LOSS_STREAK_RELOCK} AND phase_profit < 0")
 st.write("Relock Rule 2:", f"phase_profit_group <= {PHASE_STOP_LOSS}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase profit <= 0")
+st.write("Validate Trend Filter:", REQUIRE_VALIDATE_TREND_UP)
+st.write("MIN_VALIDATE_PHASE_PROFIT:", MIN_VALIDATE_PHASE_PROFIT)
+st.write("MIN_VALIDATE_TREND_FROM_MIN:", MIN_VALIDATE_TREND_FROM_MIN)
+st.write("MIN_VALIDATE_RECENT_PROFIT:", MIN_VALIDATE_RECENT_PROFIT)
+st.write("MIN_PHASE_AGE_BEFORE_RELOCK:", MIN_PHASE_AGE_BEFORE_RELOCK)
+st.write("RELOCK_COOLDOWN_ROUNDS:", RELOCK_COOLDOWN_ROUNDS)
 st.write("Telegram Enabled:", telegram_enabled())
 
 st.subheader("Profit Compare")
