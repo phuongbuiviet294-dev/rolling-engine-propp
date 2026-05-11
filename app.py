@@ -26,55 +26,43 @@ LOSS_GROUP = -1.0
 PATTERN_LEN_MIN = 4
 PATTERN_LEN_MAX = 6
 
-# Core filter
 MIN_TRADES = 5
-MIN_WR = 0.34
-MIN_PROFIT = 1.5
-MIN_SCORE = 6.0
+MIN_WR = 0.33
+MIN_PROFIT = 1.0
+MIN_SCORE = 5.0
 
-# Recent filter
-RECENT_ROUNDS = 60
-RECENT_MIN_PROFIT = 1
+RECENT_ROUNDS = 50
+RECENT_MIN_PROFIT = 1.0
 RECENT_WR_MIN = 0.30
 
-# Break filter
 PATTERN_BREAK_STREAK_LIMIT = 2
 MAX_LOSS_STREAK_ALLOWED = 2
 
-# Dominance
-DOMINANCE_MIN = 0.08
-PROFIT_GAP_MIN = 2.0
+DOMINANCE_MIN = 0.07
+PROFIT_GAP_MIN = 1.5
 
-# Transition
 ENABLE_TRANSITION_FILTER = True
-TRANSITION_MIN_COUNT = 1
+TRANSITION_MIN_COUNT = 2
 TRANSITION_DOMINANCE_MIN = 0.08
 
-# Lọc rác nhẹ
-PROFIT_PER_TRADE_MIN = 0.01
-MAX_PATTERN_DRAWDOWN = 20
+PROFIT_PER_TRADE_MIN = -0.05
+MAX_PATTERN_DRAWDOWN = 999.0
 RECENT_CHECK_N = 6
-RECENT_HIT_MIN = 2
+RECENT_HIT_MIN = 3
 
-# Risk cooldown nhẹ, KHÔNG stop chart
-RISK_RECENT_N = 66
-RISK_RECENT_STOP = -66.0
-RISK_COOLDOWN_ROUNDS = 33
+RISK_RECENT_N = 8
+RISK_RECENT_STOP = -8.0
+RISK_COOLDOWN_ROUNDS = 3
+
+REAL_LIVE_LOSS_STREAK_STOP = 2
 
 SHOW_HISTORY_ROWS = 100
 SHOW_TOP_PATTERNS = 60
 
 BAD_PATTERN_SIDES = {
-    ("AABB", "B"),
     ("AABB", "D"),
-    ("ABAACC", "A"),
-    ("ABAACC", "B"),
-    ("ABBCC", "A"),
     ("ABBCC", "C"),
-    ("ABBAA", "B"),
-    ("ABBC", "A"),
-    ("ABCCDD", "C"),
-    ("ABCCDD", "D"),
+    ("ABCAD", "D"),
 }
 
 
@@ -109,6 +97,19 @@ def save_state(state):
             json.dump(state, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def real_live_loss_streak(state):
+    hist = state.get("real_live_history", [])
+    streak = 0
+
+    for x in reversed(hist):
+        if x.get("pnl", 0) < 0:
+            streak += 1
+        else:
+            break
+
+    return streak
 
 
 # =========================
@@ -439,8 +440,6 @@ def choose_signal(groups):
             continue
         if m["recent_wr"] < RECENT_WR_MIN:
             continue
-        if m["recent_check_count"] >= RECENT_CHECK_N and m["recent_hits"] < RECENT_HIT_MIN:
-            continue
         if m["profit_gap"] < PROFIT_GAP_MIN:
             continue
         if m["max_drawdown"] > MAX_PATTERN_DRAWDOWN:
@@ -640,6 +639,12 @@ if not hist.empty:
             signal = None
             state = "WAIT_LIVE_RECENT_WEAK"
 
+live_loss_streak = real_live_loss_streak(state_data)
+
+if live_loss_streak >= REAL_LIVE_LOSS_STREAK_STOP:
+    signal = None
+    state = "WAIT_REAL_LIVE_LOSS_STREAK"
+
 if current_round >= LOCK_ROWS and signal is not None:
     state_data = create_pending(state_data, signal, current_round)
 
@@ -648,7 +653,7 @@ save_state(state_data)
 # =========================
 # UI
 # =========================
-st.title("LOCK75 BALANCED ENGINE FIX")
+st.title("LOCK75 BALANCED ENGINE FIX + LIVE LOSS STOP")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", current_round)
@@ -666,7 +671,9 @@ q1, q2, q3, q4 = st.columns(4)
 q1.metric("Peak Profit", peak_profit)
 q2.metric("Drawdown Now", drawdown_now)
 q3.metric("Recent Live Profit", round(recent_live_profit, 2))
-q4.metric("State", state)
+q4.metric("Live Loss Streak", live_loss_streak)
+
+st.metric("State", state)
 
 with st.expander("CONFIG"):
     st.write("LOCK_ROWS:", LOCK_ROWS)
@@ -680,8 +687,7 @@ with st.expander("CONFIG"):
     st.write("RECENT_WR_MIN:", RECENT_WR_MIN)
     st.write("PROFIT_PER_TRADE_MIN:", PROFIT_PER_TRADE_MIN)
     st.write("MAX_PATTERN_DRAWDOWN:", MAX_PATTERN_DRAWDOWN)
-    st.write("RISK_RECENT_STOP:", RISK_RECENT_STOP)
-    st.write("RISK_COOLDOWN_ROUNDS:", RISK_COOLDOWN_ROUNDS)
+    st.write("REAL_LIVE_LOSS_STREAK_STOP:", REAL_LIVE_LOSS_STREAK_STOP)
     st.write("BAD_PATTERN_SIDES:", sorted(list(BAD_PATTERN_SIDES)))
 
 st.subheader("REAL LIVE LEDGER")
