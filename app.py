@@ -37,20 +37,20 @@ FIXED_RULES = {
 
     # 2 GROUP - quay về A
     "AAAB": "A",
-    #"AAAAB": "A",
-    #"AABB": "A",
-    #"AABBA": "A",
-    #"AAABB": "A",
-    #"AAABBA": "A",
+    "AAAAB": "A",
+    "AABB": "A",
+    "AABBA": "A",
+    "AAABB": "A",
+    "AAABBA": "A",
 
     # 2 GROUP - xen kẽ
     "ABABA": "B",
     "BABAB": "A",
 
     # 3 GROUP - chỉ chơi chuỗi xen kẽ lặp có A
-    #"ABCAB": "A",
+    "ABCAB": "A",
     "ABACAB": "A",
-    #"ABACABA": "A",
+    "ABACABA": "A",
 }
 
 
