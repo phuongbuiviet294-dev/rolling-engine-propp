@@ -17,7 +17,7 @@ st_autorefresh(interval=5000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 STATE_FILE = "/tmp/lock120_final_live_engine.json"
 
-LOCK_ROWS = 120
+LOCK_ROWS = 168
 MAX_SOURCE_ROWS = 500
 
 WIN_GROUP = 2.5
@@ -28,8 +28,8 @@ PATTERN_LEN_MAX = 6
 
 MIN_TRADES = 4
 MIN_WR = 0.33
-MIN_PROFIT = 1.0
-MIN_SCORE = 5.0
+MIN_PROFIT = 2.0
+MIN_SCORE = 3.0
 
 RECENT_ROUNDS = 50
 RECENT_MIN_PROFIT = 0.0
