@@ -5,14 +5,14 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="FIXED RULE GROUP ENGINE", layout="wide")
+st.set_page_config(page_title="FIXED RULE SAFE ENGINE", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================
 # CONFIG
 # =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
-STATE_FILE = "/tmp/fixed_rule_group_engine.json"
+STATE_FILE = "/tmp/fixed_rule_safe_engine.json"
 
 LOCK_ROWS = 75
 MAX_SOURCE_ROWS = 500
@@ -20,38 +20,24 @@ MAX_SOURCE_ROWS = 500
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-PATTERN_LEN_MIN = 3
-PATTERN_LEN_MAX = 7
+PATTERN_LEN_MIN = 5
+PATTERN_LEN_MAX = 6
 
 SHOW_HISTORY_ROWS = 100
 
-# Chặn live nếu thua liên tiếp
-REAL_LIVE_LOSS_STREAK_STOP = 22
+REAL_LIVE_LOSS_STREAK_STOP = 2
 
 # =========================
-# FIXED RULES
+# FIXED RULES SAFE
 # =========================
 FIXED_RULES = {
-    # 1 GROUP - chỉ dừng tới 4
-    "AAA": "A",
-    "AAAA": "A",
-
-    # 2 GROUP - quay về A
-    "AAAB": "A",
-    "AAAAB": "A",
-    "AABB": "A",
-    "AABBA": "A",
-    "AAABB": "A",
-    "AAABBA": "A",
-
-    # 2 GROUP - xen kẽ
+    # 2 GROUP - đảo/xen kẽ
     "ABABA": "B",
     "BABAB": "A",
 
-    # 3 GROUP - chỉ chơi chuỗi xen kẽ lặp có A
+    # 3 GROUP - chỉ giữ chuỗi xen kẽ có A lặp lại
     "ABCAB": "A",
     "ABACAB": "A",
-    "ABACABA": "A",
 }
 
 
@@ -172,7 +158,6 @@ def choose_signal(groups):
         tail = groups[-L:]
         pattern, reverse = groups_to_pattern(tail)
 
-        # bỏ pattern 4 group trở lên
         if len(set(pattern)) >= 4:
             continue
 
@@ -197,13 +182,13 @@ def choose_signal(groups):
         }
 
         matches.append(sig)
-        return sig, "READY_FIXED_RULE", matches
+        return sig, "READY_FIXED_RULE_SAFE", matches
 
-    return None, "WAIT_NO_FIXED_RULE", matches
+    return None, "WAIT_NO_SAFE_RULE", matches
 
 
 # =========================
-# BACKTEST LOCK
+# BACKTEST
 # =========================
 @st.cache_data(ttl=5, show_spinner=False)
 def simulate_backtest(groups_tuple):
@@ -365,7 +350,7 @@ save_state(state_data)
 # =========================
 # UI
 # =========================
-st.title("FIXED RULE GROUP ENGINE")
+st.title("FIXED RULE SAFE ENGINE | ONLY REVERSAL + ALTERNATE")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", current_round)
@@ -420,7 +405,7 @@ st.subheader("Backtest History")
 if not hist.empty:
     st.dataframe(hist.iloc[::-1].head(SHOW_HISTORY_ROWS), use_container_width=True)
 
-st.subheader("Fixed Rules")
+st.subheader("Fixed Safe Rules")
 st.dataframe(
     pd.DataFrame(
         [{"pattern": k, "bet_label": v} for k, v in FIXED_RULES.items()]
