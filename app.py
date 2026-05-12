@@ -17,7 +17,7 @@ st_autorefresh(interval=5000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 STATE_FILE = "/tmp/real_live_lock75_state.json"
 
-LOCK_ROWS = 75
+LOCK_ROWS = 168
 MAX_SOURCE_ROWS = 500
 
 WIN_GROUP = 2.5
@@ -27,8 +27,8 @@ PATTERN_LEN_MIN = 4
 PATTERN_LEN_MAX = 5
 
 # Core filter - tối ưu theo dữ liệu hiện tại
-MIN_TRADES = 5
-MIN_WR = 0.4
+MIN_TRADES = 6
+MIN_WR = 0.35
 MIN_PROFIT = 1.5
 MIN_SCORE = 6.0
 
