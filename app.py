@@ -17,7 +17,7 @@ st_autorefresh(interval=5000, key="refresh")
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 STATE_FILE = "/tmp/lock75_final_live_engine.json"
 
-LOCK_ROWS = 120
+LOCK_ROWS = 168
 MAX_SOURCE_ROWS = 500
 
 WIN_GROUP = 2.5
