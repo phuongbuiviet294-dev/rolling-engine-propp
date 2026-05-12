@@ -5,14 +5,14 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="FIXED RULE FREEZE ENGINE", layout="wide")
+st.set_page_config(page_title="FIXED RULE ENGINE OPTIMIZED", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================
 # CONFIG
 # =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
-STATE_FILE = "/tmp/fixed_rule_freeze_engine.json"
+STATE_FILE = "/tmp/fixed_rule_engine_optimized.json"
 
 LOCK_ROWS = 168
 MAX_SOURCE_ROWS = 500
@@ -28,10 +28,10 @@ SHOW_HISTORY_ROWS = 120
 # Freeze / recovery
 FREEZE_AFTER_LOSS_STREAK = 2
 RECOVERY_REQUIRED_PATTERNS = {
-    "AAA",
-    "AAAA",
     "ABABA",
+    "BABAB",
     "ABCAB",
+    "ABACAB",
 }
 
 # Market filter
@@ -41,11 +41,23 @@ MAX_DRAWDOWN_FROM_PEAK = 5.0
 ROLLING_CHECK = 20
 ROLLING_MIN_PROFIT = -1.0
 
+# Same-pattern protection
+SAME_PATTERN_RECENT_N = 2
+SAME_PATTERN_LOSS_LIMIT = 2
+
+# Risky rule protection
+RISKY_RULES = {
+    "AABB",
+    "AAABB",
+    "AAABBA",
+    "ABACABA",
+}
+
 # =========================
 # FIXED RULES
 # =========================
 FIXED_RULES = {
-    # 1 GROUP - chỉ dừng tới 4
+    # 1 GROUP
     "AAA": "A",
     "AAAA": "A",
 
@@ -61,7 +73,7 @@ FIXED_RULES = {
     "ABABA": "B",
     "BABAB": "A",
 
-    # 3 GROUP - chỉ chơi chuỗi xen kẽ lặp có A
+    # 3 GROUP - xen kẽ có A lặp lại
     "ABCAB": "A",
     "ABACAB": "A",
     "ABACABA": "A",
@@ -111,6 +123,21 @@ def real_live_loss_streak(state):
         else:
             break
     return streak
+
+
+def same_pattern_recent_bad(state, pattern, n=SAME_PATTERN_RECENT_N):
+    hist = [
+        x for x in state.get("real_live_history", [])
+        if x.get("pattern") == pattern
+    ]
+
+    if len(hist) < n:
+        return False
+
+    recent = hist[-n:]
+    loss_count = sum(1 for x in recent if x.get("pnl", 0) < 0)
+
+    return loss_count >= SAME_PATTERN_LOSS_LIMIT
 
 
 def live_recent_profit(state, n=LIVE_RECENT_N):
@@ -201,7 +228,7 @@ def choose_signal(groups):
         tail = groups[-L:]
         pattern, reverse = groups_to_pattern(tail)
 
-        # Bỏ pattern 4 group trở lên
+        # bỏ pattern 4 group trở lên
         if len(set(pattern)) >= 4:
             continue
 
@@ -235,10 +262,13 @@ def recovery_pattern_found(groups):
         L = len(p)
         if len(groups) < L:
             continue
+
         tail = groups[-L:]
         pattern, _ = groups_to_pattern(tail)
+
         if pattern == p:
             return True, pattern
+
     return False, None
 
 
@@ -253,8 +283,9 @@ def simulate_backtest(groups_tuple):
     profit = 0.0
     peak = 0.0
     freeze_mode = False
-
     loss_streak = 0
+
+    pattern_result_hist = {}
 
     for target_idx in range(LOCK_ROWS, len(groups)):
         train = groups[:target_idx]
@@ -267,7 +298,6 @@ def simulate_backtest(groups_tuple):
         hit = None
         pnl = 0.0
 
-        # ===== market filters =====
         trade_rows = [r for r in rows if r["trade"]]
 
         recent_profit = 0.0
@@ -293,6 +323,22 @@ def simulate_backtest(groups_tuple):
                 sig = None
                 trade = False
                 state = "WAIT_FREEZE_RECOVERY"
+
+        if trade and sig is not None:
+            pattern = sig["pattern"]
+            recent_pattern_results = pattern_result_hist.get(pattern, [])[-SAME_PATTERN_RECENT_N:]
+
+            if len(recent_pattern_results) >= SAME_PATTERN_RECENT_N:
+                if sum(1 for x in recent_pattern_results if x < 0) >= SAME_PATTERN_LOSS_LIMIT:
+                    sig = None
+                    trade = False
+                    state = "WAIT_SAME_PATTERN_BAD"
+
+        if trade and sig is not None:
+            if loss_streak >= 1 and sig["pattern"] in RISKY_RULES:
+                sig = None
+                trade = False
+                state = "WAIT_RISKY_RULE_AFTER_LOSS"
 
         if trade and sig is not None:
             if recent_profit <= LIVE_RECENT_STOP and len(trade_rows) >= LIVE_RECENT_N:
@@ -322,6 +368,8 @@ def simulate_backtest(groups_tuple):
                 loss_streak = 0
             else:
                 loss_streak += 1
+
+            pattern_result_hist.setdefault(sig["pattern"], []).append(pnl)
 
             state = "LIVE_TRADE"
 
@@ -454,11 +502,11 @@ live_peak, live_drawdown = live_peak_and_drawdown(state_data)
 
 recovered, recovery_pattern = recovery_pattern_found(groups)
 
-# bật freeze nếu live thua liên tiếp
+# Bật freeze nếu live thua liên tiếp
 if live_loss_streak >= FREEZE_AFTER_LOSS_STREAK:
     state_data["freeze_mode"] = True
 
-# xử lý freeze live
+# Freeze mode live: chỉ mở lại bằng recovery pattern
 if state_data.get("freeze_mode", False):
     if recovered:
         state_data["freeze_mode"] = False
@@ -467,7 +515,19 @@ if state_data.get("freeze_mode", False):
         signal = None
         state = "WAIT_FREEZE_RECOVERY"
 
-# market filter live
+# Same pattern protection live
+if signal is not None:
+    if same_pattern_recent_bad(state_data, signal["pattern"]):
+        signal = None
+        state = "WAIT_SAME_PATTERN_BAD"
+
+# Risky rule after live loss
+if signal is not None:
+    if live_loss_streak >= 1 and signal["pattern"] in RISKY_RULES:
+        signal = None
+        state = "WAIT_RISKY_RULE_AFTER_LOSS"
+
+# Market filter live
 rolling_profit_now = 0.0
 if not hist.empty and len(hist) >= ROLLING_CHECK:
     rolling_profit_now = float(hist.tail(ROLLING_CHECK)["pnl"].sum())
@@ -493,7 +553,7 @@ save_state(state_data)
 # =========================
 # UI
 # =========================
-st.title("FIXED RULE ENGINE + FREEZE RECOVERY")
+st.title("FIXED RULE ENGINE OPTIMIZED")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", current_round)
@@ -526,6 +586,9 @@ with st.expander("CONFIG"):
     st.write("PATTERN_LEN:", f"{PATTERN_LEN_MIN} -> {PATTERN_LEN_MAX}")
     st.write("FREEZE_AFTER_LOSS_STREAK:", FREEZE_AFTER_LOSS_STREAK)
     st.write("RECOVERY_REQUIRED_PATTERNS:", sorted(list(RECOVERY_REQUIRED_PATTERNS)))
+    st.write("RISKY_RULES:", sorted(list(RISKY_RULES)))
+    st.write("SAME_PATTERN_RECENT_N:", SAME_PATTERN_RECENT_N)
+    st.write("SAME_PATTERN_LOSS_LIMIT:", SAME_PATTERN_LOSS_LIMIT)
     st.write("LIVE_RECENT_N:", LIVE_RECENT_N)
     st.write("LIVE_RECENT_STOP:", LIVE_RECENT_STOP)
     st.write("MAX_DRAWDOWN_FROM_PEAK:", MAX_DRAWDOWN_FROM_PEAK)
