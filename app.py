@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=3000, key="refresh")
+st_autorefresh(interval=8000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -63,7 +63,7 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 2.5
+PHASE_STOP_WIN = 12.5
 PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
