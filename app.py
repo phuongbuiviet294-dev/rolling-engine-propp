@@ -40,8 +40,8 @@ FIXED_RULES = {
     "AAAAB": "A",
     #"AABB": "A",
     "AABBA": "A",
-   # "AAABB": "A",
-    #"AAABBA": "A",
+    "AAABB": "A",
+    "AAABBA": "A",
 
     # 2 GROUP - xen kẽ
     "ABABA": "B",
