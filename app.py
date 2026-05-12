@@ -38,10 +38,10 @@ FIXED_RULES = {
     # 2 GROUP - quay về A
     "AAAB": "A",
     "AAAAB": "A",
-    "AABB": "A",
+    #"AABB": "A",
     "AABBA": "A",
-    "AAABB": "A",
-    "AAABBA": "A",
+   # "AAABB": "A",
+    #"AAABBA": "A",
 
     # 2 GROUP - xen kẽ
     "ABABA": "B",
