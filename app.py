@@ -21,7 +21,7 @@ WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
 PATTERN_LEN_MIN = 3
-PATTERN_LEN_MAX = 7
+PATTERN_LEN_MAX = 6
 
 SHOW_HISTORY_ROWS = 100
 
@@ -37,20 +37,20 @@ FIXED_RULES = {
 
     # 2 GROUP - quay về A
     "AAAB": "A",
-    "AAAAB": "A",
+    #"AAAAB": "A",
     #"AABB": "A",
-    "AABBA": "A",
-    "AAABB": "A",
-    "AAABBA": "A",
+    #"AABBA": "A",
+    #"AAABB": "A",
+    #"AAABBA": "A",
 
     # 2 GROUP - xen kẽ
     "ABABA": "B",
     "BABAB": "A",
 
     # 3 GROUP - chỉ chơi chuỗi xen kẽ lặp có A
-    "ABCAB": "A",
+    #"ABCAB": "A",
     "ABACAB": "A",
-    "ABACABA": "A",
+    #"ABACABA": "A",
 }
 
 
