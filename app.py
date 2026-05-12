@@ -92,7 +92,7 @@ VOTE_DOMINANCE_RATIO = 0.60
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
 
-SESSION_STOP_WIN = 4.0
+SESSION_STOP_WIN = 14.0
 SESSION_STOP_LOSS = -13.0
 
 MIN_FALLBACK_SCORE = 0
