@@ -33,8 +33,7 @@ REAL_LIVE_LOSS_STREAK_STOP = 3
 # =========================
 FIXED_RULES = {
     # 1 GROUP - chỉ dừng tới 4
-    "AAA": "A",
-    "AAAA": "A",
+   
 
     # 2 GROUP - quay về A
     "AAAB": "A",
