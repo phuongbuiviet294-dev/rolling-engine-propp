@@ -26,7 +26,7 @@ PATTERN_LEN_MAX = 7
 SHOW_HISTORY_ROWS = 100
 
 # Chặn live nếu thua liên tiếp
-REAL_LIVE_LOSS_STREAK_STOP = 2
+REAL_LIVE_LOSS_STREAK_STOP = 22
 
 # =========================
 # FIXED RULES
