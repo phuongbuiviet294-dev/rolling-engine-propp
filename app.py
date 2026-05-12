@@ -11,6 +11,9 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="LOCK120 FINAL LIVE ENGINE", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
+# =========================
+# CONFIG
+# =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 STATE_FILE = "/tmp/lock120_final_live_engine.json"
 
@@ -57,6 +60,7 @@ RECOVERY_MIN_RECENT_PROFIT = 1.0
 RECOVERY_MIN_WR = 0.35
 
 SHOW_HISTORY_ROWS = 100
+SHOW_TOP_PATTERNS = 60
 
 BAD_PATTERN_SIDES = {
     ("AABB", "D"),
@@ -65,6 +69,9 @@ BAD_PATTERN_SIDES = {
 }
 
 
+# =========================
+# STATE
+# =========================
 def default_state():
     return {
         "real_live_profit": 0.0,
@@ -98,14 +105,19 @@ def save_state(state):
 def real_live_loss_streak(state):
     hist = state.get("real_live_history", [])
     streak = 0
+
     for x in reversed(hist):
         if x.get("pnl", 0) < 0:
             streak += 1
         else:
             break
+
     return streak
 
 
+# =========================
+# LOAD DATA
+# =========================
 @st.cache_data(ttl=5, show_spinner=False)
 def load_data():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&t={int(time.time() // 5)}"
@@ -142,6 +154,9 @@ def group_of(n):
     return 4
 
 
+# =========================
+# PATTERN CORE
+# =========================
 def groups_to_pattern(seq):
     mapping = {}
     reverse = {}
@@ -175,7 +190,10 @@ def calc_pattern_stats(groups, pattern, bet_label):
         tail = groups[i - L + 1:i + 1]
         p, reverse = groups_to_pattern(tail)
 
-        if p != pattern or bet_label not in reverse:
+        if p != pattern:
+            continue
+
+        if bet_label not in reverse:
             continue
 
         pred_group = reverse[bet_label]
@@ -231,6 +249,7 @@ def calc_pattern_stats(groups, pattern, bet_label):
         "recent_hits": recent_hits,
         "recent_check_count": len(recent_results),
         "min_equity": min(equity) if equity else 0.0,
+        "max_equity": max(equity) if equity else 0.0,
         "max_drawdown": max_drawdown,
     }
 
@@ -248,6 +267,7 @@ def transition_stats(groups, tail, pred_group):
             counts[groups[i + 1]] += 1
 
     total = sum(counts.values())
+
     if total == 0:
         return {
             "transition_count": 0,
@@ -293,6 +313,7 @@ def score_pattern(stat, recent, trans):
     recent_profit = recent["profit"]
 
     score = 0.0
+
     score += profit * 1.3
     score += recent_profit * 3.8
     score += stat["profit_per_trade"] * 5.0
@@ -358,6 +379,12 @@ def current_tail_candidates(groups):
         tail = groups[-L:]
         pattern, reverse = groups_to_pattern(tail)
 
+        unique_count = len(set(pattern))
+
+        # Bỏ hẳn pattern 4 group trở lên vì quá nhiễu
+        if unique_count >= 4:
+            continue
+
         for bet_label in labels_in_pattern(pattern):
             if bet_label not in reverse:
                 continue
@@ -373,9 +400,21 @@ def current_tail_candidates(groups):
             broken = pattern_is_broken(stat, recent)
             score = score_pattern(stat, recent, trans)
 
+            # Ưu tiên theo số group
+            if unique_count == 1:
+                score += 1.0
+                # AAAA / AAAAA phải có dominance mạnh mới chơi
+                if trans["transition_top_ratio"] < 0.65:
+                    continue
+            elif unique_count == 2:
+                score += 4.0
+            elif unique_count == 3:
+                score += 2.5
+
             rows.append({
                 "pattern": pattern,
                 "len": L,
+                "unique_count": unique_count,
                 "bet_label": bet_label,
                 "bet_group": bet_group,
                 "tail": tail,
@@ -497,6 +536,7 @@ def simulate_lock_backtest(groups_tuple):
             "peak_profit": peak,
             "drawdown": peak - profit,
             "state": state,
+            "score": round(sig["score"], 2) if sig else None,
         })
 
         trade_hist = [r for r in rows if r["trade"]]
@@ -579,6 +619,9 @@ def recovery_signal_ok(signal):
     return True
 
 
+# =========================
+# MAIN
+# =========================
 numbers, round_ids, total_round = load_data()
 groups = [group_of(n) for n in numbers]
 
@@ -634,7 +677,10 @@ if current_round >= LOCK_ROWS and signal is not None:
 
 save_state(state_data)
 
-st.title("LOCK120 FINAL LIVE ENGINE")
+# =========================
+# UI
+# =========================
+st.title("LOCK120 FINAL LIVE ENGINE | NO 4-GROUP PATTERN")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", current_round)
@@ -657,12 +703,20 @@ q4.metric("Live Loss Streak", live_loss_streak)
 st.metric("State", state)
 
 st.subheader("NEXT BET")
+
 if signal:
     st.success(
         f"READY BET NEXT GROUP {signal['bet_group']} | "
         f"Pattern {signal['pattern']} | "
+        f"Unique {signal['unique_count']} | "
         f"Score {round(signal['score'], 2)}"
     )
+
+    a, b, c, d = st.columns(4)
+    a.metric("NEXT GROUP", signal["bet_group"])
+    b.metric("Pattern", signal["pattern"])
+    c.metric("WR %", round(signal["wr"] * 100, 2))
+    d.metric("Score", round(signal["score"], 2))
 else:
     st.warning(f"WAIT - {state}")
 
