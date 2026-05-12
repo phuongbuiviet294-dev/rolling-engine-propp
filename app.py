@@ -5,35 +5,39 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="FIXED RULE MARKET FILTER ENGINE", layout="wide")
+st.set_page_config(page_title="FIXED RULE FREEZE ENGINE", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================
 # CONFIG
 # =========================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
-STATE_FILE = "/tmp/fixed_rule_market_filter_engine.json"
+STATE_FILE = "/tmp/fixed_rule_freeze_engine.json"
 
-LOCK_ROWS = 168
+LOCK_ROWS = 75
 MAX_SOURCE_ROWS = 500
 
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-PATTERN_LEN_MIN = 4
-PATTERN_LEN_MAX = 6
+PATTERN_LEN_MIN = 3
+PATTERN_LEN_MAX = 7
 
-SHOW_HISTORY_ROWS = 100
+SHOW_HISTORY_ROWS = 120
 
-# Chặn live thật
-REAL_LIVE_LOSS_STREAK_STOP = 2
+# Freeze / recovery
+FREEZE_AFTER_LOSS_STREAK = 2
+RECOVERY_REQUIRED_PATTERNS = {
+    "AAA",
+    "AAAA",
+    "ABABA",
+    "ABCAB",
+}
 
-# Market filter để tránh đoạn giảm mạnh ở giữa
+# Market filter
 LIVE_RECENT_N = 6
-LIVE_RECENT_STOP = -2.0
-
+LIVE_RECENT_STOP = -3.0
 MAX_DRAWDOWN_FROM_PEAK = 5.0
-
 ROLLING_CHECK = 20
 ROLLING_MIN_PROFIT = -1.0
 
@@ -41,17 +45,26 @@ ROLLING_MIN_PROFIT = -1.0
 # FIXED RULES
 # =========================
 FIXED_RULES = {
-    # 2 GROUP - đảo/xen kẽ
+    # 1 GROUP - chỉ dừng tới 4
+    "AAA": "A",
+    "AAAA": "A",
+
+    # 2 GROUP - quay về A
+    "AAAB": "A",
+    "AAAAB": "A",
+    "AABB": "A",
+    "AABBA": "A",
+    "AAABB": "A",
+    "AAABBA": "A",
+
+    # 2 GROUP - xen kẽ
     "ABABA": "B",
     "BABAB": "A",
 
-    # 3 GROUP - chỉ giữ chuỗi xen kẽ có A lặp lại
+    # 3 GROUP - chỉ chơi chuỗi xen kẽ lặp có A
     "ABCAB": "A",
     "ABACAB": "A",
-
-    # continuation nhẹ
-    "AAAB": "A",
-    "AABBA": "A",
+    "ABACABA": "A",
 }
 
 
@@ -64,6 +77,7 @@ def default_state():
         "pending_bet": None,
         "settled_rounds": [],
         "real_live_history": [],
+        "freeze_mode": False,
     }
 
 
@@ -91,13 +105,11 @@ def save_state(state):
 def real_live_loss_streak(state):
     hist = state.get("real_live_history", [])
     streak = 0
-
     for x in reversed(hist):
         if x.get("pnl", 0) < 0:
             streak += 1
         else:
             break
-
     return streak
 
 
@@ -116,7 +128,7 @@ def live_peak_and_drawdown(state):
     for x in hist:
         values.append(float(x.get("real_live_profit", 0.0)))
 
-    peak = max(values) if values else 0.0
+    peak = max(values)
     drawdown = peak - cur_profit
     return peak, drawdown
 
@@ -160,9 +172,6 @@ def group_of(n):
     return 4
 
 
-# =========================
-# PATTERN NORMALIZE
-# =========================
 def groups_to_pattern(seq):
     mapping = {}
     reverse = {}
@@ -180,7 +189,7 @@ def groups_to_pattern(seq):
 
 
 # =========================
-# FIXED RULE SIGNAL
+# SIGNAL
 # =========================
 def choose_signal(groups):
     matches = []
@@ -200,7 +209,6 @@ def choose_signal(groups):
             continue
 
         bet_label = FIXED_RULES[pattern]
-
         if bet_label not in reverse:
             continue
 
@@ -222,8 +230,20 @@ def choose_signal(groups):
     return None, "WAIT_NO_RULE", matches
 
 
+def recovery_pattern_found(groups):
+    for p in RECOVERY_REQUIRED_PATTERNS:
+        L = len(p)
+        if len(groups) < L:
+            continue
+        tail = groups[-L:]
+        pattern, _ = groups_to_pattern(tail)
+        if pattern == p:
+            return True, pattern
+    return False, None
+
+
 # =========================
-# BACKTEST WITH MARKET FILTER
+# BACKTEST WITH FREEZE
 # =========================
 @st.cache_data(ttl=5, show_spinner=False)
 def simulate_backtest(groups_tuple):
@@ -232,6 +252,9 @@ def simulate_backtest(groups_tuple):
 
     profit = 0.0
     peak = 0.0
+    freeze_mode = False
+
+    loss_streak = 0
 
     for target_idx in range(LOCK_ROWS, len(groups)):
         train = groups[:target_idx]
@@ -244,7 +267,7 @@ def simulate_backtest(groups_tuple):
         hit = None
         pnl = 0.0
 
-        # ===== MARKET FILTER BACKTEST =====
+        # ===== market filters =====
         trade_rows = [r for r in rows if r["trade"]]
 
         recent_profit = 0.0
@@ -257,27 +280,49 @@ def simulate_backtest(groups_tuple):
         if len(rows) >= ROLLING_CHECK:
             rolling_profit = float(sum(r["pnl"] for r in rows[-ROLLING_CHECK:]))
 
-        if recent_profit <= LIVE_RECENT_STOP and len(trade_rows) >= LIVE_RECENT_N:
-            sig = None
-            trade = False
-            state = "WAIT_RECENT_BAD"
+        if loss_streak >= FREEZE_AFTER_LOSS_STREAK:
+            freeze_mode = True
 
-        elif drawdown_now >= MAX_DRAWDOWN_FROM_PEAK:
-            sig = None
-            trade = False
-            state = "WAIT_DRAWDOWN"
+        recovered, recovery_pattern = recovery_pattern_found(train)
 
-        elif rolling_profit <= ROLLING_MIN_PROFIT and len(rows) >= ROLLING_CHECK:
-            sig = None
-            trade = False
-            state = "WAIT_ROLLING_BAD"
+        if freeze_mode:
+            if recovered:
+                freeze_mode = False
+                state = f"RECOVERED_BY_{recovery_pattern}"
+            else:
+                sig = None
+                trade = False
+                state = "WAIT_FREEZE_RECOVERY"
+
+        if trade and sig is not None:
+            if recent_profit <= LIVE_RECENT_STOP and len(trade_rows) >= LIVE_RECENT_N:
+                sig = None
+                trade = False
+                state = "WAIT_RECENT_BAD"
+
+            elif drawdown_now >= MAX_DRAWDOWN_FROM_PEAK:
+                sig = None
+                trade = False
+                state = "WAIT_DRAWDOWN"
+
+            elif rolling_profit <= ROLLING_MIN_PROFIT and len(rows) >= ROLLING_CHECK:
+                sig = None
+                trade = False
+                state = "WAIT_ROLLING_BAD"
 
         if trade and sig is not None:
             bet_group = sig["bet_group"]
             hit = 1 if bet_group == actual else 0
             pnl = WIN_GROUP if hit else LOSS_GROUP
+
             profit += pnl
             peak = max(peak, profit)
+
+            if hit:
+                loss_streak = 0
+            else:
+                loss_streak += 1
+
             state = "LIVE_TRADE"
 
         rows.append({
@@ -297,6 +342,8 @@ def simulate_backtest(groups_tuple):
             "drawdown": peak - profit,
             "recent_profit": recent_profit,
             "rolling_profit": rolling_profit,
+            "loss_streak": loss_streak,
+            "freeze_mode": freeze_mode,
             "state": state,
         })
 
@@ -405,26 +452,38 @@ live_loss_streak = real_live_loss_streak(state_data)
 recent_live_profit = live_recent_profit(state_data)
 live_peak, live_drawdown = live_peak_and_drawdown(state_data)
 
+recovered, recovery_pattern = recovery_pattern_found(groups)
+
+# bật freeze nếu live thua liên tiếp
+if live_loss_streak >= FREEZE_AFTER_LOSS_STREAK:
+    state_data["freeze_mode"] = True
+
+# xử lý freeze live
+if state_data.get("freeze_mode", False):
+    if recovered:
+        state_data["freeze_mode"] = False
+        state = f"RECOVERED_BY_{recovery_pattern}"
+    else:
+        signal = None
+        state = "WAIT_FREEZE_RECOVERY"
+
+# market filter live
 rolling_profit_now = 0.0
 if not hist.empty and len(hist) >= ROLLING_CHECK:
     rolling_profit_now = float(hist.tail(ROLLING_CHECK)["pnl"].sum())
 
-# ===== MARKET FILTER REAL LIVE =====
-if live_loss_streak >= REAL_LIVE_LOSS_STREAK_STOP:
-    signal = None
-    state = "WAIT_REAL_LIVE_LOSS_STREAK"
+if signal is not None:
+    if recent_live_profit <= LIVE_RECENT_STOP and len(state_data.get("real_live_history", [])) >= LIVE_RECENT_N:
+        signal = None
+        state = "WAIT_RECENT_BAD"
 
-elif recent_live_profit <= LIVE_RECENT_STOP and len(state_data.get("real_live_history", [])) >= LIVE_RECENT_N:
-    signal = None
-    state = "WAIT_RECENT_BAD"
+    elif live_drawdown >= MAX_DRAWDOWN_FROM_PEAK:
+        signal = None
+        state = "WAIT_LIVE_DRAWDOWN"
 
-elif live_drawdown >= MAX_DRAWDOWN_FROM_PEAK:
-    signal = None
-    state = "WAIT_LIVE_DRAWDOWN"
-
-elif rolling_profit_now <= ROLLING_MIN_PROFIT and len(hist) >= ROLLING_CHECK:
-    signal = None
-    state = "WAIT_ROLLING_BAD"
+    elif rolling_profit_now <= ROLLING_MIN_PROFIT and len(hist) >= ROLLING_CHECK:
+        signal = None
+        state = "WAIT_ROLLING_BAD"
 
 if current_round >= LOCK_ROWS and signal is not None:
     state_data = create_pending(state_data, signal, current_round)
@@ -434,7 +493,7 @@ save_state(state_data)
 # =========================
 # UI
 # =========================
-st.title("FIXED RULE ENGINE + MARKET FILTER")
+st.title("FIXED RULE ENGINE + FREEZE RECOVERY")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current Round", current_round)
@@ -454,22 +513,24 @@ q2.metric("Backtest Drawdown", drawdown_now_bt)
 q3.metric("Live Recent Profit", round(recent_live_profit, 2))
 q4.metric("Live Loss Streak", live_loss_streak)
 
-r1, r2, r3 = st.columns(3)
+r1, r2, r3, r4 = st.columns(4)
 r1.metric("Live Peak", round(live_peak, 2))
 r2.metric("Live Drawdown", round(live_drawdown, 2))
 r3.metric("Rolling Profit", round(rolling_profit_now, 2))
+r4.metric("Freeze Mode", str(state_data.get("freeze_mode", False)))
 
 st.metric("State", state)
 
 with st.expander("CONFIG"):
     st.write("LOCK_ROWS:", LOCK_ROWS)
     st.write("PATTERN_LEN:", f"{PATTERN_LEN_MIN} -> {PATTERN_LEN_MAX}")
+    st.write("FREEZE_AFTER_LOSS_STREAK:", FREEZE_AFTER_LOSS_STREAK)
+    st.write("RECOVERY_REQUIRED_PATTERNS:", sorted(list(RECOVERY_REQUIRED_PATTERNS)))
     st.write("LIVE_RECENT_N:", LIVE_RECENT_N)
     st.write("LIVE_RECENT_STOP:", LIVE_RECENT_STOP)
     st.write("MAX_DRAWDOWN_FROM_PEAK:", MAX_DRAWDOWN_FROM_PEAK)
     st.write("ROLLING_CHECK:", ROLLING_CHECK)
     st.write("ROLLING_MIN_PROFIT:", ROLLING_MIN_PROFIT)
-    st.write("REAL_LIVE_LOSS_STREAK_STOP:", REAL_LIVE_LOSS_STREAK_STOP)
 
 st.subheader("NEXT BET")
 
