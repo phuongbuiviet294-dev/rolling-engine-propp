@@ -11,7 +11,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Auto Relock Engine | Patched", layout="wide")
-st_autorefresh(interval=3000, key="refresh")
+st_autorefresh(interval=8000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
