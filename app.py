@@ -27,9 +27,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+ #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 GAP = 1
@@ -126,7 +126,7 @@ PHASE_STOP_WIN = PROFILE["PHASE_STOP_WIN"]   # FIX 5
 PHASE_STOP_LOSS = PROFILE["PHASE_STOP_LOSS"]
 PHASE_LOSS_STREAK_RELOCK = PROFILE["PHASE_LOSS_STREAK_RELOCK"]
 
-SESSION_STOP_WIN = 4.0
+SESSION_STOP_WIN = 14.0
 SESSION_STOP_LOSS = -13.0
 
 MIN_FALLBACK_SCORE = 0
@@ -139,12 +139,12 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
+WINDOW_SPACING_MAX = 5
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [12, 16, 20, 24]
+VALIDATE_LEN_LIST = [12, 16, 24]
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 1
 VALIDATE_MIN_DRAWDOWN = PROFILE["VALIDATE_MIN_DRAWDOWN"]   # FIX 5
