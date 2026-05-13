@@ -1,8 +1,8 @@
+
 import time
 import json
 import os
 from collections import Counter
-from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -10,14 +10,16 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="Auto Relock Engine | Patched", layout="wide")
-st_autorefresh(interval=8000, key="refresh")
+# =========================================================
+# PAGE / REFRESH
+# =========================================================
+st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
+st_autorefresh(interval=3000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
 # =========================================================
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
-LOCAL_CSV_PATH = os.environ.get("LOCAL_CSV_PATH", "numbers.csv")
 
 # =========================================================
 # LOCK / REPLAY
@@ -27,11 +29,13 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
- #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
-#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
+# GAP = 1 nghĩa là không bet trùng cùng round.
+# Nếu muốn bắt buộc nghỉ 1 round sau mỗi trade, đổi GAP = 2.
 GAP = 1
 
 # =========================================================
@@ -43,116 +47,78 @@ LOSS_GROUP = -1.0
 ENABLE_COLOR_BET = False
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
-COLOR_VOTE_OFFSET = 0  # color_vote_required = max(2, vote_required + offset)
+COLOR_VOTE_OFFSET = 0
 
 PHASE_BET_UNIT = 1.0
 COLOR_BET_UNIT = 1.0
 
 # =========================================================
-# PROFILES
-# Mặc định dùng "balanced". Có thể đổi bằng:
-# ENGINE_PROFILE=safe streamlit run app_patched.py
+# FIXED RISK / PHASE GUARDS
 # =========================================================
-PARAMETER_PRESETS = {
-    "safe": {
-        "VOTE_DOMINANCE_RATIO": 0.67,
-        "PHASE_MIN_RECENT_PNL_TO_TRADE": 0.0,
-        "PHASE_MIN_TOTAL_PNL_TO_TRADE": 0.0,      # FIX 2: guard trực tiếp theo tổng phase
-        "PHASE_STOP_WIN": 12.5,                    # FIX 5: dùng stop-win thật
-        "PHASE_STOP_LOSS": -2.0,
-        "PHASE_LOSS_STREAK_RELOCK": 2,
-        "MAX_PHASE_TRADES": 4,
-        "VALIDATE_MIN_DRAWDOWN": -1.0,            # FIX 5: nới drawdown validate
-        "KEEP_AFTER_LOSS_ROUNDS": 0,              # FIX 3: semantics đã sửa, mặc định an toàn vẫn để 0
-        "ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK": True,   # FIX 2: phase âm + có signal => relock
-        "NEGATIVE_PHASE_EXTRA_VOTE": 1,
-        "NEGATIVE_PHASE_DOMINANCE_RATIO": 0.67,
-    },
-    "balanced": {
-        "VOTE_DOMINANCE_RATIO": 0.60,
-        "PHASE_MIN_RECENT_PNL_TO_TRADE": 0.0,
-        "PHASE_MIN_TOTAL_PNL_TO_TRADE": 0.0,
-        "PHASE_STOP_WIN": 2.5,
-        "PHASE_STOP_LOSS": -2.0,
-        "PHASE_LOSS_STREAK_RELOCK": 2,
-        "MAX_PHASE_TRADES": 5,
-        "VALIDATE_MIN_DRAWDOWN": -1.0,
-        "KEEP_AFTER_LOSS_ROUNDS": 0,
-        "ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK": True,
-        "NEGATIVE_PHASE_EXTRA_VOTE": 1,
-        "NEGATIVE_PHASE_DOMINANCE_RATIO": 0.60,
-    },
-    "aggressive": {
-        "VOTE_DOMINANCE_RATIO": 0.50,
-        "PHASE_MIN_RECENT_PNL_TO_TRADE": 0.0,
-        "PHASE_MIN_TOTAL_PNL_TO_TRADE": -0.5,
-        "PHASE_STOP_WIN": 5.0,
-        "PHASE_STOP_LOSS": -2.0,
-        "PHASE_LOSS_STREAK_RELOCK": 2,
-        "MAX_PHASE_TRADES": 6,
-        "VALIDATE_MIN_DRAWDOWN": -1.5,
-        "KEEP_AFTER_LOSS_ROUNDS": 1,
-        "ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK": False,
-        "NEGATIVE_PHASE_EXTRA_VOTE": 1,
-        "NEGATIVE_PHASE_DOMINANCE_RATIO": 0.60,
-    },
-}
+# Bản fix chính:
+# 1. recent_phase_pnl tính theo TRADE gần nhất, không tính theo ROW gần nhất.
+# 2. Nếu phase đang âm thì WAIT/RELOCK, không bet tiếp.
+# 3. Bật relock trước khi trade nếu phase âm và lại có signal mới.
+# 4. VALIDATE_MIN_DRAWDOWN phải là số âm, không để 0.
+# 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
+# 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-ACTIVE_PROFILE = os.environ.get("ENGINE_PROFILE", "balanced").lower().strip()
-if ACTIVE_PROFILE not in PARAMETER_PRESETS:
-    ACTIVE_PROFILE = "balanced"
-PROFILE = PARAMETER_PRESETS[ACTIVE_PROFILE]
+PHASE_STOP_WIN = 2.5
+PHASE_STOP_LOSS = -2.0
+PHASE_LOSS_STREAK_RELOCK = 2
 
-# =========================================================
-# PHASE / SESSION POLICY
-# =========================================================
+# Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
+
+# Nếu False: phase âm thì luôn WAIT.
+# Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
+NEGATIVE_PHASE_EXTRA_VOTE = 1
+NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
+
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 4
-PHASE_MIN_RECENT_PNL_TO_TRADE = PROFILE["PHASE_MIN_RECENT_PNL_TO_TRADE"]
-PHASE_MIN_TOTAL_PNL_TO_TRADE = PROFILE["PHASE_MIN_TOTAL_PNL_TO_TRADE"]  # FIX 2
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
+
+# Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 3
-MAX_PHASE_TRADES = PROFILE["MAX_PHASE_TRADES"]
-VOTE_DOMINANCE_RATIO = PROFILE["VOTE_DOMINANCE_RATIO"]
+MAX_PHASE_TRADES = 5
+VOTE_DOMINANCE_RATIO = 0.60
 
-KEEP_AFTER_LOSS_ROUNDS = PROFILE["KEEP_AFTER_LOSS_ROUNDS"]  # FIX 3
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = PROFILE["ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK"]  # FIX 2
-NEGATIVE_PHASE_EXTRA_VOTE = PROFILE["NEGATIVE_PHASE_EXTRA_VOTE"]
-NEGATIVE_PHASE_DOMINANCE_RATIO = PROFILE["NEGATIVE_PHASE_DOMINANCE_RATIO"]
+# Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
+KEEP_AFTER_LOSS_ROUNDS = 0
 
-PHASE_STOP_WIN = PROFILE["PHASE_STOP_WIN"]   # FIX 5
-PHASE_STOP_LOSS = PROFILE["PHASE_STOP_LOSS"]
-PHASE_LOSS_STREAK_RELOCK = PROFILE["PHASE_LOSS_STREAK_RELOCK"]
-
-SESSION_STOP_WIN = 14.0
+SESSION_STOP_WIN = 4.0
 SESSION_STOP_LOSS = -13.0
 
 MIN_FALLBACK_SCORE = 0
 
-# =========================================================
-# WINDOW / VALIDATION
-# =========================================================
 MIN_TRADES_PER_WINDOW = 18
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 5
+WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [12, 16, 24]
+VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 1
-VALIDATE_MIN_DRAWDOWN = PROFILE["VALIDATE_MIN_DRAWDOWN"]   # FIX 5
+
+# QUAN TRỌNG: max_drawdown luôn <= 0.
+# Không để 0 vì quá gắt, dễ bóp méo lock.
+VALIDATE_MIN_DRAWDOWN = -1.0
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 10
+SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
@@ -163,34 +129,9 @@ DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
 CHAT_ID = st.secrets["CHAT_ID"] if "CHAT_ID" in st.secrets else DEFAULT_CHAT_ID
-SENT_FILE = "/tmp/telegram_sent_phase_group_color_keep.json"
+SENT_FILE = "/tmp/telegram_sent_phase_group_color_keep_fixed.json"
 
-# Cache fingerprint để đảm bảo đổi profile / params thì backtest cũng đổi theo.
-ENGINE_CONFIG_FINGERPRINT = json.dumps(
-    {
-        "ACTIVE_PROFILE": ACTIVE_PROFILE,
-        "GAP": GAP,
-        "WIN_GROUP": WIN_GROUP,
-        "LOSS_GROUP": LOSS_GROUP,
-        "PHASE_STOP_WIN": PHASE_STOP_WIN,
-        "PHASE_STOP_LOSS": PHASE_STOP_LOSS,
-        "PHASE_LOSS_STREAK_RELOCK": PHASE_LOSS_STREAK_RELOCK,
-        "PHASE_MIN_RECENT_PNL_TO_TRADE": PHASE_MIN_RECENT_PNL_TO_TRADE,
-        "PHASE_MIN_TOTAL_PNL_TO_TRADE": PHASE_MIN_TOTAL_PNL_TO_TRADE,
-        "MAX_PHASE_TRADES": MAX_PHASE_TRADES,
-        "VOTE_DOMINANCE_RATIO": VOTE_DOMINANCE_RATIO,
-        "KEEP_AFTER_LOSS_ROUNDS": KEEP_AFTER_LOSS_ROUNDS,
-        "VALIDATE_MIN_DRAWDOWN": VALIDATE_MIN_DRAWDOWN,
-        "ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK": ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK,
-        "NEGATIVE_PHASE_EXTRA_VOTE": NEGATIVE_PHASE_EXTRA_VOTE,
-        "NEGATIVE_PHASE_DOMINANCE_RATIO": NEGATIVE_PHASE_DOMINANCE_RATIO,
-    },
-    sort_keys=True,
-)
 
-# =========================================================
-# NOTIFY / IO HELPERS
-# =========================================================
 def telegram_enabled():
     return bool(BOT_TOKEN and CHAT_ID)
 
@@ -242,48 +183,25 @@ def send_signal_once(signal_name, current_round, msg):
     return ok
 
 
-def _normalize_numbers_from_df(df: pd.DataFrame) -> List[int]:
-    df = df.copy()
+# =========================================================
+# LOAD DATA
+# =========================================================
+@st.cache_data(ttl=60, show_spinner=False)
+def load_numbers():
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
+    df = pd.read_csv(url)
     df.columns = [str(c).strip().lower() for c in df.columns]
+
     if "number" not in df.columns:
-        raise ValueError("Dữ liệu phải có cột 'number'")
+        raise ValueError("Sheet must contain column 'number'")
+
     df["number"] = pd.to_numeric(df["number"], errors="coerce")
     nums = df["number"].dropna().astype(int).tolist()
-    nums = [x for x in nums if 1 <= x <= 12]
-    if not nums:
-        raise ValueError("Không tìm thấy numbers hợp lệ trong khoảng 1..12")
-    return nums
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def load_numbers(sheet_id: str, local_csv_path: str) -> Tuple[List[int], str]:
-    """
-    Ưu tiên đọc từ Google Sheet.
-    Nếu lỗi mạng / lỗi quyền / không có dữ liệu, fallback sang file CSV local.
-    """
-    errors = []
-
-    if sheet_id:
-        try:
-            url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&cache={time.time()}"
-            df = pd.read_csv(url)
-            nums = _normalize_numbers_from_df(df)
-            return nums, f"google_sheet:{sheet_id}"
-        except Exception as e:
-            errors.append(f"google_sheet_error={e}")
-
-    try:
-        df_local = pd.read_csv(local_csv_path)
-        nums = _normalize_numbers_from_df(df_local)
-        return nums, f"local_csv:{local_csv_path}"
-    except Exception as e:
-        errors.append(f"local_csv_error={e}")
-
-    raise ValueError("Không thể load dữ liệu. " + " | ".join(errors))
+    return [x for x in nums if 1 <= x <= 12]
 
 
 # =========================================================
-# MAPPING
+# MAP
 # =========================================================
 def group_of(n):
     if n <= 3:
@@ -314,7 +232,7 @@ def color_text(c):
 
 
 # =========================================================
-# CORE HELPERS
+# METRICS
 # =========================================================
 def vote_dominance_ok(preds, confidence, min_ratio):
     if not preds:
@@ -374,16 +292,17 @@ def compute_recent_profit(results, recent_n, win_value, loss_value):
     return float(sum(win_value if r == 1 else loss_value for r in tail))
 
 
-def compute_recent_trade_profit_from_hits(results, recent_n, win_value, loss_value):
+def compute_recent_phase_trade_pnl(phase_hits_group):
     """
-    FIX 1:
-    Tính recent PNL theo TRADE HITS của phase hiện tại,
-    không theo history rows / rounds.
+    FIX: recent PNL tính theo N TRADES gần nhất của phase,
+    không tính theo N ROWS gần nhất vì rows WAIT có pnl = 0 làm sai logic.
     """
-    if not results:
-        return 0.0
-    tail = results[-recent_n:]
-    return float(sum(win_value if r == 1 else loss_value for r in tail))
+    return compute_recent_profit(
+        phase_hits_group,
+        RECENT_PHASE_CHECK,
+        WIN_GROUP * PHASE_BET_UNIT,
+        LOSS_GROUP * PHASE_BET_UNIT,
+    )
 
 
 def compute_streak_metrics(results):
@@ -467,15 +386,17 @@ def evaluate_window_group(seq_groups, w):
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
+    expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
         score = (
-            profit * 0.8
+            profit * 0.75
             + winrate * 8.0
-            + np.log(trades + 1) * 1.2
-            + recent_profit * 1.5
-            - abs(max_drawdown) * 0.8
-            + streak_metrics["streak_score"] * 1.0
+            + expectancy * 6.0
+            + np.log(trades + 1) * 1.0
+            + recent_profit * 1.0
+            - abs(max_drawdown) * 1.1
+            + streak_metrics["streak_score"] * 0.7
         )
     else:
         score = -999999.0
@@ -486,6 +407,7 @@ def evaluate_window_group(seq_groups, w):
         "wins": wins,
         "profit": profit,
         "winrate": winrate,
+        "expectancy": expectancy,
         "max_drawdown": max_drawdown,
         "recent_profit": recent_profit,
         "max_hit_streak": streak_metrics["max_hit_streak"],
@@ -528,7 +450,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     df = pd.DataFrame(rows)
 
     df_all = df.sort_values(
-        ["score", "streak_score", "recent_profit", "profit", "winrate", "trades"],
+        ["score", "recent_profit", "profit", "expectancy", "winrate", "trades"],
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
@@ -539,7 +461,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     ].copy()
 
     filtered_df = filtered_df.sort_values(
-        ["streak_score", "score", "recent_profit", "profit", "winrate", "trades", "max_loss_streak"],
+        ["score", "recent_profit", "profit", "expectancy", "winrate", "trades", "max_loss_streak"],
         ascending=[False, False, False, False, False, False, True],
     ).reset_index(drop=True)
 
@@ -549,7 +471,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
 
     candidate_df = selected_seed.sort_values(
-        ["streak_score", "score", "recent_profit", "profit", "winrate", "trades"],
+        ["score", "recent_profit", "profit", "expectancy", "winrate", "trades"],
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
@@ -582,6 +504,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
             "trades": 0,
             "profit_group": 0.0,
             "winrate_group": 0.0,
+            "expectancy_group": 0.0,
             "max_drawdown_group": 0.0,
             "recent_profit_group": 0.0,
             "max_hit_streak": 0,
@@ -599,8 +522,14 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
             continue
 
         vote_group, confidence_group = Counter(preds).most_common(1)[0]
+        dominance_ok, dominance_ratio = vote_dominance_ok(
+            preds,
+            confidence_group,
+            VOTE_DOMINANCE_RATIO,
+        )
 
-        if confidence_group >= vote_required and (i - last_trade >= GAP):
+        # FIX: backtest dùng cùng dominance gate với live.
+        if confidence_group >= vote_required and dominance_ok and (i - last_trade >= GAP):
             last_trade = i
             trades += 1
             hit = 1 if seq_groups[i] == vote_group else 0
@@ -609,6 +538,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
 
     profit_group = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in results_group))
     winrate_group = wins_group / trades if trades > 0 else 0.0
+    expectancy_group = profit_group / trades if trades > 0 else 0.0
     max_drawdown_group = compute_max_drawdown(results_group, WIN_GROUP, LOSS_GROUP)
     recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results_group)
@@ -617,6 +547,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         "trades": trades,
         "profit_group": profit_group,
         "winrate_group": winrate_group,
+        "expectancy_group": expectancy_group,
         "max_drawdown_group": max_drawdown_group,
         "recent_profit_group": recent_profit_group,
         "max_hit_streak": streak_metrics["max_hit_streak"],
@@ -718,24 +649,23 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         validate_end,
                     )
 
-                    # FIX 5:
-                    # max_drawdown_group luôn là 0 hoặc âm.
-                    # Vì vậy VALIDATE_MIN_DRAWDOWN phải là số âm hợp lý, ví dụ -1.0.
                     validate_pass = (
                         validate_bt["trades"] >= MIN_VALIDATE_TRADES
                         and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
                     )
 
                     final_score = (
-                        train_bt["profit_group"] * 0.8
+                        train_bt["profit_group"] * 0.75
                         + train_bt["winrate_group"] * 8.0
-                        + train_bt["recent_profit_group"] * 1.5
-                        - abs(train_bt["max_drawdown_group"]) * 0.8
-                        + train_bt["streak_score"] * 1.0
+                        + train_bt["expectancy_group"] * 6.0
+                        + train_bt["recent_profit_group"] * 1.0
+                        - abs(train_bt["max_drawdown_group"]) * 1.1
+                        + train_bt["streak_score"] * 0.7
                         + validate_bt["profit_group"] * 3.0
                         + validate_bt["winrate_group"] * 10.0
-                        - abs(validate_bt["max_drawdown_group"]) * 1.5
-                        + validate_bt["streak_score"] * 1.0
+                        + validate_bt["expectancy_group"] * 8.0
+                        - abs(validate_bt["max_drawdown_group"]) * 2.0
+                        + validate_bt["streak_score"] * 0.8
                     )
 
                     mode_with_params = dict(mode)
@@ -757,8 +687,12 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         local_best_score = final_score
                         local_best_windows = selected_windows
                         local_best_mode = mode_with_params
-                        local_best_scan_df = local_fallback_scan_df.copy()
-                        local_best_filtered_df = local_fallback_filtered_df.copy()
+                        local_best_scan_df = df_all.copy()
+                        local_best_scan_df["selected_spacing"] = spacing
+                        local_best_scan_df["selected_validate_len"] = validate_len
+                        local_best_filtered_df = filtered_df.copy()
+                        local_best_filtered_df["selected_spacing"] = spacing
+                        local_best_filtered_df["selected_validate_len"] = validate_len
                         local_lock_mode = "validated"
 
             if local_best_mode is not None:
@@ -815,35 +749,36 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
-def compute_live_next_preview(
-    numbers: List[int],
-    groups: List[int],
-    colors: List[int],
-    locked_windows: List[int],
-    current_mode: Optional[Dict[str, Any]],
-    phase_start_round: Optional[int],
-    phase_index: int,
-    phase_profit_group: float,
-    phase_profit_color: float,
-    phase_profit_total: float,
-    total_phase_profit_all: float,
-    phase_hits_group: List[int],
-    keep_phase_group: Optional[int],
-    keep_phase_color: Optional[int],
-    keep_phase_left: int,
-    last_phase_bet_was_loss: bool,
-    last_phase_trade_idx: int,
-    session_stop: bool,
-    session_stop_reason: Optional[str],
-) -> Dict[str, Any]:
-    """
-    FIX 4:
-    Tạo preview NEXT ROUND từ live-state thật của engine
-    thay vì suy luận từ hist.iloc[-1] (dễ stale sau relock).
-    """
+def make_next_preview(
+    numbers,
+    groups,
+    colors,
+    locked_windows,
+    current_mode,
+    phase_start_round,
+    phase_index,
+    phase_profit_group,
+    phase_profit_color,
+    phase_profit_total,
+    total_phase_profit_all,
+    phase_hits_group,
+    keep_phase_group,
+    keep_phase_color,
+    keep_phase_left,
+    last_phase_bet_was_loss,
+    last_phase_trade_idx,
+    session_stop,
+    session_stop_reason,
+):
+    next_idx = len(groups)
+    next_round = len(groups) + 1
+    current_round = len(numbers)
+
     preview = {
-        "current_round": len(numbers),
-        "next_round": len(numbers) + 1,
+        "current_round": current_round,
+        "next_round": next_round,
+        "vote_required": 0,
+        "color_vote_required": 0,
         "vote_group": None,
         "confidence_group": 0,
         "dominance_ratio": 0.0,
@@ -861,17 +796,12 @@ def compute_live_next_preview(
         "current_phase_age_next": 1,
         "current_phase_trade_count": len(phase_hits_group),
         "distance_from_last_trade": None,
-        "phase_profit_group": phase_profit_group,
-        "phase_profit_color": phase_profit_color,
-        "phase_profit_total": phase_profit_total,
-        "total_phase_profit_all": total_phase_profit_all,
+        "negative_phase_pretrade_relock_ready": False,
     }
 
     if current_mode is None or not locked_windows:
         return preview
 
-    next_idx = len(groups)
-    next_round = next_idx + 1
     vote_required = current_mode["vote_required"]
     color_vote_required = max(2, vote_required + COLOR_VOTE_OFFSET)
 
@@ -897,12 +827,7 @@ def compute_live_next_preview(
     signal_group = (confidence_group >= vote_required and dominance_ok_next) if vote_group is not None else False
     signal_color = confidence_color >= color_vote_required if vote_color is not None else False
 
-    recent_phase_pnl_next = compute_recent_trade_profit_from_hits(
-        phase_hits_group,
-        RECENT_PHASE_CHECK,
-        WIN_GROUP * PHASE_BET_UNIT,
-        LOSS_GROUP * PHASE_BET_UNIT,
-    )
+    recent_phase_pnl_next = compute_recent_phase_trade_pnl(phase_hits_group)
 
     current_phase_age_next = (
         next_round - phase_start_round + 1
@@ -924,22 +849,11 @@ def compute_live_next_preview(
         and keep_phase_group is not None
     )
 
-    # FIX 3:
-    # KEEP chỉ được dùng nếu current signal vẫn cùng hướng với keep group.
+    # KEEP chỉ dùng nếu signal vẫn cùng hướng.
     if keep_active_next and signal_group and vote_group == keep_phase_group:
         used_keep_phase_next = True
         final_phase_group_next = keep_phase_group
-
-        if signal_color and keep_phase_color is not None and vote_color == keep_phase_color:
-            final_phase_color_next = keep_phase_color
-        else:
-            final_phase_color_next = vote_color if signal_color else None
-
-    phase_next_allowed = (
-        signal_group
-        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
-        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-    )
+        final_phase_color_next = keep_phase_color if keep_phase_color is not None else final_phase_color_next
 
     negative_phase_pretrade_relock_ready = (
         ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
@@ -947,15 +861,20 @@ def compute_live_next_preview(
         and phase_profit_group < 0
     )
 
+    phase_next_allowed = (
+        signal_group
+        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
+        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+    )
+
     if (
-        not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
+        ALLOW_TRADE_WHEN_PHASE_NEGATIVE
+        and not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
         and phase_profit_group < 0
-        and phase_next_allowed
     ):
-        # Nếu profile cho phép trade nhẹ khi phase âm, phải siết tín hiệu hơn.
         phase_next_allowed = (
-            confidence_group >= (vote_required + NEGATIVE_PHASE_EXTRA_VOTE)
+            confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
             and dominance_ratio_next >= NEGATIVE_PHASE_DOMINANCE_RATIO
         )
 
@@ -998,7 +917,7 @@ def compute_live_next_preview(
 
     preview.update(
         {
-            "current_round": len(numbers),
+            "current_round": current_round,
             "next_round": next_round,
             "vote_required": vote_required,
             "color_vote_required": color_vote_required,
@@ -1056,9 +975,6 @@ def simulate_engine(numbers, groups, colors):
         "keep_phase_left": 0,
         "last_phase_bet_was_loss": False,
         "next_preview": {},
-        "phase_start_round": None,
-        "phase_trade_count": 0,
-        "recent_phase_trade_pnl": 0.0,
     }
 
     (
@@ -1147,66 +1063,48 @@ def simulate_engine(numbers, groups, colors):
 
         phase_age = round_no - phase_start_round + 1
 
-        # FIX 1:
-        # recent_phase_pnl phải tính theo TRADE của phase hiện tại, không theo số round gần nhất.
-        recent_phase_pnl = compute_recent_trade_profit_from_hits(
-            phase_hits_group,
-            RECENT_PHASE_CHECK,
-            WIN_GROUP * PHASE_BET_UNIT,
-            LOSS_GROUP * PHASE_BET_UNIT,
-        )
+        # FIX 1: recent PNL theo trades.
+        recent_phase_pnl = compute_recent_phase_trade_pnl(phase_hits_group)
 
         prev_signal_pnl_in_phase = last_signal_pnl_in_phase
         prev_signal_round_in_phase = last_signal_round_in_phase
-
-        phase_trade_count_before = len(phase_hits_group)
-        phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
-        max_phase_trades_block = phase_trade_count_before >= MAX_PHASE_TRADES
-
-        keep_active_before_round = (
-            last_phase_bet_was_loss
-            and keep_phase_left > 0
-            and keep_phase_group is not None
-        )
 
         used_keep_phase = False
         final_phase_group = vote_group
         final_phase_color = vote_color if signal_color else None
 
-        # FIX 3:
-        # KEEP chỉ có hiệu lực nếu current signal vẫn cùng group với lệnh vừa thua.
-        if keep_active_before_round and signal_group and vote_group == keep_phase_group:
+        keep_active_before = (
+            last_phase_bet_was_loss
+            and keep_phase_left > 0
+            and keep_phase_group is not None
+        )
+
+        # FIX KEEP: chỉ giữ nếu signal hiện tại vẫn cùng hướng.
+        if keep_active_before and signal_group and vote_group == keep_phase_group:
             used_keep_phase = True
             final_phase_group = keep_phase_group
-
-            if signal_color and keep_phase_color is not None and vote_color == keep_phase_color:
+            if keep_phase_color is not None:
                 final_phase_color = keep_phase_color
-            else:
-                final_phase_color = vote_color if signal_color else None
 
-        # FIX 2:
-        # guard trực tiếp theo tổng phase.
+        phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
+        max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
+
+        # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
             and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
             and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
-        negative_phase_pretrade_relock_ready = (
-            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-            and signal_group
-            and phase_profit_group < 0
-        )
-
-        # Nếu profile cho trade mềm khi phase âm (ví dụ aggressive), phải siết tín hiệu hơn.
+        # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
-            not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
+            ALLOW_TRADE_WHEN_PHASE_NEGATIVE
+            and not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
             and phase_profit_group < 0
-            and phase_trade_allowed
         ):
             phase_trade_allowed = (
-                confidence_group >= (vote_required + NEGATIVE_PHASE_EXTRA_VOTE)
+                confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
                 and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
             )
 
@@ -1228,16 +1126,19 @@ def simulate_engine(numbers, groups, colors):
 
         relock_triggered_now = False
         relock_reason_now = None
-        state = "WAIT"
-        new_keep_assigned_this_round = False
 
-        # FIX 2:
-        # phase âm mà có signal -> relock ngay trước trade, nếu option được bật.
-        if negative_phase_pretrade_relock_ready:
+        # FIX 3: phase âm + signal mới => relock trước trade.
+        negative_phase_pretrade_relock = (
+            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
+            and signal_group
+            and phase_profit_group < 0
+        )
+
+        if negative_phase_pretrade_relock:
+            phase_trade_allowed = False
             relock_triggered_now = True
             relock_reason_now = "NEGATIVE_PHASE_PRETRADE_RELOCK"
             state = "AUTO_RELOCK_NEGATIVE_PHASE"
-            phase_trade_allowed = False
 
         elif phase_trade_allowed:
             last_phase_trade_idx = i
@@ -1279,27 +1180,22 @@ def simulate_engine(numbers, groups, colors):
 
             if phase_hit_group == 1:
                 phase_consecutive_losses = 0
+                last_phase_bet_was_loss = False
                 keep_phase_group = None
                 keep_phase_color = None
                 keep_phase_left = 0
-                last_phase_bet_was_loss = False
             else:
                 phase_consecutive_losses += 1
-
-                # FIX 3:
-                # KEEP bây giờ là "số rounds tiếp theo" được phép giữ ý tưởng cũ,
-                # nhưng vẫn phải có signal cùng hướng.
                 if KEEP_AFTER_LOSS_ROUNDS > 0:
+                    last_phase_bet_was_loss = True
                     keep_phase_group = final_phase_group
                     keep_phase_color = final_phase_color
                     keep_phase_left = KEEP_AFTER_LOSS_ROUNDS
-                    last_phase_bet_was_loss = True
-                    new_keep_assigned_this_round = True
                 else:
+                    last_phase_bet_was_loss = False
                     keep_phase_group = None
                     keep_phase_color = None
                     keep_phase_left = 0
-                    last_phase_bet_was_loss = False
 
             state = "PHASE_KEEP_BET" if used_keep_phase else "PHASE_BET"
 
@@ -1310,7 +1206,7 @@ def simulate_engine(numbers, groups, colors):
                 state = "WAIT_MAX_PHASE_TRADES"
             elif vote_group is not None and not dominance_ok:
                 state = "WAIT_VOTE_DOMINANCE_WEAK"
-            elif keep_active_before_round and signal_group and vote_group != keep_phase_group:
+            elif keep_active_before and signal_group and vote_group != keep_phase_group:
                 state = "WAIT_KEEP_SIGNAL_MISMATCH"
             elif signal_group and phase_profit_group < PHASE_MIN_TOTAL_PNL_TO_TRADE:
                 state = "WAIT_PHASE_TOTAL_PNL_TOO_LOW"
@@ -1321,10 +1217,8 @@ def simulate_engine(numbers, groups, colors):
             else:
                 state = "WAIT"
 
-        # FIX 3:
-        # KEEP countdown giảm theo round, không phải chỉ theo lần trade.
-        # Nếu vừa sinh KEEP mới từ lệnh thua hiện tại thì không giảm ngay.
-        if keep_active_before_round and not new_keep_assigned_this_round and last_phase_bet_was_loss and keep_phase_group is not None:
+        # KEEP giảm theo round, không giữ mãi.
+        if keep_active_before and not phase_trade_allowed and keep_phase_left > 0:
             keep_phase_left = max(int(keep_phase_left) - 1, 0)
             if keep_phase_left <= 0:
                 keep_phase_group = None
@@ -1332,8 +1226,7 @@ def simulate_engine(numbers, groups, colors):
                 keep_phase_left = 0
                 last_phase_bet_was_loss = False
 
-        # FIX 5:
-        # Kích hoạt stop-win thật sự.
+        # FIX 5: stop win dùng thật.
         if not relock_triggered_now:
             if phase_profit_group >= PHASE_STOP_WIN:
                 relock_triggered_now = True
@@ -1410,7 +1303,6 @@ def simulate_engine(numbers, groups, colors):
                 "prev_signal_round_in_phase": prev_signal_round_in_phase,
                 "prev_signal_pnl_in_phase": prev_signal_pnl_in_phase,
                 "phase_age": phase_age,
-                "phase_trade_count_before": phase_trade_count_before,
                 "state": state,
                 "locked_windows": ", ".join(map(str, locked_windows)),
                 "lock_mode": lock_mode,
@@ -1493,18 +1385,17 @@ def simulate_engine(numbers, groups, colors):
                 keep_phase_color = None
                 keep_phase_left = 0
                 last_phase_bet_was_loss = False
-
                 last_signal_pnl_in_phase = 0.0
                 last_signal_round_in_phase = None
 
-                # FIX 4b:
-                # phase mới không nên bị dính last trade idx của phase cũ.
+                # phase mới không bị dính last trade của phase cũ
                 last_phase_trade_idx = -999999
 
     hist = pd.DataFrame(history_rows)
     phase_summary_df = pd.DataFrame(phase_summary_rows)
 
     session_stop = total_phase_profit_all >= SESSION_STOP_WIN or total_phase_profit_all <= SESSION_STOP_LOSS
+
     session_stop_reason = (
         "SESSION_STOP_WIN"
         if total_phase_profit_all >= SESSION_STOP_WIN
@@ -1513,7 +1404,7 @@ def simulate_engine(numbers, groups, colors):
         else None
     )
 
-    next_preview = compute_live_next_preview(
+    next_preview = make_next_preview(
         numbers=numbers,
         groups=groups,
         colors=colors,
@@ -1566,18 +1457,29 @@ def simulate_engine(numbers, groups, colors):
             "keep_phase_left": keep_phase_left,
             "last_phase_bet_was_loss": last_phase_bet_was_loss,
             "next_preview": next_preview,
-            "phase_start_round": phase_start_round,
-            "phase_trade_count": len(phase_hits_group),
-            "recent_phase_trade_pnl": compute_recent_trade_profit_from_hits(
-                phase_hits_group,
-                RECENT_PHASE_CHECK,
-                WIN_GROUP * PHASE_BET_UNIT,
-                LOSS_GROUP * PHASE_BET_UNIT,
-            ),
         }
     )
 
     return result
+
+
+ENGINE_CONFIG_FINGERPRINT = json.dumps(
+    {
+        "PHASE_STOP_WIN": PHASE_STOP_WIN,
+        "PHASE_STOP_LOSS": PHASE_STOP_LOSS,
+        "PHASE_LOSS_STREAK_RELOCK": PHASE_LOSS_STREAK_RELOCK,
+        "ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK": ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK,
+        "ALLOW_TRADE_WHEN_PHASE_NEGATIVE": ALLOW_TRADE_WHEN_PHASE_NEGATIVE,
+        "PHASE_MIN_RECENT_PNL_TO_TRADE": PHASE_MIN_RECENT_PNL_TO_TRADE,
+        "PHASE_MIN_TOTAL_PNL_TO_TRADE": PHASE_MIN_TOTAL_PNL_TO_TRADE,
+        "MIN_PHASE_AGE_TO_TRADE": MIN_PHASE_AGE_TO_TRADE,
+        "MAX_PHASE_TRADES": MAX_PHASE_TRADES,
+        "VOTE_DOMINANCE_RATIO": VOTE_DOMINANCE_RATIO,
+        "KEEP_AFTER_LOSS_ROUNDS": KEEP_AFTER_LOSS_ROUNDS,
+        "VALIDATE_MIN_DRAWDOWN": VALIDATE_MIN_DRAWDOWN,
+    },
+    sort_keys=True,
+)
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -1589,9 +1491,9 @@ def cached_simulate_engine(numbers_tuple, config_fingerprint):
 
 
 # =========================================================
-# APP START
+# APP
 # =========================================================
-numbers, data_source = load_numbers(SHEET_ID, LOCAL_CSV_PATH)
+numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
@@ -1644,13 +1546,14 @@ next_preview = sim["next_preview"]
 
 current_round = next_preview["current_round"]
 next_round = next_preview["next_round"]
-vote_required = next_preview.get("vote_required", 0)
-color_vote_required = next_preview.get("color_vote_required", 0)
+
+vote_required = next_preview["vote_required"]
+color_vote_required = next_preview["color_vote_required"]
 
 vote_group = next_preview["vote_group"]
 confidence_group = next_preview["confidence_group"]
-dominance_ratio_next = next_preview["dominance_ratio"]
 dominance_ok_next = next_preview["dominance_ok"]
+dominance_ratio_next = next_preview["dominance_ratio"]
 
 vote_color = next_preview["vote_color"]
 confidence_color = next_preview["confidence_color"]
@@ -1669,11 +1572,32 @@ current_phase_age_next = next_preview["current_phase_age_next"]
 current_phase_trade_count = next_preview["current_phase_trade_count"]
 distance_from_last_trade = next_preview["distance_from_last_trade"]
 
-st.title("Auto Relock Engine | PHASE GROUP + COLOR | PATCHED")
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
+    ready_msg = (
+        f"READY PHASE BET FIXED\n"
+        f"Round: {current_round}\n"
+        f"Current Number: {numbers[-1]}\n"
+        f"Current Group: {groups[-1]}\n"
+        f"Current Color: {color_text(colors[-1])}\n"
+        f"Phase Bet Group: {final_phase_group_next}\n"
+        f"Phase Bet Color: {color_text(final_phase_color_next)}\n"
+        f"Used Keep Phase: {used_keep_phase_next}\n"
+        f"Keep Phase Left: {keep_phase_left}\n"
+        f"Group Vote Strength: {confidence_group}/{vote_required}\n"
+        f"Color Vote Strength: {confidence_color}/{color_vote_required}\n"
+        f"Recent Phase PNL Trades: {recent_phase_pnl_next}\n"
+        f"Phase Group Profit: {phase_profit_group}\n"
+        f"Phase Color Profit: {phase_profit_color}\n"
+        f"Phase Total Profit: {phase_profit_total}\n"
+        f"Total Phase Profit All: {total_phase_profit_all}\n"
+        f"State: {next_state}"
+    )
+    send_signal_once("READY_PHASE_FIXED", current_round, ready_msg)
+
+st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
 
 st.caption(
-    f"Profile: {ACTIVE_PROFILE} | Data Source: {data_source} | "
-    f"Fixes: recent-trades, phase-total-guard, keep-semantics, live-preview, validate-dd, stop-win"
+    "FIX: recent PNL theo trades | phase âm thì wait/relock | stop-win phase | validate drawdown âm | next preview theo live-state."
 )
 
 st.subheader("LAST ROUND RESULT")
@@ -1733,7 +1657,7 @@ d1, d2, d3, d4 = st.columns(4)
 d1.metric("Next Round", next_round)
 d2.metric("Group Vote", f"{confidence_group}/{vote_required}")
 d3.metric("Dominance", round(dominance_ratio_next, 2))
-d4.metric("Recent Phase PNL", recent_phase_pnl_next)
+d4.metric("Recent Phase PNL Trades", recent_phase_pnl_next)
 
 st.write("Next Group Vote:", vote_group if vote_group is not None else "-")
 st.write("Next Color Vote:", color_text(vote_color))
@@ -1747,8 +1671,8 @@ st.write("Last Phase Bet Was Loss:", last_phase_bet_was_loss)
 st.write("PHASE_MIN_RECENT_PNL_TO_TRADE:", PHASE_MIN_RECENT_PNL_TO_TRADE)
 st.write("PHASE_MIN_TOTAL_PNL_TO_TRADE:", PHASE_MIN_TOTAL_PNL_TO_TRADE)
 st.write("MIN_PHASE_AGE_TO_TRADE:", MIN_PHASE_AGE_TO_TRADE)
-st.write("Current Phase Age Next:", current_phase_age_next)
 st.write("MAX_PHASE_TRADES:", MAX_PHASE_TRADES)
+st.write("Current Phase Age Next:", current_phase_age_next)
 st.write("Current Phase Trade Count:", current_phase_trade_count)
 st.write("Distance From Last Trade:", distance_from_last_trade)
 st.write("VOTE_DOMINANCE_RATIO:", VOTE_DOMINANCE_RATIO)
@@ -1822,7 +1746,6 @@ exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 if exist_chart_cols:
     st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
 
-# Hỗ trợ so sánh baseline/patched bằng cách tải history CSV ra ngoài
 hist_csv = hist.to_csv(index=False).encode("utf-8")
 phase_summary_csv = phase_summary_df.to_csv(index=False).encode("utf-8") if not phase_summary_df.empty else b""
 
@@ -1831,14 +1754,14 @@ with dl1:
     st.download_button(
         "Download History CSV",
         data=hist_csv,
-        file_name=f"history_{ACTIVE_PROFILE}.csv",
+        file_name="history_fixed_phase_wait.csv",
         mime="text/csv",
     )
 with dl2:
     st.download_button(
         "Download Phase Summary CSV",
         data=phase_summary_csv,
-        file_name=f"phase_summary_{ACTIVE_PROFILE}.csv",
+        file_name="phase_summary_fixed_phase_wait.csv",
         mime="text/csv",
     )
 
@@ -1908,27 +1831,3 @@ st.dataframe(
     hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS),
     use_container_width=True,
 )
-
-# Telegram preview signal
-if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
-    ready_msg = (
-        f"READY PHASE BET\n"
-        f"Profile: {ACTIVE_PROFILE}\n"
-        f"Round: {current_round}\n"
-        f"Current Number: {numbers[-1]}\n"
-        f"Current Group: {groups[-1]}\n"
-        f"Current Color: {color_text(colors[-1])}\n"
-        f"Phase Bet Group: {final_phase_group_next}\n"
-        f"Phase Bet Color: {color_text(final_phase_color_next)}\n"
-        f"Used Keep Phase: {used_keep_phase_next}\n"
-        f"Keep Phase Left: {keep_phase_left}\n"
-        f"Group Vote Strength: {confidence_group}/{vote_required}\n"
-        f"Color Vote Strength: {confidence_color}/{color_vote_required}\n"
-        f"Recent Phase PNL (trades): {recent_phase_pnl_next}\n"
-        f"Phase Group Profit: {phase_profit_group}\n"
-        f"Phase Color Profit: {phase_profit_color}\n"
-        f"Phase Total Profit: {phase_profit_total}\n"
-        f"Total Phase Profit All: {total_phase_profit_all}\n"
-        f"State: {next_state}"
-    )
-    send_signal_once("READY_PHASE_PATCHED", current_round, ready_msg)
