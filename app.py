@@ -58,7 +58,7 @@ PARAMETER_PRESETS = {
         "VOTE_DOMINANCE_RATIO": 0.67,
         "PHASE_MIN_RECENT_PNL_TO_TRADE": 0.0,
         "PHASE_MIN_TOTAL_PNL_TO_TRADE": 0.0,      # FIX 2: guard trực tiếp theo tổng phase
-        "PHASE_STOP_WIN": 2.5,                    # FIX 5: dùng stop-win thật
+        "PHASE_STOP_WIN": 12.5,                    # FIX 5: dùng stop-win thật
         "PHASE_STOP_LOSS": -2.0,
         "PHASE_LOSS_STREAK_RELOCK": 2,
         "MAX_PHASE_TRADES": 4,
