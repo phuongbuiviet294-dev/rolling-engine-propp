@@ -124,7 +124,7 @@ SHOW_DEBUG_TABLES = False
 # =========================================================
 # TELEGRAM
 # =========================================================
-DEFAULT_BOT_TOKEN = ""
+DEFAULT_BOT_TOKEN = "8582950075:AAGgGD_HZ67D8Tq_tGutYf-c3BjT2do4hso"
 DEFAULT_CHAT_ID = "6655585286"
 
 BOT_TOKEN = st.secrets["BOT_TOKEN"] if "BOT_TOKEN" in st.secrets else DEFAULT_BOT_TOKEN
