@@ -24,9 +24,9 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # =========================================================
 # LOCK / REPLAY
 # =========================================================
-LOCK_ROUND_START = 168
-LOCK_ROUND_END = 170
-REPLAY_FROM = 170
+LOCK_ROUND_START = 120
+LOCK_ROUND_END = 140
+REPLAY_FROM = 140
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
