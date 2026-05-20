@@ -863,10 +863,7 @@ def make_next_preview(
 
     phase_next_allowed = (
         signal_group
-        and (
-            phase_profit_group > 0
-            or len(phase_hits_group) == 0
-        )
+        and phase_profit_group > 0
     )
 
     if (
@@ -992,9 +989,9 @@ def simulate_engine(numbers, groups, colors):
     if selected_lock_round is None or selected_mode is None:
         return result
 
-    phase_profit_group = 0.0
+    phase_profit_group = 0.01
     phase_profit_color = 0.0
-    phase_profit_total = 0.0
+    phase_profit_total = 0.01
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1094,10 +1091,7 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and (
-                phase_profit_group > 0
-                or len(phase_hits_group) == 0
-            )
+            and phase_profit_group > 0
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1378,9 +1372,9 @@ def simulate_engine(numbers, groups, colors):
                 phase_index += 1
                 phase_start_round = round_no + 1
 
-                phase_profit_group = 0.0
+                phase_profit_group = 0.01
                 phase_profit_color = 0.0
-                phase_profit_total = 0.0
+                phase_profit_total = 0.01
                 phase_hits_group = []
                 phase_hits_color = []
 
