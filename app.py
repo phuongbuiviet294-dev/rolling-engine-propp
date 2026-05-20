@@ -86,7 +86,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 18
+MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -863,7 +863,10 @@ def make_next_preview(
 
     phase_next_allowed = (
         signal_group
-        and phase_profit_group > 0
+        and (
+            phase_profit_group > 0
+            or len(phase_hits_group) == 0
+        )
     )
 
     if (
@@ -989,9 +992,9 @@ def simulate_engine(numbers, groups, colors):
     if selected_lock_round is None or selected_mode is None:
         return result
 
-    phase_profit_group = 0.01
+    phase_profit_group = 0.0
     phase_profit_color = 0.0
-    phase_profit_total = 0.01
+    phase_profit_total = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1091,7 +1094,10 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and phase_profit_group > 0
+            and (
+                phase_profit_group > 0
+                or len(phase_hits_group) == 0
+            )
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1372,9 +1378,9 @@ def simulate_engine(numbers, groups, colors):
                 phase_index += 1
                 phase_start_round = round_no + 1
 
-                phase_profit_group = 0.01
+                phase_profit_group = 0.0
                 phase_profit_color = 0.0
-                phase_profit_total = 0.01
+                phase_profit_total = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
