@@ -863,8 +863,10 @@ def make_next_preview(
 
     phase_next_allowed = (
         signal_group
-        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
-        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        and (
+            phase_profit_group > 0
+            or len(phase_hits_group) == 0
+        )
     )
 
     if (
@@ -1092,8 +1094,10 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and (
+                phase_profit_group > 0
+                or len(phase_hits_group) == 0
+            )
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
