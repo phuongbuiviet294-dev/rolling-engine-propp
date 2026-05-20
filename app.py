@@ -1072,6 +1072,10 @@ def simulate_engine(numbers, groups, colors):
         used_keep_phase = False
         final_phase_group = vote_group
         final_phase_color = vote_color if signal_color else None
+        phase_has_positive_history = (
+            len(phase_hits_group) >= 2
+            and phase_profit_group > 0
+        )
 
         keep_active_before = (
             last_phase_bet_was_loss
@@ -1090,11 +1094,6 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-
-        phase_has_positive_history = (
-          len(phase_hits_group) >= 2
-          and phase_profit_group > 0
-        )
 
          phase_trade_allowed = (
            signal_group
