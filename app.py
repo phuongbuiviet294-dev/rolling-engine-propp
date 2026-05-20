@@ -855,15 +855,12 @@ def make_next_preview(
         final_phase_group_next = keep_phase_group
         final_phase_color_next = keep_phase_color if keep_phase_color is not None else final_phase_color_next
 
-    negative_phase_pretrade_relock_ready = (
-        ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-        and signal_group
-        and phase_profit_group < 0
-    )
+    negative_phase_pretrade_relock_ready = False
 
+    # Preview logic giống live
     phase_next_allowed = (
         signal_group
-        and phase_profit_group > 0
+        and phase_profit_group > -1
     )
 
     if (
@@ -989,9 +986,9 @@ def simulate_engine(numbers, groups, colors):
     if selected_lock_round is None or selected_mode is None:
         return result
 
-    phase_profit_group = 0.01
+    phase_profit_group = 0.0
     phase_profit_color = 0.0
-    phase_profit_total = 0.01
+    phase_profit_total = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1089,9 +1086,10 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
+        # Trade bình thường nhưng chặn phase âm sâu
         phase_trade_allowed = (
             signal_group
-            and phase_profit_group > 0
+            and phase_profit_group > -1
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1126,11 +1124,7 @@ def simulate_engine(numbers, groups, colors):
         relock_reason_now = None
 
         # FIX 3: phase âm + signal mới => relock trước trade.
-        negative_phase_pretrade_relock = (
-            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-            and signal_group
-            and phase_profit_group < 0
-        )
+        negative_phase_pretrade_relock = False
 
         if negative_phase_pretrade_relock:
             phase_trade_allowed = False
@@ -1372,9 +1366,9 @@ def simulate_engine(numbers, groups, colors):
                 phase_index += 1
                 phase_start_round = round_no + 1
 
-                phase_profit_group = 0.01
+                phase_profit_group = 0.0
                 phase_profit_color = 0.0
-                phase_profit_total = 0.01
+                phase_profit_total = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
