@@ -857,10 +857,13 @@ def make_next_preview(
 
     negative_phase_pretrade_relock_ready = False
 
-    # Preview logic giống live
+    # Preview theo momentum phase
     phase_next_allowed = (
         signal_group
-        and phase_profit_group > -1
+        and (
+            phase_profit_group > 0
+            or next_preview.get('phase_is_recovering', True)
+        )
     )
 
     if (
@@ -990,6 +993,9 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_color = 0.0
     phase_profit_total = 0.0
 
+    # Theo dõi momentum phase
+    previous_phase_profit_group = 0.0
+
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
     total_phase_profit_all = 0.0
@@ -1059,6 +1065,11 @@ def simulate_engine(numbers, groups, colors):
 
         phase_age = round_no - phase_start_round + 1
 
+        # Momentum phase
+        phase_is_recovering = (
+            phase_profit_group >= previous_phase_profit_group
+        )
+
         # FIX 1: recent PNL theo trades.
         recent_phase_pnl = compute_recent_phase_trade_pnl(phase_hits_group)
 
@@ -1086,10 +1097,13 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # Trade bình thường nhưng chặn phase âm sâu
+        # Trade theo momentum phase
         phase_trade_allowed = (
             signal_group
-            and phase_profit_group > -1
+            and (
+                phase_profit_group > 0
+                or phase_is_recovering
+            )
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1157,6 +1171,8 @@ def simulate_engine(numbers, groups, colors):
 
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
+            previous_phase_profit_group = phase_profit_group
+
             phase_profit_total += phase_pnl_total
 
             total_phase_profit_group += phase_pnl_group
