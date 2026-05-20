@@ -855,16 +855,12 @@ def make_next_preview(
         final_phase_group_next = keep_phase_group
         final_phase_color_next = keep_phase_color if keep_phase_color is not None else final_phase_color_next
 
-    negative_phase_pretrade_relock_ready = (
-        ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-        and signal_group
-        and phase_profit_group < 0
-    )
+    negative_phase_pretrade_relock_ready = False
 
+    # Preview giống logic live
     phase_next_allowed = (
         signal_group
-        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
-        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        and phase_profit_group > -2
     )
 
     if (
@@ -1090,10 +1086,10 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
+        # Giữ logic gốc nhưng chặn phase âm sâu
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and phase_profit_group > -2
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1128,11 +1124,7 @@ def simulate_engine(numbers, groups, colors):
         relock_reason_now = None
 
         # FIX 3: phase âm + signal mới => relock trước trade.
-        negative_phase_pretrade_relock = (
-            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-            and signal_group
-            and phase_profit_group < 0
-        )
+        negative_phase_pretrade_relock = False
 
         if negative_phase_pretrade_relock:
             phase_trade_allowed = False
