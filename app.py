@@ -65,7 +65,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 44
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_LOSS_STREAK_RELOCK = 1
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -80,14 +80,19 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
+# 5 trade gần nhất phải dương mới được trade
+PHASE_MIN_RECENT_PNL_TO_TRADE = 1.5
 
-# Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+# Tổng phase phải đủ dương mới cho trade
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 2.5
 
-MIN_PHASE_AGE_TO_TRADE = 4
+# Phase phải chạy đủ tuổi mới được vào
+MIN_PHASE_AGE_TO_TRADE = 6
+
 MAX_PHASE_TRADES = 8
-VOTE_DOMINANCE_RATIO = 0.60
+
+# Vote phải cực mạnh
+VOTE_DOMINANCE_RATIO = 0.72
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -858,13 +863,14 @@ def make_next_preview(
     negative_phase_pretrade_relock_ready = (
         ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
-        and phase_profit_group < 0
+        and phase_profit_group < PHASE_MIN_TOTAL_PNL_TO_TRADE
     )
 
     phase_next_allowed = (
         signal_group
         and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
         and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        and dominance_ratio_next >= VOTE_DOMINANCE_RATIO
     )
 
     if (
@@ -1094,6 +1100,7 @@ def simulate_engine(numbers, groups, colors):
             signal_group
             and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
             and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and dominance_ratio >= VOTE_DOMINANCE_RATIO
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1131,7 +1138,7 @@ def simulate_engine(numbers, groups, colors):
         negative_phase_pretrade_relock = (
             ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group < 0
+            and phase_profit_group < PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
         if negative_phase_pretrade_relock:
