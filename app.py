@@ -855,15 +855,15 @@ def make_next_preview(
         final_phase_group_next = keep_phase_group
         final_phase_color_next = keep_phase_color if keep_phase_color is not None else final_phase_color_next
 
-    negative_phase_pretrade_relock_ready = False
+    negative_phase_pretrade_relock_ready = (
+        ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
+        and signal_group
+        and phase_profit_group < 0
+    )
 
-    # Preview theo momentum phase
     phase_next_allowed = (
         signal_group
-        and (
-            phase_profit_group > 0
-            or next_preview.get('phase_is_recovering', True)
-        )
+        and phase_profit_group > 0
     )
 
     if (
@@ -989,12 +989,9 @@ def simulate_engine(numbers, groups, colors):
     if selected_lock_round is None or selected_mode is None:
         return result
 
-    phase_profit_group = 0.0
+    phase_profit_group = 0.01
     phase_profit_color = 0.0
-    phase_profit_total = 0.0
-
-    # Theo dõi momentum phase
-    previous_phase_profit_group = 0.0
+    phase_profit_total = 0.01
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1065,11 +1062,6 @@ def simulate_engine(numbers, groups, colors):
 
         phase_age = round_no - phase_start_round + 1
 
-        # Momentum phase
-        phase_is_recovering = (
-            phase_profit_group >= previous_phase_profit_group
-        )
-
         # FIX 1: recent PNL theo trades.
         recent_phase_pnl = compute_recent_phase_trade_pnl(phase_hits_group)
 
@@ -1097,13 +1089,9 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # Trade theo momentum phase
         phase_trade_allowed = (
             signal_group
-            and (
-                phase_profit_group > 0
-                or phase_is_recovering
-            )
+            and phase_profit_group > 0
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1138,7 +1126,11 @@ def simulate_engine(numbers, groups, colors):
         relock_reason_now = None
 
         # FIX 3: phase âm + signal mới => relock trước trade.
-        negative_phase_pretrade_relock = False
+        negative_phase_pretrade_relock = (
+            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
+            and signal_group
+            and phase_profit_group < 0
+        )
 
         if negative_phase_pretrade_relock:
             phase_trade_allowed = False
@@ -1171,8 +1163,6 @@ def simulate_engine(numbers, groups, colors):
 
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
-            previous_phase_profit_group = phase_profit_group
-
             phase_profit_total += phase_pnl_total
 
             total_phase_profit_group += phase_pnl_group
@@ -1382,9 +1372,9 @@ def simulate_engine(numbers, groups, colors):
                 phase_index += 1
                 phase_start_round = round_no + 1
 
-                phase_profit_group = 0.0
+                phase_profit_group = 0.01
                 phase_profit_color = 0.0
-                phase_profit_total = 0.0
+                phase_profit_total = 0.01
                 phase_hits_group = []
                 phase_hits_color = []
 
