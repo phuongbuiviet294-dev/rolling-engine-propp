@@ -1091,16 +1091,16 @@ def simulate_engine(numbers, groups, colors):
 
         # FIX 2: guard tổng phase.
 
-     phase_has_positive_history = (
-      len(phase_hits_group) >= 2
-       and phase_profit_group > 0
-          )
+phase_has_positive_history = (
+    len(phase_hits_group) >= 2
+    and phase_profit_group > 0
+)
 
-      phase_trade_allowed = (
-            signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_has_positive_history
-                     )
+phase_trade_allowed = (
+    signal_group
+    and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+    and phase_has_positive_history
+)
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
             ALLOW_TRADE_WHEN_PHASE_NEGATIVE
