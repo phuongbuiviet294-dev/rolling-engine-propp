@@ -865,7 +865,10 @@ def make_next_preview(
         signal_group
         and (
             phase_profit_group > 0
-            or len(phase_hits_group) == 0
+            or (
+                len(phase_hits_group) == 0
+                and total_phase_profit_all >= 0
+            )
         )
     )
 
@@ -1016,6 +1019,9 @@ def simulate_engine(numbers, groups, colors):
     phase_index = 1
     relock_count = 0
 
+    # Chặn mở phase mới liên tục sau phase âm
+    allow_new_phase_trade = True
+
     lock_scan_start = LOCK_ROUND_START
     lock_scan_end = LOCK_ROUND_END
 
@@ -1048,6 +1054,14 @@ def simulate_engine(numbers, groups, colors):
                 VOTE_DOMINANCE_RATIO,
             )
             signal_group = confidence_group >= vote_required and dominance_ok
+
+            # Signal cực mạnh mới mở lại phase sau âm
+            if (
+                not allow_new_phase_trade
+                and confidence_group >= vote_required + 1
+                and dominance_ratio >= 0.75
+            ):
+                allow_new_phase_trade = True
         else:
             vote_group = None
             confidence_group = 0
@@ -1096,7 +1110,10 @@ def simulate_engine(numbers, groups, colors):
             signal_group
             and (
                 phase_profit_group > 0
-                or len(phase_hits_group) == 0
+                or (
+                    len(phase_hits_group) == 0
+                    and allow_new_phase_trade
+                )
             )
         )
 
@@ -1190,6 +1207,10 @@ def simulate_engine(numbers, groups, colors):
                 keep_phase_left = 0
             else:
                 phase_consecutive_losses += 1
+
+                # Phase âm => khóa mở phase mới
+                if phase_profit_group < 0:
+                    allow_new_phase_trade = False
                 if KEEP_AFTER_LOSS_ROUNDS > 0:
                     last_phase_bet_was_loss = True
                     keep_phase_group = final_phase_group
@@ -1394,6 +1415,9 @@ def simulate_engine(numbers, groups, colors):
 
                 # phase mới không bị dính last trade của phase cũ
                 last_phase_trade_idx = -999999
+
+                # Chỉ cho mở phase mới nếu total không âm
+                allow_new_phase_trade = total_phase_profit_all >= 0
 
     hist = pd.DataFrame(history_rows)
     phase_summary_df = pd.DataFrame(phase_summary_rows)
