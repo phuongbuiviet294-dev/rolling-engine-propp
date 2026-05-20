@@ -80,12 +80,12 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = 0.5
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.5
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 2
+MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
@@ -1092,8 +1092,8 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >0
-            and phase_profit_group >0
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
