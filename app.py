@@ -82,7 +82,7 @@ TIMEOUT_RELOCK_ROUNDS = 40
 RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
-# Chỉ bet khi phase đang dương
+# Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
@@ -858,12 +858,13 @@ def make_next_preview(
     negative_phase_pretrade_relock_ready = (
         ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
-        and phase_profit_group < -1
+        and phase_profit_group < 0
     )
 
     phase_next_allowed = (
         signal_group
-        and phase_profit_group > 0
+        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
+        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
     )
 
     if (
@@ -1091,7 +1092,8 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and phase_profit_group > 0
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1129,7 +1131,7 @@ def simulate_engine(numbers, groups, colors):
         negative_phase_pretrade_relock = (
             ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group < -1
+            and phase_profit_group < 0
         )
 
         if negative_phase_pretrade_relock:
