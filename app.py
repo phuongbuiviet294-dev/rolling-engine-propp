@@ -1090,24 +1090,15 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # Stable phase filter
-        # Nếu phase hiện tại âm
-        # và recent pnl âm
-        # => chỉ trade khi phase hồi dương
+        # Original engine + wait after 2 consecutive losses
+        # Không filter phase
+        # Không trend filter
+        # Không recovery filter
 
-        if (
-            phase_profit_group < 0
-            and recent_phase_pnl < 0
-        ):
-
-            phase_trade_allowed = (
-                signal_group
-                and phase_profit_group > 0
-            )
-
-        else:
-
-            phase_trade_allowed = signal_group
+        phase_trade_allowed = (
+            signal_group
+            and phase_consecutive_losses < 2
+        )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
