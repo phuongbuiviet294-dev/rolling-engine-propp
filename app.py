@@ -857,11 +857,17 @@ def make_next_preview(
 
     negative_phase_pretrade_relock_ready = False
 
-    # Preview giống logic live
-    phase_next_allowed = (
-        signal_group
-        and phase_profit_group > -2
-    )
+    # Preview logic giống live
+    if phase_consecutive_losses >= 2:
+        phase_next_allowed = (
+            signal_group
+            and phase_profit_group > 0
+        )
+    else:
+        phase_next_allowed = (
+            signal_group
+            and phase_profit_group > -2
+        )
 
     if (
         ALLOW_TRADE_WHEN_PHASE_NEGATIVE
@@ -1086,11 +1092,19 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # Giữ logic gốc nhưng chặn phase âm sâu
-        phase_trade_allowed = (
-            signal_group
-            and phase_profit_group > -2
-        )
+        # Adaptive filter:
+        # nếu thua liên tiếp >=2 thì phase phải dương mới được trade tiếp
+
+        if phase_consecutive_losses >= 2:
+            phase_trade_allowed = (
+                signal_group
+                and phase_profit_group > 0
+            )
+        else:
+            phase_trade_allowed = (
+                signal_group
+                and phase_profit_group > -2
+            )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
