@@ -1137,7 +1137,7 @@ def simulate_engine(numbers, groups, colors):
 
         elif (
             phase_trade_allowed
-            and phase_profit_group > -2.0
+            and phase_profit_group >= 0.0
             and phase_consecutive_losses < 2
         ):
             last_phase_trade_idx = i
