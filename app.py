@@ -1089,10 +1089,7 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        phase_trade_allowed = (
-            signal_group
-            and phase_profit_group > 0
-        )
+        phase_trade_allowed = bool(signal_group)
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
