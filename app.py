@@ -1138,8 +1138,7 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "NEGATIVE_PHASE_PRETRADE_RELOCK"
             state = "AUTO_RELOCK_NEGATIVE_PHASE"
 
-        el
-        if (
+        elif (
             phase_trade_allowed
             and phase_profit_group > -2.0
             and phase_consecutive_losses < 2
