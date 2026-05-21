@@ -1162,8 +1162,24 @@ def simulate_engine(numbers, groups, colors):
 
             phase_pnl_total = phase_pnl_group + phase_pnl_color
 
-            phase_profit_group += phase_pnl_group
-            phase_profit_color += phase_pnl_color
+            
+        # UPDATE RESULT FIRST
+        phase_profit_group += phase_pnl_group
+        phase_profit_color += phase_pnl_color
+
+        # IMMEDIATE RELOCK ON NEGATIVE
+        if phase_profit_group < 0.0:
+            
+            relock_triggered_now = True
+            relock_reason_now = "NEGATIVE_PHASE"
+            
+            current_locked_window = None
+            
+            phase_profit_group = 0.0
+            phase_profit_color = 0.0
+            phase_trade_count = 0
+            phase_consecutive_losses = 0
+
             phase_profit_total += phase_pnl_total
 
             total_phase_profit_group += phase_pnl_group
