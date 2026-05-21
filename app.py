@@ -1178,13 +1178,13 @@ def simulate_engine(numbers, groups, colors):
 
             previous_phase_profit_group = phase_profit_group
 
-phase_profit_group += phase_pnl_group
+            phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
 
             total_previous_phase_profit_group = phase_profit_group
 
-phase_profit_group += phase_pnl_group
+            phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
             total_phase_profit_all += phase_pnl_total
 
