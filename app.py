@@ -1004,8 +1004,7 @@ def simulate_engine(numbers, groups, colors):
     last_signal_pnl_in_phase = 0.0
     last_signal_round_in_phase = None
 
-    # keep loss streak
-    phase_locked_after_losses = False
+    phase_consecutive_losses = 0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -1180,7 +1179,7 @@ def simulate_engine(numbers, groups, colors):
             last_signal_round_in_phase = round_no
 
             if phase_hit_group == 1:
-                # keep loss streak
+                phase_consecutive_losses = 0
                 last_phase_bet_was_loss = False
                 keep_phase_group = None
                 keep_phase_color = None
@@ -1381,7 +1380,7 @@ def simulate_engine(numbers, groups, colors):
                 phase_hits_group = []
                 phase_hits_color = []
 
-                # keep loss streak
+                phase_consecutive_losses = 0
                 keep_phase_group = None
                 keep_phase_color = None
                 keep_phase_left = 0
