@@ -1412,10 +1412,10 @@ def simulate_engine(numbers, groups, colors):
     )
 
     next_preview = make_next_preview(
-            numbers=numbers,
-            groups=groups,
-            colors=colors,
-            phase_consecutive_losses=phase_consecutive_losses,
+        numbers=numbers,
+        groups=groups,
+        colors=colors,
+        phase_consecutive_losses=phase_consecutive_losses,
         locked_windows=locked_windows,
         current_mode=current_mode,
         phase_start_round=phase_start_round,
