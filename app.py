@@ -991,7 +991,6 @@ def simulate_engine(numbers, groups, colors):
         return result
 
     phase_profit_group = 0.0
-    previous_phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
 
@@ -1091,11 +1090,15 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # Stable phase trend filter
-        # Nếu phase giảm mạnh >2
-        # thì phase phải dương mới trade
+        # Stable phase filter
+        # Nếu phase hiện tại âm
+        # và recent pnl âm
+        # => chỉ trade khi phase hồi dương
 
-        if phase_profit_group < previous_phase_profit_group - 2:
+        if (
+            phase_profit_group < 0
+            and recent_phase_pnl < 0
+        ):
 
             phase_trade_allowed = (
                 signal_group
@@ -1104,10 +1107,7 @@ def simulate_engine(numbers, groups, colors):
 
         else:
 
-            phase_trade_allowed = (
-                signal_group
-                and phase_profit_group > -2
-            )
+            phase_trade_allowed = signal_group
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1175,8 +1175,6 @@ def simulate_engine(numbers, groups, colors):
                 phase_pnl_color = 0.0
 
             phase_pnl_total = phase_pnl_group + phase_pnl_color
-
-            previous_phase_profit_group = phase_profit_group
 
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
