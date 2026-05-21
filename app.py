@@ -1,3 +1,5 @@
+PAUSE_AFTER_2_LOSSES_ROUNDS = 8
+
 
 import time
 import json
@@ -1005,6 +1007,8 @@ def simulate_engine(numbers, groups, colors):
     last_signal_round_in_phase = None
 
     phase_consecutive_losses = 0
+
+    phase_pause_rounds_left = 0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
