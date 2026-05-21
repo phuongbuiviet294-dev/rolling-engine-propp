@@ -1165,11 +1165,19 @@ def simulate_engine(numbers, groups, colors):
 
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
-            phase_profit_total += phase_pnl_total
+
+            phase_profit_total = (
+                phase_profit_group
+                + phase_profit_color
+            )
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
-            total_phase_profit_all += phase_pnl_total
+
+            total_phase_profit_all = (
+                total_phase_profit_group
+                + total_phase_profit_color
+            )
 
             phase_hits_group.append(phase_hit_group)
             if phase_hit_color is not None:
@@ -1239,12 +1247,12 @@ def simulate_engine(numbers, groups, colors):
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
             elif (
-                phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
-                and phase_profit_group > 0
+                phase_profit_group > 0
+                and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
             ):
                 relock_triggered_now = True
-                relock_reason_now = "PHASE_LOSS_STREAK_RELOCK_IN_PROFIT"
-                state = "AUTO_RELOCK_LOSS_STREAK_IN_PROFIT"
+                relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
+                state = "AUTO_RELOCK_LOSS_STREAK"
 
             elif len(phase_hits_group) >= MAX_PHASE_TRADES:
                 relock_triggered_now = True
@@ -1282,7 +1290,10 @@ def simulate_engine(numbers, groups, colors):
                 "vote_color": color_text(vote_color),
                 "confidence_color": confidence_color,
                 "signal_color": signal_color,
-                "PHASE_BET": phase_trade_allowed,
+                "PHASE_BET": (
+                    phase_trade_allowed
+                    and final_phase_group is not None
+                ),
                 "used_keep_phase": used_keep_phase,
                 "phase_bet_group": final_phase_group if phase_trade_allowed else None,
                 "phase_bet_color": color_text(final_phase_color) if phase_trade_allowed else "-",
@@ -1739,7 +1750,6 @@ st.subheader("Profit Curve")
 
 chart_cols = [
     "phase_profit_group",
-    "phase_profit_color",
     "phase_profit_total",
     "total_phase_profit_all",
 ]
