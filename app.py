@@ -1,7 +1,3 @@
-ENABLE_TRAILING_STOP = True
-TRAILING_ACTIVATE_PROFIT = 4.0
-TRAILING_STOP_GIVEBACK = 2.0
-
 
 import time
 import json
@@ -997,7 +993,6 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
-    phase_peak_profit = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1176,11 +1171,6 @@ def simulate_engine(numbers, groups, colors):
                 + phase_profit_color
             )
 
-            phase_peak_profit = max(
-                phase_peak_profit,
-                phase_profit_group
-            )
-
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
 
@@ -1263,19 +1253,6 @@ def simulate_engine(numbers, groups, colors):
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
-
-            elif (
-                ENABLE_TRAILING_STOP
-                and phase_peak_profit >= TRAILING_ACTIVATE_PROFIT
-                and phase_profit_group <= (
-                    phase_peak_profit - TRAILING_STOP_GIVEBACK
-                )
-            ):
-
-                relock_triggered_now = True
-                relock_reason_now = "PHASE_TRAILING_STOP"
-
-                state = "AUTO_RELOCK_TRAILING_STOP"
 
             elif len(phase_hits_group) >= MAX_PHASE_TRADES:
                 relock_triggered_now = True
