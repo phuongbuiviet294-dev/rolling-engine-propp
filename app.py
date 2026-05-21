@@ -753,6 +753,7 @@ def make_next_preview(
     numbers,
     groups,
     colors,
+    phase_consecutive_losses,
     locked_windows,
     current_mode,
     phase_start_round,
