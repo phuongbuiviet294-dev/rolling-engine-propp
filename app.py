@@ -1089,12 +1089,39 @@ def simulate_engine(numbers, groups, colors):
         phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
-        # FIX 2: guard tổng phase.
-        phase_trade_allowed = (
-            signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-        )
+        # =====================================================
+        # HARD NEGATIVE PHASE FILTER
+        # nếu phase đang âm sâu thì bỏ phase ngay
+        # =====================================================
+        if phase_profit_group <= -2.0:
+
+            relock_triggered_now = True
+            relock_reason_now = "NEGATIVE_PHASE_RELOCK"
+            state = "AUTO_RELOCK_NEGATIVE_PHASE"
+
+            phase_trade_allowed = False
+
+        # =====================================================
+        # LOSS STREAK RELOCK
+        # =====================================================
+        elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+
+            relock_triggered_now = True
+            relock_reason_now = "LOSS_STREAK_RELOCK"
+            state = "AUTO_RELOCK_LOSS_STREAK"
+
+            phase_trade_allowed = False
+
+        # =====================================================
+        # NORMAL TRADE
+        # =====================================================
+        else:
+
+            phase_trade_allowed = (
+                signal_group
+                and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+                and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1126,18 +1153,6 @@ def simulate_engine(numbers, groups, colors):
 
         relock_triggered_now = False
         relock_reason_now = None
-
-        # =====================================================
-        # HARD FIX:
-        # nếu phase đã thua liên tiếp >= limit
-        # thì RELOCK NGAY trước khi xét signal mới.
-        # Không cho phase cũ tiếp tục trade thêm.
-        # =====================================================
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
-            relock_triggered_now = True
-            relock_reason_now = "PRE_ROUND_LOSS_STREAK_RELOCK"
-            state = "AUTO_RELOCK_PRE_ROUND_LOSS_STREAK"
-            phase_trade_allowed = False
 
         # FIX 3: phase âm + signal mới => relock trước trade.
         negative_phase_pretrade_relock = (
@@ -1250,7 +1265,7 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif False and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
@@ -1326,6 +1341,12 @@ def simulate_engine(numbers, groups, colors):
         )
 
         if relock_triggered_now:
+
+            # HARD RESET BAD PHASE
+            phase_profit_group = 0.0
+            phase_profit_color = 0.0
+            phase_trade_count = 0
+            phase_consecutive_losses = 0
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
