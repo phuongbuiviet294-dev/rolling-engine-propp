@@ -1350,7 +1350,7 @@ def simulate_engine(numbers, groups, colors):
         )
 
         
-if relock_triggered_now:
+        if relock_triggered_now:
 
             # HARD RESET CURVE VALUE
             phase_profit_group = 0.0
