@@ -1089,15 +1089,20 @@ def simulate_engine(numbers, groups, colors):
         phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
+        # FIX 2: guard tổng phase.
         # =====================================================
-        # HARD NEGATIVE PHASE FILTER
-        # nếu phase đang âm sâu thì bỏ phase ngay
+        # HARD NEGATIVE PHASE RELOCK
         # =====================================================
         if phase_profit_group <= -2.0:
 
             relock_triggered_now = True
             relock_reason_now = "NEGATIVE_PHASE_RELOCK"
-            state = "AUTO_RELOCK_NEGATIVE_PHASE"
+
+            # reset phase hiện tại
+            phase_profit_group = 0.0
+            phase_profit_color = 0.0
+            phase_trade_count = 0
+            phase_consecutive_losses = 0
 
             phase_trade_allowed = False
 
@@ -1108,7 +1113,11 @@ def simulate_engine(numbers, groups, colors):
 
             relock_triggered_now = True
             relock_reason_now = "LOSS_STREAK_RELOCK"
-            state = "AUTO_RELOCK_LOSS_STREAK"
+
+            phase_profit_group = 0.0
+            phase_profit_color = 0.0
+            phase_trade_count = 0
+            phase_consecutive_losses = 0
 
             phase_trade_allowed = False
 
@@ -1340,13 +1349,13 @@ def simulate_engine(numbers, groups, colors):
             }
         )
 
-        if relock_triggered_now:
+        
+if relock_triggered_now:
 
-            # HARD RESET BAD PHASE
+            # HARD RESET CURVE VALUE
             phase_profit_group = 0.0
             phase_profit_color = 0.0
-            phase_trade_count = 0
-            phase_consecutive_losses = 0
+
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
