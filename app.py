@@ -1184,7 +1184,8 @@ def simulate_engine(numbers, groups, colors):
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
-            total_phase_profit_all += phase_pnl_total
+            if allow_trade_now and not relock_triggered_now:
+                total_phase_profit_all += realized_total_pnl
 
             phase_hits_group.append(phase_hit_group)
             if phase_hit_color is not None:
@@ -1274,7 +1275,10 @@ def simulate_engine(numbers, groups, colors):
             state = "AUTO_RELOCK_TIMEOUT"
 
         
+        
         if relock_triggered_now:
+            total_phase_profit_all = 0.0
+
             phase_profit_group = 0.0
             phase_profit_color = 0.0
 
@@ -1335,6 +1339,7 @@ def simulate_engine(numbers, groups, colors):
         )
 
         if relock_triggered_now:
+            total_phase_profit_all = 0.0
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
