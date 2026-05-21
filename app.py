@@ -1,5 +1,3 @@
-FORCE_RELOCK_AFTER_2_LOSSES = True
-
 
 import time
 import json
