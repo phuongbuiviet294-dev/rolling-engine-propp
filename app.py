@@ -1090,47 +1090,11 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # =====================================================
-        # HARD NEGATIVE PHASE RELOCK
-        # =====================================================
-        if phase_profit_group <= -2.0:
-
-            relock_triggered_now = True
-            relock_reason_now = "NEGATIVE_PHASE_RELOCK"
-
-            # reset phase hiện tại
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-            phase_trade_count = 0
-            phase_consecutive_losses = 0
-
-            phase_trade_allowed = False
-
-        # =====================================================
-        # LOSS STREAK RELOCK
-        # =====================================================
-        elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
-
-            relock_triggered_now = True
-            relock_reason_now = "LOSS_STREAK_RELOCK"
-
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-            phase_trade_count = 0
-            phase_consecutive_losses = 0
-
-            phase_trade_allowed = False
-
-        # =====================================================
-        # NORMAL TRADE
-        # =====================================================
-        else:
-
-            phase_trade_allowed = (
-                signal_group
-                and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-                and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-            )
+        phase_trade_allowed = (
+            signal_group
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1349,13 +1313,7 @@ def simulate_engine(numbers, groups, colors):
             }
         )
 
-        
         if relock_triggered_now:
-
-            # HARD RESET CURVE VALUE
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
