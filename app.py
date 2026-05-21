@@ -1184,7 +1184,12 @@ def simulate_engine(numbers, groups, colors):
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
-            if allow_trade_now and not relock_triggered_now:
+            if (
+                signal_group
+                and phase_trade_allowed
+                and not relock_triggered_now
+                and phase_profit_group >= 0.0
+            ):
                 total_phase_profit_all += realized_total_pnl
 
             phase_hits_group.append(phase_hit_group)
