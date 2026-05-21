@@ -992,6 +992,8 @@ def simulate_engine(numbers, groups, colors):
 
     phase_profit_group = 0.0
     phase_profit_color = 0.0
+    phase_consecutive_losses = 0
+    phase_locked_after_losses = False
     phase_profit_total = 0.0
 
     total_phase_profit_group = 0.0
@@ -1239,7 +1241,7 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            elif locals().get('phase_consecutive_losses', 0) >= PHASE_LOSS_STREAK_RELOCK:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
