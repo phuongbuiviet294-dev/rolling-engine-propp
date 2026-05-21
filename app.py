@@ -85,7 +85,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 18
 VOTE_DOMINANCE_RATIO = 0.60
 
