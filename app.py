@@ -991,7 +991,7 @@ def simulate_engine(numbers, groups, colors):
         return result
 
     phase_profit_group = 0.0
-previous_phase_profit_group = 0.0
+    previous_phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
 
