@@ -1,7 +1,3 @@
-PHASE_TRAILING_STOP = 2.0
-PHASE_PROFIT_LOCK_THRESHOLD = 4.0
-
-
 import time
 import json
 import os
