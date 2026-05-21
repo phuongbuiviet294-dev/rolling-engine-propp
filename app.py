@@ -85,7 +85,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
@@ -115,10 +115,10 @@ MIN_VALIDATE_TRADES = 1
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 30
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 5
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
