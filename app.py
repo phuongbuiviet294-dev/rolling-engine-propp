@@ -1390,7 +1390,6 @@ def simulate_engine(numbers, groups, colors):
 
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
-                phase_profit_total = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
