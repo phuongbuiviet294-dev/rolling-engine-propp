@@ -1090,17 +1090,11 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # HARD RULE:
-        # nếu đã thua liên tiếp >= PHASE_LOSS_STREAK_RELOCK
-        # thì KHÔNG được bet tiếp trong phase hiện tại.
-        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
-            phase_trade_allowed = False
-        else:
-            phase_trade_allowed = (
-                signal_group
-                and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-                and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-            )
+        phase_trade_allowed = (
+            signal_group
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1132,6 +1126,18 @@ def simulate_engine(numbers, groups, colors):
 
         relock_triggered_now = False
         relock_reason_now = None
+
+        # =====================================================
+        # HARD FIX:
+        # nếu phase đã thua liên tiếp >= limit
+        # thì RELOCK NGAY trước khi xét signal mới.
+        # Không cho phase cũ tiếp tục trade thêm.
+        # =====================================================
+        if phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            relock_triggered_now = True
+            relock_reason_now = "PRE_ROUND_LOSS_STREAK_RELOCK"
+            state = "AUTO_RELOCK_PRE_ROUND_LOSS_STREAK"
+            phase_trade_allowed = False
 
         # FIX 3: phase âm + signal mới => relock trước trade.
         negative_phase_pretrade_relock = (
@@ -1214,8 +1220,6 @@ def simulate_engine(numbers, groups, colors):
                 state = "WAIT_VOTE_DOMINANCE_WEAK"
             elif keep_active_before and signal_group and vote_group != keep_phase_group:
                 state = "WAIT_KEEP_SIGNAL_MISMATCH"
-            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
-                state = "WAIT_LOSS_STREAK_RELOCK"
             elif signal_group and phase_profit_group < PHASE_MIN_TOTAL_PNL_TO_TRADE:
                 state = "WAIT_PHASE_TOTAL_PNL_TOO_LOW"
             elif signal_group and recent_phase_pnl < PHASE_MIN_RECENT_PNL_TO_TRADE:
@@ -1246,7 +1250,7 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            elif False and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
