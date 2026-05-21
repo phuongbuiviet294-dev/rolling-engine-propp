@@ -1,3 +1,4 @@
+
 import time
 import json
 import os
@@ -81,7 +82,7 @@ TIMEOUT_RELOCK_ROUNDS = 40
 RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
-# Chỉ bet khi phase đang dương
+# Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
@@ -857,12 +858,13 @@ def make_next_preview(
     negative_phase_pretrade_relock_ready = (
         ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
-        and phase_profit_group < -1
+        and phase_profit_group < 0
     )
 
     phase_next_allowed = (
         signal_group
-        and phase_profit_group > 0
+        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
+        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
     )
 
     if (
@@ -1003,7 +1005,6 @@ def simulate_engine(numbers, groups, colors):
     last_signal_round_in_phase = None
 
     phase_consecutive_losses = 0
-    phase_peak_profit = 0.0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -1089,7 +1090,11 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        phase_trade_allowed = bool(signal_group)
+        phase_trade_allowed = (
+            signal_group
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1126,7 +1131,7 @@ def simulate_engine(numbers, groups, colors):
         negative_phase_pretrade_relock = (
             ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group < -1
+            and phase_profit_group < 0
         )
 
         if negative_phase_pretrade_relock:
@@ -1135,10 +1140,7 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "NEGATIVE_PHASE_PRETRADE_RELOCK"
             state = "AUTO_RELOCK_NEGATIVE_PHASE"
 
-        elif (
-            phase_trade_allowed
-            and phase_profit_group >= 0.0
-        ):
+        elif phase_trade_allowed:
             last_phase_trade_idx = i
 
             if groups[i] == final_phase_group:
@@ -1161,23 +1163,8 @@ def simulate_engine(numbers, groups, colors):
 
             phase_pnl_total = phase_pnl_group + phase_pnl_color
 
-            
-        # UPDATE RESULT FIRST
-        phase_profit_group += phase_pnl_group
-        phase_profit_color += phase_pnl_color
-
-        # IMMEDIATE RELOCK ON NEGATIVE
-        if phase_profit_group < 0.0:
-            
-            relock_triggered_now = True
-            relock_reason_now = "NEGATIVE_PHASE"
-            
-            current_locked_window = None
-            
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-            phase_trade_count = 0
-            phase_consecutive_losses = 0
+            phase_profit_group += phase_pnl_group
+            phase_profit_color += phase_pnl_color
 
             phase_profit_total = (
                 phase_profit_group
@@ -1186,6 +1173,7 @@ def simulate_engine(numbers, groups, colors):
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
+
             total_phase_profit_all = (
                 total_phase_profit_group
                 + total_phase_profit_color
@@ -1263,8 +1251,8 @@ def simulate_engine(numbers, groups, colors):
                 and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
             ):
                 relock_triggered_now = True
-                relock_reason_now = "PROFIT_PHASE_LOSS_STREAK_RELOCK"
-                state = "AUTO_RELOCK_PROFIT_LOSS_STREAK"
+                relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
+                state = "AUTO_RELOCK_LOSS_STREAK"
 
             elif len(phase_hits_group) >= MAX_PHASE_TRADES:
                 relock_triggered_now = True
@@ -1281,15 +1269,7 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "TIMEOUT_RELOCK_PHASE_NOT_POSITIVE"
             state = "AUTO_RELOCK_TIMEOUT"
 
-        
-        
-        if relock_triggered_now:
-
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-
         history_rows.append(
-
             {
                 "phase": phase_index,
                 "round": round_no,
