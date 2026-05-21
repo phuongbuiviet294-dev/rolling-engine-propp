@@ -118,7 +118,7 @@ VALIDATE_MIN_DRAWDOWN = -1.0
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 5
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
