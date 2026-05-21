@@ -1006,7 +1006,6 @@ def simulate_engine(numbers, groups, colors):
     last_signal_pnl_in_phase = 0.0
     last_signal_round_in_phase = None
 
-    # keep loss streak
     phase_locked_after_losses = False
     keep_phase_group = None
     keep_phase_color = None
