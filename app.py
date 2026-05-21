@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 18
-VOTE_DOMINANCE_RATIO = 0.50
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -118,7 +118,7 @@ VALIDATE_MIN_DRAWDOWN = -1.0
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 5
+SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
@@ -186,7 +186,7 @@ def send_signal_once(signal_name, current_round, msg):
 # =========================================================
 # LOAD DATA
 # =========================================================
-@st.cache_data(ttl=100, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
