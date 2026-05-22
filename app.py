@@ -107,7 +107,7 @@ MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [16,24]
+VALIDATE_RATIO_LIST = [0.30, 0.45]
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 2
 
@@ -115,7 +115,10 @@ MIN_VALIDATE_TRADES = 2
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 26
+AUTO_SCAN_RELOCK_LEN = True
+
+RELOCK_SCAN_LEN = 55
+RELOCK_SCAN_LEN_LIST = [26, 40, 55, 80]
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 5
@@ -1366,7 +1369,15 @@ def simulate_engine(numbers, groups, colors):
             )
 
             scan_end = i
-            scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
+            current_relock_scan_len = current_mode.get(
+                    "relock_scan_len",
+                    RELOCK_SCAN_LEN
+                )
+
+                scan_start = max(
+                    LOCK_ROUND_START,
+                    scan_end - current_relock_scan_len + 1 - RELOCK_BUFFER
+                )
 
             (
                 new_selected_lock_round,
