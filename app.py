@@ -107,7 +107,7 @@ MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_RATIO_LIST = [0.30, 0.45]
+
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 2
 
@@ -592,6 +592,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     for relock_scan_len in relock_scan_values:
 
+        # validate dynamic theo regime
         if AUTO_SCAN_VALIDATE_LEN:
             validate_values = sorted(
                 list(
@@ -1369,15 +1370,7 @@ def simulate_engine(numbers, groups, colors):
             )
 
             scan_end = i
-            current_relock_scan_len = current_mode.get(
-                    "relock_scan_len",
-                    RELOCK_SCAN_LEN
-                )
-
-                scan_start = max(
-                    LOCK_ROUND_START,
-                    scan_end - current_relock_scan_len + 1 - RELOCK_BUFFER
-                )
+            scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
 
             (
                 new_selected_lock_round,
