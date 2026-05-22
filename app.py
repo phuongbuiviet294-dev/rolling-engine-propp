@@ -116,6 +116,7 @@ MIN_VALIDATE_TRADES = 1
 VALIDATE_MIN_DRAWDOWN = -1.0
 
 RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN_LIST = [18, 26]
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
@@ -580,11 +581,20 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     round_eval_rows = []
 
-    validate_values = VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else [VALIDATE_LEN]
+    relock_scan_values = RELOCK_SCAN_LEN_LIST
 
-    for validate_len in validate_values:
-        if validate_len < 0:
-            continue
+    validate_values = (
+        VALIDATE_LEN_LIST
+        if AUTO_SCAN_VALIDATE_LEN
+        else [VALIDATE_LEN]
+    )
+
+    for relock_scan_len in relock_scan_values:
+
+        for validate_len in validate_values:
+
+            if validate_len < 0:
+                continue
 
         for r in range(scan_start, effective_scan_end + 1):
             if r < validate_len + MIN_TRAIN_LEN:
@@ -594,7 +604,14 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             validate_start = train_end
             validate_end = r
 
-            train_groups = all_groups[:train_end]
+            train_start = max(
+                0,
+                train_end - relock_scan_len
+            )
+
+            train_groups = all_groups[
+                train_start:train_end
+            ]
             validate_groups = all_groups[:validate_end]
 
             local_best_score = -999999.0
@@ -671,6 +688,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     mode_with_params = dict(mode)
                     mode_with_params["spacing"] = spacing
                     mode_with_params["validate_len"] = validate_len
+                    mode_with_params["relock_scan_len"] = relock_scan_len
 
                     if final_score > local_fallback_score:
                         local_fallback_score = final_score
@@ -1345,7 +1363,15 @@ def simulate_engine(numbers, groups, colors):
             )
 
             scan_end = i
-            scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
+            current_relock_scan_len = current_mode.get(
+                "relock_scan_len",
+                RELOCK_SCAN_LEN
+            )
+
+            scan_start = max(
+                LOCK_ROUND_START,
+                scan_end - current_relock_scan_len + 1 - RELOCK_BUFFER
+            )
 
             (
                 new_selected_lock_round,
@@ -1691,6 +1717,13 @@ c4.metric("Relock Count", relock_count)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Selected Window Spacing:", selected_mode.get("spacing", MIN_WINDOW_SPACING) if selected_mode else "-")
 st.write("Selected Validate Len:", selected_mode.get("validate_len", VALIDATE_LEN) if selected_mode else "-")
+st.write(
+    "Selected Relock Scan Len:",
+    selected_mode.get(
+        "relock_scan_len",
+        RELOCK_SCAN_LEN
+    ) if selected_mode else "-"
+)
 st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
 st.write("Locked Windows:", locked_windows)
