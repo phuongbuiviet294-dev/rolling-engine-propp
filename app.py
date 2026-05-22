@@ -85,7 +85,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 5
+MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
@@ -107,21 +107,18 @@ MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_RATIO_LIST = [0.2, 0.3]
+VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 2
+MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-AUTO_SCAN_RELOCK_LEN = True
-
-RELOCK_SCAN_LEN = 8
-RELOCK_SCAN_LEN_LIST = [8,12,16,20,24,30]
+RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 5
+SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
@@ -583,31 +580,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
 
     round_eval_rows = []
 
-    if AUTO_SCAN_RELOCK_LEN:
-        relock_scan_values = RELOCK_SCAN_LEN_LIST
-    else:
-        relock_scan_values = [RELOCK_SCAN_LEN]
+    validate_values = VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else [VALIDATE_LEN]
 
-    for relock_scan_len in relock_scan_values:
-
-        if AUTO_SCAN_VALIDATE_LEN:
-            validate_values = sorted(
-                list(
-                    set(
-                        [
-                            max(8, int(relock_scan_len * r))
-                            for r in VALIDATE_RATIO_LIST
-                        ]
-                    )
-                )
-            )
-        else:
-            validate_values = [VALIDATE_LEN]
-
-        for validate_len in validate_values:
-
-            if validate_len < 0:
-                continue
+    for validate_len in validate_values:
+        if validate_len < 0:
+            continue
 
         for r in range(scan_start, effective_scan_end + 1):
             if r < validate_len + MIN_TRAIN_LEN:
@@ -617,12 +594,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
             validate_start = train_end
             validate_end = r
 
-            train_start = max(
-                0,
-                train_end - relock_scan_len
-            )
-
-            train_groups = all_groups[train_start:train_end]
+            train_groups = all_groups[:train_end]
             validate_groups = all_groups[:validate_end]
 
             local_best_score = -999999.0
@@ -699,7 +671,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     mode_with_params = dict(mode)
                     mode_with_params["spacing"] = spacing
                     mode_with_params["validate_len"] = validate_len
-                    mode_with_params["relock_scan_len"] = relock_scan_len
 
                     if final_score > local_fallback_score:
                         local_fallback_score = final_score
@@ -1374,15 +1345,7 @@ def simulate_engine(numbers, groups, colors):
             )
 
             scan_end = i
-            current_relock_scan_len = current_mode.get(
-                "relock_scan_len",
-                RELOCK_SCAN_LEN
-            )
-
-            scan_start = max(
-                LOCK_ROUND_START,
-                scan_end - current_relock_scan_len + 1 - RELOCK_BUFFER
-            )
+            scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
 
             (
                 new_selected_lock_round,
@@ -1728,10 +1691,7 @@ c4.metric("Relock Count", relock_count)
 st.write("Selected Mode:", selected_mode["name"] if selected_mode else "-")
 st.write("Selected Window Spacing:", selected_mode.get("spacing", MIN_WINDOW_SPACING) if selected_mode else "-")
 st.write("Selected Validate Len:", selected_mode.get("validate_len", VALIDATE_LEN) if selected_mode else "-")
-st.write(
-    "Auto Scan Validate Ratio:",
-    VALIDATE_RATIO_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN
-)
+st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
 st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
