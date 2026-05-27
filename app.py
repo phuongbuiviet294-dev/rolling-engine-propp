@@ -1074,7 +1074,8 @@ def simulate_engine(numbers, groups, colors):
         )
 
         phase_recovering = (
-            phase_profit_total > phase_profit_ma
+            len(phase_hits_group) < 6
+            or phase_profit_total > phase_profit_ma
         )
 
         prev_signal_pnl_in_phase = last_signal_pnl_in_phase
@@ -1106,7 +1107,6 @@ def simulate_engine(numbers, groups, colors):
 
         phase_trade_allowed = (
             signal_group
-            and phase_profit_total >= 0
             and phase_recovering
         )
 
