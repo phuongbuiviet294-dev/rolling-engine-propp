@@ -945,6 +945,10 @@ def make_next_preview(
 
 
 def simulate_engine(numbers, groups, colors):
+
+    # FIX runtime scope
+    phase_profit_history = []
+
     result = {
         "hist": pd.DataFrame(),
         "phase_profit_group": 0.0,
