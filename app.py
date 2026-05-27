@@ -1,3 +1,6 @@
+PHASE_TRAILING_STOP = 2.0
+PHASE_PROFIT_LOCK_THRESHOLD = 4.0
+
 
 import time
 import json
@@ -63,8 +66,8 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_WIN = 18
+PHASE_STOP_LOSS = -6.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -74,7 +77,7 @@ ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
 ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
 NEGATIVE_PHASE_EXTRA_VOTE = 1
-NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
+NEGATIVE_PHASE_DOMINANCE_RATIO = 0.64
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
@@ -82,30 +85,31 @@ TIMEOUT_RELOCK_ROUNDS = 40
 RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
-# Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
+# Chỉ bet khi phase đang dương
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 5
+MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 8
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.66
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
-KEEP_AFTER_LOSS_ROUNDS = 1
+KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 1
 
-MIN_TRADES_PER_WINDOW = 26
+MIN_TRADES_PER_WINDOW = 28
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
+MIN_WINDOW_SCORE = 4.0
 
-VALIDATE_LEN = 12
+VALIDATE_LEN = 48
 AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
@@ -115,7 +119,7 @@ MIN_VALIDATE_TRADES = 1
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 42
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
@@ -858,13 +862,12 @@ def make_next_preview(
     negative_phase_pretrade_relock_ready = (
         ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
-        and phase_profit_group < 0
+        and phase_profit_group < -1
     )
 
     phase_next_allowed = (
         signal_group
-        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
-        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+        and phase_profit_group > 0
     )
 
     if (
@@ -1005,6 +1008,7 @@ def simulate_engine(numbers, groups, colors):
     last_signal_round_in_phase = None
 
     phase_consecutive_losses = 0
+    phase_peak_profit = 0.0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -1090,11 +1094,7 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        phase_trade_allowed = (
-            signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-        )
+        phase_trade_allowed = bool(signal_group)
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1103,10 +1103,14 @@ def simulate_engine(numbers, groups, colors):
             and signal_group
             and phase_profit_group < 0
         ):
-            phase_trade_allowed = (
-                confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
-                and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
-            )
+            
+phase_trade_allowed = (
+    signal_group
+)
+
+if locked_window_score < MIN_WINDOW_SCORE:
+    phase_trade_allowed = False
+
 
         if phase_trade_allowed and phase_warmup_block:
             phase_trade_allowed = False
@@ -1131,7 +1135,7 @@ def simulate_engine(numbers, groups, colors):
         negative_phase_pretrade_relock = (
             ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group < 0
+            and phase_profit_group < -1
         )
 
         if negative_phase_pretrade_relock:
@@ -1140,7 +1144,10 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "NEGATIVE_PHASE_PRETRADE_RELOCK"
             state = "AUTO_RELOCK_NEGATIVE_PHASE"
 
-        elif phase_trade_allowed:
+        elif (
+            phase_trade_allowed
+            and phase_profit_group >= 0.0
+        ):
             last_phase_trade_idx = i
 
             if groups[i] == final_phase_group:
@@ -1163,13 +1170,35 @@ def simulate_engine(numbers, groups, colors):
 
             phase_pnl_total = phase_pnl_group + phase_pnl_color
 
-            phase_profit_group += phase_pnl_group
-            phase_profit_color += phase_pnl_color
-            phase_profit_total += phase_pnl_total
+            
+        # UPDATE RESULT FIRST
+        phase_profit_group += phase_pnl_group
+        phase_profit_color += phase_pnl_color
+
+        # IMMEDIATE RELOCK ON NEGATIVE
+        if phase_profit_group < 0.0:
+            
+            relock_triggered_now = True
+            relock_reason_now = "NEGATIVE_PHASE"
+            
+            current_locked_window = None
+            
+            phase_profit_group = 0.0
+            phase_profit_color = 0.0
+            phase_trade_count = 0
+            phase_consecutive_losses = 0
+
+            phase_profit_total = (
+                phase_profit_group
+                + phase_profit_color
+            )
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
-            total_phase_profit_all += phase_pnl_total
+            total_phase_profit_all = (
+                total_phase_profit_group
+                + total_phase_profit_color
+            )
 
             phase_hits_group.append(phase_hit_group)
             if phase_hit_color is not None:
@@ -1233,15 +1262,18 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
 
-            elif phase_profit_group <= PHASE_STOP_LOSS:
+            elif phase_profit_total <= PHASE_STOP_LOSS:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            elif (
+                phase_profit_group > 0
+                and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
+            ):
                 relock_triggered_now = True
-                relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
-                state = "AUTO_RELOCK_LOSS_STREAK"
+                relock_reason_now = "PROFIT_PHASE_LOSS_STREAK_RELOCK"
+                state = "AUTO_RELOCK_PROFIT_LOSS_STREAK"
 
             elif len(phase_hits_group) >= MAX_PHASE_TRADES:
                 relock_triggered_now = True
@@ -1258,7 +1290,15 @@ def simulate_engine(numbers, groups, colors):
             relock_reason_now = "TIMEOUT_RELOCK_PHASE_NOT_POSITIVE"
             state = "AUTO_RELOCK_TIMEOUT"
 
+        
+        
+        if relock_triggered_now:
+
+            phase_profit_group = 0.0
+            phase_profit_color = 0.0
+
         history_rows.append(
+
             {
                 "phase": phase_index,
                 "round": round_no,
@@ -1279,7 +1319,10 @@ def simulate_engine(numbers, groups, colors):
                 "vote_color": color_text(vote_color),
                 "confidence_color": confidence_color,
                 "signal_color": signal_color,
-                "PHASE_BET": phase_trade_allowed,
+                "PHASE_BET": (
+                    phase_trade_allowed
+                    and final_phase_group is not None
+                ),
                 "used_keep_phase": used_keep_phase,
                 "phase_bet_group": final_phase_group if phase_trade_allowed else None,
                 "phase_bet_color": color_text(final_phase_color) if phase_trade_allowed else "-",
@@ -1736,7 +1779,6 @@ st.subheader("Profit Curve")
 
 chart_cols = [
     "phase_profit_group",
-    "phase_profit_color",
     "phase_profit_total",
     "total_phase_profit_all",
 ]
