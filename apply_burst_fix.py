@@ -84,5 +84,13 @@ output = Path("app_fixed_burst.py")
 
 output.write_text(text, encoding="utf-8")
 
+import os
+
+print("START PATCH")
+
+os.system("cp app.py app_fixed_burst.py")
+
+print("DONE")
+
 print("DONE")
 print("Created:", output.resolve())
