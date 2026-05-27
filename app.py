@@ -102,12 +102,12 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 10
+WINDOW_SPACING_MAX = 3
+MAX_CANDIDATE_WINDOWS = 6
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [16,24]
+VALIDATE_LEN_LIST = [18]
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 1
 
@@ -1095,11 +1095,38 @@ def simulate_engine(numbers, groups, colors):
             phase_peak_profit - phase_profit_group
         ) <= 2.0
 
+        phase_profit_history.append(
+            phase_profit_group
+        )
+
+        phase_profit_history = (
+            phase_profit_history[-10:]
+        )
+
+        phase_trend_confirm = False
+
+        if (
+            len(phase_profit_history)
+            >= PHASE_TREND_CONFIRM_ROUNDS
+        ):
+
+            last_vals = phase_profit_history[
+                -PHASE_TREND_CONFIRM_ROUNDS:
+            ]
+
+            phase_trend_confirm = all(
+                x <= y
+                for x, y in zip(
+                    last_vals,
+                    last_vals[1:]
+                )
+            )
+
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-            and phase_recovery_ok
+            and phase_trend_confirm
+            and phase_profit_group
+                >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
