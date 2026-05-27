@@ -90,7 +90,7 @@ MAX_PHASE_TRADES = 50
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
-KEEP_AFTER_LOSS_ROUNDS = 0
+KEEP_AFTER_LOSS_ROUNDS = 1
 
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
@@ -1140,31 +1140,9 @@ def simulate_engine(numbers, groups, colors):
         ):
             phase_trade_allowed = False
 
-        # LOSS STREAK RELOCK
-        if (
-            phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
-            and phase_profit_group < -2
-        ):
-
-            relock_triggered_now = True
-            relock_reason_now = "LOSS_STREAK_RELOCK"
-
-            phase_trade_allowed = False
-
-        # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
-        if (
-            ALLOW_TRADE_WHEN_PHASE_NEGATIVE
-            and not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-            and signal_group
-            and phase_profit_group < 0
-        ):
-            phase_trade_allowed = (
-                confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
-                and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
-            )
-
         if phase_trade_allowed and phase_warmup_block:
-            phase_trade_allowed = False
+            if confidence_group < vote_required + 1:
+                phase_trade_allowed = False
 
         if phase_trade_allowed and max_phase_trades_block:
             phase_trade_allowed = False
@@ -1182,12 +1160,8 @@ def simulate_engine(numbers, groups, colors):
         relock_triggered_now = False
         relock_reason_now = None
 
-        # FIX 3: phase âm + signal mới => relock trước trade.
-        negative_phase_pretrade_relock = (
-            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
-            and signal_group
-            and phase_profit_group < 0
-        )
+        # SMART ENGINE: disable old negative relock
+        negative_phase_pretrade_relock = False
 
         if negative_phase_pretrade_relock:
             phase_trade_allowed = False
@@ -1368,13 +1342,7 @@ def simulate_engine(numbers, groups, colors):
             }
         )
 
-        
         if relock_triggered_now:
-
-            # HARD RESET CURVE VALUE
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
