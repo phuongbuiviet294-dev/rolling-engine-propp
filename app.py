@@ -103,7 +103,7 @@ MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 6
+MAX_CANDIDATE_WINDOWS = 5
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
@@ -947,8 +947,7 @@ def make_next_preview(
 def simulate_engine(numbers, groups, colors):
 
     # FIX runtime scope
-    phase_profit_history = []
-    PHASE_TREND_CONFIRM_ROUNDS = 3
+    
 
     result = {
         "hist": pd.DataFrame(),
@@ -1011,6 +1010,7 @@ def simulate_engine(numbers, groups, colors):
     last_signal_round_in_phase = None
 
     phase_consecutive_losses = 0
+    phase_last_min_profit = 0.0
     phase_peak_profit = 0.0
     keep_phase_group = None
     keep_phase_color = None
@@ -1101,39 +1101,7 @@ def simulate_engine(numbers, groups, colors):
             phase_peak_profit - phase_profit_group
         ) <= 2.0
 
-        phase_profit_history.append(
-            phase_profit_group
-        )
-
-        phase_profit_history = (
-            phase_profit_history[-10:]
-        )
-
-        phase_trend_confirm = False
-
-        if (
-            len(phase_profit_history)
-            >= PHASE_TREND_CONFIRM_ROUNDS
-        ):
-
-            last_vals = phase_profit_history[
-                -PHASE_TREND_CONFIRM_ROUNDS:
-            ]
-
-            phase_trend_confirm = all(
-                x <= y
-                for x, y in zip(
-                    last_vals,
-                    last_vals[1:]
-                )
-            )
-
-        phase_trade_allowed = (
-            signal_group
-            and phase_trend_confirm
-            and phase_profit_group
-                >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-        )
+        
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1208,6 +1176,11 @@ def simulate_engine(numbers, groups, colors):
 
             phase_peak_profit = max(
                 phase_peak_profit,
+                phase_profit_group
+            )
+
+            phase_last_min_profit = min(
+                phase_last_min_profit,
                 phase_profit_group
             )
 
