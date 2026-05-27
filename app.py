@@ -948,6 +948,7 @@ def simulate_engine(numbers, groups, colors):
 
     # FIX runtime scope
     phase_profit_history = []
+    PHASE_TREND_CONFIRM_ROUNDS = 3
 
     result = {
         "hist": pd.DataFrame(),
