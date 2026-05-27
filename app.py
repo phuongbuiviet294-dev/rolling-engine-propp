@@ -1115,7 +1115,19 @@ def simulate_engine(numbers, groups, colors):
                 and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
             )
 
+        
+        phase_trade_allowed = (
+            signal_group
+            and (
+                phase_profit_group
+                >= (
+                    phase_last_min_profit + 1.5
+                )
+            )
+        )
+
         if phase_trade_allowed and phase_warmup_block:
+
             phase_trade_allowed = False
 
         if phase_trade_allowed and max_phase_trades_block:
