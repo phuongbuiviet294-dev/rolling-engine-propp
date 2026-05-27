@@ -64,29 +64,29 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 12
-PHASE_STOP_LOSS = -8.0
-PHASE_LOSS_STREAK_RELOCK = 5
+PHASE_STOP_LOSS = -5.0
+PHASE_LOSS_STREAK_RELOCK = 4
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
-ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = True
 NEGATIVE_PHASE_EXTRA_VOTE = 1
-NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
+NEGATIVE_PHASE_DOMINANCE_RATIO = 0.72
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = -999
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = -4.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 24
+MIN_PHASE_AGE_TO_TRADE = 1
+MAX_PHASE_TRADES = 30
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -113,7 +113,7 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -5.0
 
 RELOCK_SCAN_LEN = 12
 RELOCK_BUFFER = 0
@@ -1089,48 +1089,63 @@ def simulate_engine(numbers, groups, colors):
         phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
-        # FIX 2: guard tổng phase.
         # =====================================================
-        # HARD NEGATIVE PHASE RELOCK
+        # FINAL COMPLETE STABLE ENGINE
         # =====================================================
-        if phase_profit_group <= -2.0:
 
-            relock_triggered_now = True
-            relock_reason_now = "NEGATIVE_PHASE_RELOCK"
+        relock_triggered_now = False
+        relock_reason_now = None
 
-            # reset phase hiện tại
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-            phase_trade_count = 0
-            phase_consecutive_losses = 0
+        phase_trade_allowed = False
 
+        strong_signal = (
+            signal_group
+            and confidence_group >= vote_required
+            and dominance_ok
+        )
+
+        if "last_vote_group" not in st.session_state:
+            st.session_state.last_vote_group = None
+
+        if "last_signal_ok" not in st.session_state:
+            st.session_state.last_signal_ok = False
+
+        momentum_confirm = (
+            strong_signal
+            and st.session_state.last_signal_ok
+            and st.session_state.last_vote_group == vote_group
+        )
+
+        if strong_signal:
+            st.session_state.last_vote_group = vote_group
+            st.session_state.last_signal_ok = True
+        else:
+            st.session_state.last_signal_ok = False
+
+        if momentum_confirm:
+            phase_trade_allowed = True
+
+        # hot phase continue
+        if phase_profit_group > 0 and strong_signal:
+            phase_trade_allowed = True
+
+        # deep negative wait
+        if (
+            phase_profit_group <= -4.0
+            and phase_consecutive_losses >= 3
+        ):
             phase_trade_allowed = False
 
-        # =====================================================
-        # LOSS STREAK RELOCK
-        # =====================================================
-        elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+        # loss streak relock
+        if (
+            phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
+            and phase_profit_group < 0
+        ):
 
             relock_triggered_now = True
             relock_reason_now = "LOSS_STREAK_RELOCK"
 
-            phase_profit_group = 0.0
-            phase_profit_color = 0.0
-            phase_trade_count = 0
-            phase_consecutive_losses = 0
-
             phase_trade_allowed = False
-
-        # =====================================================
-        # NORMAL TRADE
-        # =====================================================
-        else:
-
-            phase_trade_allowed = (
-                signal_group
-                and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-                and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-            )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
