@@ -65,7 +65,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 12
 PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 4
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -80,10 +80,10 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = 0.5
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.5
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 6
@@ -1594,7 +1594,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     )
     send_signal_once("READY_PHASE_FIXED", current_round, ready_msg)
 
-st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT v2")
+st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT FINAL")
 
 st.caption(
     "FIX: recent PNL theo trades | phase âm thì wait/relock | stop-win phase | validate drawdown âm | next preview theo live-state."
