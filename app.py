@@ -63,12 +63,12 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_WIN = 20
+PHASE_STOP_LOSS = -8.0
+PHASE_LOSS_STREAK_RELOCK = 999
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
@@ -79,30 +79,30 @@ NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
-RECENT_PHASE_CHECK = 5
+RECENT_PHASE_CHECK = 6
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 5
-MAX_PHASE_TRADES = 8
-VOTE_DOMINANCE_RATIO = 0.60
+MIN_PHASE_AGE_TO_TRADE = 2
+MAX_PHASE_TRADES = 28
+VOTE_DOMINANCE_RATIO = 0.58
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
-KEEP_AFTER_LOSS_ROUNDS = 0
+KEEP_AFTER_LOSS_ROUNDS = 1
 
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 1
 
-MIN_TRADES_PER_WINDOW = 26
-RECENT_WINDOW_SIZE = 33
+MIN_TRADES_PER_WINDOW = 18
+RECENT_WINDOW_SIZE = 40
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
+WINDOW_SPACING_MAX = 4
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
@@ -113,9 +113,9 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -4.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 12
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
@@ -1090,10 +1090,11 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
+        # phase âm -> WAIT
+        # phase dương -> TRADE
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and phase_profit_total >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1233,12 +1234,15 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
 
-            elif phase_profit_group <= PHASE_STOP_LOSS:
+            elif phase_profit_total <= PHASE_STOP_LOSS:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            elif (
+                phase_consecutive_losses >= 6
+                and phase_profit_total < -4
+            ):
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
