@@ -1010,7 +1010,6 @@ def simulate_engine(numbers, groups, colors):
     keep_phase_left = 0
     last_phase_bet_was_loss = False
     last_phase_trade_idx = -999999
-
     max_phase_profit = 0.0
 
     phase_index = 1
@@ -1092,7 +1091,7 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # =====================================================
-        # FINAL AGGRESSIVE BURST ENGINE
+        # FINAL SMART AGGRESSIVE BURST ENGINE
         # =====================================================
 
         strong_signal = (
@@ -1111,7 +1110,7 @@ def simulate_engine(numbers, groups, colors):
         if phase_profit_group > max_phase_profit:
             max_phase_profit = phase_profit_group
 
-        # TRAILING PROFIT LOCK
+        # SMART TRAILING LOCK
         if phase_profit_group >= 10:
 
             drawdown_from_peak = (
@@ -1119,10 +1118,18 @@ def simulate_engine(numbers, groups, colors):
                 - phase_profit_group
             )
 
-            if drawdown_from_peak >= 4:
+            weak_momentum = (
+                confidence_group < vote_required
+                or not dominance_ok
+            )
+
+            if (
+                drawdown_from_peak >= 6
+                and weak_momentum
+            ):
 
                 relock_triggered_now = True
-                relock_reason_now = "TRAILING_DD_LOCK"
+                relock_reason_now = "SMART_TRAILING_LOCK"
 
                 phase_trade_allowed = False
 
@@ -1444,7 +1451,6 @@ def simulate_engine(numbers, groups, colors):
 
                 # phase mới không bị dính last trade của phase cũ
                 last_phase_trade_idx = -999999
-
     max_phase_profit = 0.0
 
     hist = pd.DataFrame(history_rows)
