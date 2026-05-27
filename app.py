@@ -13,7 +13,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
-st.set_page_config(page_title="Auto Relock Engine | PROFIT TREND ENGINE", layout="wide")
+st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
@@ -64,11 +64,11 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 12
-PHASE_STOP_LOSS = -6
-PHASE_LOSS_STREAK_RELOCK = 999
+PHASE_STOP_LOSS = -3.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
@@ -80,17 +80,17 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.5
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.5
 
-MIN_PHASE_AGE_TO_TRADE = 5
-MAX_PHASE_TRADES = 24
+MIN_PHASE_AGE_TO_TRADE = 2
+MAX_PHASE_TRADES = 6
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
-KEEP_AFTER_LOSS_ROUNDS = 0
+KEEP_AFTER_LOSS_ROUNDS = 1
 
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
@@ -113,9 +113,9 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -4
+VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 12
+RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
@@ -1066,18 +1066,6 @@ def simulate_engine(numbers, groups, colors):
         # FIX 1: recent PNL theo trades.
         recent_phase_pnl = compute_recent_phase_trade_pnl(phase_hits_group)
 
-        # PROFIT TREND FILTER
-        phase_profit_ma = (
-            np.mean(phase_hits_group[-6:])
-            if len(phase_hits_group) >= 6
-            else 0
-        )
-
-        phase_recovering = (
-            len(phase_hits_group) < 6
-            or phase_profit_total > phase_profit_ma
-        )
-
         prev_signal_pnl_in_phase = last_signal_pnl_in_phase
         prev_signal_round_in_phase = last_signal_round_in_phase
 
@@ -1101,17 +1089,12 @@ def simulate_engine(numbers, groups, colors):
         phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
-        # PROFIT TREND ENGINE
-        # phase âm -> WAIT
-        # phase hồi -> TRADE
-
+        # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and phase_recovering
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
-
-        if phase_profit_total < 0:
-            phase_trade_allowed = False
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
@@ -1250,15 +1233,12 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
 
-            elif phase_profit_total <= PHASE_STOP_LOSS:
+            elif phase_profit_group <= PHASE_STOP_LOSS:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif (
-                phase_consecutive_losses >= 4
-                and phase_profit_total < -3
-            ):
+            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
@@ -1614,7 +1594,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
     )
     send_signal_once("READY_PHASE_FIXED", current_round, ready_msg)
 
-st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
+st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT v2")
 
 st.caption(
     "FIX: recent PNL theo trades | phase âm thì wait/relock | stop-win phase | validate drawdown âm | next preview theo live-state."
