@@ -1011,6 +1011,9 @@ def simulate_engine(numbers, groups, colors):
 
     phase_consecutive_losses = 0
     phase_last_min_profit = 0.0
+
+    if phase_last_min_profit == 0:
+        phase_last_min_profit = -1.0
     phase_peak_profit = 0.0
     keep_phase_group = None
     keep_phase_color = None
@@ -1111,9 +1114,17 @@ def simulate_engine(numbers, groups, colors):
             and phase_profit_group < 0
         ):
             phase_trade_allowed = (
-                confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
-                and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
+            (
+                signal_group
+                or recent_phase_pnl >= -0.5
             )
+            and (
+                phase_profit_group
+                >= (
+                    phase_last_min_profit + 0.5
+                )
+            )
+        )
 
         
         phase_trade_allowed = (
@@ -1121,7 +1132,7 @@ def simulate_engine(numbers, groups, colors):
             and (
                 phase_profit_group
                 >= (
-                    phase_last_min_profit + 1.5
+                    phase_last_min_profit + 0.5
                 )
             )
         )
