@@ -1005,6 +1005,7 @@ def simulate_engine(numbers, groups, colors):
     last_signal_round_in_phase = None
 
     phase_consecutive_losses = 0
+    phase_peak_profit = 0.0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -1090,10 +1091,15 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
+        phase_recovery_ok = (
+            phase_peak_profit - phase_profit_group
+        ) <= 2.0
+
         phase_trade_allowed = (
             signal_group
             and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
             and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and phase_recovery_ok
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1167,6 +1173,11 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
 
+            phase_peak_profit = max(
+                phase_peak_profit,
+                phase_profit_group
+            )
+
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
             total_phase_profit_all += phase_pnl_total
@@ -1238,7 +1249,10 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
+            elif (
+                phase_profit_group > 0
+                and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
+            ):
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
@@ -1377,6 +1391,7 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
+                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
