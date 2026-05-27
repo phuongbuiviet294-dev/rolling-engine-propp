@@ -63,30 +63,30 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 18
-PHASE_STOP_LOSS = -6.0
-PHASE_LOSS_STREAK_RELOCK = 5
+PHASE_STOP_WIN = 44
+PHASE_STOP_LOSS = -1.0
+PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
-ALLOW_TRADE_WHEN_PHASE_NEGATIVE = True
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
 NEGATIVE_PHASE_EXTRA_VOTE = 1
-NEGATIVE_PHASE_DOMINANCE_RATIO = 0.72
+NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = -999
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = -5.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 1
-MAX_PHASE_TRADES = 50
+MIN_PHASE_AGE_TO_TRADE = 5
+MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -113,7 +113,7 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -6.0
+VALIDATE_MIN_DRAWDOWN = -1.0
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
@@ -1128,7 +1128,11 @@ def simulate_engine(numbers, groups, colors):
         relock_reason_now = None
 
         # FIX 3: phase âm + signal mới => relock trước trade.
-        negative_phase_pretrade_relock = False
+        negative_phase_pretrade_relock = (
+            ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
+            and signal_group
+            and phase_profit_group < 0
+        )
 
         if negative_phase_pretrade_relock:
             phase_trade_allowed = False
