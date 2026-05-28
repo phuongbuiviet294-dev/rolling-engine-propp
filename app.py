@@ -79,14 +79,14 @@ NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
-RECENT_PHASE_CHECK = 5
+RECENT_PHASE_CHECK = 6
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 5
-MAX_PHASE_TRADES = 8
+MIN_PHASE_AGE_TO_TRADE = 6
+MAX_PHASE_TRADES = 10
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
