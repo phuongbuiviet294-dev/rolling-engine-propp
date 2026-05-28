@@ -102,12 +102,12 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 6
+WINDOW_SPACING_MAX = 6
+MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [18]
+VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 1
 
@@ -945,11 +945,6 @@ def make_next_preview(
 
 
 def simulate_engine(numbers, groups, colors):
-
-    # FIX runtime scope
-    phase_profit_history = []
-    PHASE_TREND_CONFIRM_ROUNDS = 3
-
     result = {
         "hist": pd.DataFrame(),
         "phase_profit_group": 0.0,
@@ -975,7 +970,6 @@ def simulate_engine(numbers, groups, colors):
         "last_signal_pnl_in_phase": 0.0,
         "last_signal_round_in_phase": None,
         "phase_consecutive_losses": 0,
-        "phase_profit_history": [],
         "keep_phase_group": None,
         "keep_phase_color": None,
         "keep_phase_left": 0,
@@ -1011,7 +1005,6 @@ def simulate_engine(numbers, groups, colors):
     last_signal_round_in_phase = None
 
     phase_consecutive_losses = 0
-    phase_peak_profit = 0.0
     keep_phase_group = None
     keep_phase_color = None
     keep_phase_left = 0
@@ -1097,42 +1090,10 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        phase_recovery_ok = (
-            phase_peak_profit - phase_profit_group
-        ) <= 2.0
-
-        phase_profit_history.append(
-            phase_profit_group
-        )
-
-        phase_profit_history = (
-            phase_profit_history[-10:]
-        )
-
-        phase_trend_confirm = False
-
-        if (
-            len(phase_profit_history)
-            >= PHASE_TREND_CONFIRM_ROUNDS
-        ):
-
-            last_vals = phase_profit_history[
-                -PHASE_TREND_CONFIRM_ROUNDS:
-            ]
-
-            phase_trend_confirm = all(
-                x <= y
-                for x, y in zip(
-                    last_vals,
-                    last_vals[1:]
-                )
-            )
-
         phase_trade_allowed = (
             signal_group
-            and phase_trend_confirm
-            and phase_profit_group
-                >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1206,11 +1167,6 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
 
-            phase_peak_profit = max(
-                phase_peak_profit,
-                phase_profit_group
-            )
-
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
             total_phase_profit_all += phase_pnl_total
@@ -1282,10 +1238,7 @@ def simulate_engine(numbers, groups, colors):
                 relock_reason_now = "PHASE_GROUP_STOP_LOSS"
                 state = "AUTO_RELOCK_PHASE_GROUP_LOSS"
 
-            elif (
-                phase_profit_group > 0
-                and phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK
-            ):
+            elif phase_consecutive_losses >= PHASE_LOSS_STREAK_RELOCK:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_LOSS_STREAK_RELOCK"
                 state = "AUTO_RELOCK_LOSS_STREAK"
@@ -1424,7 +1377,6 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
-                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
