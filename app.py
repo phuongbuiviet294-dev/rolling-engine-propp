@@ -72,7 +72,7 @@ ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
-ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = True
 NEGATIVE_PHASE_EXTRA_VOTE = 1
 NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
