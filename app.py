@@ -64,8 +64,8 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -0.5
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_LOSS = -3.5
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -93,7 +93,7 @@ VOTE_DOMINANCE_RATIO = 0.60
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 55.0
-SESSION_STOP_LOSS = -4.0
+SESSION_STOP_LOSS = -6.0
 
 MIN_FALLBACK_SCORE = 1
 
