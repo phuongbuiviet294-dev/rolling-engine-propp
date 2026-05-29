@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_LOSS = 0.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -80,7 +80,7 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
