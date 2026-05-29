@@ -73,7 +73,7 @@ ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
 ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
-NEGATIVE_PHASE_EXTRA_VOTE = 2
+NEGATIVE_PHASE_EXTRA_VOTE = 1
 NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
 ENABLE_TIMEOUT_RELOCK = False
@@ -83,7 +83,7 @@ RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 1.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 8
