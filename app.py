@@ -44,7 +44,7 @@ GAP = 1
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-ENABLE_COLOR_BET = True
+ENABLE_COLOR_BET = False
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 COLOR_VOTE_OFFSET = 0
@@ -55,24 +55,18 @@ COLOR_BET_UNIT = 1.0
 # =========================================================
 # FIXED RISK / PHASE GUARDS
 # =========================================================
-# Bản fix chính:
-# 1. recent_phase_pnl tính theo TRADE gần nhất, không tính theo ROW gần nhất.
-# 2. Nếu phase đang âm thì WAIT/RELOCK, không bet tiếp.
-# 3. Bật relock trước khi trade nếu phase âm và lại có signal mới.
-# 4. VALIDATE_MIN_DRAWDOWN phải là số âm, không để 0.
-# 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
-# 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -3.5
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_STOP_LOSS = -1.0
+PHASE_LOSS_STREAK_RELOCK = 2
 
-# Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
+# Nếu phase đang âm + xuất hiện signal mới => relock ngay
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 
-# Nếu False: phase âm thì luôn WAIT.
-# Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
+# Không cho trade khi phase âm
 ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
+
+# Nếu muốn cho trade lại khi vote mạnh hơn thì bật True
 NEGATIVE_PHASE_EXTRA_VOTE = 1
 NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
@@ -82,18 +76,18 @@ TIMEOUT_RELOCK_ROUNDS = 40
 RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
-# Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
+# FIX CHÍNH
+# phase_profit_group < 0 => WAIT
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 5
+MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
-# Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
 
-SESSION_STOP_WIN = 55.0
-SESSION_STOP_LOSS = -4.0
+SESSION_STOP_WIN = 15.0
+SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 1
 
@@ -107,13 +101,14 @@ MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [16,24]
+VALIDATE_LEN_LIST = [12, 16, 20, 24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 1
+MIN_VALIDATE_TRADES = 2
 
-# QUAN TRỌNG: max_drawdown luôn <= 0.
-# Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -1.0
+# FIX QUAN TRỌNG
+# Không để =0
+VALIDATE_MIN_DRAWDOWN = -6
+
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
