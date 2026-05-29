@@ -30,7 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 20},
+    {"name": "8v4", "top_windows": 8, "vote_required": 3, "window_min": 6, "window_max": 22},
 #    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
@@ -107,8 +107,8 @@ MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [16,20,26]
-MIN_TRAIN_LEN = 160
+VALIDATE_LEN_LIST = [16,26]
+MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
