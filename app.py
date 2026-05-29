@@ -85,8 +85,8 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 6
-MAX_PHASE_TRADES = 22
+MIN_PHASE_AGE_TO_TRADE = 5
+MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -95,7 +95,7 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -4.0
 
-MIN_FALLBACK_SCORE = 1
+MIN_FALLBACK_SCORE = 5
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
