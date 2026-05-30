@@ -29,9 +29,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
- #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 18},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 18},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -64,8 +64,8 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_LOSS = -2.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -86,8 +86,8 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 8
-VOTE_DOMINANCE_RATIO = 0.60
+MAX_PHASE_TRADES = 12
+VOTE_DOMINANCE_RATIO = 0.70
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -102,18 +102,18 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
+WINDOW_SPACING_MAX = 8
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 1
+MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
@@ -456,8 +456,12 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
+        & (df["profit"] > 0)
+        & (df["recent_profit"] > 0)
+        & (df["expectancy"] > 0)
+        & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
+        & (df["max_loss_streak"] <= 5)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1092,8 +1096,9 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and recent_phase_pnl >= 0
+            and phase_profit_group >= 0
+            and dominance_ratio >= 0.70
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
