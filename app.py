@@ -29,9 +29,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 18},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 18},
-  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
+  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -63,8 +63,8 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_WIN = 3.0
+PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.7
+VOTE_DOMINANCE_RATIO = 0.65
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 4
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 40
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 5
@@ -385,18 +385,24 @@ def evaluate_window_group(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0.0
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
+
+    recent30 = results[-30:] if len(results) >= 30 else results
+    recent_profit_30 = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent30)) if recent30 else 0.0
+    recent_wr_30 = (sum(recent30) / len(recent30)) if len(recent30) > 0 else 0.0
+
     streak_metrics = compute_streak_metrics(results)
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
         score = (
-            profit * 0.75
-            + winrate * 8.0
-            + expectancy * 6.0
-            + np.log(trades + 1) * 1.0
+            profit * 0.30
+            + winrate * 4.0
+            + expectancy * 4.0
             + recent_profit * 1.0
-            - abs(max_drawdown) * 1.1
-            + streak_metrics["streak_score"] * 0.7
+            + recent_profit_30 * 3.0
+            + recent_wr_30 * 15.0
+            - abs(max_drawdown) * 1.0
+            + streak_metrics["streak_score"] * 0.5
         )
     else:
         score = -999999.0
@@ -410,6 +416,8 @@ def evaluate_window_group(seq_groups, w):
         "expectancy": expectancy,
         "max_drawdown": max_drawdown,
         "recent_profit": recent_profit,
+        "recent_profit_30": recent_profit_30,
+        "recent_wr_30": recent_wr_30,
         "max_hit_streak": streak_metrics["max_hit_streak"],
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
