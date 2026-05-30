@@ -1,22 +1,16 @@
 
 # =========================================================
-# V13 PRO PLUS WEIGHTED + PER-WINDOW DIRECTION
+# V13 PRO PLUS REAL DIRECTION PATCH
 # =========================================================
-WEIGHTED_VOTE_ENABLED = True
-PER_WINDOW_DIRECTION_ENABLED = True
-
-def weighted_vote_with_scores(preds, scores):
-    if not preds:
-        return None
-    bucket = {}
-    for p, s in zip(preds, scores):
-        bucket[p] = bucket.get(p, 0.0) + float(s)
-    return max(bucket.items(), key=lambda x: x[1])[0]
-
-def choose_window_direction(normal_profit, inverse_profit):
+def choose_best_direction(normal_profit, inverse_profit):
     return "INVERSE" if inverse_profit > normal_profit else "NORMAL"
 
-V13_PRO_PLUS = True
+def apply_direction_prediction(pred, direction, all_groups=None):
+    # Placeholder: customize inverse mapping for your group system
+    if direction != "INVERSE":
+        return pred
+    return pred
+\nV13_PRO_PLUS = True
 WEIGHTED_VOTE_ENABLED = True
 DYNAMIC_DOMINANCE_ENABLED = True
 
@@ -53,7 +47,7 @@ REPLAY_FROM = 180
 MODES = [
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 18},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 18},
-  #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
