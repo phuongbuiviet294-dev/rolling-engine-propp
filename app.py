@@ -1,6 +1,3 @@
-PROFIT_LOCK_TARGET = 2.0
-PROFIT_RELOCK_THRESHOLD = 1.5
-
 
 import time
 import json
@@ -16,7 +13,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
-st.set_page_config(page_title="Auto Relock Engine V13 Pro Plus Clean", layout="wide")
+st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
@@ -66,7 +63,7 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
+PHASE_STOP_WIN = 8
 PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
@@ -83,14 +80,14 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = -1.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 12
-VOTE_DOMINANCE_RATIO = 0.70
+MIN_PHASE_AGE_TO_TRADE = 2
+MAX_PHASE_TRADES = 8
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -460,11 +457,11 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["profit"] > 0)
-        & (df["recent_profit"] >= -1)
+        & (df["recent_profit"] > 0)
         & (df["expectancy"] > 0)
         & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
+        & (df["max_loss_streak"] <= 5)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1097,14 +1094,10 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        # V13 Profit Lock Engine
-    if phase_profit_total >= PROFIT_LOCK_TARGET:
-        phase_trade_allowed = False
-    else:
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= 0
-            and phase_profit_group >= 0
+            and recent_phase_pnl >= -1
+            and phase_profit_group >= -1
             and dominance_ratio >= 0.70
         )
 
@@ -1115,11 +1108,7 @@ def simulate_engine(numbers, groups, colors):
             and signal_group
             and phase_profit_group < 0
         ):
-            # V13 Profit Lock Engine
-    if phase_profit_total >= PROFIT_LOCK_TARGET:
-        phase_trade_allowed = False
-    else:
-        phase_trade_allowed = (
+            phase_trade_allowed = (
                 confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
                 and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
             )
