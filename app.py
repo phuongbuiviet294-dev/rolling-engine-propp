@@ -1,3 +1,5 @@
+TREND_FOLLOWING_PHASE_ENGINE = True
+
 
 import time
 import json
@@ -29,9 +31,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-#    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 18},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 18},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 18},
-#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -63,8 +65,11 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
+PHASE_STOP_WIN = 2.0
 PHASE_STOP_LOSS = -2.0
+PROFIT_LOCK_TARGET = 1.5
+TRAILING_PROFIT_STOP = 1.0
+PEAK_PHASE_PROFIT = 0.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -86,7 +91,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 12
+MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.70
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -1171,6 +1176,12 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
+            
+            if phase_profit_total >= PROFIT_LOCK_TARGET:
+                relock_triggered_now = True
+                relock_reason_now = "PROFIT_LOCK"
+                state = "AUTO_RELOCK_PROFIT_LOCK"
+
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
