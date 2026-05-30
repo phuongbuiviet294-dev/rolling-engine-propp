@@ -1,16 +1,22 @@
 
 # =========================================================
-# V13 PRO PLUS REAL DIRECTION PATCH
+# V13 PRO PLUS WEIGHTED + PER-WINDOW DIRECTION
 # =========================================================
-def choose_best_direction(normal_profit, inverse_profit):
+WEIGHTED_VOTE_ENABLED = True
+PER_WINDOW_DIRECTION_ENABLED = True
+
+def weighted_vote_with_scores(preds, scores):
+    if not preds:
+        return None
+    bucket = {}
+    for p, s in zip(preds, scores):
+        bucket[p] = bucket.get(p, 0.0) + float(s)
+    return max(bucket.items(), key=lambda x: x[1])[0]
+
+def choose_window_direction(normal_profit, inverse_profit):
     return "INVERSE" if inverse_profit > normal_profit else "NORMAL"
 
-def apply_direction_prediction(pred, direction, all_groups=None):
-    # Placeholder: customize inverse mapping for your group system
-    if direction != "INVERSE":
-        return pred
-    return pred
-\nV13_PRO_PLUS = True
+V13_PRO_PLUS = True
 WEIGHTED_VOTE_ENABLED = True
 DYNAMIC_DOMINANCE_ENABLED = True
 
