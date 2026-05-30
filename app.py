@@ -89,11 +89,11 @@ MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 12
 VOTE_DOMINANCE_RATIO = 0.70
 
-# Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
+# Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 15.0
-SESSION_STOP_LOSS = -5.5
+SESSION_STOP_LOSS = -7.5
 
 MIN_FALLBACK_SCORE = 1
 
@@ -118,7 +118,7 @@ VALIDATE_MIN_DRAWDOWN = -2.0
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 5
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
