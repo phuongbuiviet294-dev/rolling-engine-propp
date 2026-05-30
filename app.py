@@ -36,7 +36,7 @@ MODES = [
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
 # Nếu muốn bắt buộc nghỉ 1 round sau mỗi trade, đổi GAP = 2.
-GAP = 1
+GAP = 4
 
 # =========================================================
 # PAYOUT
