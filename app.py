@@ -1,3 +1,21 @@
+
+# =========================================================
+# V13 PRO PLUS WEIGHTED + PER-WINDOW DIRECTION
+# =========================================================
+WEIGHTED_VOTE_ENABLED = True
+PER_WINDOW_DIRECTION_ENABLED = True
+
+def weighted_vote_with_scores(preds, scores):
+    if not preds:
+        return None
+    bucket = {}
+    for p, s in zip(preds, scores):
+        bucket[p] = bucket.get(p, 0.0) + float(s)
+    return max(bucket.items(), key=lambda x: x[1])[0]
+
+def choose_window_direction(normal_profit, inverse_profit):
+    return "INVERSE" if inverse_profit > normal_profit else "NORMAL"
+
 V13_PRO_PLUS = True
 WEIGHTED_VOTE_ENABLED = True
 DYNAMIC_DOMINANCE_ENABLED = True
