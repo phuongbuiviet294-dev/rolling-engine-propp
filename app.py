@@ -1,3 +1,5 @@
+TREND_FOLLOWING_PHASE_ENGINE = True
+
 
 import time
 import json
@@ -63,8 +65,11 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
+PHASE_STOP_WIN = 2.0
 PHASE_STOP_LOSS = -2.0
+PROFIT_LOCK_TARGET = 1.5
+TRAILING_PROFIT_STOP = 1.0
+PEAK_PHASE_PROFIT = 0.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -86,7 +91,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 12
+MAX_PHASE_TRADES = 8
 VOTE_DOMINANCE_RATIO = 0.70
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -456,8 +461,12 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
+        & (df["profit"] > 0)
+        & (df["recent_profit"] > 0)
+        & (df["expectancy"] > 0)
+        & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
+        & (df["max_loss_streak"] <= 5)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1092,8 +1101,9 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and recent_phase_pnl >= 0
+            and phase_profit_group >= 0
+            and dominance_ratio >= 0.70
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1166,6 +1176,12 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
+            
+            if phase_profit_total >= PROFIT_LOCK_TARGET:
+                relock_triggered_now = True
+                relock_reason_now = "PROFIT_LOCK"
+                state = "AUTO_RELOCK_PROFIT_LOCK"
+
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
