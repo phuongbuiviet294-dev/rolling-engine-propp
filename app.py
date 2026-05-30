@@ -1,4 +1,19 @@
 
+from collections import Counter
+
+def weighted_vote(preds, weights=None):
+    if not preds:
+        return None
+    if weights is None:
+        weights = [1.0] * len(preds)
+
+    scores = {}
+    for p, w in zip(preds, weights):
+        scores[p] = scores.get(p, 0.0) + float(w)
+
+    return max(scores.items(), key=lambda x: x[1])[0]
+
+
 import time
 import json
 import os
@@ -13,7 +28,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
-st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
+st.set_page_config(page_title="Auto Relock Engine V16 Adaptive Inverse", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
@@ -37,6 +52,9 @@ MODES = [
 # GAP = 1 nghĩa là không bet trùng cùng round.
 # Nếu muốn bắt buộc nghỉ 1 round sau mỗi trade, đổi GAP = 2.
 GAP = 1
+
+ENABLE_INVERSE_MODE = True
+INVERSE_SCORE_BONUS = 1.2
 
 # =========================================================
 # PAYOUT
@@ -87,7 +105,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 12
-VOTE_DOMINANCE_RATIO = 0.70
+VOTE_DOMINANCE_RATIO = 0.65
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -389,7 +407,12 @@ def evaluate_window_group(seq_groups, w):
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
+        adaptive_bonus = (
+            max(0, recent_profit) * 1.5
+            + max(0, expectancy) * 10.0
+        )
         score = (
+            adaptive_bonus +
             profit * 0.75
             + winrate * 8.0
             + expectancy * 6.0
@@ -457,11 +480,11 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["profit"] > 0)
-        & (df["recent_profit"] > 0)
+        & (df["recent_profit"] >= -1)
         & (df["expectancy"] > 0)
         & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 5)
+        & (df["max_loss_streak"] <= 6)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -658,7 +681,14 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
                     )
 
+                    mode_bonus = 0
+                    if mode["name"] == "5v3":
+                        mode_bonus = validate_bt["winrate_group"] * 3.0
+                    elif mode["name"] == "8v5":
+                        mode_bonus = validate_bt["expectancy_group"] * 4.0
+
                     final_score = (
+                        mode_bonus +
                         train_bt["profit_group"] * 0.75
                         + train_bt["winrate_group"] * 8.0
                         + train_bt["expectancy_group"] * 6.0
@@ -1098,7 +1128,7 @@ def simulate_engine(numbers, groups, colors):
             signal_group
             and recent_phase_pnl >= 0
             and phase_profit_group >= 0
-            and dominance_ratio >= 0.70
+            and dominance_ratio >= VOTE_DOMINANCE_RATIO
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
