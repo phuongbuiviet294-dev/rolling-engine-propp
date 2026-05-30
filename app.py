@@ -1507,6 +1507,32 @@ def cached_simulate_engine(numbers_tuple, config_fingerprint):
     return simulate_engine(nums, grps, cols)
 
 
+
+# =========================
+# V15 WEIGHTED VOTE ENGINE
+# =========================
+def weighted_majority_vote(preds, windows, scan_df_all):
+    if not preds:
+        return None, 0, 0.0
+
+    weights = {}
+    for pred, w in zip(preds, windows[:len(preds)]):
+        row = scan_df_all[scan_df_all["window"] == w]
+        if len(row):
+            r = row.iloc[0]
+            weight = max(0.1, float(r["profit"]) + float(r["recent_profit"]) + float(r["expectancy"]) * 5.0)
+        else:
+            weight = 1.0
+
+        weights[pred] = weights.get(pred, 0.0) + weight
+
+    best_pred = max(weights.items(), key=lambda x: x[1])[0]
+    total = sum(weights.values())
+    dominance = weights[best_pred] / total if total else 0.0
+    confidence = round(weights[best_pred], 2)
+    return best_pred, confidence, dominance
+
+
 # =========================================================
 # APP
 # =========================================================
