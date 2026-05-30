@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 12
-VOTE_DOMINANCE_RATIO = 0.70
+VOTE_DOMINANCE_RATIO = 0.65
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -389,7 +389,12 @@ def evaluate_window_group(seq_groups, w):
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
+        adaptive_bonus = (
+            max(0, recent_profit) * 1.5
+            + max(0, expectancy) * 10.0
+        )
         score = (
+            adaptive_bonus +
             profit * 0.75
             + winrate * 8.0
             + expectancy * 6.0
@@ -658,7 +663,14 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
                     )
 
+                    mode_bonus = 0
+                    if mode["name"] == "5v3":
+                        mode_bonus = validate_bt["winrate_group"] * 3.0
+                    elif mode["name"] == "8v5":
+                        mode_bonus = validate_bt["expectancy_group"] * 4.0
+
                     final_score = (
+                        mode_bonus +
                         train_bt["profit_group"] * 0.75
                         + train_bt["winrate_group"] * 8.0
                         + train_bt["expectancy_group"] * 6.0
