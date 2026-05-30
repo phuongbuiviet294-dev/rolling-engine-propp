@@ -1,26 +1,4 @@
 
-# =========================================================
-# V13 PRO PLUS WEIGHTED + PER-WINDOW DIRECTION
-# =========================================================
-WEIGHTED_VOTE_ENABLED = True
-PER_WINDOW_DIRECTION_ENABLED = True
-
-def weighted_vote_with_scores(preds, scores):
-    if not preds:
-        return None
-    bucket = {}
-    for p, s in zip(preds, scores):
-        bucket[p] = bucket.get(p, 0.0) + float(s)
-    return max(bucket.items(), key=lambda x: x[1])[0]
-
-def choose_window_direction(normal_profit, inverse_profit):
-    return "INVERSE" if inverse_profit > normal_profit else "NORMAL"
-
-V13_PRO_PLUS = True
-WEIGHTED_VOTE_ENABLED = True
-DYNAMIC_DOMINANCE_ENABLED = True
-
-
 import time
 import json
 import os
@@ -35,7 +13,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
-st.set_page_config(page_title="Auto Relock Engine V13 Pro Plus", layout="wide")
+st.set_page_config(page_title="Auto Relock Engine V13 Pro Plus Clean", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
@@ -53,7 +31,7 @@ REPLAY_FROM = 180
 MODES = [
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 18},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 18},
-#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 18},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -385,6 +363,10 @@ def compute_streak_metrics(results):
     }
 
 
+
+def inverse_group(g):
+    return {1:3, 2:4, 3:1, 4:2}.get(g, g)
+
 def evaluate_window_group(seq_groups, w):
     profit = 0.0
     trades = 0
@@ -478,12 +460,12 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
-        & (df["profit"] > 0)
-        & (df["recent_profit"] > 0)
+        & (df["profit"] >= -0.5)
+        & (df["recent_profit"] >= -1)
         & (df["expectancy"] > 0)
         & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 5)
+        & (df["max_loss_streak"] <= 6)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1119,7 +1101,7 @@ def simulate_engine(numbers, groups, colors):
         phase_trade_allowed = (
             signal_group
             and recent_phase_pnl >= 0
-            and phase_profit_group >= 0
+            and phase_profit_group >= -1
             and dominance_ratio >= 0.70
         )
 
