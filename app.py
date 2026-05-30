@@ -1,3 +1,4 @@
+
 import time
 import json
 import os
@@ -455,8 +456,12 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
+        & (df["profit"] > 0)
+        & (df["recent_profit"] > 0)
+        & (df["expectancy"] > 0)
+        & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
+        & (df["max_loss_streak"] <= 5)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1091,8 +1096,9 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and recent_phase_pnl >= 0
+            and phase_profit_group >= 0
+            and dominance_ratio >= 0.70
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
