@@ -65,9 +65,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 2.0
 PHASE_STOP_LOSS = -2.0
-PROFIT_LOCK_TARGET = 1.5
-TRAILING_PROFIT_STOP = 1.0
-PEAK_PHASE_PROFIT = 0.0
+PROFIT_LOCK_TARGET = 2.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
