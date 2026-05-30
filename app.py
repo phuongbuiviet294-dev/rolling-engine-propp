@@ -1,3 +1,6 @@
+PROFIT_LOCK_TARGET = 2.0
+PROFIT_RELOCK_THRESHOLD = 1.5
+
 
 import time
 import json
@@ -93,7 +96,7 @@ VOTE_DOMINANCE_RATIO = 0.70
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 15.0
-SESSION_STOP_LOSS = -4.5
+SESSION_STOP_LOSS = -5.5
 
 MIN_FALLBACK_SCORE = 1
 
@@ -363,10 +366,6 @@ def compute_streak_metrics(results):
     }
 
 
-
-def inverse_group(g):
-    return {1:3, 2:4, 3:1, 4:2}.get(g, g)
-
 def evaluate_window_group(seq_groups, w):
     profit = 0.0
     trades = 0
@@ -460,7 +459,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
-        & (df["profit"] >= -0.5)
+        & (df["profit"] > 0)
         & (df["recent_profit"] >= -1)
         & (df["expectancy"] > 0)
         & (df["max_drawdown"] >= -8)
@@ -1098,10 +1097,14 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
+        # V13 Profit Lock Engine
+    if phase_profit_total >= PROFIT_LOCK_TARGET:
+        phase_trade_allowed = False
+    else:
         phase_trade_allowed = (
             signal_group
             and recent_phase_pnl >= 0
-            and phase_profit_group >= -1
+            and phase_profit_group >= 0
             and dominance_ratio >= 0.70
         )
 
@@ -1112,7 +1115,11 @@ def simulate_engine(numbers, groups, colors):
             and signal_group
             and phase_profit_group < 0
         ):
-            phase_trade_allowed = (
+            # V13 Profit Lock Engine
+    if phase_profit_total >= PROFIT_LOCK_TARGET:
+        phase_trade_allowed = False
+    else:
+        phase_trade_allowed = (
                 confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
                 and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
             )
