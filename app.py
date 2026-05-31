@@ -1091,7 +1091,7 @@ def simulate_engine(numbers, groups, colors):
     phase_start_round = start_replay + 1
     current_mode = selected_mode
 
-    last_closed_idx = len(groups)
+    last_closed_idx = max(start_replay, len(groups) - 1)
 
     for i in range(start_replay, last_closed_idx):
         round_no = i + 1
@@ -1702,7 +1702,7 @@ if (
     and len(groups) > st.session_state.last_seen_round
 ):
     p = st.session_state.pending_trade
-    if len(groups) == p["bet_round"]:
+    if len(groups) >= p["bet_round"]:
         actual_group = groups[p["bet_round"] - 1]
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
         if pnl > 0:
@@ -1866,14 +1866,14 @@ st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
 
 
-st.subheader("REPLAY PROFIT")
+st.subheader("LIVE PROFIT")
 
-trade_df = hist[hist["PHASE_BET"] == True].copy()
+live_df = pd.DataFrame(st.session_state.live_trade_log)
 
-live_profit_real = float(trade_df["phase_pnl_total"].sum()) if not trade_df.empty else 0.0
-live_trades_real = len(trade_df)
-live_wr_real = float((trade_df["phase_hit_group"] == 1).mean() * 100) if live_trades_real > 0 else 0.0
-ledger_df = trade_df.copy()
+live_profit_real = float(st.session_state.live_profit)
+live_trades_real = int(st.session_state.live_trade_count)
+live_wr_real = (st.session_state.live_win_count / live_trades_real * 100) if live_trades_real > 0 else 0.0
+ledger_df = live_df.copy()
 
 l1,l2,l3 = st.columns(3)
 l1.metric("Replay Profit", round(live_profit_real,2))
@@ -1881,12 +1881,12 @@ l2.metric("Replay Trades", live_trades_real)
 l3.metric("Replay WR %", round(live_wr_real,2))
 
 
-st.subheader("REPLAY HISTORY")
+st.subheader("LIVE HISTORY")
 import pandas as pd
-if not trade_df.empty:
-    show_live = trade_df[["round","phase_bet_group","group","phase_pnl_total","total_phase_profit_all"]].copy()
-    st.dataframe(show_live.iloc[::-1], use_container_width=True)
-    st.line_chart(trade_df["total_phase_profit_all"].reset_index(drop=True))
+if not live_df.empty:
+    st.dataframe(live_df.iloc[::-1], use_container_width=True)
+    if "cum_profit" in live_df.columns:
+        st.line_chart(live_df["cum_profit"].reset_index(drop=True))
 
 st.subheader("Profit Compare")
 
@@ -1898,7 +1898,7 @@ p4.metric("Ledger Trades", live_trades_real)
 
 st.subheader("Trade Stats")
 
-phase_trades = len(trade_df)
+phase_trades = live_trades_real
 phase_group_wr = round(live_wr_real,2)
 
 color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
@@ -1921,8 +1921,8 @@ chart_cols = [
 
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 
-if not trade_df.empty:
-    st.line_chart(trade_df["total_phase_profit_all"].reset_index(drop=True))
+if not live_df.empty and "cum_profit" in live_df.columns:
+    st.line_chart(live_df["cum_profit"].reset_index(drop=True))
 elif exist_chart_cols:
     st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
 
@@ -2041,3 +2041,11 @@ st.dataframe(
 
 
 # ---- V13.5.5 Stable : Pending Trade Cleanup ----
+def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
+    try:
+        if not phase_next_allowed:
+            session_state.pending_trade = None
+            if hasattr(session_state, "live_signal_sent"):
+                session_state.live_signal_sent = set()
+    except Exception:
+        pass
