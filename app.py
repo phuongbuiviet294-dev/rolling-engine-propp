@@ -1712,12 +1712,6 @@ numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
-if "live_profit" not in st.session_state:
-    get_live_metrics()["profit"] = 0.0
-if "live_trade_count" not in st.session_state:
-    get_live_metrics()["trades"] = 0
-if "live_win_count" not in st.session_state:
-    get_live_metrics()["wins"] = 0
 if "pending_trade" not in st.session_state:
     st.session_state.pending_trade = load_pending_trade()
 if "last_seen_round" not in st.session_state:
@@ -1821,22 +1815,20 @@ if st.session_state.pending_trade is not None:
         except Exception:
             actual_group = groups[-1]
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
-        if pnl > 0:
-            get_live_metrics()["wins"] += 1
-        get_live_metrics()["profit"] += pnl
-        get_live_metrics()["trades"] += 1
-        st.session_state.live_trade_log.append({
-            "bet_round": p["bet_round"],
-            "pred_group": p["group"],
-            "actual_group": actual_group,
-            "pnl": pnl,
-            "cum_profit": get_live_metrics()["profit"],
-            "settled": 1
-        })
         try:
             ledger_df = load_live_ledger()
+            current_profit = float(ledger_df["pnl"].sum()) if len(ledger_df) > 0 and "pnl" in ledger_df.columns else 0.0
+            trade_row = {
+                "signal_round": p.get("signal_round"),
+                "bet_round": p["bet_round"],
+                "pred_group": p["group"],
+                "actual_group": actual_group,
+                "pnl": pnl,
+                "cum_profit": current_profit + pnl,
+                "settled": 1
+            }
             import pandas as pd
-            ledger_df = pd.concat([ledger_df, pd.DataFrame([st.session_state.live_trade_log[-1]])], ignore_index=True)
+            ledger_df = pd.concat([ledger_df, pd.DataFrame([trade_row])], ignore_index=True)
             save_live_ledger(ledger_df)
         except Exception:
             pass
@@ -2008,9 +2000,13 @@ else:
     live_wr_real = 0.0
 
 l1,l2,l3 = st.columns(3)
-l1.metric("Replay Profit", round(live_profit_real,2))
-l2.metric("Replay Trades", live_trades_real)
-l3.metric("Replay WR %", round(live_wr_real,2))
+replay_profit = float(total_phase_profit_all)
+replay_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+replay_wins = int(hist.loc[hist["PHASE_BET"]==True,"phase_hit_group"].fillna(0).sum()) if replay_trades>0 else 0
+replay_wr = (replay_wins/replay_trades*100) if replay_trades>0 else 0.0
+l1.metric("Replay Profit", round(replay_profit,2))
+l2.metric("Replay Trades", replay_trades)
+l3.metric("Replay WR %", round(replay_wr,2))
 
 
 st.subheader("LIVE HISTORY")
@@ -2025,13 +2021,13 @@ st.subheader("Profit Compare")
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("Replay Phase Group", phase_profit_group)
 p2.metric("Replay Phase Total", phase_profit_total)
-p3.metric("Replay Profit", round(live_profit_real,2))
-p4.metric("Ledger Trades", live_trades_real)
+p3.metric("Replay Profit", round(replay_profit,2))
+p4.metric("Live Trades", live_trades_real)
 
 st.subheader("Trade Stats")
 
-phase_trades = live_trades_real
-phase_group_wr = round(live_wr_real,2)
+phase_trades = replay_trades
+phase_group_wr = round(replay_wr,2)
 
 color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
