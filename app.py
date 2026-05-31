@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=15000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -65,7 +65,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 3.0
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -131,7 +131,7 @@ TRAILING_TRIGGER = 2.5
 TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 50
+SHOW_HISTORY_ROWS = 5
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
@@ -199,7 +199,7 @@ def send_signal_once(signal_name, current_round, msg):
 # =========================================================
 # LOAD DATA
 # =========================================================
-@st.cache_data(ttl=100, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
@@ -1358,6 +1358,9 @@ def simulate_engine(numbers, groups, colors):
                 "lock_scan_end": lock_scan_end,
                 "relock_triggered_now": relock_triggered_now,
                 "relock_reason": relock_reason_now,
+                "trade_executed": bool(phase_trade_allowed),
+                "predicted_from_round": round_no - 1,
+                "bet_round": round_no,
             }
         )
 
@@ -1624,7 +1627,8 @@ distance_from_last_trade = next_preview["distance_from_last_trade"]
 if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
-        f"Round: {current_round}\n"
+        f"Current Round: {current_round}\n"
+        f"Bet For Round: {next_round}\n"
         f"Current Number: {numbers[-1]}\n"
         f"Current Group: {groups[-1]}\n"
         f"Current Color: {color_text(colors[-1])}\n"
@@ -1641,7 +1645,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         f"Total Phase Profit All: {total_phase_profit_all}\n"
         f"State: {next_state}"
     )
-    send_signal_once("READY_PHASE_FIXED", current_round, ready_msg)
+    send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
 
