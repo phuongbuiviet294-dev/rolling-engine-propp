@@ -131,7 +131,7 @@ TRAILING_TRIGGER = 2.5
 TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 50
+SHOW_HISTORY_ROWS = 5
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
@@ -1732,6 +1732,9 @@ st.write("VOTE_DOMINANCE_RATIO:", VOTE_DOMINANCE_RATIO)
 st.write("Dominance OK Next:", dominance_ok_next)
 st.write("Negative Phase Relock Enabled:", ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK)
 st.write("Next State:", next_state)
+st.write("Signal Generated Round:", current_round)
+st.write("Bet For Round:", next_round)
+st.write("Settlement Status:", "WAIT_RESULT" if phase_next_allowed else "-")
 
 st.subheader("Lock Info")
 
@@ -1835,6 +1838,14 @@ if SHOW_DEBUG_TABLES:
     with st.expander("Filtered Windows"):
         st.dataframe(scan_df_filtered.head(25), use_container_width=True)
 
+
+st.subheader("Settlement Debug")
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Signal Generated", int(hist["signal_group"].sum()) if "signal_group" in hist.columns else 0)
+m2.metric("Trade Executed", int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0)
+m3.metric("Trade Settled", int(hist["phase_hit_group"].notna().sum()) if "phase_hit_group" in hist.columns else 0)
+
 st.subheader("History")
 
 history_cols = [
@@ -1854,6 +1865,9 @@ history_cols = [
     "confidence_color",
     "signal_color",
     "PHASE_BET",
+    "trade_executed",
+    "predicted_from_round",
+    "bet_round",
     "used_keep_phase",
     "phase_bet_group",
     "phase_bet_color",
