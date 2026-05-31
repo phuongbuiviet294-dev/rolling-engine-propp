@@ -124,9 +124,11 @@ MIN_VALIDATE_TRADES = 4
 VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 16
-SCAN_LEN_LIST = [16,24,40]
+SCAN_LEN_LIST = [30]
 AUTO_DYNAMIC_SCAN_LEN = True
 PROFIT_TRAIL_GIVEBACK = 1.0
+TRAILING_TRIGGER = 2.5
+TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 5
@@ -1026,6 +1028,7 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_color = 0.0
     phase_profit_total = 0.0
     phase_peak_profit = 0.0
+    last_trailing_lock_round = -999999
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1264,11 +1267,13 @@ def simulate_engine(numbers, groups, colors):
         # FIX 5: stop win dùng thật.
         if not relock_triggered_now:
             if (
-                phase_peak_profit >= 2.5
+                phase_peak_profit >= TRAILING_TRIGGER
+                and (round_no - last_trailing_lock_round) > TRAILING_COOLDOWN
                 and phase_profit_group <= (phase_peak_profit - PROFIT_TRAIL_GIVEBACK)
             ):
                 relock_triggered_now = True
                 relock_reason_now = "TRAILING_PROFIT_LOCK"
+                last_trailing_lock_round = round_no
                 state = "AUTO_RELOCK_TRAILING_PROFIT"
 
             elif phase_profit_group >= PHASE_STOP_WIN:
@@ -1420,6 +1425,7 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
+                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
