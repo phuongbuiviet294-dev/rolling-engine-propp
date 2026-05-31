@@ -29,8 +29,8 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
-#    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
+  #  {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
+   {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
 #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
 
@@ -124,7 +124,7 @@ MIN_VALIDATE_TRADES = 4
 VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 12
-SCAN_LEN_LIST = [16,30,40,50,60]
+SCAN_LEN_LIST = [16,24,40,50,60]
 PROFIT_TRAIL_GIVEBACK = 1.5
 RELOCK_BUFFER = 0
 
