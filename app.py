@@ -1091,7 +1091,7 @@ def simulate_engine(numbers, groups, colors):
     phase_start_round = start_replay + 1
     current_mode = selected_mode
 
-    last_closed_idx = max(start_replay, len(groups) - 1)
+    last_closed_idx = len(groups)
 
     for i in range(start_replay, last_closed_idx):
         round_no = i + 1
@@ -1702,7 +1702,7 @@ if (
     and len(groups) > st.session_state.last_seen_round
 ):
     p = st.session_state.pending_trade
-    if len(groups) >= p["bet_round"]:
+    if len(groups) == p["bet_round"]:
         actual_group = groups[p["bet_round"] - 1]
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
         if pnl > 0:
@@ -2041,11 +2041,3 @@ st.dataframe(
 
 
 # ---- V13.5.5 Stable : Pending Trade Cleanup ----
-def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
-    try:
-        if not phase_next_allowed:
-            session_state.pending_trade = None
-            if hasattr(session_state, "live_signal_sent"):
-                session_state.live_signal_sent = set()
-    except Exception:
-        pass
