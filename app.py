@@ -1583,10 +1583,10 @@ def cached_simulate_engine(numbers_tuple, config_fingerprint):
 
 def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
     try:
+        # Pending trades are only cleared AFTER settlement.
+        # Never clear a live pending trade from preview logic.
         if not phase_next_allowed:
-            session_state.pending_trade = None
-            if hasattr(session_state, "live_signal_sent"):
-                session_state.live_signal_sent = set()
+            pass
     except Exception:
         pass
 
@@ -1683,10 +1683,7 @@ final_phase_group_next = next_preview["final_phase_group"]
 final_phase_color_next = next_preview["final_phase_color"]
 phase_next_allowed = next_preview["phase_next_allowed"]
 
-cleanup_invalid_pending_trade(
-    st.session_state,
-    phase_next_allowed
-)
+# V13.6.1: do not clear pending trades before settlement
 
 next_state = next_preview["next_state"]
 
@@ -1696,11 +1693,10 @@ current_phase_trade_count = next_preview["current_phase_trade_count"]
 distance_from_last_trade = next_preview["distance_from_last_trade"]
 
 
+st.write("Pending Trade:", st.session_state.pending_trade)
+
 # LIVE SETTLEMENT ENGINE
-if (
-    st.session_state.pending_trade is not None
-    and len(groups) > st.session_state.last_seen_round
-):
+if st.session_state.pending_trade is not None:
     p = st.session_state.pending_trade
     if len(groups) >= p["bet_round"]:
         actual_group = groups[p["bet_round"] - 1]
@@ -2040,12 +2036,3 @@ st.dataframe(
 )
 
 
-# ---- V13.5.5 Stable : Pending Trade Cleanup ----
-def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
-    try:
-        if not phase_next_allowed:
-            session_state.pending_trade = None
-            if hasattr(session_state, "live_signal_sent"):
-                session_state.live_signal_sent = set()
-    except Exception:
-        pass
