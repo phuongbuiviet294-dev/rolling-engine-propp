@@ -30,8 +30,8 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
- #   {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
-#  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
+  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 3.0
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -110,21 +110,21 @@ HOT_WINDOW_WEIGHT_20 = 2.0
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 6
+WINDOW_SPACING_MAX = 8
+MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 12
+VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
-VALIDATE_LEN_LIST = [8,12,16,20,24]
-MIN_TRAIN_LEN = 60
+VALIDATE_LEN_LIST = [16]
+MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 30
-SCAN_LEN_LIST = [12,18,26,40,50]
+RELOCK_SCAN_LEN = 40
+SCAN_LEN_LIST = [30,40,50,60,80]
 PROFIT_TRAIL_GIVEBACK = 1.5
 RELOCK_BUFFER = 0
 
@@ -400,21 +400,12 @@ def evaluate_window_group(seq_groups, w):
     recent_profit_30 = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent30)) if recent30 else 0.0
     recent_wr_30 = (sum(recent30) / len(recent30)) if len(recent30) > 0 else 0.0
 
-    recent10 = results[-10:] if len(results) >= 10 else results
-    recent20 = results[-20:] if len(results) >= 20 else results
-
-    profit10 = sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent10)
-    profit20 = sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent20)
-
-    hot_score = profit10 * HOT_WINDOW_WEIGHT_10 + profit20 * HOT_WINDOW_WEIGHT_20
-
     streak_metrics = compute_streak_metrics(results)
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
         score = (
-            hot_score
-            + profit * 0.30
+            profit * 0.30
             + winrate * 4.0
             + expectancy * 4.0
             + recent_profit * 1.0
@@ -1126,7 +1117,7 @@ def simulate_engine(numbers, groups, colors):
             signal_group
             and recent_phase_pnl >= 0
             and phase_profit_group >= 0
-            and dominance_ratio >= 0.60
+            and dominance_ratio >= 0.70
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1134,7 +1125,7 @@ def simulate_engine(numbers, groups, colors):
             ALLOW_TRADE_WHEN_PHASE_NEGATIVE
             and not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group <= -2
+            and phase_profit_group < 0
         ):
             phase_trade_allowed = (
                 confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
@@ -1164,7 +1155,7 @@ def simulate_engine(numbers, groups, colors):
         negative_phase_pretrade_relock = (
             ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group <= -2
+            and phase_profit_group < 0
         )
 
         if negative_phase_pretrade_relock:
@@ -1419,7 +1410,6 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
-                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
