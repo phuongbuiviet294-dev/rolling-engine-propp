@@ -30,8 +30,8 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
- #   {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
-#  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
+  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 3.0
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -124,6 +124,8 @@ MIN_VALIDATE_TRADES = 4
 VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 40
+SCAN_LEN_LIST = [30,40,50,60,80]
+PROFIT_TRAIL_GIVEBACK = 1.5
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 5
@@ -1013,6 +1015,7 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
+    phase_peak_profit = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1187,6 +1190,7 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
+            phase_peak_profit = max(phase_peak_profit, phase_profit_group)
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
@@ -1249,7 +1253,15 @@ def simulate_engine(numbers, groups, colors):
 
         # FIX 5: stop win dùng thật.
         if not relock_triggered_now:
-            if phase_profit_group >= PHASE_STOP_WIN:
+            if (
+                phase_peak_profit >= 2.5
+                and phase_profit_group <= (phase_peak_profit - PROFIT_TRAIL_GIVEBACK)
+            ):
+                relock_triggered_now = True
+                relock_reason_now = "TRAILING_PROFIT_LOCK"
+                state = "AUTO_RELOCK_TRAILING_PROFIT"
+
+            elif phase_profit_group >= PHASE_STOP_WIN:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
