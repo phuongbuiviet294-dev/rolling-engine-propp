@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=15000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -108,10 +108,10 @@ HOT_WINDOW_WEIGHT_10 = 4.0
 HOT_WINDOW_WEIGHT_20 = 2.0
 
 MIN_WINDOW_SPACING = 1
-AUTO_SCAN_WINDOW_SPACING = True
+AUTO_SCAN_WINDOW_SPACING = False
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 6
+MAX_CANDIDATE_WINDOWS = 4
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
@@ -124,7 +124,7 @@ MIN_VALIDATE_TRADES = 4
 VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 16
-SCAN_LEN_LIST = [20,30,40]
+SCAN_LEN_LIST = [30]
 AUTO_DYNAMIC_SCAN_LEN = True
 PROFIT_TRAIL_GIVEBACK = 1.0
 RELOCK_BUFFER = 0
@@ -1525,7 +1525,7 @@ ENGINE_CONFIG_FINGERPRINT = json.dumps(
 )
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def cached_simulate_engine(numbers_tuple, config_fingerprint):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
