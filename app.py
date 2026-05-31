@@ -1008,6 +1008,7 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
+    phase_peak_profit = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1181,6 +1182,7 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
+            phase_peak_profit = max(phase_peak_profit, phase_profit_group)
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
@@ -1262,6 +1264,17 @@ def simulate_engine(numbers, groups, colors):
                 relock_triggered_now = True
                 relock_reason_now = "MAX_PHASE_TRADES_RELOCK"
                 state = "AUTO_RELOCK_MAX_PHASE_TRADES"
+
+
+        if (
+            not relock_triggered_now
+            and ENABLE_PROFIT_TRAILING_RELOCK
+            and phase_peak_profit >= TRAILING_TRIGGER
+            and (phase_peak_profit - phase_profit_group) >= TRAILING_GIVEBACK
+        ):
+            relock_triggered_now = True
+            relock_reason_now = "PROFIT_TRAILING_RELOCK"
+            state = "AUTO_RELOCK_PROFIT_TRAILING"
 
         if (
             not relock_triggered_now
@@ -1392,6 +1405,7 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
+                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
