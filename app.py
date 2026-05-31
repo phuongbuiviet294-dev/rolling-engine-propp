@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=8000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -29,7 +29,7 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
+   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 18},
   # {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
 #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
@@ -196,7 +196,7 @@ def send_signal_once(signal_name, current_round, msg):
 # =========================================================
 # LOAD DATA
 # =========================================================
-@st.cache_data(ttl=100, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
