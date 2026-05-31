@@ -96,7 +96,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = -1.0
 
 MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.67
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -1689,7 +1689,7 @@ if (
 st.session_state.last_seen_round = len(groups)
 
 signal_key_live = f"{next_round}_{final_phase_group_next}"
-if telegram_enabled() and signal_group and final_phase_group_next is not None and signal_key_live not in st.session_state.live_signal_sent:
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and signal_key_live not in st.session_state.live_signal_sent:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
         f"Round: {current_round}\n"
@@ -1744,12 +1744,12 @@ st.write("Last State:", str(last["state"]))
 st.subheader("NEXT ROUND BET")
 
 b1, b2, b3, b4 = st.columns(4)
-b1.metric("NEXT PHASE BET", "YES" if signal_group else "NO")
-b2.metric("NEXT GROUP", final_phase_group_next if signal_group else "-")
-b3.metric("NEXT COLOR", color_text(final_phase_color_next) if signal_group else "-")
+b1.metric("NEXT PHASE BET", "YES" if phase_next_allowed else "NO")
+b2.metric("NEXT GROUP", final_phase_group_next if phase_next_allowed else "-")
+b3.metric("NEXT COLOR", color_text(final_phase_color_next) if phase_next_allowed else "-")
 b4.metric("USED KEEP", "YES" if used_keep_phase_next else "NO")
 
-if signal_group and final_phase_group_next is not None:
+if phase_next_allowed and final_phase_group_next is not None:
     st.markdown(
         f"""
         <div style="background:#ff3333;padding:26px;border-radius:14px;text-align:center;
@@ -1775,6 +1775,11 @@ else:
     )
 
 st.subheader("NEXT ROUND DEBUG")
+
+st.write("Current Round:", current_round)
+st.write("Ready For Round:", next_round)
+st.write("signal_group =", signal_group)
+st.write("phase_next_allowed =", phase_next_allowed)
 
 d1, d2, d3, d4 = st.columns(4)
 d1.metric("Next Round", next_round)
