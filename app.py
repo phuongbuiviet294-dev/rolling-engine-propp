@@ -1721,7 +1721,7 @@ st.write("Pending Trade:", st.session_state.pending_trade)
 if st.session_state.pending_trade is not None:
     p = st.session_state.pending_trade
     if len(groups) >= p["bet_round"]:
-        actual_group = groups[p["bet_round"] - 1]
+        actual_group = groups[p["bet_round"] - 2]  # header/round offset fix
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
         if pnl > 0:
             st.session_state.live_win_count += 1
@@ -1734,6 +1734,13 @@ if st.session_state.pending_trade is not None:
             "pnl": pnl,
             "cum_profit": st.session_state.live_profit
         })
+        try:
+            ledger_df = load_live_ledger()
+            import pandas as pd
+            ledger_df = pd.concat([ledger_df, pd.DataFrame([st.session_state.live_trade_log[-1]])], ignore_index=True)
+            save_live_ledger(ledger_df)
+        except Exception:
+            pass
         st.session_state.pending_trade = None
 
 st.session_state.last_seen_round = len(groups)
