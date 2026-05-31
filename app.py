@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=15000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -29,7 +29,7 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 18},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
  #   {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
 #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
@@ -111,7 +111,7 @@ MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = False
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 6
+MAX_CANDIDATE_WINDOWS = 4
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
@@ -126,8 +126,8 @@ VALIDATE_MIN_DRAWDOWN = -2.0
 RELOCK_SCAN_LEN = 16
 SCAN_LEN_LIST = [16,24,40]
 AUTO_DYNAMIC_SCAN_LEN = True
-PROFIT_TRAIL_GIVEBACK = 1.0
-TRAILING_TRIGGER = 1.5
+PROFIT_TRAIL_GIVEBACK = 2.0
+TRAILING_TRIGGER = 2.5
 TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
@@ -199,7 +199,7 @@ def send_signal_once(signal_name, current_round, msg):
 # =========================================================
 # LOAD DATA
 # =========================================================
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=100, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
@@ -484,19 +484,10 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
-    df["health_score"] = (
-        df["recent_profit_30"] * 5
-        + df["recent_profit"] * 3
-        + df["recent_wr_30"] * 20
-    )
-
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["profit"] > 0)
         & (df["recent_profit"] > 0)
-        & (df["recent_profit_30"] > 0)
-        & (df["recent_wr_30"] >= 0.30)
-        & (df["health_score"] > 0)
         & (df["expectancy"] > 0)
         & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
@@ -1307,14 +1298,6 @@ def simulate_engine(numbers, groups, colors):
 
         if (
             not relock_triggered_now
-            and phase_profit_group <= -3
-        ):
-            relock_triggered_now = True
-            relock_reason_now = "WINDOW_HEALTH_FORCE_RELOCK"
-            state = "AUTO_RELOCK_WINDOW_HEALTH"
-
-        elif (
-            not relock_triggered_now
             and ENABLE_TIMEOUT_RELOCK
             and phase_age >= TIMEOUT_RELOCK_ROUNDS
             and phase_profit_group <= 0
@@ -1563,22 +1546,6 @@ numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
-if "live_profit" not in st.session_state:
-    st.session_state.live_profit = 0.0
-if "live_trade_count" not in st.session_state:
-    st.session_state.live_trade_count = 0
-if "live_win_count" not in st.session_state:
-    st.session_state.live_win_count = 0
-if "pending_trade" not in st.session_state:
-    st.session_state.pending_trade = None
-if "last_seen_round" not in st.session_state:
-    st.session_state.last_seen_round = len(groups)
-if "live_trade_log" not in st.session_state:
-    st.session_state.live_trade_log = []
-if "live_signal_sent" not in st.session_state:
-    st.session_state.live_signal_sent = set()
-
-
 if len(groups) < LOCK_ROUND_START:
     st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
     st.stop()
@@ -1654,33 +1621,7 @@ current_phase_age_next = next_preview["current_phase_age_next"]
 current_phase_trade_count = next_preview["current_phase_trade_count"]
 distance_from_last_trade = next_preview["distance_from_last_trade"]
 
-
-# LIVE SETTLEMENT ENGINE
-if (
-    st.session_state.pending_trade is not None
-    and len(groups) > st.session_state.last_seen_round
-):
-    p = st.session_state.pending_trade
-    if len(groups) >= p["bet_round"]:
-        actual_group = groups[p["bet_round"] - 1]
-        pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
-        if pnl > 0:
-            st.session_state.live_win_count += 1
-        st.session_state.live_profit += pnl
-        st.session_state.live_trade_count += 1
-        st.session_state.live_trade_log.append({
-            "bet_round": p["bet_round"],
-            "pred_group": p["group"],
-            "actual_group": actual_group,
-            "pnl": pnl,
-            "cum_profit": st.session_state.live_profit
-        })
-        st.session_state.pending_trade = None
-
-st.session_state.last_seen_round = len(groups)
-
-signal_key_live = f"{next_round}_{final_phase_group_next}"
-if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and signal_key_live not in st.session_state.live_signal_sent:
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
         f"Round: {current_round}\n"
@@ -1700,13 +1641,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         f"Total Phase Profit All: {total_phase_profit_all}\n"
         f"State: {next_state}"
     )
-    st.session_state.pending_trade = {
-        "signal_round": current_round,
-        "bet_round": next_round,
-        "group": final_phase_group_next,
-    }
-    st.session_state.live_signal_sent.add(signal_key_live)
-    send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
+    send_signal_once("READY_PHASE_FIXED", current_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
 
@@ -1819,22 +1754,6 @@ st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group prof
 st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
 
-
-st.subheader("LIVE PROFIT")
-l1,l2,l3 = st.columns(3)
-live_wr = (st.session_state.live_win_count / st.session_state.live_trade_count * 100) if st.session_state.live_trade_count else 0
-l1.metric("Live Profit", round(st.session_state.live_profit,2))
-l2.metric("Live Trades", st.session_state.live_trade_count)
-l3.metric("Live WR %", round(live_wr,2))
-
-
-st.subheader("LIVE HISTORY")
-import pandas as pd
-if len(st.session_state.live_trade_log) > 0:
-    live_df = pd.DataFrame(st.session_state.live_trade_log)
-    st.dataframe(live_df.iloc[::-1], use_container_width=True)
-    st.line_chart(live_df["cum_profit"])
-
 st.subheader("Profit Compare")
 
 p1, p2, p3, p4 = st.columns(4)
@@ -1898,39 +1817,12 @@ with dl2:
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
 
-
-# V13.2 WINDOW HEALTH FORCE RELOCK
-try:
-    if not scan_df_all.empty and locked_windows:
-        lock_df_chk = scan_df_all[scan_df_all["window"].isin(locked_windows)].copy()
-
-        score_col = "health_score" if "health_score" in lock_df_chk.columns else "score"
-
-        bad_windows = lock_df_chk[lock_df_chk[score_col] < 0]["window"].tolist()
-
-        if len(bad_windows) >= 2:
-            relock_triggered_now = True
-            relock_reason_now = f"WINDOW_HEALTH_FORCE_RELOCK:{','.join(map(str,bad_windows))}"
-except Exception:
-    pass
-
 with st.expander("Current Locked Window Detail"):
     if not scan_df_all.empty and locked_windows:
-        show_df = scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window")
-        cols = [c for c in [
-            "window","profit","recent_profit","recent_profit_30",
-            "recent_wr_30","health_score","score"
-        ] if c in show_df.columns]
-        show_df["health_status"] = show_df["health_score"].apply(
-            lambda x: "GOOD" if x > 0 else "BAD"
-        ) if "health_score" in show_df.columns else "UNKNOWN"
-        st.dataframe(show_df, use_container_width=True)
-
-        bad_count = 0
-        if "health_score" in show_df.columns:
-            bad_count = int((show_df["health_score"] < 0).sum())
-
-        st.metric("Bad Locked Windows", bad_count)
+        st.dataframe(
+            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
+            use_container_width=True,
+        )
 
 if SHOW_DEBUG_TABLES:
     with st.expander("Round Evaluation"):
