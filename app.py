@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=15000, key="refresh")
+st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -126,8 +126,8 @@ VALIDATE_MIN_DRAWDOWN = -2.0
 RELOCK_SCAN_LEN = 16
 SCAN_LEN_LIST = [16,24,40]
 AUTO_DYNAMIC_SCAN_LEN = True
-PROFIT_TRAIL_GIVEBACK = 2.0
-TRAILING_TRIGGER = 2.5
+PROFIT_TRAIL_GIVEBACK = 1.0
+TRAILING_TRIGGER = 1.5
 TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
