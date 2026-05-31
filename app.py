@@ -1580,6 +1580,17 @@ def cached_simulate_engine(numbers_tuple, config_fingerprint):
     return simulate_engine(nums, grps, cols)
 
 
+
+def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
+    try:
+        if not phase_next_allowed:
+            session_state.pending_trade = None
+            if hasattr(session_state, "live_signal_sent"):
+                session_state.live_signal_sent = set()
+    except Exception:
+        pass
+
+
 # =========================================================
 # APP
 # =========================================================
