@@ -1,3 +1,30 @@
+
+# ===== V13.9.2 SINGLE SOURCE METRICS =====
+def get_live_metrics():
+    ledger_df = load_live_ledger()
+
+    if ledger_df is None or len(ledger_df) == 0:
+        return {
+            "profit": 0.0,
+            "trades": 0,
+            "wins": 0,
+            "wr": 0.0,
+            "ledger": ledger_df
+        }
+
+    profit = float(ledger_df["pnl"].sum()) if "pnl" in ledger_df.columns else 0.0
+    trades = int(len(ledger_df))
+    wins = int((ledger_df["pnl"] > 0).sum()) if "pnl" in ledger_df.columns else 0
+    wr = (wins / trades * 100.0) if trades > 0 else 0.0
+
+    return {
+        "profit": profit,
+        "trades": trades,
+        "wins": wins,
+        "wr": wr,
+        "ledger": ledger_df
+    }
+
 # V13.5.5 Pending Trade Cleanup
 
 # =========================================================
@@ -1592,7 +1619,33 @@ def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
 
 
 
-# ===== V13.7 LIVE LEDGER PERSISTENT =====
+
+PENDING_FILE = "pending_trade.json"
+
+def load_pending_trade():
+    try:
+        if os.path.exists(PENDING_FILE):
+            with open(PENDING_FILE,"r",encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def save_pending_trade(x):
+    try:
+        with open(PENDING_FILE,"w",encoding="utf-8") as f:
+            json.dump(x,f)
+    except Exception:
+        pass
+
+def clear_pending_trade():
+    try:
+        if os.path.exists(PENDING_FILE):
+            os.remove(PENDING_FILE)
+    except Exception:
+        pass
+
+# ===== V13.9 LIVE LEDGER PERSISTENT =====
 LEDGER_FILE = "live_ledger.csv"
 
 def load_live_ledger():
@@ -1603,7 +1656,7 @@ def load_live_ledger():
         pass
     return pd.DataFrame(columns=[
         "signal_round","bet_round","pred_group",
-        "actual_group","pnl","cum_profit"
+        "actual_group","pnl","cum_profit","settled"
     ])
 
 def save_live_ledger(df):
@@ -1621,13 +1674,13 @@ groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
 if "live_profit" not in st.session_state:
-    st.session_state.live_profit = 0.0
+    get_live_metrics()["profit"] = 0.0
 if "live_trade_count" not in st.session_state:
-    st.session_state.live_trade_count = 0
+    get_live_metrics()["trades"] = 0
 if "live_win_count" not in st.session_state:
-    st.session_state.live_win_count = 0
+    get_live_metrics()["wins"] = 0
 if "pending_trade" not in st.session_state:
-    st.session_state.pending_trade = None
+    st.session_state.pending_trade = load_pending_trade()
 if "last_seen_round" not in st.session_state:
     st.session_state.last_seen_round = len(groups)
 if "live_trade_log" not in st.session_state:
@@ -1720,25 +1773,26 @@ st.write("Pending Trade:", st.session_state.pending_trade)
 # LIVE SETTLEMENT ENGINE
 if st.session_state.pending_trade is not None:
     p = st.session_state.pending_trade
-    if len(groups) >= p["bet_round"]:
-        # V13.8.1 round mapping by real round number
+    if len(groups) > p["bet_round"]:
+        # V13.9.1 live settlement from Google Sheet
         try:
-            actual_group = int(
-                hist.loc[hist["round"] == p["bet_round"], "group"].iloc[0]
-            )
+            live_numbers = load_numbers()
+            live_groups = [group_of(n) for n in live_numbers]
+            actual_group = live_groups[p["bet_round"] - 1]
         except Exception:
             actual_group = groups[-1]
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
         if pnl > 0:
-            st.session_state.live_win_count += 1
-        st.session_state.live_profit += pnl
-        st.session_state.live_trade_count += 1
+            get_live_metrics()["wins"] += 1
+        get_live_metrics()["profit"] += pnl
+        get_live_metrics()["trades"] += 1
         st.session_state.live_trade_log.append({
             "bet_round": p["bet_round"],
             "pred_group": p["group"],
             "actual_group": actual_group,
             "pnl": pnl,
-            "cum_profit": st.session_state.live_profit
+            "cum_profit": get_live_metrics()["profit"],
+            "settled": 1
         })
         try:
             ledger_df = load_live_ledger()
@@ -1748,6 +1802,7 @@ if st.session_state.pending_trade is not None:
         except Exception:
             pass
         st.session_state.pending_trade = None
+        clear_pending_trade()
 
 st.session_state.last_seen_round = len(groups)
 
@@ -1777,6 +1832,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         "bet_round": next_round,
         "group": final_phase_group_next,
     }
+    save_pending_trade(st.session_state.pending_trade)
     st.session_state.live_signal_sent.add(signal_key_live)
     send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
 
