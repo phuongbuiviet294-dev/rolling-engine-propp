@@ -96,7 +96,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = -1.0
 
 MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.67
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -281,6 +281,18 @@ def get_valid_color_preds(seq_colors, i, windows):
             if seq_colors[i - 1] != pred:
                 preds.append(pred)
     return preds
+
+
+
+def phase_signal_allowed(confidence_group, vote_required, dominance_ratio):
+    """
+    Single Source Of Truth:
+    Preview và Replay dùng cùng điều kiện signal.
+    """
+    return (
+        confidence_group >= vote_required
+        and dominance_ratio >= VOTE_DOMINANCE_RATIO
+    )
 
 
 def compute_profit_path(results, win_value, loss_value):
@@ -876,7 +888,7 @@ def make_next_preview(
     else:
         vote_color, confidence_color = None, 0
 
-    signal_group = (confidence_group >= vote_required and dominance_ok_next) if vote_group is not None else False
+    signal_group = phase_signal_allowed(confidence_group, vote_required, dominance_ratio_next) if vote_group is not None else False
     signal_color = confidence_color >= color_vote_required if vote_color is not None else False
 
     recent_phase_pnl_next = compute_recent_phase_trade_pnl(phase_hits_group)
@@ -1099,7 +1111,7 @@ def simulate_engine(numbers, groups, colors):
                 confidence_group,
                 VOTE_DOMINANCE_RATIO,
             )
-            signal_group = confidence_group >= vote_required and dominance_ok
+            signal_group = phase_signal_allowed(confidence_group, vote_required, dominance_ratio)
         else:
             vote_group = None
             confidence_group = 0
