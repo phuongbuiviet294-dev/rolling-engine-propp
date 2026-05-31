@@ -97,7 +97,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = -1.0
 
 MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.67
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -1091,7 +1091,9 @@ def simulate_engine(numbers, groups, colors):
     phase_start_round = start_replay + 1
     current_mode = selected_mode
 
-    for i in range(start_replay, len(groups)):
+    last_closed_idx = max(start_replay, len(groups) - 1)
+
+    for i in range(start_replay, last_closed_idx):
         round_no = i + 1
 
         if total_phase_profit_all >= SESSION_STOP_WIN:
@@ -1669,6 +1671,12 @@ used_keep_phase_next = next_preview["used_keep_phase"]
 final_phase_group_next = next_preview["final_phase_group"]
 final_phase_color_next = next_preview["final_phase_color"]
 phase_next_allowed = next_preview["phase_next_allowed"]
+
+cleanup_invalid_pending_trade(
+    st.session_state,
+    phase_next_allowed
+)
+
 next_state = next_preview["next_state"]
 
 recent_phase_pnl_next = next_preview["recent_phase_pnl"]
@@ -1847,7 +1855,7 @@ st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
 
 
-st.subheader("LIVE PROFIT")
+st.subheader("REPLAY PROFIT")
 
 trade_df = hist[hist["PHASE_BET"] == True].copy()
 
@@ -1857,12 +1865,12 @@ live_wr_real = float((trade_df["phase_hit_group"] == 1).mean() * 100) if live_tr
 ledger_df = trade_df.copy()
 
 l1,l2,l3 = st.columns(3)
-l1.metric("Live Profit", round(live_profit_real,2))
-l2.metric("Live Trades", live_trades_real)
-l3.metric("Live WR %", round(live_wr_real,2))
+l1.metric("Replay Profit", round(live_profit_real,2))
+l2.metric("Replay Trades", live_trades_real)
+l3.metric("Replay WR %", round(live_wr_real,2))
 
 
-st.subheader("LIVE HISTORY")
+st.subheader("REPLAY HISTORY")
 import pandas as pd
 if not trade_df.empty:
     show_live = trade_df[["round","phase_bet_group","group","phase_pnl_total","total_phase_profit_all"]].copy()
@@ -1874,7 +1882,7 @@ st.subheader("Profit Compare")
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("Replay Phase Group", phase_profit_group)
 p2.metric("Replay Phase Total", phase_profit_total)
-p3.metric("Live Profit", round(live_profit_real,2))
+p3.metric("Replay Profit", round(live_profit_real,2))
 p4.metric("Ledger Trades", live_trades_real)
 
 st.subheader("Trade Stats")
