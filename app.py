@@ -126,8 +126,8 @@ VALIDATE_MIN_DRAWDOWN = -2.0
 RELOCK_SCAN_LEN = 16
 SCAN_LEN_LIST = [16,24,40]
 AUTO_DYNAMIC_SCAN_LEN = True
-PROFIT_TRAIL_GIVEBACK = 1.0
-TRAILING_TRIGGER = 1.5
+PROFIT_TRAIL_GIVEBACK = 2.0
+TRAILING_TRIGGER = 2.5
 TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
@@ -484,10 +484,19 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
+    df["health_score"] = (
+        df["recent_profit_30"] * 5
+        + df["recent_profit"] * 3
+        + df["recent_wr_30"] * 20
+    )
+
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["profit"] > 0)
         & (df["recent_profit"] > 0)
+        & (df["recent_profit_30"] > 0)
+        & (df["recent_wr_30"] >= 0.30)
+        & (df["health_score"] > 0)
         & (df["expectancy"] > 0)
         & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
@@ -1298,6 +1307,14 @@ def simulate_engine(numbers, groups, colors):
 
         if (
             not relock_triggered_now
+            and phase_profit_group <= -3
+        ):
+            relock_triggered_now = True
+            relock_reason_now = "WINDOW_HEALTH_FORCE_RELOCK"
+            state = "AUTO_RELOCK_WINDOW_HEALTH"
+
+        elif (
+            not relock_triggered_now
             and ENABLE_TIMEOUT_RELOCK
             and phase_age >= TIMEOUT_RELOCK_ROUNDS
             and phase_profit_group <= 0
@@ -1556,6 +1573,10 @@ if "pending_trade" not in st.session_state:
     st.session_state.pending_trade = None
 if "last_seen_round" not in st.session_state:
     st.session_state.last_seen_round = len(groups)
+if "live_trade_log" not in st.session_state:
+    st.session_state.live_trade_log = []
+if "live_signal_sent" not in st.session_state:
+    st.session_state.live_signal_sent = set()
 
 
 if len(groups) < LOCK_ROUND_START:
@@ -1647,11 +1668,19 @@ if (
             st.session_state.live_win_count += 1
         st.session_state.live_profit += pnl
         st.session_state.live_trade_count += 1
+        st.session_state.live_trade_log.append({
+            "bet_round": p["bet_round"],
+            "pred_group": p["group"],
+            "actual_group": actual_group,
+            "pnl": pnl,
+            "cum_profit": st.session_state.live_profit
+        })
         st.session_state.pending_trade = None
 
 st.session_state.last_seen_round = len(groups)
 
-if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
+signal_key_live = f"{next_round}_{final_phase_group_next}"
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and signal_key_live not in st.session_state.live_signal_sent:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
         f"Round: {current_round}\n"
@@ -1676,6 +1705,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         "bet_round": next_round,
         "group": final_phase_group_next,
     }
+    st.session_state.live_signal_sent.add(signal_key_live)
     send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
@@ -1797,6 +1827,14 @@ l1.metric("Live Profit", round(st.session_state.live_profit,2))
 l2.metric("Live Trades", st.session_state.live_trade_count)
 l3.metric("Live WR %", round(live_wr,2))
 
+
+st.subheader("LIVE HISTORY")
+import pandas as pd
+if len(st.session_state.live_trade_log) > 0:
+    live_df = pd.DataFrame(st.session_state.live_trade_log)
+    st.dataframe(live_df.iloc[::-1], use_container_width=True)
+    st.line_chart(live_df["cum_profit"])
+
 st.subheader("Profit Compare")
 
 p1, p2, p3, p4 = st.columns(4)
@@ -1862,10 +1900,12 @@ with st.expander("Phase Summary"):
 
 with st.expander("Current Locked Window Detail"):
     if not scan_df_all.empty and locked_windows:
-        st.dataframe(
-            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
-            use_container_width=True,
-        )
+        show_df = scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window")
+        cols = [c for c in [
+            "window","profit","recent_profit","recent_profit_30",
+            "recent_wr_30","health_score","score"
+        ] if c in show_df.columns]
+        st.dataframe(show_df[cols], use_container_width=True)
 
 if SHOW_DEBUG_TABLES:
     with st.expander("Round Evaluation"):
