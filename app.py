@@ -1,4 +1,43 @@
 
+# ===== V13.9.4 UNIFIED UI HELPERS =====
+def render_ready_banner(signal_round, bet_round, group_name):
+    try:
+        st.success(
+            f"READY TO BET\nSignal Round: {signal_round}\nBet Round: {bet_round}\nGroup: {group_name}"
+        )
+    except Exception:
+        pass
+
+def render_wait_banner(bet_round):
+    try:
+        st.info(f"WAIT RESULT ROUND {bet_round}")
+    except Exception:
+        pass
+
+
+# ===== V13.9.3 DUPLICATE PROTECTION =====
+def ledger_has_bet_round(bet_round):
+    try:
+        df = load_live_ledger()
+        if df is None or len(df) == 0:
+            return False
+        return bet_round in set(df["bet_round"].astype(int).tolist())
+    except Exception:
+        return False
+
+def ledger_trade_settled(bet_round):
+    try:
+        df = load_live_ledger()
+        x = df[df["bet_round"].astype(int) == int(bet_round)]
+        if len(x) == 0:
+            return False
+        if "settled" in x.columns:
+            return bool(x.iloc[-1]["settled"])
+        return True
+    except Exception:
+        return False
+
+
 # ===== V13.9.2 SINGLE SOURCE METRICS =====
 def get_live_metrics():
     ledger_df = load_live_ledger()
