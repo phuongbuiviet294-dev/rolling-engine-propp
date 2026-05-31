@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=8000, key="refresh")
+st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -30,8 +30,8 @@ REPLAY_FROM = 180
 
 MODES = [
    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
-  # {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
-#  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
+  #  {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
+ # {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -63,9 +63,9 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 3.0
+PHASE_STOP_WIN = 4.0
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.65
+VOTE_DOMINANCE_RATIO = 0.70
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -99,33 +99,23 @@ MIN_FALLBACK_SCORE = 1
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
-
-# ===== V6 HOT WINDOW DYNAMIC RELOCK =====
-ENABLE_HOT_WINDOW_DYNAMIC_RELOCK = True
-HOT_WINDOW_RECENT_10 = 10
-HOT_WINDOW_RECENT_20 = 20
-HOT_WINDOW_WEIGHT_10 = 4.0
-HOT_WINDOW_WEIGHT_20 = 2.0
-
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
-WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 6
+WINDOW_SPACING_MIN = 2
+WINDOW_SPACING_MAX = 4
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16]
-MIN_TRAIN_LEN = 60
+MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 12
-SCAN_LEN_LIST = [16,24,40,60]
-PROFIT_TRAIL_GIVEBACK = 1.5
+RELOCK_SCAN_LEN = 60
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 5
@@ -196,7 +186,7 @@ def send_signal_once(signal_name, current_round, msg):
 # =========================================================
 # LOAD DATA
 # =========================================================
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=100, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
@@ -880,7 +870,7 @@ def make_next_preview(
     negative_phase_pretrade_relock_ready = (
         ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
-        and phase_profit_group < 0
+        and phase_profit_group <= -2
     )
 
     phase_next_allowed = (
@@ -893,7 +883,7 @@ def make_next_preview(
         ALLOW_TRADE_WHEN_PHASE_NEGATIVE
         and not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
         and signal_group
-        and phase_profit_group < 0
+        and phase_profit_group <= -2
     ):
         phase_next_allowed = (
             confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
@@ -1015,7 +1005,6 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
-    phase_peak_profit = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1117,7 +1106,6 @@ def simulate_engine(numbers, groups, colors):
             signal_group
             and recent_phase_pnl >= 0
             and phase_profit_group >= 0
-            and dominance_ratio >= 0.70
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1125,7 +1113,7 @@ def simulate_engine(numbers, groups, colors):
             ALLOW_TRADE_WHEN_PHASE_NEGATIVE
             and not ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group < 0
+            and phase_profit_group <= -2
         ):
             phase_trade_allowed = (
                 confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
@@ -1155,7 +1143,7 @@ def simulate_engine(numbers, groups, colors):
         negative_phase_pretrade_relock = (
             ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK
             and signal_group
-            and phase_profit_group < 0
+            and phase_profit_group <= -2
         )
 
         if negative_phase_pretrade_relock:
@@ -1190,7 +1178,6 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
-            phase_peak_profit = max(phase_peak_profit, phase_profit_group)
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
@@ -1253,15 +1240,7 @@ def simulate_engine(numbers, groups, colors):
 
         # FIX 5: stop win dùng thật.
         if not relock_triggered_now:
-            if (
-                phase_peak_profit >= 2.5
-                and phase_profit_group <= (phase_peak_profit - PROFIT_TRAIL_GIVEBACK)
-            ):
-                relock_triggered_now = True
-                relock_reason_now = "TRAILING_PROFIT_LOCK"
-                state = "AUTO_RELOCK_TRAILING_PROFIT"
-
-            elif phase_profit_group >= PHASE_STOP_WIN:
+            if phase_profit_group >= PHASE_STOP_WIN:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
