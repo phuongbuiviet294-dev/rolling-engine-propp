@@ -1898,6 +1898,22 @@ with dl2:
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
 
+
+# V13.2 WINDOW HEALTH FORCE RELOCK
+try:
+    if not scan_df_all.empty and locked_windows:
+        lock_df_chk = scan_df_all[scan_df_all["window"].isin(locked_windows)].copy()
+
+        score_col = "health_score" if "health_score" in lock_df_chk.columns else "score"
+
+        bad_windows = lock_df_chk[lock_df_chk[score_col] < 0]["window"].tolist()
+
+        if len(bad_windows) >= 2:
+            relock_triggered_now = True
+            relock_reason_now = f"WINDOW_HEALTH_FORCE_RELOCK:{','.join(map(str,bad_windows))}"
+except Exception:
+    pass
+
 with st.expander("Current Locked Window Detail"):
     if not scan_df_all.empty and locked_windows:
         show_df = scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window")
@@ -1905,7 +1921,16 @@ with st.expander("Current Locked Window Detail"):
             "window","profit","recent_profit","recent_profit_30",
             "recent_wr_30","health_score","score"
         ] if c in show_df.columns]
-        st.dataframe(show_df[cols], use_container_width=True)
+        show_df["health_status"] = show_df["health_score"].apply(
+            lambda x: "GOOD" if x > 0 else "BAD"
+        ) if "health_score" in show_df.columns else "UNKNOWN"
+        st.dataframe(show_df, use_container_width=True)
+
+        bad_count = 0
+        if "health_score" in show_df.columns:
+            bad_count = int((show_df["health_score"] < 0).sum())
+
+        st.metric("Bad Locked Windows", bad_count)
 
 if SHOW_DEBUG_TABLES:
     with st.expander("Round Evaluation"):
