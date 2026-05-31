@@ -1137,9 +1137,9 @@ def simulate_engine(numbers, groups, colors):
         # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
-            and recent_phase_pnl >= -1
-            and phase_profit_group >= -1
-            and dominance_ratio >= 0.60
+            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
+            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
+            and dominance_ratio >= VOTE_DOMINANCE_RATIO
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1821,11 +1821,17 @@ st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for product
 
 
 st.subheader("LIVE PROFIT")
+
+ledger_df = pd.DataFrame(st.session_state.live_trade_log) if len(st.session_state.live_trade_log) > 0 else pd.DataFrame()
+
+live_profit_real = float(ledger_df["pnl"].sum()) if not ledger_df.empty else 0.0
+live_trades_real = len(ledger_df)
+live_wr_real = float((ledger_df["pnl"] > 0).mean() * 100) if live_trades_real > 0 else 0.0
+
 l1,l2,l3 = st.columns(3)
-live_wr = (st.session_state.live_win_count / st.session_state.live_trade_count * 100) if st.session_state.live_trade_count else 0
-l1.metric("Live Profit", round(st.session_state.live_profit,2))
-l2.metric("Live Trades", st.session_state.live_trade_count)
-l3.metric("Live WR %", round(live_wr,2))
+l1.metric("Live Profit", round(live_profit_real,2))
+l2.metric("Live Trades", live_trades_real)
+l3.metric("Live WR %", round(live_wr_real,2))
 
 
 st.subheader("LIVE HISTORY")
@@ -1838,20 +1844,16 @@ if len(st.session_state.live_trade_log) > 0:
 st.subheader("Profit Compare")
 
 p1, p2, p3, p4 = st.columns(4)
-p1.metric("Phase Group Profit", phase_profit_group)
-p2.metric("Phase Color Profit", phase_profit_color)
-p3.metric("Phase Total Profit", phase_profit_total)
-p4.metric("Total Phase All", total_phase_profit_all)
+p1.metric("Replay Phase Group", phase_profit_group)
+p2.metric("Replay Phase Total", phase_profit_total)
+p3.metric("Live Profit", round(live_profit_real,2))
+p4.metric("Ledger Trades", live_trades_real)
 
 st.subheader("Trade Stats")
 
-phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+phase_trades = live_trades_real
 
-phase_group_wr = (
-    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
-    if phase_trades > 0
-    else 0
-)
+phase_group_wr = round(live_wr_real,2)
 
 color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
@@ -1873,7 +1875,9 @@ chart_cols = [
 
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 
-if exist_chart_cols:
+if not ledger_df.empty and "cum_profit" in ledger_df.columns:
+    st.line_chart(ledger_df["cum_profit"])
+elif exist_chart_cols:
     st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
 
 hist_csv = hist.to_csv(index=False).encode("utf-8")
