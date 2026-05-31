@@ -1,3 +1,4 @@
+# V13.5.5 Pending Trade Cleanup
 
 # =========================================================
 # V13.5 UNIFIED METRICS
@@ -94,9 +95,9 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = -1.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.67
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -2018,3 +2019,14 @@ st.dataframe(
     hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS),
     use_container_width=True,
 )
+
+
+# ---- V13.5.5 Stable : Pending Trade Cleanup ----
+def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
+    try:
+        if not phase_next_allowed:
+            session_state.pending_trade = None
+            if hasattr(session_state, "live_signal_sent"):
+                session_state.live_signal_sent = set()
+    except Exception:
+        pass
