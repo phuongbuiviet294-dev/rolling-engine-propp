@@ -110,20 +110,20 @@ HOT_WINDOW_WEIGHT_20 = 2.0
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 5
-MAX_CANDIDATE_WINDOWS = 10
+WINDOW_SPACING_MAX = 3
+MAX_CANDIDATE_WINDOWS = 6
 
-VALIDATE_LEN = 16
+VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [8,12,16,20,24]
-MIN_TRAIN_LEN = 100
+MIN_TRAIN_LEN = 60
 MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 40
+RELOCK_SCAN_LEN = 30
 SCAN_LEN_LIST = [12,18,26,40,50]
 PROFIT_TRAIL_GIVEBACK = 1.5
 RELOCK_BUFFER = 0
@@ -1419,6 +1419,7 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
+                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
