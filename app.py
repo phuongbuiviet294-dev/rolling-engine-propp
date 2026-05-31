@@ -1721,7 +1721,13 @@ st.write("Pending Trade:", st.session_state.pending_trade)
 if st.session_state.pending_trade is not None:
     p = st.session_state.pending_trade
     if len(groups) >= p["bet_round"]:
-        actual_group = groups[p["bet_round"] - 2]  # header/round offset fix
+        # V13.8.1 round mapping by real round number
+        try:
+            actual_group = int(
+                hist.loc[hist["round"] == p["bet_round"], "group"].iloc[0]
+            )
+        except Exception:
+            actual_group = groups[-1]
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
         if pnl > 0:
             st.session_state.live_win_count += 1
