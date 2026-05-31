@@ -131,7 +131,7 @@ TRAILING_TRIGGER = 2.5
 TRAILING_COOLDOWN = 5
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 5
+SHOW_HISTORY_ROWS = 50
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
