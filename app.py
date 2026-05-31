@@ -1893,12 +1893,18 @@ st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for product
 
 st.subheader("LIVE PROFIT")
 
-live_df = pd.DataFrame(st.session_state.live_trade_log)
+ledger_df = load_live_ledger()
+live_df = ledger_df.copy()
 
-live_profit_real = float(st.session_state.live_profit)
-live_trades_real = int(st.session_state.live_trade_count)
-live_wr_real = (st.session_state.live_win_count / live_trades_real * 100) if live_trades_real > 0 else 0.0
-ledger_df = live_df.copy()
+if not ledger_df.empty:
+    live_profit_real = float(ledger_df["pnl"].sum())
+    live_trades_real = int(len(ledger_df))
+    live_win_count_real = int((ledger_df["pnl"] > 0).sum())
+    live_wr_real = (live_win_count_real / live_trades_real * 100) if live_trades_real > 0 else 0.0
+else:
+    live_profit_real = 0.0
+    live_trades_real = 0
+    live_wr_real = 0.0
 
 l1,l2,l3 = st.columns(3)
 l1.metric("Replay Profit", round(live_profit_real,2))
