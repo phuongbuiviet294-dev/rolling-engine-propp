@@ -29,9 +29,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
-  #  {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
- # {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 24},
+  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 3.0
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.70
+VOTE_DOMINANCE_RATIO = 0.65
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -99,10 +99,18 @@ MIN_FALLBACK_SCORE = 1
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
+
+# ===== V6 HOT WINDOW DYNAMIC RELOCK =====
+ENABLE_HOT_WINDOW_DYNAMIC_RELOCK = True
+HOT_WINDOW_RECENT_10 = 10
+HOT_WINDOW_RECENT_20 = 20
+HOT_WINDOW_WEIGHT_10 = 4.0
+HOT_WINDOW_WEIGHT_20 = 2.0
+
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
+WINDOW_SPACING_MAX = 8
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 16
@@ -115,8 +123,6 @@ MIN_VALIDATE_TRADES = 4
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-AUTO_RELOCK_SCAN_LEN = True
-RELOCK_SCAN_LEN_LIST = [18,24,30,40,50,60]
 RELOCK_SCAN_LEN = 40
 RELOCK_BUFFER = 0
 
@@ -1360,31 +1366,7 @@ def simulate_engine(numbers, groups, colors):
             )
 
             scan_end = i
-
-            adaptive_scan_len = RELOCK_SCAN_LEN
-
-            if AUTO_RELOCK_SCAN_LEN:
-                best_scan_len = RELOCK_SCAN_LEN_LIST[0]
-                best_score_scan = -999999
-
-                for test_scan_len in RELOCK_SCAN_LEN_LIST:
-                    test_scan_start = max(
-                        LOCK_ROUND_START,
-                        scan_end - test_scan_len + 1 - RELOCK_BUFFER
-                    )
-
-                    test_score = scan_end - test_scan_start
-
-                    if test_score > best_score_scan:
-                        best_score_scan = test_score
-                        best_scan_len = test_scan_len
-
-                adaptive_scan_len = best_scan_len
-
-            scan_start = max(
-                LOCK_ROUND_START,
-                scan_end - adaptive_scan_len + 1 - RELOCK_BUFFER
-            )
+            scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
 
             (
                 new_selected_lock_round,
