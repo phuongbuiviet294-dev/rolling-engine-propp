@@ -1591,6 +1591,28 @@ def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
         pass
 
 
+
+# ===== V13.7 LIVE LEDGER PERSISTENT =====
+LEDGER_FILE = "live_ledger.csv"
+
+def load_live_ledger():
+    try:
+        if os.path.exists(LEDGER_FILE):
+            return pd.read_csv(LEDGER_FILE)
+    except Exception:
+        pass
+    return pd.DataFrame(columns=[
+        "signal_round","bet_round","pred_group",
+        "actual_group","pnl","cum_profit"
+    ])
+
+def save_live_ledger(df):
+    try:
+        df.to_csv(LEDGER_FILE, index=False)
+    except Exception:
+        pass
+
+
 # =========================================================
 # APP
 # =========================================================
