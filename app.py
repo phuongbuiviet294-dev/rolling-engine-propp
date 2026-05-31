@@ -1358,9 +1358,6 @@ def simulate_engine(numbers, groups, colors):
                 "lock_scan_end": lock_scan_end,
                 "relock_triggered_now": relock_triggered_now,
                 "relock_reason": relock_reason_now,
-                "trade_executed": bool(phase_trade_allowed),
-                "predicted_from_round": round_no - 1,
-                "bet_round": round_no,
             }
         )
 
@@ -1549,6 +1546,18 @@ numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
+if "live_profit" not in st.session_state:
+    st.session_state.live_profit = 0.0
+if "live_trade_count" not in st.session_state:
+    st.session_state.live_trade_count = 0
+if "live_win_count" not in st.session_state:
+    st.session_state.live_win_count = 0
+if "pending_trade" not in st.session_state:
+    st.session_state.pending_trade = None
+if "last_seen_round" not in st.session_state:
+    st.session_state.last_seen_round = len(groups)
+
+
 if len(groups) < LOCK_ROUND_START:
     st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
     st.stop()
@@ -1624,11 +1633,28 @@ current_phase_age_next = next_preview["current_phase_age_next"]
 current_phase_trade_count = next_preview["current_phase_trade_count"]
 distance_from_last_trade = next_preview["distance_from_last_trade"]
 
+
+# LIVE SETTLEMENT ENGINE
+if (
+    st.session_state.pending_trade is not None
+    and len(groups) > st.session_state.last_seen_round
+):
+    p = st.session_state.pending_trade
+    if len(groups) >= p["bet_round"]:
+        actual_group = groups[p["bet_round"] - 1]
+        pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
+        if pnl > 0:
+            st.session_state.live_win_count += 1
+        st.session_state.live_profit += pnl
+        st.session_state.live_trade_count += 1
+        st.session_state.pending_trade = None
+
+st.session_state.last_seen_round = len(groups)
+
 if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
-        f"Current Round: {current_round}\n"
-        f"Bet For Round: {next_round}\n"
+        f"Round: {current_round}\n"
         f"Current Number: {numbers[-1]}\n"
         f"Current Group: {groups[-1]}\n"
         f"Current Color: {color_text(colors[-1])}\n"
@@ -1645,6 +1671,11 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         f"Total Phase Profit All: {total_phase_profit_all}\n"
         f"State: {next_state}"
     )
+    st.session_state.pending_trade = {
+        "signal_round": current_round,
+        "bet_round": next_round,
+        "group": final_phase_group_next,
+    }
     send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
@@ -1732,9 +1763,6 @@ st.write("VOTE_DOMINANCE_RATIO:", VOTE_DOMINANCE_RATIO)
 st.write("Dominance OK Next:", dominance_ok_next)
 st.write("Negative Phase Relock Enabled:", ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK)
 st.write("Next State:", next_state)
-st.write("Signal Generated Round:", current_round)
-st.write("Bet For Round:", next_round)
-st.write("Settlement Status:", "WAIT_RESULT" if phase_next_allowed else "-")
 
 st.subheader("Lock Info")
 
@@ -1760,6 +1788,14 @@ st.write("Relock Rule Max Trades:", f">= {MAX_PHASE_TRADES}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group profit <= 0")
 st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
+
+
+st.subheader("LIVE PROFIT")
+l1,l2,l3 = st.columns(3)
+live_wr = (st.session_state.live_win_count / st.session_state.live_trade_count * 100) if st.session_state.live_trade_count else 0
+l1.metric("Live Profit", round(st.session_state.live_profit,2))
+l2.metric("Live Trades", st.session_state.live_trade_count)
+l3.metric("Live WR %", round(live_wr,2))
 
 st.subheader("Profit Compare")
 
@@ -1838,14 +1874,6 @@ if SHOW_DEBUG_TABLES:
     with st.expander("Filtered Windows"):
         st.dataframe(scan_df_filtered.head(25), use_container_width=True)
 
-
-st.subheader("Settlement Debug")
-
-m1, m2, m3 = st.columns(3)
-m1.metric("Signal Generated", int(hist["signal_group"].sum()) if "signal_group" in hist.columns else 0)
-m2.metric("Trade Executed", int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0)
-m3.metric("Trade Settled", int(hist["phase_hit_group"].notna().sum()) if "phase_hit_group" in hist.columns else 0)
-
 st.subheader("History")
 
 history_cols = [
@@ -1865,9 +1893,6 @@ history_cols = [
     "confidence_color",
     "signal_color",
     "PHASE_BET",
-    "trade_executed",
-    "predicted_from_round",
-    "bet_round",
     "used_keep_phase",
     "phase_bet_group",
     "phase_bet_color",
