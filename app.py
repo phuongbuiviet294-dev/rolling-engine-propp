@@ -1757,7 +1757,6 @@ colors = [color_of_number(n) for n in numbers]
 pending_trade_runtime = load_pending_trade()
 if "last_seen_round" not in st.session_state:
     st.session_state.last_seen_round = len(groups)
-    pass
 
 
 if len(groups) < LOCK_ROUND_START:
@@ -1859,21 +1858,26 @@ if pending_trade_runtime is not None:
         else:
             try:
                 ledger_df = load_live_ledger()
-            current_profit = float(ledger_df["pnl"].sum()) if len(ledger_df) > 0 and "pnl" in ledger_df.columns else 0.0
-            trade_row = {
-                "signal_round": p.get("signal_round"),
-                "bet_round": p["bet_round"],
-                "pred_group": p["group"],
-                "actual_group": actual_group,
-                "pnl": pnl,
-                "cum_profit": current_profit + pnl,
-                "settled": 1
-            }
-            import pandas as pd
-            ledger_df = pd.concat([ledger_df, pd.DataFrame([trade_row])], ignore_index=True)
+
+                current_profit = float(ledger_df["pnl"].sum()) if len(ledger_df) > 0 and "pnl" in ledger_df.columns else 0.0
+
+                trade_row = {
+                    "signal_round": p.get("signal_round"),
+                    "bet_round": p["bet_round"],
+                    "pred_group": p["group"],
+                    "actual_group": actual_group,
+                    "pnl": pnl,
+                    "cum_profit": current_profit + pnl,
+                    "settled": 1
+                }
+
+                import pandas as pd
+                ledger_df = pd.concat([ledger_df, pd.DataFrame([trade_row])], ignore_index=True)
                 save_live_ledger(ledger_df)
+
             except Exception:
                 pass
+
             clear_pending_trade()
 
 st.session_state.last_seen_round = len(groups)
