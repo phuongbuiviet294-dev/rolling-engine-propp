@@ -1727,6 +1727,7 @@ def append_signal_registry(signal_round, bet_round, group):
     try:
         df = load_signal_registry()
         row = pd.DataFrame([{
+            "trade_id": f"{signal_round}_{bet_round}",
             "signal_round":signal_round,
             "bet_round":bet_round,
             "group":group
@@ -1935,9 +1936,14 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         f"State: {next_state}"
     )
     pending_trade_new = {
+        "trade_id": f"{current_round}_{next_round}",
         "signal_round": current_round,
         "bet_round": next_round,
         "group": final_phase_group_next,
+        "locked_windows": list(locked_windows) if locked_windows else [],
+        "mode": selected_mode["name"] if selected_mode else None,
+        "vote_required": vote_required,
+        "snapshot": True
     }
     save_pending_trade(pending_trade_new)
     append_signal_registry(current_round, next_round, final_phase_group_next)
