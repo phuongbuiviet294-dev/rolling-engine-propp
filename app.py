@@ -2118,6 +2118,65 @@ if not live_df.empty and "bet_round" in live_df.columns:
     else:
         st.error("MISMATCH")
 
+
+st.subheader("V14.3 Single Truth Audit")
+
+if not live_df.empty:
+    replay_audit = hist[hist["PHASE_BET"] == True].copy()
+
+    replay_audit = replay_audit[[
+        "signal_round",
+        "bet_round",
+        "phase_bet_group",
+        "group",
+        "phase_pnl_group"
+    ]].rename(columns={
+        "phase_bet_group":"replay_pred_group",
+        "group":"replay_actual_group",
+        "phase_pnl_group":"replay_pnl"
+    })
+
+    live_audit = live_df[[
+        "signal_round",
+        "bet_round",
+        "pred_group",
+        "actual_group",
+        "pnl"
+    ]].rename(columns={
+        "pred_group":"live_pred_group",
+        "actual_group":"live_actual_group",
+        "pnl":"live_pnl"
+    })
+
+    audit_df = replay_audit.merge(
+        live_audit,
+        on=["signal_round","bet_round"],
+        how="outer"
+    )
+
+    def _status(r):
+        if pd.isna(r.get("live_pnl")):
+            return "REPLAY_ONLY"
+        if pd.isna(r.get("replay_pnl")):
+            return "LIVE_ONLY"
+        if abs(float(r["replay_pnl"]) - float(r["live_pnl"])) < 1e-9:
+            return "MATCH"
+        return "MISMATCH"
+
+    audit_df["status"] = audit_df.apply(_status, axis=1)
+
+    st.dataframe(audit_df, use_container_width=True)
+
+    matched = audit_df[audit_df["status"]=="MATCH"]
+
+    replay_match_profit = float(matched["replay_pnl"].fillna(0).sum()) if len(matched)>0 else 0.0
+    live_match_profit = float(matched["live_pnl"].fillna(0).sum()) if len(matched)>0 else 0.0
+
+    st.write(
+        f"Matched Trades Profit -> Replay={round(replay_match_profit,2)} | Live={round(live_match_profit,2)}"
+    )
+
+
 st.subheader("LIVE HISTORY")
 import pandas as pd
 if not live_df.empty:
