@@ -99,6 +99,20 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
+
+# ===== V15.1 Ledger Driven Relock =====
+def calc_live_loss_streak(df):
+    streak = 0
+    try:
+        for pnl in reversed(df["pnl"].fillna(0).tolist()):
+            if pnl < 0:
+                streak += 1
+            else:
+                break
+    except Exception:
+        pass
+    return streak
+
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
