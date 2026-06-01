@@ -2105,12 +2105,12 @@ try:
     replay_bootstrap = hist[hist["PHASE_BET"] == True].copy()
 
     if "live_df" in locals():
-        need_bootstrap = (
-            len(live_df) == 0
-            or len(live_df) < max(1, int(len(replay_bootstrap) * 0.3))
+        ledger_exists = (
+            live_df is not None
+            and len(live_df) > 0
         )
 
-        if need_bootstrap and len(replay_bootstrap) > 0:
+        if (not ledger_exists) and len(replay_bootstrap) > 0:
 
             bootstrap_rows = []
 
