@@ -101,6 +101,18 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 
 # ===== V15.1 Ledger Driven Relock =====
+
+# ===== V15.2 Real Profit Phase Engine =====
+def calc_live_profit_metrics(df):
+    try:
+        if df is None or len(df) == 0:
+            return 0.0, 0.0
+        live_profit = float(df["pnl"].fillna(0).sum())
+        recent_profit = float(df["pnl"].fillna(0).tail(5).sum())
+        return live_profit, recent_profit
+    except Exception:
+        return 0.0, 0.0
+
 def calc_live_loss_streak(df):
     streak = 0
     try:
