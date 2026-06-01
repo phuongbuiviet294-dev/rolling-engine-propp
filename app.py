@@ -1902,7 +1902,18 @@ st.session_state.last_seen_round = len(groups)
 
 signal_key_live = f"{next_round}_{final_phase_group_next}"
 already_sent = signal_registry_has_round(next_round)
-pending_exists = load_pending_trade() is not None
+
+pending_obj = load_pending_trade()
+pending_exists = (
+    pending_obj is not None
+    and isinstance(pending_obj, dict)
+)
+
+if pending_exists:
+    st.warning(
+        f"ACTIVE PENDING: {pending_obj.get('signal_round')} -> {pending_obj.get('bet_round')}"
+    )
+
 if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and not already_sent and not pending_exists:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
@@ -2047,6 +2058,15 @@ st.write("Relock Rule Max Trades:", f">= {MAX_PHASE_TRADES}")
 st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group profit <= 0")
 st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
+
+
+
+st.subheader("PENDING AUDIT")
+pending_audit = load_pending_trade()
+if pending_audit:
+    st.json(pending_audit)
+else:
+    st.success("NO PENDING TRADE")
 
 
 st.subheader("LIVE PROFIT")
