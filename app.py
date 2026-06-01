@@ -2148,11 +2148,31 @@ if not live_df.empty and "bet_round" in live_df.columns:
     replay_cmp = replay_df[replay_df["bet_round"] <= common_round].copy()
     live_cmp = live_df[live_df["bet_round"] <= common_round].copy()
 
+    common_keys = set(
+        zip(replay_cmp["signal_round"], replay_cmp["bet_round"])
+    ).intersection(
+        set(zip(live_cmp["signal_round"], live_cmp["bet_round"]))
+    )
+
+    replay_cmp = replay_cmp[
+        replay_cmp.apply(
+            lambda r: (r["signal_round"], r["bet_round"]) in common_keys,
+            axis=1
+        )
+    ]
+
+    live_cmp = live_cmp[
+        live_cmp.apply(
+            lambda r: (r["signal_round"], r["bet_round"]) in common_keys,
+            axis=1
+        )
+    ]
+
     replay_profit_cmp = float(replay_cmp["phase_pnl_group"].fillna(0).sum()) if len(replay_cmp) > 0 else 0.0
     live_profit_cmp = float(live_cmp["pnl"].fillna(0).sum()) if len(live_cmp) > 0 else 0.0
 
     st.write(f"Validation Through Round {common_round}")
-    st.write(f"Replay Profit={round(replay_profit_cmp,2)} | Live Profit={round(live_profit_cmp,2)}")
+    st.write(f"Matched Trade Profit Replay={round(replay_profit_cmp,2)} | Live={round(live_profit_cmp,2)}")
 
     if abs(replay_profit_cmp - live_profit_cmp) < 0.0001:
         st.success("MATCH")
