@@ -2074,9 +2074,29 @@ l2.metric("Replay Trades", replay_trades)
 l3.metric("Replay WR %", round(replay_wr,2))
 
 
-st.subheader("V14.0.3 Replay vs Live Validation")
-if not live_df.empty:
-    st.write(f"Replay Profit={round(replay_profit,2)} | Live Profit={round(live_profit_real,2)}")
+st.subheader("V14.2.1 Replay vs Live Validation")
+
+if not live_df.empty and "bet_round" in live_df.columns:
+    replay_df = hist[(hist["PHASE_BET"] == True)].copy()
+
+    replay_last_round = int(replay_df["bet_round"].max()) if len(replay_df) > 0 and "bet_round" in replay_df.columns else 0
+    live_last_round = int(live_df["bet_round"].max()) if len(live_df) > 0 else 0
+
+    common_round = min(replay_last_round, live_last_round)
+
+    replay_cmp = replay_df[replay_df["bet_round"] <= common_round].copy()
+    live_cmp = live_df[live_df["bet_round"] <= common_round].copy()
+
+    replay_profit_cmp = float(replay_cmp["phase_pnl_group"].fillna(0).sum()) if len(replay_cmp) > 0 else 0.0
+    live_profit_cmp = float(live_cmp["pnl"].fillna(0).sum()) if len(live_cmp) > 0 else 0.0
+
+    st.write(f"Validation Through Round {common_round}")
+    st.write(f"Replay Profit={round(replay_profit_cmp,2)} | Live Profit={round(live_profit_cmp,2)}")
+
+    if abs(replay_profit_cmp - live_profit_cmp) < 0.0001:
+        st.success("MATCH")
+    else:
+        st.error("MISMATCH")
 
 st.subheader("LIVE HISTORY")
 import pandas as pd
