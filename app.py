@@ -1735,10 +1735,7 @@ def load_live_ledger():
             return pd.read_csv(LEDGER_FILE)
     except Exception:
         pass
-    return pd.DataFrame(columns=[
-        "signal_round","bet_round","pred_group",
-        "actual_group","pnl","cum_profit","settled"
-    ])
+    return pd.DataFrame(columns=["signal_round","bet_round","pred_group","actual_number","actual_group","sheet_length","audit_timestamp","pnl","cum_profit","settled"])
 
 def save_live_ledger(df):
     try:
@@ -1844,14 +1841,22 @@ st.write("Pending Trade:", load_pending_trade())
 pending_trade_runtime = load_pending_trade()
 if pending_trade_runtime is not None:
     p = pending_trade_runtime
-    if len(groups) > p["bet_round"]:
+    if len(groups) >= p["bet_round"]:
         # V13.9.1 live settlement from Google Sheet
         try:
-            live_numbers = load_numbers()
-            live_groups = [group_of(n) for n in live_numbers]
-            actual_group = live_groups[p["bet_round"] - 1]
+            load_numbers.clear()
         except Exception:
+            pass
+
+        try:
+            live_numbers = load_numbers()
+            actual_number = live_numbers[p["bet_round"] - 1]
+            actual_group = group_of(actual_number)
+            sheet_length = len(live_numbers)
+        except Exception:
+            actual_number = None
             actual_group = groups[-1]
+            sheet_length = len(groups)
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
         if ledger_trade_settled(p["bet_round"]):
             clear_pending_trade()
@@ -1865,7 +1870,10 @@ if pending_trade_runtime is not None:
                     "signal_round": p.get("signal_round"),
                     "bet_round": p["bet_round"],
                     "pred_group": p["group"],
+                    "actual_number": actual_number,
                     "actual_group": actual_group,
+                    "sheet_length": sheet_length,
+                    "audit_timestamp": pd.Timestamp.now(),
                     "pnl": pnl,
                     "cum_profit": current_profit + pnl,
                     "settled": 1
@@ -2055,6 +2063,10 @@ l1.metric("Replay Profit", round(replay_profit,2))
 l2.metric("Replay Trades", replay_trades)
 l3.metric("Replay WR %", round(replay_wr,2))
 
+
+st.subheader("V14.0.3 Replay vs Live Validation")
+if not live_df.empty:
+    st.write(f"Replay Profit={round(replay_profit,2)} | Live Profit={round(live_profit_real,2)}")
 
 st.subheader("LIVE HISTORY")
 import pandas as pd
