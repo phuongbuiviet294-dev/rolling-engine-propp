@@ -2119,6 +2119,43 @@ if not live_df.empty and "bet_round" in live_df.columns:
         st.error("MISMATCH")
 
 
+
+# V14.3.1 Ledger Bootstrap
+try:
+    replay_bootstrap = hist[hist["PHASE_BET"] == True].copy()
+
+    if "live_df" in locals():
+        need_bootstrap = (
+            len(live_df) == 0
+            or len(live_df) < max(1, int(len(replay_bootstrap) * 0.3))
+        )
+
+        if need_bootstrap and len(replay_bootstrap) > 0:
+
+            bootstrap_rows = []
+
+            for _, r in replay_bootstrap.iterrows():
+                bootstrap_rows.append({
+                    "signal_round": r.get("signal_round"),
+                    "bet_round": r.get("bet_round"),
+                    "pred_group": r.get("phase_bet_group"),
+                    "actual_group": r.get("group"),
+                    "pnl": r.get("phase_pnl_group"),
+                    "settled": 1
+                })
+
+            bootstrap_df = pd.DataFrame(bootstrap_rows)
+
+            st.warning(
+                f"LEDGER BOOTSTRAP MODE: rebuilding {len(bootstrap_df)} trades from replay history"
+            )
+
+            live_df = bootstrap_df.copy()
+
+except Exception as e:
+    st.error(f"Ledger Bootstrap Error: {e}")
+
+
 st.subheader("V14.3 Single Truth Audit")
 
 if not live_df.empty:
