@@ -1172,6 +1172,10 @@ def simulate_engine(numbers, groups, colors):
     for i in range(start_replay, last_closed_idx):
         round_no = i + 1
 
+        bet_idx = min(i + 1, len(groups) - 1)
+        history_number = numbers[i]
+        history_group = groups[i]
+
         if total_phase_profit_all >= SESSION_STOP_WIN:
             break
         if total_phase_profit_all <= SESSION_STOP_LOSS:
