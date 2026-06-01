@@ -1659,6 +1659,7 @@ def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
 
 
 
+SIGNAL_REGISTRY_FILE = "signal_registry.csv"
 PENDING_FILE = "pending_trade.json"
 
 def load_pending_trade():
@@ -1681,6 +1682,37 @@ def clear_pending_trade():
     try:
         if os.path.exists(PENDING_FILE):
             os.remove(PENDING_FILE)
+    except Exception:
+        pass
+
+
+def load_signal_registry():
+    try:
+        if os.path.exists(SIGNAL_REGISTRY_FILE):
+            return pd.read_csv(SIGNAL_REGISTRY_FILE)
+    except Exception:
+        pass
+    return pd.DataFrame(columns=["signal_round","bet_round","group"])
+
+def signal_registry_has_round(bet_round):
+    try:
+        df = load_signal_registry()
+        if len(df)==0:
+            return False
+        return int(bet_round) in set(df["bet_round"].astype(int))
+    except Exception:
+        return False
+
+def append_signal_registry(signal_round, bet_round, group):
+    try:
+        df = load_signal_registry()
+        row = pd.DataFrame([{
+            "signal_round":signal_round,
+            "bet_round":bet_round,
+            "group":group
+        }])
+        df = pd.concat([df,row], ignore_index=True)
+        df.to_csv(SIGNAL_REGISTRY_FILE,index=False)
     except Exception:
         pass
 
@@ -1838,7 +1870,8 @@ if st.session_state.pending_trade is not None:
 st.session_state.last_seen_round = len(groups)
 
 signal_key_live = f"{next_round}_{final_phase_group_next}"
-if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and signal_key_live not in st.session_state.live_signal_sent:
+already_sent = signal_registry_has_round(next_round)
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and not already_sent:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
         f"Round: {current_round}\n"
@@ -1864,7 +1897,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         "group": final_phase_group_next,
     }
     save_pending_trade(st.session_state.pending_trade)
-    st.session_state.live_signal_sent.add(signal_key_live)
+    append_signal_registry(current_round, next_round, final_phase_group_next)
     send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
