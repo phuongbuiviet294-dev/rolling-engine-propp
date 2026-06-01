@@ -1289,7 +1289,11 @@ def simulate_engine(numbers, groups, colors):
         elif phase_trade_allowed:
             last_phase_trade_idx = i
 
-            if groups[i] == final_phase_group:
+            bet_idx = i + 1
+            if bet_idx >= len(groups):
+                continue
+
+            if groups[bet_idx] == final_phase_group:
                 phase_hit_group = 1
                 phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
             else:
@@ -1426,9 +1430,11 @@ def simulate_engine(numbers, groups, colors):
         history_rows.append(
             {
                 "phase": phase_index,
-                "round": round_no,
-                "number": numbers[i],
-                "group": groups[i],
+                "signal_round": round_no,
+                "bet_round": round_no + 1,
+                "round": round_no + 1,
+                "number": numbers[bet_idx],
+                "group": groups[bet_idx],
                 "color": color_text(colors[i]),
                 "mode": current_mode["name"],
                 "vote_required": vote_required,
