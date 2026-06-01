@@ -1,6 +1,6 @@
 
 # =========================================================
-# V13.9.6 FULL CLEAN ARCHITECTURE
+# V14.0 PRODUCTION READY
 # Replay      -> hist / phase_summary
 # Pending     -> pending_trade.json
 # Live        -> live_ledger.csv
@@ -9,7 +9,7 @@
 # =========================================================
 
 
-# ===== V13.9.6 FULL CLEAN ARCHITECTURE =====
+# ===== V14.0 PRODUCTION READY =====
 def render_ready_banner(signal_round, bet_round, group_name):
     try:
         st.success(
@@ -1754,12 +1754,10 @@ numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
 
-if "pending_trade" not in st.session_state:
-    st.session_state.pending_trade = load_pending_trade()
+pending_trade_runtime = load_pending_trade()
 if "last_seen_round" not in st.session_state:
     st.session_state.last_seen_round = len(groups)
-    st.session_state.live_trade_log = []
-    st.session_state.live_signal_sent = set()
+    pass
 
 
 if len(groups) < LOCK_ROUND_START:
@@ -1841,11 +1839,12 @@ current_phase_trade_count = next_preview["current_phase_trade_count"]
 distance_from_last_trade = next_preview["distance_from_last_trade"]
 
 
-st.write("Pending Trade:", st.session_state.pending_trade)
+st.write("Pending Trade:", load_pending_trade())
 
 # LIVE SETTLEMENT ENGINE
-if st.session_state.pending_trade is not None:
-    p = st.session_state.pending_trade
+pending_trade_runtime = load_pending_trade()
+if pending_trade_runtime is not None:
+    p = pending_trade_runtime
     if len(groups) > p["bet_round"]:
         # V13.9.1 live settlement from Google Sheet
         try:
@@ -1855,8 +1854,11 @@ if st.session_state.pending_trade is not None:
         except Exception:
             actual_group = groups[-1]
         pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
-        try:
-            ledger_df = load_live_ledger()
+        if ledger_trade_settled(p["bet_round"]):
+            clear_pending_trade()
+        else:
+            try:
+                ledger_df = load_live_ledger()
             current_profit = float(ledger_df["pnl"].sum()) if len(ledger_df) > 0 and "pnl" in ledger_df.columns else 0.0
             trade_row = {
                 "signal_round": p.get("signal_round"),
@@ -1869,17 +1871,17 @@ if st.session_state.pending_trade is not None:
             }
             import pandas as pd
             ledger_df = pd.concat([ledger_df, pd.DataFrame([trade_row])], ignore_index=True)
-            save_live_ledger(ledger_df)
-        except Exception:
-            pass
-        st.session_state.pending_trade = None
-        clear_pending_trade()
+                save_live_ledger(ledger_df)
+            except Exception:
+                pass
+            clear_pending_trade()
 
 st.session_state.last_seen_round = len(groups)
 
 signal_key_live = f"{next_round}_{final_phase_group_next}"
 already_sent = signal_registry_has_round(next_round)
-if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and not already_sent:
+pending_exists = load_pending_trade() is not None
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and not already_sent and not pending_exists:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
         f"Round: {current_round}\n"
@@ -1899,12 +1901,12 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         f"Total Phase Profit All: {total_phase_profit_all}\n"
         f"State: {next_state}"
     )
-    st.session_state.pending_trade = {
+    pending_trade_new = {
         "signal_round": current_round,
         "bet_round": next_round,
         "group": final_phase_group_next,
     }
-    save_pending_trade(st.session_state.pending_trade)
+    save_pending_trade(pending_trade_new)
     append_signal_registry(current_round, next_round, final_phase_group_next)
     send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
 
