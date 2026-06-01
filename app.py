@@ -1,5 +1,15 @@
 
-# ===== V13.9.4 UNIFIED UI HELPERS =====
+# =========================================================
+# V13.9.6 FULL CLEAN ARCHITECTURE
+# Replay      -> hist / phase_summary
+# Pending     -> pending_trade.json
+# Live        -> live_ledger.csv
+# Signals     -> signal_registry.csv
+# No live metrics stored in session_state
+# =========================================================
+
+
+# ===== V13.9.6 FULL CLEAN ARCHITECTURE =====
 def render_ready_banner(signal_round, bet_round, group_name):
     try:
         st.success(
@@ -1748,9 +1758,7 @@ if "pending_trade" not in st.session_state:
     st.session_state.pending_trade = load_pending_trade()
 if "last_seen_round" not in st.session_state:
     st.session_state.last_seen_round = len(groups)
-if "live_trade_log" not in st.session_state:
     st.session_state.live_trade_log = []
-if "live_signal_sent" not in st.session_state:
     st.session_state.live_signal_sent = set()
 
 
