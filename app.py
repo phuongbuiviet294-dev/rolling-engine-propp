@@ -207,7 +207,7 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -11.5
 
-MIN_FALLBACK_SCORE = 1
+MIN_FALLBACK_SCORE = 15
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
@@ -223,7 +223,7 @@ MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = False
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 4
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
@@ -2341,18 +2341,19 @@ with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
 
 
-# V13.2 WINDOW HEALTH FORCE RELOCK
+# V16 CLUSTER PROFIT ENGINE
 try:
     if not scan_df_all.empty and locked_windows:
         lock_df_chk = scan_df_all[scan_df_all["window"].isin(locked_windows)].copy()
 
-        score_col = "health_score" if "health_score" in lock_df_chk.columns else "score"
+        cluster_profit = float(lock_df_chk["profit"].sum()) if "profit" in lock_df_chk.columns else 0.0
+        positive_windows = int((lock_df_chk["profit"] > 0).sum()) if "profit" in lock_df_chk.columns else 0
+        total_windows = max(len(lock_df_chk), 1)
+        positive_ratio = positive_windows / total_windows
 
-        bad_windows = lock_df_chk[lock_df_chk[score_col] < 0]["window"].tolist()
-
-        if len(bad_windows) >= 2:
+        if cluster_profit <= 0 or positive_ratio < 0.60:
             relock_triggered_now = True
-            relock_reason_now = f"WINDOW_HEALTH_FORCE_RELOCK:{','.join(map(str,bad_windows))}"
+            relock_reason_now = "AUTO_RELOCK_BAD_CLUSTER"
 except Exception:
     pass
 
@@ -2370,7 +2371,7 @@ with st.expander("Current Locked Window Detail"):
 
         bad_count = 0
         if "health_score" in show_df.columns:
-            bad_count = int((show_df["health_score"] < 0).sum())
+            bad_count = int((show_df["profit"] <= 0).sum())
 
         st.metric("Bad Locked Windows", bad_count)
 
