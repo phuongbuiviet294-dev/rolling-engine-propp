@@ -1,90 +1,4 @@
 
-# =========================================================
-# V14.0 PRODUCTION READY
-# Replay      -> hist / phase_summary
-# Pending     -> pending_trade.json
-# Live        -> live_ledger.csv
-# Signals     -> signal_registry.csv
-# No live metrics stored in session_state
-# =========================================================
-
-
-# ===== V14.0 PRODUCTION READY =====
-def render_ready_banner(signal_round, bet_round, group_name):
-    try:
-        st.success(
-            f"READY TO BET\nSignal Round: {signal_round}\nBet Round: {bet_round}\nGroup: {group_name}"
-        )
-    except Exception:
-        pass
-
-def render_wait_banner(bet_round):
-    try:
-        st.info(f"WAIT RESULT ROUND {bet_round}")
-    except Exception:
-        pass
-
-
-# ===== V13.9.3 DUPLICATE PROTECTION =====
-def ledger_has_bet_round(bet_round):
-    try:
-        df = load_live_ledger()
-        if df is None or len(df) == 0:
-            return False
-        return bet_round in set(df["bet_round"].astype(int).tolist())
-    except Exception:
-        return False
-
-def ledger_trade_settled(bet_round):
-    try:
-        df = load_live_ledger()
-        x = df[df["bet_round"].astype(int) == int(bet_round)]
-        if len(x) == 0:
-            return False
-        if "settled" in x.columns:
-            return bool(x.iloc[-1]["settled"])
-        return True
-    except Exception:
-        return False
-
-
-# ===== V13.9.2 SINGLE SOURCE METRICS =====
-def get_live_metrics():
-    ledger_df = load_live_ledger()
-
-    if ledger_df is None or len(ledger_df) == 0:
-        return {
-            "profit": 0.0,
-            "trades": 0,
-            "wins": 0,
-            "wr": 0.0,
-            "ledger": ledger_df
-        }
-
-    profit = float(ledger_df["pnl"].sum()) if "pnl" in ledger_df.columns else 0.0
-    trades = int(len(ledger_df))
-    wins = int((ledger_df["pnl"] > 0).sum()) if "pnl" in ledger_df.columns else 0
-    wr = (wins / trades * 100.0) if trades > 0 else 0.0
-
-    return {
-        "profit": profit,
-        "trades": trades,
-        "wins": wins,
-        "wr": wr,
-        "ledger": ledger_df
-    }
-
-# V13.5.5 Pending Trade Cleanup
-
-# =========================================================
-# V13.5 UNIFIED METRICS
-# Current Phase Profit
-# Session Profit
-# Window Profit
-# Single Source Of Truth
-# =========================================================
-
-
 import time
 import json
 import os
@@ -99,32 +13,6 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
-
-# ===== V15.1 Ledger Driven Relock =====
-
-# ===== V15.2 Real Profit Phase Engine =====
-def calc_live_profit_metrics(df):
-    try:
-        if df is None or len(df) == 0:
-            return 0.0, 0.0
-        live_profit = float(df["pnl"].fillna(0).sum())
-        recent_profit = float(df["pnl"].fillna(0).tail(5).sum())
-        return live_profit, recent_profit
-    except Exception:
-        return 0.0, 0.0
-
-def calc_live_loss_streak(df):
-    streak = 0
-    try:
-        for pnl in reversed(df["pnl"].fillna(0).tolist()):
-            if pnl < 0:
-                streak += 1
-            else:
-                break
-    except Exception:
-        pass
-    return streak
-
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
@@ -141,9 +29,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
- #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 4, "window_max": 24},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 4, "window_max": 18},
-#  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 4, "window_max": 24},
+ #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
+#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -175,9 +63,9 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 3.0
+PHASE_STOP_WIN = 44
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -192,58 +80,45 @@ ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
 
 RECENT_PHASE_CHECK = 5
-PHASE_MIN_RECENT_PNL_TO_TRADE = -1.0
+PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = -1.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 0
+MIN_PHASE_AGE_TO_TRADE = 4
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.67
+VOTE_DOMINANCE_RATIO = 0.60
 
-# Khuyên để 0. Nếu bật KEEP = 1 thì bản -7ày đã fix: chỉ keep khi signal vẫn cùng hướng.
+# Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 15.0
-SESSION_STOP_LOSS = -11.5
+SESSION_STOP_LOSS = -10.0
 
-MIN_FALLBACK_SCORE = 15
+MIN_FALLBACK_SCORE = 1
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
-
-# ===== V6 HOT WINDOW DYNAMIC RELOCK =====
-ENABLE_HOT_WINDOW_DYNAMIC_RELOCK = True
-HOT_WINDOW_RECENT_10 = 10
-HOT_WINDOW_RECENT_20 = 20
-HOT_WINDOW_WEIGHT_10 = 4.0
-HOT_WINDOW_WEIGHT_20 = 2.0
-
 MIN_WINDOW_SPACING = 1
-AUTO_SCAN_WINDOW_SPACING = False
+AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 8
+WINDOW_SPACING_MAX = 6
+MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 16
+VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = False
-VALIDATE_LEN_LIST = [8,12,16,20,24]
+VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 4
+MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -2.0
+VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 16
-SCAN_LEN_LIST = [16,24,40]
-AUTO_DYNAMIC_SCAN_LEN = True
-PROFIT_TRAIL_GIVEBACK = 2.0
-TRAILING_TRIGGER = 2.5
-TRAILING_COOLDOWN = 5
+RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 5
+SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
@@ -311,7 +186,7 @@ def send_signal_once(signal_name, current_round, msg):
 # =========================================================
 # LOAD DATA
 # =========================================================
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=100, show_spinner=False)
 def load_numbers():
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&cache={time.time()}"
     df = pd.read_csv(url)
@@ -384,18 +259,6 @@ def get_valid_color_preds(seq_colors, i, windows):
             if seq_colors[i - 1] != pred:
                 preds.append(pred)
     return preds
-
-
-
-def phase_signal_allowed(confidence_group, vote_required, dominance_ratio):
-    """
-    Single Source Of Truth:
-    Preview và Replay dùng cùng điều kiện signal.
-    """
-    return (
-        confidence_group >= vote_required
-        and dominance_ratio >= VOTE_DOMINANCE_RATIO
-    )
 
 
 def compute_profit_path(results, win_value, loss_value):
@@ -522,33 +385,18 @@ def evaluate_window_group(seq_groups, w):
     winrate = wins / trades if trades > 0 else 0.0
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
-
-    recent30 = results[-30:] if len(results) >= 30 else results
-    recent_profit_30 = float(sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent30)) if recent30 else 0.0
-    recent_wr_30 = (sum(recent30) / len(recent30)) if len(recent30) > 0 else 0.0
-
-    recent10 = results[-10:] if len(results) >= 10 else results
-    recent20 = results[-20:] if len(results) >= 20 else results
-
-    profit10 = sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent10)
-    profit20 = sum(WIN_GROUP if r == 1 else LOSS_GROUP for r in recent20)
-
-    hot_score = profit10 * HOT_WINDOW_WEIGHT_10 + profit20 * HOT_WINDOW_WEIGHT_20
-
     streak_metrics = compute_streak_metrics(results)
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
         score = (
-            hot_score
-            + profit * 0.30
-            + winrate * 4.0
-            + expectancy * 4.0
+            profit * 0.75
+            + winrate * 8.0
+            + expectancy * 6.0
+            + np.log(trades + 1) * 1.0
             + recent_profit * 1.0
-            + recent_profit_30 * 3.0
-            + recent_wr_30 * 15.0
-            - abs(max_drawdown) * 1.0
-            + streak_metrics["streak_score"] * 0.5
+            - abs(max_drawdown) * 1.1
+            + streak_metrics["streak_score"] * 0.7
         )
     else:
         score = -999999.0
@@ -562,8 +410,6 @@ def evaluate_window_group(seq_groups, w):
         "expectancy": expectancy,
         "max_drawdown": max_drawdown,
         "recent_profit": recent_profit,
-        "recent_profit_30": recent_profit_30,
-        "recent_wr_30": recent_wr_30,
         "max_hit_streak": streak_metrics["max_hit_streak"],
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
@@ -608,23 +454,10 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
-    df["health_score"] = (
-        df["recent_profit_30"] * 5
-        + df["recent_profit"] * 3
-        + df["recent_wr_30"] * 20
-    )
-
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
-        & (df["profit"] > 0)
-        & (df["recent_profit"] > 0)
-        & (df["recent_profit_30"] > 0)
-        & (df["recent_wr_30"] >= 0.30)
-        & (df["health_score"] > 0)
-        & (df["expectancy"] > 0)
-        & (df["max_drawdown"] >= -8)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 5)
+        & (df["max_loss_streak"] <= 6)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -991,7 +824,7 @@ def make_next_preview(
     else:
         vote_color, confidence_color = None, 0
 
-    signal_group = phase_signal_allowed(confidence_group, vote_required, dominance_ratio_next) if vote_group is not None else False
+    signal_group = (confidence_group >= vote_required and dominance_ok_next) if vote_group is not None else False
     signal_color = confidence_color >= color_vote_required if vote_color is not None else False
 
     recent_phase_pnl_next = compute_recent_phase_trade_pnl(phase_hits_group)
@@ -1160,8 +993,6 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
-    phase_peak_profit = 0.0
-    last_trailing_lock_round = -999999
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1193,14 +1024,8 @@ def simulate_engine(numbers, groups, colors):
     phase_start_round = start_replay + 1
     current_mode = selected_mode
 
-    last_closed_idx = max(start_replay, len(groups) - 1)
-
-    for i in range(start_replay, last_closed_idx):
+    for i in range(start_replay, len(groups)):
         round_no = i + 1
-
-        bet_idx = min(i + 1, len(groups) - 1)
-        history_number = numbers[i]
-        history_group = groups[i]
 
         if total_phase_profit_all >= SESSION_STOP_WIN:
             break
@@ -1220,7 +1045,7 @@ def simulate_engine(numbers, groups, colors):
                 confidence_group,
                 VOTE_DOMINANCE_RATIO,
             )
-            signal_group = phase_signal_allowed(confidence_group, vote_required, dominance_ratio)
+            signal_group = confidence_group >= vote_required and dominance_ok
         else:
             vote_group = None
             confidence_group = 0
@@ -1269,7 +1094,6 @@ def simulate_engine(numbers, groups, colors):
             signal_group
             and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
             and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-            and dominance_ratio >= VOTE_DOMINANCE_RATIO
         )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
@@ -1319,11 +1143,7 @@ def simulate_engine(numbers, groups, colors):
         elif phase_trade_allowed:
             last_phase_trade_idx = i
 
-            bet_idx = i + 1
-            if bet_idx >= len(groups):
-                continue
-
-            if groups[bet_idx] == final_phase_group:
+            if groups[i] == final_phase_group:
                 phase_hit_group = 1
                 phase_pnl_group = WIN_GROUP * PHASE_BET_UNIT
             else:
@@ -1346,7 +1166,6 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_group += phase_pnl_group
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
-            phase_peak_profit = max(phase_peak_profit, phase_profit_group)
 
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
@@ -1409,17 +1228,7 @@ def simulate_engine(numbers, groups, colors):
 
         # FIX 5: stop win dùng thật.
         if not relock_triggered_now:
-            if (
-                phase_peak_profit >= TRAILING_TRIGGER
-                and (round_no - last_trailing_lock_round) > TRAILING_COOLDOWN
-                and phase_profit_group <= (phase_peak_profit - PROFIT_TRAIL_GIVEBACK)
-            ):
-                relock_triggered_now = True
-                relock_reason_now = "TRAILING_PROFIT_LOCK"
-                last_trailing_lock_round = round_no
-                state = "AUTO_RELOCK_TRAILING_PROFIT"
-
-            elif phase_profit_group >= PHASE_STOP_WIN:
+            if phase_profit_group >= PHASE_STOP_WIN:
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
@@ -1441,14 +1250,6 @@ def simulate_engine(numbers, groups, colors):
 
         if (
             not relock_triggered_now
-            and phase_profit_group <= -3
-        ):
-            relock_triggered_now = True
-            relock_reason_now = "WINDOW_HEALTH_FORCE_RELOCK"
-            state = "AUTO_RELOCK_WINDOW_HEALTH"
-
-        elif (
-            not relock_triggered_now
             and ENABLE_TIMEOUT_RELOCK
             and phase_age >= TIMEOUT_RELOCK_ROUNDS
             and phase_profit_group <= 0
@@ -1460,11 +1261,9 @@ def simulate_engine(numbers, groups, colors):
         history_rows.append(
             {
                 "phase": phase_index,
-                "signal_round": round_no,
-                "bet_round": round_no + 1,
-                "round": round_no + 1,
-                "number": numbers[bet_idx],
-                "group": groups[bet_idx],
+                "round": round_no,
+                "number": numbers[i],
+                "group": groups[i],
                 "color": color_text(colors[i]),
                 "mode": current_mode["name"],
                 "vote_required": vote_required,
@@ -1578,7 +1377,6 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
-                phase_peak_profit = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
@@ -1684,101 +1482,12 @@ ENGINE_CONFIG_FINGERPRINT = json.dumps(
 )
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def cached_simulate_engine(numbers_tuple, config_fingerprint):
     nums = list(numbers_tuple)
     grps = [group_of(n) for n in nums]
     cols = [color_of_number(n) for n in nums]
     return simulate_engine(nums, grps, cols)
-
-
-
-def cleanup_invalid_pending_trade(session_state, phase_next_allowed):
-    try:
-        # Pending trades are only cleared AFTER settlement.
-        # Never clear a live pending trade from preview logic.
-        if not phase_next_allowed:
-            pass
-    except Exception:
-        pass
-
-
-
-
-SIGNAL_REGISTRY_FILE = "signal_registry.csv"
-PENDING_FILE = "pending_trade.json"
-
-def load_pending_trade():
-    try:
-        if os.path.exists(PENDING_FILE):
-            with open(PENDING_FILE,"r",encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return None
-
-def save_pending_trade(x):
-    try:
-        with open(PENDING_FILE,"w",encoding="utf-8") as f:
-            json.dump(x,f)
-    except Exception:
-        pass
-
-def clear_pending_trade():
-    try:
-        if os.path.exists(PENDING_FILE):
-            os.remove(PENDING_FILE)
-    except Exception:
-        pass
-
-
-def load_signal_registry():
-    try:
-        if os.path.exists(SIGNAL_REGISTRY_FILE):
-            return pd.read_csv(SIGNAL_REGISTRY_FILE)
-    except Exception:
-        pass
-    return pd.DataFrame(columns=["signal_round","bet_round","group"])
-
-def signal_registry_has_round(bet_round):
-    try:
-        df = load_signal_registry()
-        if len(df)==0:
-            return False
-        return int(bet_round) in set(df["bet_round"].astype(int))
-    except Exception:
-        return False
-
-def append_signal_registry(signal_round, bet_round, group):
-    try:
-        df = load_signal_registry()
-        row = pd.DataFrame([{
-            "trade_id": f"{signal_round}_{bet_round}",
-            "signal_round":signal_round,
-            "bet_round":bet_round,
-            "group":group
-        }])
-        df = pd.concat([df,row], ignore_index=True)
-        df.to_csv(SIGNAL_REGISTRY_FILE,index=False)
-    except Exception:
-        pass
-
-# ===== V13.9 LIVE LEDGER PERSISTENT =====
-LEDGER_FILE = "live_ledger.csv"
-
-def load_live_ledger():
-    try:
-        if os.path.exists(LEDGER_FILE):
-            return pd.read_csv(LEDGER_FILE)
-    except Exception:
-        pass
-    return pd.DataFrame(columns=["signal_round","bet_round","pred_group","actual_number","actual_group","sheet_length","audit_timestamp","pnl","cum_profit","settled"])
-
-def save_live_ledger(df):
-    try:
-        df.to_csv(LEDGER_FILE, index=False)
-    except Exception:
-        pass
 
 
 # =========================================================
@@ -1787,11 +1496,6 @@ def save_live_ledger(df):
 numbers = load_numbers()
 groups = [group_of(n) for n in numbers]
 colors = [color_of_number(n) for n in numbers]
-
-pending_trade_runtime = load_pending_trade()
-if "last_seen_round" not in st.session_state:
-    st.session_state.last_seen_round = len(groups)
-
 
 if len(groups) < LOCK_ROUND_START:
     st.error(f"Chưa đủ dữ liệu. Hiện có {len(groups)} rounds, cần ít nhất {LOCK_ROUND_START}.")
@@ -1861,9 +1565,6 @@ used_keep_phase_next = next_preview["used_keep_phase"]
 final_phase_group_next = next_preview["final_phase_group"]
 final_phase_color_next = next_preview["final_phase_color"]
 phase_next_allowed = next_preview["phase_next_allowed"]
-
-# V13.6.1: do not clear pending trades before settlement
-
 next_state = next_preview["next_state"]
 
 recent_phase_pnl_next = next_preview["recent_phase_pnl"]
@@ -1871,77 +1572,7 @@ current_phase_age_next = next_preview["current_phase_age_next"]
 current_phase_trade_count = next_preview["current_phase_trade_count"]
 distance_from_last_trade = next_preview["distance_from_last_trade"]
 
-
-st.write("Pending Trade:", load_pending_trade())
-
-# LIVE SETTLEMENT ENGINE
-pending_trade_runtime = load_pending_trade()
-if pending_trade_runtime is not None:
-    p = pending_trade_runtime
-    if len(groups) >= p["bet_round"]:
-        # V13.9.1 live settlement from Google Sheet
-        try:
-            load_numbers.clear()
-        except Exception:
-            pass
-
-        try:
-            live_numbers = load_numbers()
-            actual_number = live_numbers[p["bet_round"] - 1]
-            actual_group = group_of(actual_number)
-            sheet_length = len(live_numbers)
-        except Exception:
-            actual_number = None
-            actual_group = groups[-1]
-            sheet_length = len(groups)
-        pnl = WIN_GROUP if actual_group == p["group"] else LOSS_GROUP
-        if ledger_trade_settled(p["bet_round"]):
-            clear_pending_trade()
-        else:
-            try:
-                ledger_df = load_live_ledger()
-
-                current_profit = float(ledger_df["pnl"].sum()) if len(ledger_df) > 0 and "pnl" in ledger_df.columns else 0.0
-
-                trade_row = {
-                    "signal_round": p.get("signal_round"),
-                    "bet_round": p["bet_round"],
-                    "pred_group": p["group"],
-                    "actual_number": actual_number,
-                    "actual_group": actual_group,
-                    "sheet_length": sheet_length,
-                    "audit_timestamp": pd.Timestamp.now(),
-                    "pnl": pnl,
-                    "cum_profit": current_profit + pnl,
-                    "settled": 1
-                }
-
-                import pandas as pd
-                ledger_df = pd.concat([ledger_df, pd.DataFrame([trade_row])], ignore_index=True)
-                save_live_ledger(ledger_df)
-
-            except Exception:
-                pass
-
-            clear_pending_trade()
-
-st.session_state.last_seen_round = len(groups)
-
-signal_key_live = f"{next_round}_{final_phase_group_next}"
-already_sent = signal_registry_has_round(next_round)
-
-pending_obj = load_pending_trade()
-pending_exists = (
-    pending_obj is not None
-    and isinstance(pending_obj, dict)
-)
-
-if pending_exists:
-    st.warning(
-        f"ACTIVE PENDING: {pending_obj.get('signal_round')} -> {pending_obj.get('bet_round')}"
-    )
-
-if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None and not already_sent and not pending_exists:
+if telegram_enabled() and phase_next_allowed and final_phase_group_next is not None:
     ready_msg = (
         f"READY PHASE BET FIXED\n"
         f"Round: {current_round}\n"
@@ -1961,19 +1592,7 @@ if telegram_enabled() and phase_next_allowed and final_phase_group_next is not N
         f"Total Phase Profit All: {total_phase_profit_all}\n"
         f"State: {next_state}"
     )
-    pending_trade_new = {
-        "trade_id": f"{current_round}_{next_round}",
-        "signal_round": current_round,
-        "bet_round": next_round,
-        "group": final_phase_group_next,
-        "locked_windows": list(locked_windows) if locked_windows else [],
-        "mode": selected_mode["name"] if selected_mode else None,
-        "vote_required": vote_required,
-        "snapshot": True
-    }
-    save_pending_trade(pending_trade_new)
-    append_signal_registry(current_round, next_round, final_phase_group_next)
-    send_signal_once("READY_PHASE_FIXED", next_round, ready_msg)
+    send_signal_once("READY_PHASE_FIXED", current_round, ready_msg)
 
 st.title("Auto Relock Engine | PHASE GROUP + COLOR | FIX PHASE WAIT")
 
@@ -2034,11 +1653,6 @@ else:
 
 st.subheader("NEXT ROUND DEBUG")
 
-st.write("Current Round:", current_round)
-st.write("Ready For Round:", next_round)
-st.write("signal_group =", signal_group)
-st.write("phase_next_allowed =", phase_next_allowed)
-
 d1, d2, d3, d4 = st.columns(4)
 d1.metric("Next Round", next_round)
 d2.metric("Group Vote", f"{confidence_group}/{vote_required}")
@@ -2091,207 +1705,23 @@ st.write("Timeout Relock:", f"{TIMEOUT_RELOCK_ROUNDS} rounds if phase group prof
 st.write("Telegram Enabled:", telegram_enabled())
 st.caption("Telegram: set BOT_TOKEN and CHAT_ID in Streamlit secrets for production.")
 
-
-
-st.subheader("PENDING AUDIT")
-pending_audit = load_pending_trade()
-if pending_audit:
-    st.json(pending_audit)
-else:
-    st.success("NO PENDING TRADE")
-
-
-st.subheader("LIVE PROFIT")
-
-ledger_df = load_live_ledger()
-live_df = ledger_df.copy()
-
-if not ledger_df.empty:
-    live_profit_real = float(ledger_df["pnl"].sum())
-    live_trades_real = int(len(ledger_df))
-    live_win_count_real = int((ledger_df["pnl"] > 0).sum())
-    live_wr_real = (live_win_count_real / live_trades_real * 100) if live_trades_real > 0 else 0.0
-else:
-    live_profit_real = 0.0
-    live_trades_real = 0
-    live_wr_real = 0.0
-
-l1,l2,l3 = st.columns(3)
-replay_profit = float(total_phase_profit_all)
-replay_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
-replay_wins = int(hist.loc[hist["PHASE_BET"]==True,"phase_hit_group"].fillna(0).sum()) if replay_trades>0 else 0
-replay_wr = (replay_wins/replay_trades*100) if replay_trades>0 else 0.0
-l1.metric("Replay Profit", round(replay_profit,2))
-l2.metric("Replay Trades", replay_trades)
-l3.metric("Replay WR %", round(replay_wr,2))
-
-
-# V14.3.1 Ledger Bootstrap
-try:
-    replay_bootstrap = hist[hist["PHASE_BET"] == True].copy()
-
-    if "live_df" in locals():
-        ledger_exists = (
-            live_df is not None
-            and len(live_df) > 0
-        )
-
-        if (not ledger_exists) and len(replay_bootstrap) > 0:
-
-            bootstrap_rows = []
-
-            for _, r in replay_bootstrap.iterrows():
-                bootstrap_rows.append({
-                    "signal_round": r.get("signal_round"),
-                    "bet_round": r.get("bet_round"),
-                    "pred_group": r.get("phase_bet_group"),
-                    "actual_group": r.get("group"),
-                    "pnl": r.get("phase_pnl_group"),
-                    "settled": 1
-                })
-
-            bootstrap_df = pd.DataFrame(bootstrap_rows)
-
-            st.warning(
-                f"LEDGER BOOTSTRAP MODE: rebuilding {len(bootstrap_df)} trades from replay history"
-            )
-
-            live_df = bootstrap_df.copy()
-
-            try:
-                save_live_ledger(live_df)
-            except Exception:
-                pass
-
-except Exception as e:
-    st.error(f"Ledger Bootstrap Error: {e}")
-
-
-st.subheader("V14.2.1 Replay vs Live Validation")
-
-if not live_df.empty and "bet_round" in live_df.columns:
-    replay_df = hist[(hist["PHASE_BET"] == True)].copy()
-
-    replay_last_round = int(replay_df["bet_round"].max()) if len(replay_df) > 0 and "bet_round" in replay_df.columns else 0
-    live_last_round = int(live_df["bet_round"].max()) if len(live_df) > 0 else 0
-
-    common_round = min(replay_last_round, live_last_round)
-
-    replay_cmp = replay_df[replay_df["bet_round"] <= common_round].copy()
-    live_cmp = live_df[live_df["bet_round"] <= common_round].copy()
-
-    common_keys = set(
-        zip(replay_cmp["signal_round"], replay_cmp["bet_round"])
-    ).intersection(
-        set(zip(live_cmp["signal_round"], live_cmp["bet_round"]))
-    )
-
-    replay_cmp = replay_cmp[
-        replay_cmp.apply(
-            lambda r: (r["signal_round"], r["bet_round"]) in common_keys,
-            axis=1
-        )
-    ]
-
-    live_cmp = live_cmp[
-        live_cmp.apply(
-            lambda r: (r["signal_round"], r["bet_round"]) in common_keys,
-            axis=1
-        )
-    ]
-
-    replay_profit_cmp = float(replay_cmp["phase_pnl_group"].fillna(0).sum()) if len(replay_cmp) > 0 else 0.0
-    live_profit_cmp = float(live_cmp["pnl"].fillna(0).sum()) if len(live_cmp) > 0 else 0.0
-
-    st.write(f"Validation Through Round {common_round}")
-    st.write(f"Matched Trade Profit Replay={round(replay_profit_cmp,2)} | Live={round(live_profit_cmp,2)}")
-
-    if abs(replay_profit_cmp - live_profit_cmp) < 0.0001:
-        st.success("MATCH")
-    else:
-        st.error("MISMATCH")
-
-
-
-
-
-st.subheader("V14.3 Single Truth Audit")
-
-if not live_df.empty:
-    replay_audit = hist[hist["PHASE_BET"] == True].copy()
-
-    replay_audit = replay_audit[[
-        "signal_round",
-        "bet_round",
-        "phase_bet_group",
-        "group",
-        "phase_pnl_group"
-    ]].rename(columns={
-        "phase_bet_group":"replay_pred_group",
-        "group":"replay_actual_group",
-        "phase_pnl_group":"replay_pnl"
-    })
-
-    live_audit = live_df[[
-        "signal_round",
-        "bet_round",
-        "pred_group",
-        "actual_group",
-        "pnl"
-    ]].rename(columns={
-        "pred_group":"live_pred_group",
-        "actual_group":"live_actual_group",
-        "pnl":"live_pnl"
-    })
-
-    audit_df = replay_audit.merge(
-        live_audit,
-        on=["signal_round","bet_round"],
-        how="outer"
-    )
-
-    def _status(r):
-        if pd.isna(r.get("live_pnl")):
-            return "REPLAY_ONLY"
-        if pd.isna(r.get("replay_pnl")):
-            return "LIVE_ONLY"
-        if abs(float(r["replay_pnl"]) - float(r["live_pnl"])) < 1e-9:
-            return "MATCH"
-        return "MISMATCH"
-
-    audit_df["status"] = audit_df.apply(_status, axis=1)
-
-    st.dataframe(audit_df, use_container_width=True)
-
-    matched = audit_df[audit_df["status"]=="MATCH"]
-
-    replay_match_profit = float(matched["replay_pnl"].fillna(0).sum()) if len(matched)>0 else 0.0
-    live_match_profit = float(matched["live_pnl"].fillna(0).sum()) if len(matched)>0 else 0.0
-
-    st.write(
-        f"Matched Trades Profit -> Replay={round(replay_match_profit,2)} | Live={round(live_match_profit,2)}"
-    )
-
-
-st.subheader("LIVE HISTORY")
-import pandas as pd
-if not live_df.empty:
-    st.dataframe(live_df.iloc[::-1], use_container_width=True)
-    if "cum_profit" in live_df.columns:
-        st.line_chart(live_df["cum_profit"].reset_index(drop=True))
-
 st.subheader("Profit Compare")
 
 p1, p2, p3, p4 = st.columns(4)
-p1.metric("Replay Phase Group", phase_profit_group)
-p2.metric("Replay Phase Total", phase_profit_total)
-p3.metric("Replay Profit", round(replay_profit,2))
-p4.metric("Live Trades", live_trades_real)
+p1.metric("Phase Group Profit", phase_profit_group)
+p2.metric("Phase Color Profit", phase_profit_color)
+p3.metric("Phase Total Profit", phase_profit_total)
+p4.metric("Total Phase All", total_phase_profit_all)
 
 st.subheader("Trade Stats")
 
-phase_trades = replay_trades
-phase_group_wr = round(replay_wr,2)
+phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
+
+phase_group_wr = (
+    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    if phase_trades > 0
+    else 0
+)
 
 color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
@@ -2313,9 +1743,7 @@ chart_cols = [
 
 exist_chart_cols = [c for c in chart_cols if c in hist.columns]
 
-if not live_df.empty and "cum_profit" in live_df.columns:
-    st.line_chart(live_df["cum_profit"].reset_index(drop=True))
-elif exist_chart_cols:
+if exist_chart_cols:
     st.line_chart(hist[exist_chart_cols].reset_index(drop=True))
 
 hist_csv = hist.to_csv(index=False).encode("utf-8")
@@ -2340,40 +1768,12 @@ with dl2:
 with st.expander("Phase Summary"):
     st.dataframe(phase_summary_df, use_container_width=True)
 
-
-# V16 CLUSTER PROFIT ENGINE
-try:
-    if not scan_df_all.empty and locked_windows:
-        lock_df_chk = scan_df_all[scan_df_all["window"].isin(locked_windows)].copy()
-
-        cluster_profit = float(lock_df_chk["profit"].sum()) if "profit" in lock_df_chk.columns else 0.0
-        positive_windows = int((lock_df_chk["profit"] > 0).sum()) if "profit" in lock_df_chk.columns else 0
-        total_windows = max(len(lock_df_chk), 1)
-        positive_ratio = positive_windows / total_windows
-
-        if cluster_profit <= 0 or positive_ratio < 0.60:
-            relock_triggered_now = True
-            relock_reason_now = "AUTO_RELOCK_BAD_CLUSTER"
-except Exception:
-    pass
-
 with st.expander("Current Locked Window Detail"):
     if not scan_df_all.empty and locked_windows:
-        show_df = scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window")
-        cols = [c for c in [
-            "window","profit","recent_profit","recent_profit_30",
-            "recent_wr_30","health_score","score"
-        ] if c in show_df.columns]
-        show_df["health_status"] = show_df["health_score"].apply(
-            lambda x: "GOOD" if x > 0 else "BAD"
-        ) if "health_score" in show_df.columns else "UNKNOWN"
-        st.dataframe(show_df, use_container_width=True)
-
-        bad_count = 0
-        if "health_score" in show_df.columns:
-            bad_count = int((show_df["profit"] <= 0).sum())
-
-        st.metric("Bad Locked Windows", bad_count)
+        st.dataframe(
+            scan_df_all[scan_df_all["window"].isin(locked_windows)].sort_values("window"),
+            use_container_width=True,
+        )
 
 if SHOW_DEBUG_TABLES:
     with st.expander("Round Evaluation"):
@@ -2431,5 +1831,3 @@ st.dataframe(
     hist[show_cols].iloc[::-1].head(SHOW_HISTORY_ROWS),
     use_container_width=True,
 )
-
-
