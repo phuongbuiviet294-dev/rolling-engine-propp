@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 20
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 1
+PHASE_LOSS_STREAK_RELOCK = 2
 WINNING_PHASE_PROTECTION = True
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.65
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -97,19 +97,19 @@ SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 5
 
-MIN_TRADES_PER_WINDOW = 26
+MIN_TRADES_PER_WINDOW = 30
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 10
+MAX_CANDIDATE_WINDOWS = 8
 
-VALIDATE_LEN = 16
-AUTO_SCAN_VALIDATE_LEN = False
-VALIDATE_LEN_LIST = [12,16,24,40]
+VALIDATE_LEN = 40
+AUTO_SCAN_VALIDATE_LEN = True
+VALIDATE_LEN_LIST = [16,24,40,60]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 2
+MIN_VALIDATE_TRADES = 5
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
@@ -390,13 +390,13 @@ def evaluate_window_group(seq_groups, w):
 
     if trades > 0:
         score = (
-            profit * 0.75
-            + winrate * 8.0
-            + expectancy * 6.0
+            profit * 0.50
+            + winrate * 10.0
+            + expectancy * 8.0
             + np.log(trades + 1) * 1.0
-            + recent_profit * 1.0
-            - abs(max_drawdown) * 1.1
-            + streak_metrics["streak_score"] * 0.7
+            + recent_profit * 2.0
+            - abs(max_drawdown) * 8.0
+            + streak_metrics["streak_score"] * 0.5
         )
     else:
         score = -999999.0
@@ -456,8 +456,10 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
+        & (df["recent_profit"] > 0)
+        & (df["winrate"] >= 0.35)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
+        & (df["max_loss_streak"] <= 5)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
