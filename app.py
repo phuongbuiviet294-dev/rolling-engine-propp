@@ -30,8 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-  #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
-  #  {"name": "10v5", "top_windows": 10, "vote_required": 5, "window_min": 6, "window_max": 24},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -87,7 +86,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.55
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -95,7 +94,7 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
 
-MIN_FALLBACK_SCORE = 1
+MIN_FALLBACK_SCORE = 15
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
@@ -105,17 +104,17 @@ WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 12
-AUTO_SCAN_VALIDATE_LEN = True
+VALIDATE_LEN = 16
+AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [12,16,24,40]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 1
+MIN_VALIDATE_TRADES = 3
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 40
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 200
@@ -652,6 +651,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     validate_pass = (
                         validate_bt["trades"] >= MIN_VALIDATE_TRADES
                         and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+                        and validate_bt["profit_group"] > 0
+                        and validate_bt["winrate_group"] >= 0.40
                     )
 
                     final_score = (
