@@ -30,7 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+ #   {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -117,7 +117,7 @@ VALIDATE_MIN_DRAWDOWN = -1.0
 RELOCK_SCAN_LEN = 28
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 200
+SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
