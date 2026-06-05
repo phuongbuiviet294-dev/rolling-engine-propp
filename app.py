@@ -13,7 +13,7 @@ from streamlit_autorefresh import st_autorefresh
 # =========================================================
 # PAGE / REFRESH
 # =========================================================
-st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
+st.set_page_config(page_title="Auto Relock Engine V3 | FULL LOGIC", layout="wide")
 st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
@@ -107,7 +107,17 @@ MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = False
-VALIDATE_LEN_LIST = [16,24]
+VALIDATE_LEN_LIST = [16,24,40]
+
+AUTO_DYNAMIC_SCAN_LEN = True
+PROFIT_TRAIL_GIVEBACK = 2.0
+TRAILING_TRIGGER = 2.5
+TRAILING_COOLDOWN = 5
+
+NEGATIVE_RECOVERY_EXTRA_VOTE = 2
+NEGATIVE_RECOVERY_DOMINANCE = 0.80
+HARD_RELOCK_AT = -2.0
+
 MIN_TRAIN_LEN = 100
 MIN_VALIDATE_TRADES = 1
 
