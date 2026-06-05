@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.65
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -97,19 +97,19 @@ SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 5
 
-MIN_TRADES_PER_WINDOW = 30
+MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 8
+MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 40
-AUTO_SCAN_VALIDATE_LEN = True
+VALIDATE_LEN = 24
+AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24,40,60]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 5
+MIN_VALIDATE_TRADES = 3
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
@@ -456,10 +456,9 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
-        & (df["recent_profit"] > 0)
-        & (df["winrate"] >= 0.35)
+        & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 5)
+        & (df["max_loss_streak"] <= 6)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -652,8 +651,9 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     )
 
                     validate_pass = (
-                        validate_bt["trades"] >= MIN_VALIDATE_TRADES
-                        and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
+                        validate_bt["trades"] >= 3
+                        and validate_bt["profit_group"] > 0
+                        and validate_bt["max_drawdown_group"] >= -1.5
                     )
 
                     final_score = (
