@@ -30,7 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-   # {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -62,9 +62,10 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
+PHASE_STOP_WIN = 20
 PHASE_STOP_LOSS = -1.0
 PHASE_LOSS_STREAK_RELOCK = 1
+WINNING_PHASE_PROTECTION = True
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -117,7 +118,7 @@ VALIDATE_MIN_DRAWDOWN = -1.0
 RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
-SHOW_HISTORY_ROWS = 20
+SHOW_HISTORY_ROWS = 200
 SHOW_DEBUG_TABLES = False
 
 # =========================================================
