@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 3
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 16
+RELOCK_SCAN_LEN = 50
 RELOCK_BUFFER = 0
 
 SIDEWAY_WINDOW = 6
@@ -1155,9 +1155,17 @@ def simulate_engine(numbers, groups, colors):
             history_rows.append({
                 "phase": phase_index,
                 "round": round_no,
-                "state": "WAIT_ZIGZAG",
+                "PHASE_BET": False,
+                "phase_hit_group": None,
+                "phase_hit_color": None,
+                "phase_pnl_group": 0.0,
+                "phase_pnl_color": 0.0,
+                "phase_pnl_total": 0.0,
                 "phase_profit_group": phase_profit_group,
+                "phase_profit_color": phase_profit_color,
+                "phase_profit_total": phase_profit_total,
                 "total_phase_profit_all": total_phase_profit_all,
+                "state": "WAIT_ZIGZAG",
             })
             continue
 
@@ -1827,13 +1835,15 @@ st.subheader("Trade Stats")
 
 phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
 
+phase_mask = hist["PHASE_BET"].fillna(False).astype(bool)
+
 phase_group_wr = (
-    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
+    round(hist.loc[phase_mask, "phase_hit_group"].mean() * 100, 2)
     if phase_trades > 0
     else 0
 )
 
-color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
+color_hit_df = hist[phase_mask & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
 
 s1, s2, s3, s4 = st.columns(4)
