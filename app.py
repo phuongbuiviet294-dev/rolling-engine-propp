@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -85,9 +85,9 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.65
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -103,7 +103,7 @@ MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 10
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = False
@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 1
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 12
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
