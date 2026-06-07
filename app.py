@@ -102,8 +102,8 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 10
+WINDOW_SPACING_MAX = 3
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 24
 AUTO_SCAN_VALIDATE_LEN = False
@@ -672,7 +672,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
                     combo_key = tuple(sorted(selected_windows))
                     if combo_blacklist and combo_key in combo_blacklist:
                         continue
-                    if old_windows and regime_similarity(old_windows, selected_windows) > 0.5:
+                    if old_windows and regime_similarity(old_windows, selected_windows) > 0.75:
                         continue
 
                     train_bt = backtest_bundle_vote_range(
