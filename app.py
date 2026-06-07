@@ -1121,7 +1121,14 @@ def simulate_engine(numbers, groups, colors):
         # WAIT_ZIGZAG persistent
         if zigzag_wait_counter > 0:
             zigzag_wait_counter -= 1
-            signal_group = False
+            history_rows.append({
+                "phase": phase_index,
+                "round": round_no,
+                "state": "WAIT_ZIGZAG",
+                "phase_profit_group": phase_profit_group,
+                "total_phase_profit_all": total_phase_profit_all,
+            })
+            continue
 
 # FIX 2: guard tổng phase.
         phase_trade_allowed = (
@@ -1207,7 +1214,7 @@ def simulate_engine(numbers, groups, colors):
 
             phase_hits_group.append(phase_hit_group)
 
-            recent_hits = phase_hits_group[-8:]
+            recent_hits = phase_hits_group[-6:]
             switch_count = 0
             for k in range(1, len(recent_hits)):
                 if recent_hits[k] != recent_hits[k-1]:
@@ -1218,12 +1225,17 @@ def simulate_engine(numbers, groups, colors):
                 for x in recent_hits
             )
 
+            if recent_profit8 <= 0:
+                relock_triggered_now = True
+                relock_reason_now = "RECENT_PROFIT_NEGATIVE"
+                state = "AUTO_RELOCK_RECENT_NEGATIVE"
+
             if (
                 SIDEWAY_RELOCK
                 and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 5
+                and switch_count >= 4
             ):
-                zigzag_wait_counter = 3
+                zigzag_wait_counter = 5
                 relock_triggered_now = True
                 relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
                 state = "AUTO_RELOCK_SIDEWAY"
