@@ -1214,8 +1214,7 @@ def simulate_engine(numbers, groups, colors):
             if (
                 SIDEWAY_RELOCK
                 and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 6
-                and recent_profit8 <= 0
+                and switch_count >= 5
             ):
                 relock_triggered_now = True
                 relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
