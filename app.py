@@ -1428,6 +1428,7 @@ def simulate_engine(numbers, groups, colors):
             if new_selected_lock_round is not None and new_selected_mode is not None:
                 relock_count += 1
 
+                last_window_blacklist.add(tuple(sorted(locked_windows)))
                 locked_windows = new_locked_windows
                 selected_lock_round = new_selected_lock_round
                 selected_mode = new_selected_mode
