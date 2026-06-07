@@ -421,8 +421,6 @@ def evaluate_window_group(seq_groups, w):
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
-        "trend_score": trend_score,
-        "oscillation_penalty": oscillation_penalty,
         "score": score,
     }
 
