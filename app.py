@@ -398,7 +398,7 @@ def evaluate_window_group(seq_groups, w):
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
     switch_count = sum(1 for k in range(1, len(results)) if results[k] != results[k-1])
-    oscillation_penalty = switch_count * 6.0
+    oscillation_penalty = switch_count * 3.0
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
@@ -475,7 +475,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 3)
-        & (df["switch_rate"] <= 0.25)
+        & (df["switch_rate"] <= 0.35)
         & (df["streak_score"] > 0)
     ].copy()
 
@@ -571,7 +571,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     recent_profit20 = float(sum(WIN_GROUP if x == 1 else LOSS_GROUP for x in recent20))
     switch20 = sum(recent20[k] != recent20[k-1] for k in range(1, len(recent20))) if len(recent20) > 1 else 0
     switch_rate = switch20/max(1,len(recent20))
-    oscillation_penalty = switch20*5 + switch_rate*80
+    oscillation_penalty = switch20*3 + switch_rate*40
     trend_score = recent_profit20 * 3.0
 
     return {
@@ -1272,7 +1272,7 @@ def simulate_engine(numbers, groups, colors):
                 for x in recent_hits
             )
 
-            if recent_profit8 <= 0:
+            if recent_profit8 < -1:
                 relock_triggered_now = True
                 relock_reason_now = "RECENT_PROFIT_NEGATIVE"
                 state = "AUTO_RELOCK_RECENT_NEGATIVE"
