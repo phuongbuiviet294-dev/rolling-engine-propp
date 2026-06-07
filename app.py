@@ -34,7 +34,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=5000, key="refresh")
+st_autorefresh(interval=15000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -49,11 +49,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "6v3", "top_windows": 6, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
-    {"name": "10v6", "top_windows": 10, "vote_required": 6, "window_min": 8, "window_max": 30},
+{"name":"5v3","top_windows":5,"vote_required":3,"window_min":6,"window_max":22},
+{"name":"8v4","top_windows":8,"vote_required":4,"window_min":6,"window_max":22},
+{"name":"10v6","top_windows":10,"vote_required":6,"window_min":8,"window_max":30},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -124,12 +122,12 @@ RECENT_WINDOW_SIZE = 20
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 10
-MAX_CANDIDATE_WINDOWS = 15
+WINDOW_SPACING_MAX = 6
+MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
-VALIDATE_LEN_LIST = [12,16,24,32]
+VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 120
 MIN_VALIDATE_TRADES = 3
 
@@ -137,7 +135,7 @@ MIN_VALIDATE_TRADES = 3
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -3.0
 
-RELOCK_SCAN_LEN = 60
+RELOCK_SCAN_LEN = 40
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
