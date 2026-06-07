@@ -63,7 +63,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 20
-PHASE_STOP_LOSS = 0.0
+PHASE_STOP_LOSS = -1.0
 PHASE_LOSS_STREAK_RELOCK = 2
 WINNING_PHASE_PROTECTION = True
 
@@ -478,7 +478,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     ).reset_index(drop=True)
 
     if filtered_df.empty:
-        filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
+        filtered_df = df_all.head(min(MAX_CANDIDATE_WINDOWS,6)).copy()
 
     selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
 
@@ -1226,7 +1226,7 @@ def simulate_engine(numbers, groups, colors):
                 for x in recent_hits
             )
 
-            if recent_profit8 <= 1:
+            if recent_profit8 <= 0:
                 relock_triggered_now = True
                 relock_reason_now = "RECENT_PROFIT_NEGATIVE"
                 state = "AUTO_RELOCK_RECENT_NEGATIVE"
@@ -1234,7 +1234,7 @@ def simulate_engine(numbers, groups, colors):
             if (
                 SIDEWAY_RELOCK
                 and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 3
+                and switch_count >= 4
             ):
                 zigzag_wait_counter = 8
                 relock_triggered_now = True
