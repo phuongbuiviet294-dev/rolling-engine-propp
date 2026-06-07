@@ -83,11 +83,11 @@ RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 1.5
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 3
 MAX_PHASE_TRADES = 8
-VOTE_DOMINANCE_RATIO = 0.75
+VOTE_DOMINANCE_RATIO = 0.67
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -651,9 +651,10 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     )
 
                     validate_pass = (
-                        validate_bt["trades"] >= 3
-                        and validate_bt["profit_group"] > 0
-                        and validate_bt["max_drawdown_group"] >= -1.5
+                        validate_bt["trades"] >= 4
+                        and validate_bt["profit_group"] >= 1
+                        and validate_bt["winrate_group"] >= 0.52
+                        and validate_bt["max_drawdown_group"] >= -1.2
                     )
 
                     final_score = (
