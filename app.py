@@ -468,7 +468,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 6)
-        & (df["switch_rate"] <= 0.65)
+        & (df["switch_rate"] <= 0.50)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1040,6 +1040,7 @@ def simulate_engine(numbers, groups, colors):
 
     phase_index = 1
     relock_count = 0
+    zigzag_wait_counter = 0
 
     lock_scan_start = LOCK_ROUND_START
     lock_scan_end = LOCK_ROUND_END
@@ -1116,7 +1117,12 @@ def simulate_engine(numbers, groups, colors):
         phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
-        # FIX 2: guard tổng phase.
+        # WAIT_ZIGZAG persistent
+        if zigzag_wait_counter > 0:
+            zigzag_wait_counter -= 1
+            signal_group = False
+
+# FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
             and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
@@ -1216,6 +1222,7 @@ def simulate_engine(numbers, groups, colors):
                 and len(recent_hits) >= SIDEWAY_WINDOW
                 and switch_count >= 5
             ):
+                zigzag_wait_counter = 3
                 relock_triggered_now = True
                 relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
                 state = "AUTO_RELOCK_SIDEWAY"
