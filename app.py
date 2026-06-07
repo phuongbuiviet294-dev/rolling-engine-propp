@@ -1150,7 +1150,10 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # WAIT_ZIGZAG persistent
-        if zigzag_wait_counter > 0:
+        if zigzag_wait_counter > 2:
+        zigzag_wait_counter = 2
+
+    if zigzag_wait_counter > 0:
             zigzag_wait_counter -= 1
             history_rows.append({
                 "phase": phase_index,
@@ -1272,7 +1275,7 @@ def simulate_engine(numbers, groups, colors):
                 for x in recent_hits
             )
 
-            if recent_profit8 < -1:
+            if recent_profit8 < -2:
                 relock_triggered_now = True
                 relock_reason_now = "RECENT_PROFIT_NEGATIVE"
                 state = "AUTO_RELOCK_RECENT_NEGATIVE"
