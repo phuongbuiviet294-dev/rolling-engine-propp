@@ -63,7 +63,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 20
-PHASE_STOP_LOSS = -1.0
+PHASE_STOP_LOSS = 0.0
 PHASE_LOSS_STREAK_RELOCK = 2
 WINNING_PHASE_PROTECTION = True
 
@@ -467,8 +467,9 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 6)
-        & (df["switch_rate"] <= 0.35)
+        & (df["max_loss_streak"] <= 3)
+        & (df["switch_rate"] <= 0.25)
+        & (df["streak_score"] > 0)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1214,7 +1215,7 @@ def simulate_engine(numbers, groups, colors):
 
             phase_hits_group.append(phase_hit_group)
 
-            recent_hits = phase_hits_group[-6:]
+            recent_hits = phase_hits_group[-8:]
             switch_count = 0
             for k in range(1, len(recent_hits)):
                 if recent_hits[k] != recent_hits[k-1]:
@@ -1225,7 +1226,7 @@ def simulate_engine(numbers, groups, colors):
                 for x in recent_hits
             )
 
-            if recent_profit8 <= 0:
+            if recent_profit8 <= 1:
                 relock_triggered_now = True
                 relock_reason_now = "RECENT_PROFIT_NEGATIVE"
                 state = "AUTO_RELOCK_RECENT_NEGATIVE"
@@ -1233,7 +1234,7 @@ def simulate_engine(numbers, groups, colors):
             if (
                 SIDEWAY_RELOCK
                 and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 4
+                and switch_count >= 3
             ):
                 zigzag_wait_counter = 8
                 relock_triggered_now = True
