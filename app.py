@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 20
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 1
+PHASE_LOSS_STREAK_RELOCK = 2
 WINNING_PHASE_PROTECTION = True
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -421,6 +421,8 @@ def evaluate_window_group(seq_groups, w):
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
+        "switch_count": switch_count,
+        "switch_rate": (switch_count / trades) if trades>0 else 1.0,
         "score": score,
     }
 
@@ -466,6 +468,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 6)
+        & (df["switch_rate"] <= 0.65)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
