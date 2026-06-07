@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 20
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_LOSS_STREAK_RELOCK = 1
 WINNING_PHASE_PROTECTION = True
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -83,11 +83,11 @@ RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = 1.5
 
-MIN_PHASE_AGE_TO_TRADE = 2
-MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.60
+MIN_PHASE_AGE_TO_TRADE = 4
+MAX_PHASE_TRADES = 8
+VOTE_DOMINANCE_RATIO = 0.75
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
