@@ -1,3 +1,4 @@
+
 import time
 import json
 import os
@@ -101,8 +102,8 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 12
-MAX_CANDIDATE_WINDOWS = 15
+WINDOW_SPACING_MAX = 6
+MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 24
 AUTO_SCAN_VALIDATE_LEN = False
@@ -409,7 +410,7 @@ def evaluate_window_group(seq_groups, w):
             + recent_profit * 2.0
             - abs(max_drawdown) * 8.0
             + streak_metrics["streak_score"] * 0.5
-            - oscillation_penalty*2
+            - oscillation_penalty
         )
     else:
         score = -999999.0
@@ -473,9 +474,8 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 2)
-        & (df["switch_rate"] <= 0.20)
-        & (df["recent_profit"] > 0)
+        & (df["max_loss_streak"] <= 3)
+        & (df["switch_rate"] <= 0.25)
         & (df["streak_score"] > 0)
     ].copy()
 
@@ -591,7 +591,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     }
 
 
-def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_windows=None):
+def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_windows=None, combo_blacklist=None, old_windows=None):
     effective_scan_end = min(scan_end, len(all_groups) - 1)
 
     if effective_scan_end < scan_start:
@@ -669,6 +669,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
                             continue
                     else:
                         selected_windows = candidate_windows[:top_windows]
+                    combo_key = tuple(sorted(selected_windows))
+                    if combo_blacklist and combo_key in combo_blacklist:
+                        continue
+                    if old_windows and regime_similarity(old_windows, selected_windows) > 0.5:
+                        continue
 
                     train_bt = backtest_bundle_vote_range(
                         train_groups,
@@ -1457,7 +1462,7 @@ def simulate_engine(numbers, groups, colors):
                 new_scan_df_filtered,
                 new_round_eval_df,
                 new_lock_mode,
-            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end, blacklist_windows)
+            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end, blacklist_windows, last_window_blacklist, locked_windows)
 
             if new_selected_lock_round is not None and new_selected_mode is not None:
                 relock_count += 1
