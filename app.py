@@ -32,7 +32,7 @@ MODES = [
     {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v3", "top_windows": 6, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+  #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -116,7 +116,7 @@ MIN_VALIDATE_TRADES = 1
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -3.0
 
-RELOCK_SCAN_LEN = 60
+RELOCK_SCAN_LEN = 8
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
