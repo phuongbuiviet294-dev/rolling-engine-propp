@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 3
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 12
+RELOCK_SCAN_LEN = 50
 RELOCK_BUFFER = 0
 
 SIDEWAY_WINDOW = 6
@@ -126,7 +126,7 @@ SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
 # V39 ZIGZAG KILLER
-REGIME_COOLDOWN_PHASES = 3
+REGIME_COOLDOWN_PHASES = 2
 OSC_PATTERN_WAIT = 20
 WINDOW_BLACKLIST_RADIUS = 4
 OSC_PATTERN_A=[1,0,1,0,1,0]
@@ -672,7 +672,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
                     combo_key = tuple(sorted(selected_windows))
                     if combo_blacklist and combo_key in combo_blacklist:
                         continue
-                    if old_windows and regime_similarity(old_windows, selected_windows) > 0.75:
+                    if old_windows and regime_similarity(old_windows, selected_windows) > 0.90:
                         continue
 
                     train_bt = backtest_bundle_vote_range(
