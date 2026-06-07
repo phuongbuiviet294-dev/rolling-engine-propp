@@ -114,7 +114,7 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -3.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
 RELOCK_SCAN_LEN = 8
 RELOCK_BUFFER = 0
