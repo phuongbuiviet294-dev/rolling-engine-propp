@@ -390,6 +390,8 @@ def evaluate_window_group(seq_groups, w):
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
+    switch_count = sum(1 for k in range(1, len(results)) if results[k] != results[k-1])
+    oscillation_penalty = switch_count * 0.4
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
@@ -401,6 +403,7 @@ def evaluate_window_group(seq_groups, w):
             + recent_profit * 2.0
             - abs(max_drawdown) * 8.0
             + streak_metrics["streak_score"] * 0.5
+            - oscillation_penalty
         )
     else:
         score = -999999.0
@@ -1181,13 +1184,13 @@ def simulate_engine(numbers, groups, colors):
 
             phase_hits_group.append(phase_hit_group)
 
-            recent_hits = phase_hits_group[-6:]
+            recent_hits = phase_hits_group[-8:]
             switch_count = 0
             for k in range(1, len(recent_hits)):
                 if recent_hits[k] != recent_hits[k-1]:
                     switch_count += 1
 
-            recent_profit6 = sum(
+            recent_profit8 = sum(
                 WIN_GROUP if x == 1 else LOSS_GROUP
                 for x in recent_hits
             )
@@ -1195,8 +1198,8 @@ def simulate_engine(numbers, groups, colors):
             if (
                 SIDEWAY_RELOCK
                 and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 4
-                and recent_profit6 <= SIDEWAY_THRESHOLD
+                and switch_count >= 6
+                and recent_profit8 <= 0
             ):
                 relock_triggered_now = True
                 relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
