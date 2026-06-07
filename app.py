@@ -391,7 +391,7 @@ def evaluate_window_group(seq_groups, w):
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
     switch_count = sum(1 for k in range(1, len(results)) if results[k] != results[k-1])
-    oscillation_penalty = switch_count * 0.4
+    oscillation_penalty = switch_count * 2.5
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
@@ -468,7 +468,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 6)
-        & (df["switch_rate"] <= 0.50)
+        & (df["switch_rate"] <= 0.45)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1040,6 +1040,7 @@ def simulate_engine(numbers, groups, colors):
 
     phase_index = 1
     relock_count = 0
+    last_window_blacklist = set()
     zigzag_wait_counter = 0
 
     lock_scan_start = LOCK_ROUND_START
