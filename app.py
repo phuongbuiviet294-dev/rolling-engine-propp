@@ -49,11 +49,11 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-  #  {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-   # {"name": "6v3", "top_windows": 6, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "6v3", "top_windows": 6, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-  #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
- #   {"name": "10v6", "top_windows": 10, "vote_required": 6, "window_min": 8, "window_max": 30},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "10v6", "top_windows": 10, "vote_required": 6, "window_min": 8, "window_max": 30},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -86,8 +86,8 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 20
-PHASE_STOP_LOSS = -2.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_LOSS = -3.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
@@ -124,8 +124,8 @@ RECENT_WINDOW_SIZE = 20
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 5
-MAX_CANDIDATE_WINDOWS = 10
+WINDOW_SPACING_MAX = 10
+MAX_CANDIDATE_WINDOWS = 15
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
@@ -135,9 +135,9 @@ MIN_VALIDATE_TRADES = 3
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -2.0
+VALIDATE_MIN_DRAWDOWN = -3.0
 
-RELOCK_SCAN_LEN = 12
+RELOCK_SCAN_LEN = 60
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
