@@ -29,9 +29,10 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
- #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "6v3", "top_windows": 6, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -64,15 +65,15 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_LOSS = -2.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
-ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = True
 NEGATIVE_PHASE_EXTRA_VOTE = 1
 NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
@@ -97,7 +98,7 @@ SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 1
 
-MIN_TRADES_PER_WINDOW = 26
+MIN_TRADES_PER_WINDOW = 12
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
@@ -113,9 +114,9 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -3.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 40
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
