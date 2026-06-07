@@ -451,7 +451,7 @@ def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     return out
 
 
-def build_window_tables(train_groups, window_min, window_max, min_window_spacing=None):
+def build_window_tables(train_groups, window_min, window_max, min_window_spacing=None, blacklist_windows=None):
     if min_window_spacing is None:
         min_window_spacing = MIN_WINDOW_SPACING
 
@@ -471,6 +471,11 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & (df["switch_rate"] <= 0.25)
         & (df["streak_score"] > 0)
     ].copy()
+
+    if blacklist_windows is None:
+        blacklist_windows = set()
+
+    filtered_df = filtered_df[~filtered_df["window"].isin(blacklist_windows)].copy()
 
     filtered_df = filtered_df.sort_values(
         ["score", "recent_profit", "profit", "expectancy", "winrate", "trades", "max_loss_streak"],
@@ -578,7 +583,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     }
 
 
-def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
+def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_windows=None):
     effective_scan_end = min(scan_end, len(all_groups) - 1)
 
     if effective_scan_end < scan_start:
@@ -647,6 +652,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         mode["window_min"],
                         mode["window_max"],
                         min_window_spacing=spacing,
+                        blacklist_windows=blacklist_windows,
                     )
 
                     if len(candidate_windows) < top_windows:
@@ -1042,6 +1048,7 @@ def simulate_engine(numbers, groups, colors):
     phase_index = 1
     relock_count = 0
     last_window_blacklist = set()
+    blacklist_windows = set()
     zigzag_wait_counter = 0
 
     lock_scan_start = LOCK_ROUND_START
@@ -1424,12 +1431,14 @@ def simulate_engine(numbers, groups, colors):
                 new_scan_df_filtered,
                 new_round_eval_df,
                 new_lock_mode,
-            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end)
+            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end, blacklist_windows)
 
             if new_selected_lock_round is not None and new_selected_mode is not None:
                 relock_count += 1
 
                 last_window_blacklist.add(tuple(sorted(locked_windows)))
+                for w in locked_windows:
+                    blacklist_windows.update([w-2,w-1,w,w+1,w+2])
                 locked_windows = new_locked_windows
                 selected_lock_round = new_selected_lock_round
                 selected_mode = new_selected_mode
