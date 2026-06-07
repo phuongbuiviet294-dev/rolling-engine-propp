@@ -95,7 +95,7 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
 
-MIN_FALLBACK_SCORE = 5
+MIN_FALLBACK_SCORE = -999999
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
@@ -634,9 +634,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                     )
 
                     if len(candidate_windows) < top_windows:
-                        continue
-
-                    selected_windows = candidate_windows[:top_windows]
+                        selected_windows = candidate_windows[:]
+                        if len(selected_windows) == 0:
+                            continue
+                    else:
+                        selected_windows = candidate_windows[:top_windows]
 
                     train_bt = backtest_bundle_vote_range(
                         train_groups,
@@ -749,7 +751,7 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     if best_round is not None:
         return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
-    if fallback_round is not None and fallback_score >= MIN_FALLBACK_SCORE:
+    if fallback_round is not None:
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
