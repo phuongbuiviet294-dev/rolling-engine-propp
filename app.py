@@ -29,8 +29,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
+ #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-  #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -62,10 +63,9 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 20
+PHASE_STOP_WIN = 44
 PHASE_STOP_LOSS = -1.0
 PHASE_LOSS_STREAK_RELOCK = 2
-WINNING_PHASE_PROTECTION = True
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -85,8 +85,8 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 2
-MAX_PHASE_TRADES = 12
+MIN_PHASE_AGE_TO_TRADE = 4
+MAX_PHASE_TRADES = 16
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -95,42 +95,31 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -10.0
 
-MIN_FALLBACK_SCORE = -999999
+MIN_FALLBACK_SCORE = 1
 
 MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 3
-MAX_CANDIDATE_WINDOWS = 8
+WINDOW_SPACING_MAX = 6
+MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 24
+VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = False
-VALIDATE_LEN_LIST = [16,24,40,60]
+VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 3
+MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 50
+RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
-
-SIDEWAY_WINDOW = 6
-SIDEWAY_THRESHOLD = -1.0
-SIDEWAY_RELOCK = True
 
 SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
-
-# V39 ZIGZAG KILLER
-REGIME_COOLDOWN_PHASES = 2
-OSC_PATTERN_WAIT = 20
-WINDOW_BLACKLIST_RADIUS = 4
-OSC_PATTERN_A=[1,0,1,0,1,0]
-OSC_PATTERN_B=[0,1,0,1,0,1]
 
 # =========================================================
 # TELEGRAM
@@ -397,20 +386,17 @@ def evaluate_window_group(seq_groups, w):
     max_drawdown = compute_max_drawdown(results, WIN_GROUP, LOSS_GROUP)
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
-    switch_count = sum(1 for k in range(1, len(results)) if results[k] != results[k-1])
-    oscillation_penalty = switch_count * 3.0
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
         score = (
-            profit * 0.50
-            + winrate * 10.0
-            + expectancy * 8.0
+            profit * 0.75
+            + winrate * 8.0
+            + expectancy * 6.0
             + np.log(trades + 1) * 1.0
-            + recent_profit * 2.0
-            - abs(max_drawdown) * 8.0
-            + streak_metrics["streak_score"] * 0.5
-            - oscillation_penalty
+            + recent_profit * 1.0
+            - abs(max_drawdown) * 1.1
+            + streak_metrics["streak_score"] * 0.7
         )
     else:
         score = -999999.0
@@ -428,8 +414,6 @@ def evaluate_window_group(seq_groups, w):
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
-        "switch_count": switch_count,
-        "switch_rate": (switch_count / trades) if trades>0 else 1.0,
         "score": score,
     }
 
@@ -458,7 +442,7 @@ def enforce_spacing_from_df(df_sorted, top_n, min_spacing):
     return out
 
 
-def build_window_tables(train_groups, window_min, window_max, min_window_spacing=None, blacklist_windows=None):
+def build_window_tables(train_groups, window_min, window_max, min_window_spacing=None):
     if min_window_spacing is None:
         min_window_spacing = MIN_WINDOW_SPACING
 
@@ -472,17 +456,9 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
 
     filtered_df = df[
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
-        & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 3)
-        & (df["switch_rate"] <= 0.35)
-        & (df["streak_score"] > 0)
+        & (df["max_loss_streak"] <= 6)
     ].copy()
-
-    if blacklist_windows is None:
-        blacklist_windows = set()
-
-    filtered_df = filtered_df[~filtered_df["window"].isin(blacklist_windows)].copy()
 
     filtered_df = filtered_df.sort_values(
         ["score", "recent_profit", "profit", "expectancy", "winrate", "trades", "max_loss_streak"],
@@ -490,7 +466,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     ).reset_index(drop=True)
 
     if filtered_df.empty:
-        filtered_df = df_all.head(min(MAX_CANDIDATE_WINDOWS,6)).copy()
+        filtered_df = df_all.head(MAX_CANDIDATE_WINDOWS).copy()
 
     selected_seed = filtered_df.head(MAX_CANDIDATE_WINDOWS).copy()
 
@@ -567,15 +543,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results_group)
 
-    recent20 = results_group[-20:]
-    recent_profit20 = float(sum(WIN_GROUP if x == 1 else LOSS_GROUP for x in recent20))
-    switch20 = sum(recent20[k] != recent20[k-1] for k in range(1, len(recent20))) if len(recent20) > 1 else 0
-    switch_rate = switch20/max(1,len(recent20))
-    oscillation_penalty = switch20*3 + switch_rate*40
-    trend_score = recent_profit20 * 3.0
-
     return {
-
         "trades": trades,
         "profit_group": profit_group,
         "winrate_group": winrate_group,
@@ -586,12 +554,10 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
-        "trend_score": trend_score,
-        "oscillation_penalty": oscillation_penalty,
     }
 
 
-def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_windows=None, combo_blacklist=None, old_windows=None):
+def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     effective_scan_end = min(scan_end, len(all_groups) - 1)
 
     if effective_scan_end < scan_start:
@@ -660,20 +626,12 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
                         mode["window_min"],
                         mode["window_max"],
                         min_window_spacing=spacing,
-                        blacklist_windows=blacklist_windows,
                     )
 
                     if len(candidate_windows) < top_windows:
-                        selected_windows = candidate_windows[:]
-                        if len(selected_windows) == 0:
-                            continue
-                    else:
-                        selected_windows = candidate_windows[:top_windows]
-                    combo_key = tuple(sorted(selected_windows))
-                    if combo_blacklist and combo_key in combo_blacklist:
                         continue
-                    if old_windows and regime_similarity(old_windows, selected_windows) > 0.90:
-                        continue
+
+                    selected_windows = candidate_windows[:top_windows]
 
                     train_bt = backtest_bundle_vote_range(
                         train_groups,
@@ -692,9 +650,8 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
                     )
 
                     validate_pass = (
-                        validate_bt["trades"] >= 3
-                        and validate_bt["profit_group"] > 0
-                        and validate_bt["max_drawdown_group"] >= -1.5
+                        validate_bt["trades"] >= MIN_VALIDATE_TRADES
+                        and validate_bt["max_drawdown_group"] >= VALIDATE_MIN_DRAWDOWN
                     )
 
                     final_score = (
@@ -707,10 +664,6 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
                         + validate_bt["profit_group"] * 3.0
                         + validate_bt["winrate_group"] * 10.0
                         + validate_bt["expectancy_group"] * 8.0
-                        + train_bt.get("trend_score",0)
-                        - train_bt.get("oscillation_penalty",0)
-                        + validate_bt.get("trend_score",0)
-                        - validate_bt.get("oscillation_penalty",0)
                         - abs(validate_bt["max_drawdown_group"]) * 2.0
                         + validate_bt["streak_score"] * 0.8
                     )
@@ -790,21 +743,11 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
     if best_round is not None:
         return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
-    if fallback_round is not None:
+    if fallback_round is not None and fallback_score >= MIN_FALLBACK_SCORE:
         return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
-
-
-
-def regime_similarity(old_windows, new_windows):
-    old_set = set(old_windows)
-    new_set = set(new_windows)
-    if not old_set or not new_set:
-        return 0.0
-    overlap = len(old_set & new_set)
-    return overlap / max(len(old_set), len(new_set))
 
 def make_next_preview(
     numbers,
@@ -1070,9 +1013,6 @@ def simulate_engine(numbers, groups, colors):
 
     phase_index = 1
     relock_count = 0
-    last_window_blacklist = set()
-    blacklist_windows = set()
-    zigzag_wait_counter = 0
 
     lock_scan_start = LOCK_ROUND_START
     lock_scan_end = LOCK_ROUND_END
@@ -1149,30 +1089,7 @@ def simulate_engine(numbers, groups, colors):
         phase_warmup_block = phase_age < MIN_PHASE_AGE_TO_TRADE
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
-        # WAIT_ZIGZAG persistent
-        if zigzag_wait_counter > 2:
-        zigzag_wait_counter = 2
-
-    if zigzag_wait_counter > 0:
-            zigzag_wait_counter -= 1
-            history_rows.append({
-                "phase": phase_index,
-                "round": round_no,
-                "PHASE_BET": False,
-                "phase_hit_group": None,
-                "phase_hit_color": None,
-                "phase_pnl_group": 0.0,
-                "phase_pnl_color": 0.0,
-                "phase_pnl_total": 0.0,
-                "phase_profit_group": phase_profit_group,
-                "phase_profit_color": phase_profit_color,
-                "phase_profit_total": phase_profit_total,
-                "total_phase_profit_all": total_phase_profit_all,
-                "state": "WAIT_ZIGZAG",
-            })
-            continue
-
-# FIX 2: guard tổng phase.
+        # FIX 2: guard tổng phase.
         phase_trade_allowed = (
             signal_group
             and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
@@ -1255,41 +1172,6 @@ def simulate_engine(numbers, groups, colors):
             total_phase_profit_all += phase_pnl_total
 
             phase_hits_group.append(phase_hit_group)
-
-            recent_hits = phase_hits_group[-8:]
-            switch_count = 0
-            for k in range(1, len(recent_hits)):
-                if recent_hits[k] != recent_hits[k-1]:
-                    switch_count += 1
-
-            
-            pattern6 = recent_hits[-6:]
-            if pattern6 == OSC_PATTERN_A or pattern6 == OSC_PATTERN_B:
-                zigzag_wait_counter = 20
-                relock_triggered_now = True
-                relock_reason_now = "OSCILLATION_PATTERN_WLWL"
-                state = "AUTO_RELOCK_OSC_PATTERN"
-
-            recent_profit8 = sum(
-                WIN_GROUP if x == 1 else LOSS_GROUP
-                for x in recent_hits
-            )
-
-            if recent_profit8 < -2:
-                relock_triggered_now = True
-                relock_reason_now = "RECENT_PROFIT_NEGATIVE"
-                state = "AUTO_RELOCK_RECENT_NEGATIVE"
-
-            if (
-                SIDEWAY_RELOCK
-                and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 3
-            ):
-                zigzag_wait_counter = 20
-                relock_triggered_now = True
-                relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
-                state = "AUTO_RELOCK_SIDEWAY"
-
             if phase_hit_color is not None:
                 phase_hits_color.append(phase_hit_color)
 
@@ -1473,14 +1355,11 @@ def simulate_engine(numbers, groups, colors):
                 new_scan_df_filtered,
                 new_round_eval_df,
                 new_lock_mode,
-            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end, blacklist_windows, last_window_blacklist, locked_windows)
+            ) = find_best_auto_mode_in_range(groups, scan_start, scan_end)
 
             if new_selected_lock_round is not None and new_selected_mode is not None:
                 relock_count += 1
 
-                last_window_blacklist.add(tuple(sorted(locked_windows)))
-                for w in locked_windows:
-                    blacklist_windows.update(range(w-WINDOW_BLACKLIST_RADIUS, w+WINDOW_BLACKLIST_RADIUS+1))
                 locked_windows = new_locked_windows
                 selected_lock_round = new_selected_lock_round
                 selected_mode = new_selected_mode
@@ -1838,15 +1717,13 @@ st.subheader("Trade Stats")
 
 phase_trades = int(hist["PHASE_BET"].sum()) if "PHASE_BET" in hist.columns else 0
 
-phase_mask = hist["PHASE_BET"].fillna(False).astype(bool)
-
 phase_group_wr = (
-    round(hist.loc[phase_mask, "phase_hit_group"].mean() * 100, 2)
+    round(hist.loc[hist["PHASE_BET"], "phase_hit_group"].mean() * 100, 2)
     if phase_trades > 0
     else 0
 )
 
-color_hit_df = hist[phase_mask & (hist["phase_hit_color"].notna())]
+color_hit_df = hist[(hist["PHASE_BET"] == True) & (hist["phase_hit_color"].notna())]
 phase_color_wr = round(color_hit_df["phase_hit_color"].mean() * 100, 2) if len(color_hit_df) > 0 else 0
 
 s1, s2, s3, s4 = st.columns(4)
