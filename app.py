@@ -1,4 +1,24 @@
 
+# =========================================================
+# V46 ADAPTIVE REGIME
+# =========================================================
+ENABLE_REGIME_DETECTION = True
+REGIME_LOOKBACK = 24
+
+TREND_REPEAT_RATIO = 0.65
+ZIGZAG_FLIP_RATIO = 0.60
+
+ENABLE_DYNAMIC_CONFIDENCE = True
+HIGH_CONFIDENCE_DOMINANCE = 0.80
+NORMAL_CONFIDENCE_DOMINANCE = 0.75
+
+ENABLE_AUTO_PAUSE_CHAOS = True
+CHAOS_MIN_DOMINANCE = 0.55
+
+ROLLING_PROFIT_WINDOW = 20
+ENABLE_MULTI_MODE_EQUITY = True
+
+
 import time
 import json
 import os
@@ -29,10 +49,11 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-   # {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
     {"name": "6v3", "top_windows": 6, "vote_required": 3, "window_min": 6, "window_max": 22},
-  #  {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
-  #  {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
+    {"name": "10v6", "top_windows": 10, "vote_required": 6, "window_min": 8, "window_max": 30},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -64,8 +85,8 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -2.0
+PHASE_STOP_WIN = 20
+PHASE_STOP_LOSS = -3.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -103,20 +124,20 @@ RECENT_WINDOW_SIZE = 20
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 4
-MAX_CANDIDATE_WINDOWS = 6
+WINDOW_SPACING_MAX = 10
+MAX_CANDIDATE_WINDOWS = 15
 
 VALIDATE_LEN = 12
 AUTO_SCAN_VALIDATE_LEN = True
 VALIDATE_LEN_LIST = [12,16,24,32]
-MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 1
+MIN_TRAIN_LEN = 120
+MIN_VALIDATE_TRADES = 3
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -2.0
+VALIDATE_MIN_DRAWDOWN = -3.0
 
-RELOCK_SCAN_LEN = 8
+RELOCK_SCAN_LEN = 60
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
