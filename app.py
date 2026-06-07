@@ -125,6 +125,11 @@ SIDEWAY_RELOCK = True
 SHOW_HISTORY_ROWS = 20
 SHOW_DEBUG_TABLES = False
 
+# V39 ZIGZAG KILLER
+REGIME_COOLDOWN_PHASES = 3
+OSC_PATTERN_WAIT = 20
+WINDOW_BLACKLIST_RADIUS = 4
+
 # =========================================================
 # TELEGRAM
 # =========================================================
@@ -563,7 +568,8 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     recent20 = results_group[-20:]
     recent_profit20 = float(sum(WIN_GROUP if x == 1 else LOSS_GROUP for x in recent20))
     switch20 = sum(recent20[k] != recent20[k-1] for k in range(1, len(recent20))) if len(recent20) > 1 else 0
-    oscillation_penalty = switch20 * 0.5
+    switch_rate = switch20/max(1,len(recent20))
+    oscillation_penalty = switch20*5 + switch_rate*80
     trend_score = recent_profit20 * 3.0
 
     return {
@@ -782,6 +788,16 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end, blacklist_win
 
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
+
+
+
+def regime_similarity(old_windows, new_windows):
+    old_set = set(old_windows)
+    new_set = set(new_windows)
+    if not old_set or not new_set:
+        return 0.0
+    overlap = len(old_set & new_set)
+    return overlap / max(len(old_set), len(new_set))
 
 def make_next_preview(
     numbers,
@@ -1438,7 +1454,7 @@ def simulate_engine(numbers, groups, colors):
 
                 last_window_blacklist.add(tuple(sorted(locked_windows)))
                 for w in locked_windows:
-                    blacklist_windows.update([w-2,w-1,w,w+1,w+2])
+                    blacklist_windows.update(range(w-WINDOW_BLACKLIST_RADIUS, w+WINDOW_BLACKLIST_RADIUS+1))
                 locked_windows = new_locked_windows
                 selected_lock_round = new_selected_lock_round
                 selected_mode = new_selected_mode
