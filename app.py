@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 3
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 50
 RELOCK_BUFFER = 0
 
 SIDEWAY_WINDOW = 6
@@ -391,7 +391,7 @@ def evaluate_window_group(seq_groups, w):
     recent_profit = compute_recent_profit(results, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results)
     switch_count = sum(1 for k in range(1, len(results)) if results[k] != results[k-1])
-    oscillation_penalty = switch_count * 2.5
+    oscillation_penalty = switch_count * 6.0
     expectancy = profit / trades if trades > 0 else -999999.0
 
     if trades > 0:
@@ -468,7 +468,7 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 6)
-        & (df["switch_rate"] <= 0.45)
+        & (df["switch_rate"] <= 0.35)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1235,7 +1235,7 @@ def simulate_engine(numbers, groups, colors):
                 and len(recent_hits) >= SIDEWAY_WINDOW
                 and switch_count >= 4
             ):
-                zigzag_wait_counter = 5
+                zigzag_wait_counter = 8
                 relock_triggered_now = True
                 relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
                 state = "AUTO_RELOCK_SIDEWAY"
