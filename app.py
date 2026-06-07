@@ -421,6 +421,8 @@ def evaluate_window_group(seq_groups, w):
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
+        "trend_score": trend_score,
+        "oscillation_penalty": oscillation_penalty,
         "score": score,
     }
 
@@ -551,7 +553,14 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
     recent_profit_group = compute_recent_profit(results_group, RECENT_WINDOW_SIZE, WIN_GROUP, LOSS_GROUP)
     streak_metrics = compute_streak_metrics(results_group)
 
+    recent20 = results_group[-20:]
+    recent_profit20 = float(sum(WIN_GROUP if x == 1 else LOSS_GROUP for x in recent20))
+    switch20 = sum(recent20[k] != recent20[k-1] for k in range(1, len(recent20))) if len(recent20) > 1 else 0
+    oscillation_penalty = switch20 * 0.5
+    trend_score = recent_profit20 * 3.0
+
     return {
+
         "trades": trades,
         "profit_group": profit_group,
         "winrate_group": winrate_group,
@@ -562,6 +571,8 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         "max_loss_streak": streak_metrics["max_loss_streak"],
         "count_hit_streak_ge2": streak_metrics["count_hit_streak_ge2"],
         "streak_score": streak_metrics["streak_score"],
+        "trend_score": trend_score,
+        "oscillation_penalty": oscillation_penalty,
     }
 
 
@@ -675,6 +686,10 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
                         + validate_bt["profit_group"] * 3.0
                         + validate_bt["winrate_group"] * 10.0
                         + validate_bt["expectancy_group"] * 8.0
+                        + train_bt.get("trend_score",0)
+                        - train_bt.get("oscillation_penalty",0)
+                        + validate_bt.get("trend_score",0)
+                        - validate_bt.get("oscillation_penalty",0)
                         - abs(validate_bt["max_drawdown_group"]) * 2.0
                         + validate_bt["streak_score"] * 0.8
                     )
