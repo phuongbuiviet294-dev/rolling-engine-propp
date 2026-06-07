@@ -129,6 +129,8 @@ SHOW_DEBUG_TABLES = False
 REGIME_COOLDOWN_PHASES = 3
 OSC_PATTERN_WAIT = 20
 WINDOW_BLACKLIST_RADIUS = 4
+OSC_PATTERN_A=[1,0,1,0,1,0]
+OSC_PATTERN_B=[0,1,0,1,0,1]
 
 # =========================================================
 # TELEGRAM
@@ -1244,6 +1246,14 @@ def simulate_engine(numbers, groups, colors):
                 if recent_hits[k] != recent_hits[k-1]:
                     switch_count += 1
 
+            
+            pattern6 = recent_hits[-6:]
+            if pattern6 == OSC_PATTERN_A or pattern6 == OSC_PATTERN_B:
+                zigzag_wait_counter = 20
+                relock_triggered_now = True
+                relock_reason_now = "OSCILLATION_PATTERN_WLWL"
+                state = "AUTO_RELOCK_OSC_PATTERN"
+
             recent_profit8 = sum(
                 WIN_GROUP if x == 1 else LOSS_GROUP
                 for x in recent_hits
@@ -1257,9 +1267,9 @@ def simulate_engine(numbers, groups, colors):
             if (
                 SIDEWAY_RELOCK
                 and len(recent_hits) >= SIDEWAY_WINDOW
-                and switch_count >= 4
+                and switch_count >= 3
             ):
-                zigzag_wait_counter = 8
+                zigzag_wait_counter = 20
                 relock_triggered_now = True
                 relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
                 state = "AUTO_RELOCK_SIDEWAY"
