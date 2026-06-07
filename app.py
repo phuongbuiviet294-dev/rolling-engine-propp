@@ -102,8 +102,8 @@ RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
-WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 10
+WINDOW_SPACING_MAX = 12
+MAX_CANDIDATE_WINDOWS = 15
 
 VALIDATE_LEN = 24
 AUTO_SCAN_VALIDATE_LEN = False
@@ -410,7 +410,7 @@ def evaluate_window_group(seq_groups, w):
             + recent_profit * 2.0
             - abs(max_drawdown) * 8.0
             + streak_metrics["streak_score"] * 0.5
-            - oscillation_penalty
+            - oscillation_penalty*2
         )
     else:
         score = -999999.0
@@ -474,8 +474,9 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & (df["recent_profit"] > -1)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
-        & (df["max_loss_streak"] <= 3)
-        & (df["switch_rate"] <= 0.25)
+        & (df["max_loss_streak"] <= 2)
+        & (df["switch_rate"] <= 0.20)
+        & (df["recent_profit"] > 0)
         & (df["streak_score"] > 0)
     ].copy()
 
