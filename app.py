@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 20
 PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_LOSS_STREAK_RELOCK = 1
 WINNING_PHASE_PROTECTION = True
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -1180,6 +1180,28 @@ def simulate_engine(numbers, groups, colors):
             total_phase_profit_all += phase_pnl_total
 
             phase_hits_group.append(phase_hit_group)
+
+            recent_hits = phase_hits_group[-6:]
+            switch_count = 0
+            for k in range(1, len(recent_hits)):
+                if recent_hits[k] != recent_hits[k-1]:
+                    switch_count += 1
+
+            recent_profit6 = sum(
+                WIN_GROUP if x == 1 else LOSS_GROUP
+                for x in recent_hits
+            )
+
+            if (
+                SIDEWAY_RELOCK
+                and len(recent_hits) >= SIDEWAY_WINDOW
+                and switch_count >= 4
+                and recent_profit6 <= SIDEWAY_THRESHOLD
+            ):
+                relock_triggered_now = True
+                relock_reason_now = "SIDEWAY_OSCILLATION_RELOCK"
+                state = "AUTO_RELOCK_SIDEWAY"
+
             if phase_hit_color is not None:
                 phase_hits_color.append(phase_hit_color)
 
