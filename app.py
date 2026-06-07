@@ -1,24 +1,4 @@
 
-# =========================================================
-# V46 ADAPTIVE REGIME
-# =========================================================
-ENABLE_REGIME_DETECTION = True
-REGIME_LOOKBACK = 24
-
-TREND_REPEAT_RATIO = 0.65
-ZIGZAG_FLIP_RATIO = 0.60
-
-ENABLE_DYNAMIC_CONFIDENCE = True
-HIGH_CONFIDENCE_DOMINANCE = 0.80
-NORMAL_CONFIDENCE_DOMINANCE = 0.75
-
-ENABLE_AUTO_PAUSE_CHAOS = True
-CHAOS_MIN_DOMINANCE = 0.55
-
-ROLLING_PROFIT_WINDOW = 20
-ENABLE_MULTI_MODE_EQUITY = True
-
-
 import time
 import json
 import os
@@ -34,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # PAGE / REFRESH
 # =========================================================
 st.set_page_config(page_title="Auto Relock Engine | FIX PHASE WAIT", layout="wide")
-st_autorefresh(interval=15000, key="refresh")
+st_autorefresh(interval=5000, key="refresh")
 
 # =========================================================
 # DATA SOURCE
@@ -49,9 +29,9 @@ LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
-{"name":"5v3","top_windows":5,"vote_required":3,"window_min":6,"window_max":22},
-{"name":"8v4","top_windows":8,"vote_required":4,"window_min":6,"window_max":22},
-{"name":"10v6","top_windows":10,"vote_required":6,"window_min":8,"window_max":30},
+ #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
+    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
+#    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
 # GAP = 1 nghĩa là không bet trùng cùng round.
@@ -83,18 +63,18 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 20
-PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_STOP_WIN = 44
+PHASE_STOP_LOSS = -1.0
+PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
-ALLOW_TRADE_WHEN_PHASE_NEGATIVE = True
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
 NEGATIVE_PHASE_EXTRA_VOTE = 1
-NEGATIVE_PHASE_DOMINANCE_RATIO = 0.80
+NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
 ENABLE_TIMEOUT_RELOCK = False
 TIMEOUT_RELOCK_ROUNDS = 40
@@ -106,19 +86,19 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 4
-MAX_PHASE_TRADES = 8
-VOTE_DOMINANCE_RATIO = 0.75
+MAX_PHASE_TRADES = 16
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 15.0
-SESSION_STOP_LOSS = -5.0
+SESSION_STOP_LOSS = -10.0
 
 MIN_FALLBACK_SCORE = 1
 
-MIN_TRADES_PER_WINDOW = 12
-RECENT_WINDOW_SIZE = 20
+MIN_TRADES_PER_WINDOW = 26
+RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 1
@@ -126,16 +106,16 @@ WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
 VALIDATE_LEN = 12
-AUTO_SCAN_VALIDATE_LEN = True
+AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
-MIN_TRAIN_LEN = 120
-MIN_VALIDATE_TRADES = 3
+MIN_TRAIN_LEN = 100
+MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -3.0
+VALIDATE_MIN_DRAWDOWN = -1.0
 
-RELOCK_SCAN_LEN = 40
+RELOCK_SCAN_LEN = 18
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
