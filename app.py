@@ -1,4 +1,9 @@
+MIN_GOOD_WINDOWS = 2
+GOOD_WINDOW_REQUIRE_POSITIVE_RECENT = True
+GOOD_WINDOW_REQUIRE_POSITIVE_EXPECTANCY = True
+
 MIN_LOCK_SCORE_THRESHOLD = 5.0
+
 
 import time
 import json
@@ -31,7 +36,7 @@ REPLAY_FROM = 180
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "8v4", "top_windows": 3, "vote_required": 2, "window_min": 6, "window_max": 22},
 #    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
@@ -86,9 +91,9 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 5
+MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.80
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -98,13 +103,13 @@ SESSION_STOP_LOSS = -5.0
 
 MIN_FALLBACK_SCORE = 1
 
-MIN_TRADES_PER_WINDOW = 26
+MIN_TRADES_PER_WINDOW = 18
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
-WINDOW_SPACING_MIN = 1
+WINDOW_SPACING_MIN = 2
 WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 6
+MAX_CANDIDATE_WINDOWS = 3
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
@@ -114,7 +119,7 @@ MIN_VALIDATE_TRADES = 3
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -2.0
+VALIDATE_MIN_DRAWDOWN = -3.0
 
 RELOCK_SCAN_LEN = 0
 RELOCK_BUFFER = 0
