@@ -87,7 +87,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 9999
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.62
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -109,7 +109,7 @@ VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 3
+MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
