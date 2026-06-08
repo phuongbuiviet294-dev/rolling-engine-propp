@@ -63,7 +63,7 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 5
+PHASE_STOP_WIN = 25
 PHASE_STOP_LOSS = -2.0
 PHASE_LOSS_STREAK_RELOCK = 2
 
@@ -86,7 +86,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 5
-MAX_PHASE_TRADES = 16
+MAX_PHASE_TRADES = 12
 VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
