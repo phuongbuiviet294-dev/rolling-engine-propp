@@ -65,7 +65,7 @@ COLOR_BET_UNIT = 1.0
 
 PHASE_STOP_WIN = 44
 PHASE_STOP_LOSS = -2.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_LOSS_STREAK_RELOCK = 2
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 1
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 10
+RELOCK_SCAN_LEN = 8
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
