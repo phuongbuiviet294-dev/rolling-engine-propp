@@ -65,9 +65,9 @@ COLOR_BET_UNIT = 1.0
 # 5. PHASE_STOP_WIN dùng thật để chốt phase lãi.
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
-PHASE_STOP_WIN = 25
-PHASE_STOP_LOSS = -3.0
-PHASE_LOSS_STREAK_RELOCK = 3
+PHASE_STOP_WIN = 999999
+PHASE_STOP_LOSS = -999999
+PHASE_LOSS_STREAK_RELOCK = 999999
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
@@ -88,7 +88,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
-MAX_PHASE_TRADES = 10
+MAX_PHASE_TRADES = 999999
 VOTE_DOMINANCE_RATIO = 0.72
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
@@ -117,7 +117,7 @@ MIN_VALIDATE_TRADES = 3
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -3.0
 
-RELOCK_SCAN_LEN = 25
+RELOCK_SCAN_LEN = 0
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
@@ -460,6 +460,10 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         (df["trades"] >= MIN_TRADES_PER_WINDOW)
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 6)
+        & (df["profit"] > 0)
+        & (df["recent_profit"] >= 0)
+        & (df["expectancy"] > 0)
+        & (df["max_drawdown"] > -15)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
