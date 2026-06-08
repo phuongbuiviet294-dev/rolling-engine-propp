@@ -1,6 +1,5 @@
 MIN_LOCK_SCORE_THRESHOLD = 5.0
 
-
 import time
 import json
 import os
