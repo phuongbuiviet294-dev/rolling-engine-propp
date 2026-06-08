@@ -109,7 +109,7 @@ VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 12
+MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
