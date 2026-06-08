@@ -30,7 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "10v4", "top_windows": 10, "vote_required": 4, "window_min": 6, "window_max": 22},
 #    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
@@ -101,7 +101,7 @@ MIN_TRADES_PER_WINDOW = 26
 RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
-WINDOW_SPACING_MIN = 2
+WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
@@ -115,7 +115,7 @@ MIN_VALIDATE_TRADES = 3
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 8
+RELOCK_SCAN_LEN = 5
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 5
