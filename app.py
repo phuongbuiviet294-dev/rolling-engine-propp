@@ -32,7 +32,7 @@ REPLAY_FROM = 180
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "8v4", "top_windows": 6, "vote_required": 4, "window_min": 6, "window_max": 22},
 #    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
@@ -89,7 +89,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.72
+VOTE_DOMINANCE_RATIO = 0.75
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -105,7 +105,7 @@ MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 2
 WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 10
+MAX_CANDIDATE_WINDOWS = 6
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
