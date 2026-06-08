@@ -30,7 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "10v3", "top_windows": 10, "vote_required": 3, "window_min": 6, "window_max": 24},
+    {"name": "10v4", "top_windows": 10, "vote_required": 4, "window_min": 6, "window_max": 24},
 #    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
@@ -109,13 +109,13 @@ VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 1
+MIN_VALIDATE_TRADES = 4
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 8
+RELOCK_SCAN_LEN = 4
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
