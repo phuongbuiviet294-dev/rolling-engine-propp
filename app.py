@@ -91,9 +91,9 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.67
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -101,13 +101,13 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -5.0
 
-MIN_FALLBACK_SCORE = 1
+MIN_FALLBACK_SCORE = -999999
 
-MIN_TRADES_PER_WINDOW = 26
+MIN_TRADES_PER_WINDOW = 20
 RECENT_WINDOW_SIZE = 40
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
-WINDOW_SPACING_MIN = 1
+WINDOW_SPACING_MIN = 2
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
@@ -115,17 +115,17 @@ VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 3
+MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -2.0
+VALIDATE_MIN_DRAWDOWN = -999.0
 
 RELOCK_SCAN_LEN = 0
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
-SHOW_DEBUG_TABLES = False
+SHOW_DEBUG_TABLES = True
 
 # =========================================================
 # TELEGRAM
@@ -753,7 +753,9 @@ def find_best_auto_mode_in_range(all_groups, scan_start, scan_end):
     if best_round is not None:
         return best_round, best_windows, best_mode, best_scan_df, best_filtered_df, round_eval_df, best_lock_mode
 
-    # V47 FIX: only allow validated locks
+    if fallback_round is not None:
+        return fallback_round, fallback_windows, fallback_mode, fallback_scan_df, fallback_filtered_df, round_eval_df, "fallback_soft"
+
     return None, [], None, pd.DataFrame(), pd.DataFrame(), round_eval_df, "not_found"
 
 
@@ -1028,7 +1030,7 @@ def simulate_engine(numbers, groups, colors):
     history_rows = []
     phase_summary_rows = []
 
-    start_replay = max(LOCK_ROUND_END, REPLAY_FROM)
+    start_replay = min(REPLAY_FROM, len(groups)-1)
     phase_start_round = start_replay + 1
     current_mode = selected_mode
 
