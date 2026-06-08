@@ -93,7 +93,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.67
+VOTE_DOMINANCE_RATIO = 0.62
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
