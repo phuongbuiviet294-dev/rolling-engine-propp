@@ -30,8 +30,8 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # =========================================================
 # LOCK / REPLAY
 # =========================================================
-LOCK_ROUND_START = 168
-LOCK_ROUND_END = 180
+LOCK_ROUND_START = 120
+LOCK_ROUND_END = 999999
 REPLAY_FROM = 180
 
 MODES = [
@@ -93,7 +93,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.80
+VOTE_DOMINANCE_RATIO = 0.67
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -103,13 +103,13 @@ SESSION_STOP_LOSS = -5.0
 
 MIN_FALLBACK_SCORE = 1
 
-MIN_TRADES_PER_WINDOW = 18
-RECENT_WINDOW_SIZE = 33
+MIN_TRADES_PER_WINDOW = 25
+RECENT_WINDOW_SIZE = 40
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 2
 WINDOW_SPACING_MAX = 6
-MAX_CANDIDATE_WINDOWS = 3
+MAX_CANDIDATE_WINDOWS = 8
 
 VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
@@ -465,9 +465,9 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
         & ((df["count_hit_streak_ge2"] >= 1) | (df["max_hit_streak"] >= 2))
         & (df["max_loss_streak"] <= 6)
         & (df["profit"] > 0)
-        & (df["recent_profit"] >= 0)
+        & (df["recent_profit"] > 0)
         & (df["expectancy"] > 0)
-        & (df["max_drawdown"] > -15)
+        & (df["max_drawdown"] > -10)
     ].copy()
 
     filtered_df = filtered_df.sort_values(
@@ -1321,7 +1321,7 @@ def simulate_engine(numbers, groups, colors):
             }
         )
 
-        if relock_triggered_now:
+        if False and relock_triggered_now:
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
