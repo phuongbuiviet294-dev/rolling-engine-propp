@@ -64,7 +64,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 25
-PHASE_STOP_LOSS = -3.0
+PHASE_STOP_LOSS = -1.0
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -98,7 +98,7 @@ SESSION_STOP_LOSS = -5.0
 MIN_FALLBACK_SCORE = 1
 
 MIN_TRADES_PER_WINDOW = 18
-RECENT_WINDOW_SIZE = 35
+RECENT_WINDOW_SIZE = 33
 MIN_WINDOW_SPACING = 1
 AUTO_SCAN_WINDOW_SPACING = True
 WINDOW_SPACING_MIN = 2
@@ -109,7 +109,7 @@ VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
-MIN_VALIDATE_TRADES = 1
+MIN_VALIDATE_TRADES = 3
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
