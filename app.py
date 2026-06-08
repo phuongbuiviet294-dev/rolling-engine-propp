@@ -30,7 +30,7 @@ REPLAY_FROM = 180
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
-    {"name": "8v4", "top_windows": 8, "vote_required": 4, "window_min": 6, "window_max": 22},
+    {"name": "10v4", "top_windows": 10, "vote_required": 4, "window_min": 6, "window_max": 24},
 #    {"name": "8v5", "top_windows": 8, "vote_required": 5, "window_min": 6, "window_max": 22},
 ]
 
@@ -64,8 +64,8 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 44
-PHASE_STOP_LOSS = -1.0
-PHASE_LOSS_STREAK_RELOCK = 2
+PHASE_STOP_LOSS = -2.0
+PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
 ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
@@ -85,15 +85,15 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
-MIN_PHASE_AGE_TO_TRADE = 4
+MIN_PHASE_AGE_TO_TRADE = 5
 MAX_PHASE_TRADES = 16
-VOTE_DOMINANCE_RATIO = 0.60
+VOTE_DOMINANCE_RATIO = 0.62
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
 
 SESSION_STOP_WIN = 15.0
-SESSION_STOP_LOSS = -10.0
+SESSION_STOP_LOSS = -5.0
 
 MIN_FALLBACK_SCORE = 1
 
@@ -105,7 +105,7 @@ WINDOW_SPACING_MIN = 1
 WINDOW_SPACING_MAX = 6
 MAX_CANDIDATE_WINDOWS = 10
 
-VALIDATE_LEN = 12
+VALIDATE_LEN = 16
 AUTO_SCAN_VALIDATE_LEN = False
 VALIDATE_LEN_LIST = [16,24]
 MIN_TRAIN_LEN = 100
@@ -113,9 +113,9 @@ MIN_VALIDATE_TRADES = 1
 
 # QUAN TRỌNG: max_drawdown luôn <= 0.
 # Không để 0 vì quá gắt, dễ bóp méo lock.
-VALIDATE_MIN_DRAWDOWN = -1.0
+VALIDATE_MIN_DRAWDOWN = -2.0
 
-RELOCK_SCAN_LEN = 18
+RELOCK_SCAN_LEN = 10
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
