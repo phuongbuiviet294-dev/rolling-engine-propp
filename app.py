@@ -31,12 +31,8 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # LOCK / REPLAY
 # =========================================================
 LOCK_ROUND_START = 120
-LOCK_ROUND_END = 180
+LOCK_ROUND_END = 999999
 REPLAY_FROM = 180
-
-ROLLING_RESCAN = True
-ROLLING_RESCAN_EVERY = 12
-MIN_POSITIVE_WINDOWS = 3
 
 MODES = [
  #   {"name": "5v3", "top_windows": 5, "vote_required": 3, "window_min": 6, "window_max": 22},
@@ -97,7 +93,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.62
+VOTE_DOMINANCE_RATIO = 0.67
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -105,7 +101,7 @@ KEEP_AFTER_LOSS_ROUNDS = 0
 SESSION_STOP_WIN = 15.0
 SESSION_STOP_LOSS = -5.0
 
-MIN_FALLBACK_SCORE = -999999999
+MIN_FALLBACK_SCORE = -999999
 
 MIN_TRADES_PER_WINDOW = 20
 RECENT_WINDOW_SIZE = 40
@@ -1707,7 +1703,7 @@ st.write("Selected Window Spacing:", selected_mode.get("spacing", MIN_WINDOW_SPA
 st.write("Selected Validate Len:", selected_mode.get("validate_len", VALIDATE_LEN) if selected_mode else "-")
 st.write("Auto Scan Validate Len:", VALIDATE_LEN_LIST if AUTO_SCAN_VALIDATE_LEN else VALIDATE_LEN)
 st.write("Auto Scan Window Spacing:", f"{WINDOW_SPACING_MIN} -> {WINDOW_SPACING_MAX}" if AUTO_SCAN_WINDOW_SPACING else MIN_WINDOW_SPACING)
-st.write("Current Adaptive Windows:", locked_windows)
+st.write("Locked Windows:", locked_windows)
 st.write("Best Lock Round:", selected_lock_round)
 st.write("Scan Range:", f"{lock_scan_start} -> {lock_scan_end}")
 st.write("Lock Mode:", lock_mode)
