@@ -9,6 +9,7 @@ import time
 import json
 import os
 from collections import Counter
+window_score_map = {}
 
 import numpy as np
 import pandas as pd
@@ -235,6 +236,18 @@ def color_text(c):
     if c == 3:
         return "BLUE"
     return "-"
+
+
+
+def weighted_vote(preds, windows):
+    weights = {}
+    for pred, w in zip(preds, windows):
+        score = max(1.0, window_score_map.get(w,1.0))
+        weights[pred] = weights.get(pred,0)+score
+    if not weights:
+        return None,0
+    best = max(weights,key=weights.get)
+    return best, weights[best]
 
 
 # =========================================================
@@ -500,6 +513,8 @@ def build_window_tables(train_groups, window_min, window_max, min_window_spacing
     if len(candidate_windows) < need:
         candidate_windows = enforce_spacing_from_df(df_all, need, 1)
 
+    global window_score_map
+    window_score_map = {int(r['window']): float(r['score']) for _, r in df_all.iterrows()}
     return candidate_windows, df_all, filtered_df
 
 
