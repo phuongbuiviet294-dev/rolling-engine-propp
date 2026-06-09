@@ -1,3 +1,5 @@
+PEAK_DD_RELOCK = -4.0
+
 REGIME_BLACKLIST_ROUNDS = 20
 regime_blacklist = {}
 
@@ -1041,6 +1043,7 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_group = 0.0
     phase_profit_color = 0.0
     phase_profit_total = 0.0
+    phase_peak_profit = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
@@ -1227,6 +1230,9 @@ def simulate_engine(numbers, groups, colors):
             phase_profit_color += phase_pnl_color
             phase_profit_total += phase_pnl_total
 
+            phase_peak_profit = max(phase_peak_profit, phase_profit_group)
+            peak_dd = phase_profit_group - phase_peak_profit
+
             total_phase_profit_group += phase_pnl_group
             total_phase_profit_color += phase_pnl_color
             total_phase_profit_all += phase_pnl_total
@@ -1292,6 +1298,11 @@ def simulate_engine(numbers, groups, colors):
                 relock_triggered_now = True
                 relock_reason_now = "PHASE_GROUP_STOP_WIN"
                 state = "AUTO_RELOCK_PHASE_GROUP_WIN"
+
+            elif peak_dd <= PEAK_DD_RELOCK:
+                relock_triggered_now = True
+                relock_reason_now = "PEAK_DD_RELOCK"
+                state = "AUTO_RELOCK_PEAK_DD"
 
             elif phase_profit_group <= PHASE_STOP_LOSS:
                 relock_triggered_now = True
