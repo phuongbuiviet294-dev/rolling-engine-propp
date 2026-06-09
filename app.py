@@ -70,7 +70,7 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 999999
-PHASE_STOP_LOSS = -999999
+PHASE_STOP_LOSS = -4
 PHASE_LOSS_STREAK_RELOCK = 999999
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
@@ -78,7 +78,7 @@ ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
-ALLOW_TRADE_WHEN_PHASE_NEGATIVE = True
+ALLOW_TRADE_WHEN_PHASE_NEGATIVE = False
 NEGATIVE_PHASE_EXTRA_VOTE = 1
 NEGATIVE_PHASE_DOMINANCE_RATIO = 0.67
 
@@ -89,7 +89,7 @@ RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = 0.0
+PHASE_MIN_TOTAL_PNL_TO_TRADE = -0.5
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
@@ -1340,7 +1340,10 @@ def simulate_engine(numbers, groups, colors):
             }
         )
 
-        if False and relock_triggered_now:
+        if (
+            phase_profit_group <= -4
+            and len(phase_hits_group) >= 8
+        ):
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
