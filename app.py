@@ -92,7 +92,7 @@ PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
 PHASE_MIN_TOTAL_PNL_TO_TRADE = -3
 
-MIN_PHASE_AGE_TO_TRADE = 2
+MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 999999
 VOTE_DOMINANCE_RATIO = 0.55
 
@@ -899,11 +899,7 @@ def make_next_preview(
         and phase_profit_group < 0
     )
 
-    phase_next_allowed = (
-        signal_group
-        and recent_phase_pnl_next >= PHASE_MIN_RECENT_PNL_TO_TRADE
-        and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-    )
+    phase_next_allowed = signal_group
 
     if (
         ALLOW_TRADE_WHEN_PHASE_NEGATIVE
@@ -1094,7 +1090,9 @@ def simulate_engine(numbers, groups, colors):
                 VOTE_DOMINANCE_RATIO,
                 locked_windows
             )
-            signal_group = confidence_group >= max(2, vote_required*0.5) and dominance_ok
+            total_weight = sum(max(1.0, window_score_map.get(w,1.0)) for w in locked_windows)
+            weighted_threshold = total_weight * 0.45
+            signal_group = confidence_group >= weighted_threshold
         else:
             vote_group = None
             confidence_group = 0
@@ -1139,11 +1137,7 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        phase_trade_allowed = (
-            signal_group
-            and recent_phase_pnl >= PHASE_MIN_RECENT_PNL_TO_TRADE
-            and phase_profit_group >= PHASE_MIN_TOTAL_PNL_TO_TRADE
-        )
+        phase_trade_allowed = signal_group
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
