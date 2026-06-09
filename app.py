@@ -813,14 +813,14 @@ def make_next_preview(
         return preview
 
     active_windows = max(1, len(locked_windows))
-        vote_required = max(
-    2,
-    int(np.ceil(active_windows * 0.6))
-        )
-        color_vote_required = max(
-    2,
-    vote_required + COLOR_VOTE_OFFSET
-        )
+    vote_required = max(
+        2,
+        int(np.ceil(active_windows * 0.6))
+    )
+    color_vote_required = max(
+        2,
+        vote_required + COLOR_VOTE_OFFSET
+    )
 
     preds_group = get_valid_group_preds(groups, next_idx, locked_windows)
     preds_color = get_valid_color_preds(colors, next_idx, locked_windows)
