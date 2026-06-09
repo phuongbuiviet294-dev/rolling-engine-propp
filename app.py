@@ -94,7 +94,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = -3
 
 MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.52
+VOTE_DOMINANCE_RATIO = 0.60
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -266,11 +266,22 @@ def vote_dominance_ok(preds, confidence, min_ratio, windows=None):
 
 def get_valid_group_preds(seq_groups, i, windows):
     preds = []
+    trend_mode = False
+
+    if i >= 3:
+        last3 = seq_groups[max(0, i-3):i]
+        trend_mode = (len(last3) == 3 and len(set(last3)) == 1)
+
     for w in windows:
         if i - w >= 0 and i - 1 >= 0:
-            pred = seq_groups[i - w]
-            if seq_groups[i - 1] != pred:
+            if trend_mode:
+                pred = seq_groups[i - 1]
+            else:
+                pred = seq_groups[i - w]
+
+            if seq_groups[i - 1] != pred or trend_mode:
                 preds.append(pred)
+
     return preds
 
 
@@ -1091,7 +1102,7 @@ def simulate_engine(numbers, groups, colors):
                 locked_windows
             )
             total_weight = sum(max(1.0, window_score_map.get(w,1.0)) for w in locked_windows)
-            weighted_threshold = total_weight * 0.55
+            weighted_threshold = total_weight * 0.60
             signal_group = (confidence_group >= weighted_threshold and dominance_ratio >= VOTE_DOMINANCE_RATIO)
         else:
             vote_group = None
