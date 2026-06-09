@@ -94,7 +94,7 @@ PHASE_MIN_TOTAL_PNL_TO_TRADE = -3
 
 MIN_PHASE_AGE_TO_TRADE = 0
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.55
+VOTE_DOMINANCE_RATIO = 0.52
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -1091,8 +1091,8 @@ def simulate_engine(numbers, groups, colors):
                 locked_windows
             )
             total_weight = sum(max(1.0, window_score_map.get(w,1.0)) for w in locked_windows)
-            weighted_threshold = total_weight * 0.45
-            signal_group = confidence_group >= weighted_threshold
+            weighted_threshold = total_weight * 0.55
+            signal_group = (confidence_group >= weighted_threshold and dominance_ratio >= VOTE_DOMINANCE_RATIO)
         else:
             vote_group = None
             confidence_group = 0
@@ -1137,7 +1137,10 @@ def simulate_engine(numbers, groups, colors):
         max_phase_trades_block = len(phase_hits_group) >= MAX_PHASE_TRADES
 
         # FIX 2: guard tổng phase.
-        phase_trade_allowed = signal_group
+        phase_trade_allowed = (
+            signal_group
+            and phase_profit_group >= -2
+        )
 
         # Nếu cho phép trade khi phase âm thì phải vote cực mạnh.
         if (
