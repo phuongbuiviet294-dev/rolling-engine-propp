@@ -90,11 +90,11 @@ RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = -2
+PHASE_MIN_TOTAL_PNL_TO_TRADE = -3
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.58
+VOTE_DOMINANCE_RATIO = 0.55
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -559,7 +559,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         )
 
         # FIX: backtest dùng cùng dominance gate với live.
-        if confidence_group >= vote_required and dominance_ok and (i - last_trade >= GAP):
+        if confidence_group >= max(2, vote_required*0.5) and dominance_ok and (i - last_trade >= GAP):
             last_trade = i
             trades += 1
             hit = 1 if seq_groups[i] == vote_group else 0
@@ -862,7 +862,7 @@ def make_next_preview(
     else:
         vote_color, confidence_color = None, 0
 
-    signal_group = (confidence_group >= vote_required and dominance_ok_next) if vote_group is not None else False
+    signal_group = (confidence_group >= max(2, vote_required*0.5) and dominance_ok_next) if vote_group is not None else False
     signal_color = confidence_color >= color_vote_required if vote_color is not None else False
 
     recent_phase_pnl_next = compute_recent_phase_trade_pnl(phase_hits_group)
@@ -912,7 +912,7 @@ def make_next_preview(
         and phase_profit_group < 0
     ):
         phase_next_allowed = (
-            confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
+            confidence_group >= max(2, vote_required*0.5) + NEGATIVE_PHASE_EXTRA_VOTE
             and dominance_ratio_next >= NEGATIVE_PHASE_DOMINANCE_RATIO
         )
 
@@ -1094,7 +1094,7 @@ def simulate_engine(numbers, groups, colors):
                 VOTE_DOMINANCE_RATIO,
                 locked_windows
             )
-            signal_group = confidence_group >= vote_required and dominance_ok
+            signal_group = confidence_group >= max(2, vote_required*0.5) and dominance_ok
         else:
             vote_group = None
             confidence_group = 0
@@ -1153,7 +1153,7 @@ def simulate_engine(numbers, groups, colors):
             and phase_profit_group < 0
         ):
             phase_trade_allowed = (
-                confidence_group >= vote_required + NEGATIVE_PHASE_EXTRA_VOTE
+                confidence_group >= max(2, vote_required*0.5) + NEGATIVE_PHASE_EXTRA_VOTE
                 and dominance_ratio >= NEGATIVE_PHASE_DOMINANCE_RATIO
             )
 
