@@ -76,11 +76,11 @@ COLOR_BET_UNIT = 1.0
 # 6. NEXT ROUND dùng live state sau relock, không dùng state cũ.
 
 PHASE_STOP_WIN = 999999
-PHASE_STOP_LOSS = -4
+PHASE_STOP_LOSS = -2
 PHASE_LOSS_STREAK_RELOCK = 3
 
 # Nếu True: phase đang âm mà xuất hiện signal mới => relock ngay, không bet.
-ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = False
+ENABLE_NEGATIVE_PHASE_PRETRADE_RELOCK = True
 
 # Nếu False: phase âm thì luôn WAIT.
 # Nếu True: phase âm vẫn có thể bet nếu vote mạnh hơn bình thường.
@@ -1109,7 +1109,7 @@ def simulate_engine(numbers, groups, colors):
                 locked_windows
             )
             total_weight = sum(max(1.0, window_score_map.get(w,1.0)) for w in locked_windows)
-            weighted_threshold = total_weight * 0.60
+            weighted_threshold = total_weight * 0.70
             signal_group = (confidence_group >= weighted_threshold and dominance_ratio >= VOTE_DOMINANCE_RATIO)
         else:
             vote_group = None
@@ -1385,10 +1385,7 @@ def simulate_engine(numbers, groups, colors):
             }
         )
 
-        if (
-            phase_profit_group <= -2.5
-            and len(phase_hits_group) >= 8
-        ):
+        if relock_triggered_now:
             phase_summary_rows.append(
                 {
                     "phase": phase_index,
@@ -1419,7 +1416,7 @@ def simulate_engine(numbers, groups, colors):
                 }
             )
 
-            scan_end = i
+            scan_end = i-1
             scan_start = max(LOCK_ROUND_START, scan_end - RELOCK_SCAN_LEN + 1 - RELOCK_BUFFER)
 
             (
@@ -1452,6 +1449,8 @@ def simulate_engine(numbers, groups, colors):
                 phase_profit_group = 0.0
                 phase_profit_color = 0.0
                 phase_profit_total = 0.0
+                phase_peak_profit = 0.0
+                peak_dd = 0.0
                 phase_hits_group = []
                 phase_hits_color = []
 
