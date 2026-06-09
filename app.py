@@ -31,7 +31,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # LOCK / REPLAY
 # =========================================================
 LOCK_ROUND_START = 120
-LOCK_ROUND_END = 180
+LOCK_ROUND_END = 220
 REPLAY_FROM = 180
 
 MODES = [
@@ -50,7 +50,7 @@ GAP = 1
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-ENABLE_COLOR_BET = False
+ENABLE_COLOR_BET = True
 WIN_COLOR = 1.5
 LOSS_COLOR = -1.0
 COLOR_VOTE_OFFSET = 0
@@ -815,7 +815,7 @@ def make_next_preview(
     active_windows = max(1, len(locked_windows))
     vote_required = max(
         2,
-        int(np.ceil(active_windows * 0.6))
+        int(np.ceil(active_windows * 0.5))
     )
     color_vote_required = max(
         2,
@@ -1055,7 +1055,7 @@ def simulate_engine(numbers, groups, colors):
         active_windows = max(1, len(locked_windows))
         vote_required = max(
             2,
-            int(np.ceil(active_windows * 0.6))
+            int(np.ceil(active_windows * 0.5))
         )
         color_vote_required = max(
             2,
