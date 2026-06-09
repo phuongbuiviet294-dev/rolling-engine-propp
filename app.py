@@ -812,8 +812,15 @@ def make_next_preview(
     if current_mode is None or not locked_windows:
         return preview
 
-    vote_required = current_mode["vote_required"]
-    color_vote_required = max(2, vote_required + COLOR_VOTE_OFFSET)
+    active_windows = max(1, len(locked_windows))
+        vote_required = max(
+            2,
+            int(np.ceil(active_windows * 0.6))
+        )
+        color_vote_required = max(
+            2,
+            vote_required + COLOR_VOTE_OFFSET
+        )
 
     preds_group = get_valid_group_preds(groups, next_idx, locked_windows)
     preds_color = get_valid_color_preds(colors, next_idx, locked_windows)
@@ -1030,7 +1037,10 @@ def simulate_engine(numbers, groups, colors):
     history_rows = []
     phase_summary_rows = []
 
-    start_replay = min(REPLAY_FROM, len(groups)-1)
+    start_replay = min(
+    selected_lock_round if selected_lock_round is not None else REPLAY_FROM,
+    len(groups)-1
+)
     phase_start_round = start_replay + 1
     current_mode = selected_mode
 
@@ -1042,8 +1052,15 @@ def simulate_engine(numbers, groups, colors):
         if total_phase_profit_all <= SESSION_STOP_LOSS:
             break
 
-        vote_required = current_mode["vote_required"]
-        color_vote_required = max(2, vote_required + COLOR_VOTE_OFFSET)
+        active_windows = max(1, len(locked_windows))
+        vote_required = max(
+            2,
+            int(np.ceil(active_windows * 0.6))
+        )
+        color_vote_required = max(
+            2,
+            vote_required + COLOR_VOTE_OFFSET
+        )
 
         preds_group = get_valid_group_preds(groups, i, locked_windows)
         preds_color = get_valid_color_preds(colors, i, locked_windows)
