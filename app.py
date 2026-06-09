@@ -1,3 +1,6 @@
+REGIME_BLACKLIST_ROUNDS = 20
+regime_blacklist = {}
+
 MIN_GOOD_WINDOWS = 2
 GOOD_WINDOW_REQUIRE_POSITIVE_RECENT = True
 GOOD_WINDOW_REQUIRE_POSITIVE_EXPECTANCY = True
@@ -1371,7 +1374,7 @@ def simulate_engine(numbers, groups, colors):
         )
 
         if (
-            phase_profit_group <= -4
+            phase_profit_group <= -2.5
             and len(phase_hits_group) >= 8
         ):
             phase_summary_rows.append(
