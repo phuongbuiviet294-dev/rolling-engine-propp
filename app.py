@@ -127,7 +127,7 @@ MIN_VALIDATE_TRADES = 1
 # Không để 0 vì quá gắt, dễ bóp méo lock.
 VALIDATE_MIN_DRAWDOWN = -999.0
 
-RELOCK_SCAN_LEN = 0
+RELOCK_SCAN_LEN = 80
 RELOCK_BUFFER = 0
 
 SHOW_HISTORY_ROWS = 20
@@ -1044,6 +1044,7 @@ def simulate_engine(numbers, groups, colors):
     phase_profit_color = 0.0
     phase_profit_total = 0.0
     phase_peak_profit = 0.0
+    peak_dd = 0.0
 
     total_phase_profit_group = 0.0
     total_phase_profit_color = 0.0
