@@ -253,10 +253,14 @@ def weighted_vote(preds, windows):
 # =========================================================
 # METRICS
 # =========================================================
-def vote_dominance_ok(preds, confidence, min_ratio):
+def vote_dominance_ok(preds, confidence, min_ratio, windows=None):
     if not preds:
         return False, 0.0
-    ratio = confidence / len(preds)
+    if windows is None:
+        ratio = confidence / len(preds)
+    else:
+        total_weight = sum(max(1.0, window_score_map.get(w,1.0)) for w in windows)
+        ratio = confidence / total_weight if total_weight > 0 else 0.0
     return ratio >= min_ratio, float(ratio)
 
 
@@ -546,7 +550,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
         if not preds:
             continue
 
-        vote_group, confidence_group = Counter(preds).most_common(1)[0]
+        vote_group, confidence_group = weighted_vote(preds, windows)
         dominance_ok, dominance_ratio = vote_dominance_ok(
             preds,
             confidence_group,
@@ -841,7 +845,7 @@ def make_next_preview(
     preds_color = get_valid_color_preds(colors, next_idx, locked_windows)
 
     if preds_group:
-        vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+        vote_group, confidence_group = weighted_vote(preds_group, locked_windows)
         dominance_ok_next, dominance_ratio_next = vote_dominance_ok(
             preds_group,
             confidence_group,
@@ -852,7 +856,7 @@ def make_next_preview(
         dominance_ok_next, dominance_ratio_next = False, 0.0
 
     if preds_color:
-        vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
+        vote_color, confidence_color = weighted_vote(preds_color, locked_windows)
     else:
         vote_color, confidence_color = None, 0
 
@@ -1081,7 +1085,7 @@ def simulate_engine(numbers, groups, colors):
         preds_color = get_valid_color_preds(colors, i, locked_windows)
 
         if preds_group:
-            vote_group, confidence_group = Counter(preds_group).most_common(1)[0]
+            vote_group, confidence_group = weighted_vote(preds_group, locked_windows)
             dominance_ok, dominance_ratio = vote_dominance_ok(
                 preds_group,
                 confidence_group,
@@ -1096,7 +1100,7 @@ def simulate_engine(numbers, groups, colors):
             signal_group = False
 
         if preds_color:
-            vote_color, confidence_color = Counter(preds_color).most_common(1)[0]
+            vote_color, confidence_color = weighted_vote(preds_color, locked_windows)
             signal_color = confidence_color >= color_vote_required
         else:
             vote_color = None
