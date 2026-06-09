@@ -90,11 +90,11 @@ RECENT_PHASE_CHECK = 5
 PHASE_MIN_RECENT_PNL_TO_TRADE = 0.0
 
 # Guard tổng phase. Để 0 nghĩa là phase_profit_group < 0 thì không trade.
-PHASE_MIN_TOTAL_PNL_TO_TRADE = -0.5
+PHASE_MIN_TOTAL_PNL_TO_TRADE = -2
 
 MIN_PHASE_AGE_TO_TRADE = 2
 MAX_PHASE_TRADES = 999999
-VOTE_DOMINANCE_RATIO = 0.62
+VOTE_DOMINANCE_RATIO = 0.58
 
 # Khuyên để 0. Nếu bật KEEP = 1 thì bản này đã fix: chỉ keep khi signal vẫn cùng hướng.
 KEEP_AFTER_LOSS_ROUNDS = 0
@@ -555,6 +555,7 @@ def backtest_bundle_vote_range(seq_groups, windows, vote_required, start_idx, en
             preds,
             confidence_group,
             VOTE_DOMINANCE_RATIO,
+            windows
         )
 
         # FIX: backtest dùng cùng dominance gate với live.
@@ -850,6 +851,7 @@ def make_next_preview(
             preds_group,
             confidence_group,
             VOTE_DOMINANCE_RATIO,
+            locked_windows
         )
     else:
         vote_group, confidence_group = None, 0
@@ -1090,6 +1092,7 @@ def simulate_engine(numbers, groups, colors):
                 preds_group,
                 confidence_group,
                 VOTE_DOMINANCE_RATIO,
+                locked_windows
             )
             signal_group = confidence_group >= vote_required and dominance_ok
         else:
