@@ -1,7 +1,6 @@
 from collections import Counter, deque
 
 WINDOWS = range(6, 23)
-
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
