@@ -31,7 +31,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 # LOCK / REPLAY
 # =========================================================
 LOCK_ROUND_START = 120
-LOCK_ROUND_END = 999999
+LOCK_ROUND_END = 180
 REPLAY_FROM = 180
 
 MODES = [
