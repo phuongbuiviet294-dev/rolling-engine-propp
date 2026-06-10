@@ -1131,3 +1131,158 @@ def get_profit_score():
     if get_profit20_trade()>0: score+=0.3
     if get_profit50_trade()>0: score+=0.3
     return score
+
+
+# =====================================================
+# V38 FULL PIPELINE
+# WindowState
+# -> Adaptive TopN
+# -> Consensus
+# -> Health20/50
+# -> Stability
+# -> Leader Change
+# -> Signal History
+# -> Zigzag
+# -> Trend Score
+# -> Trade State Machine
+# -> Trade History
+# -> Profit Engine
+# -> Confidence Engine
+# -> Profit Protection
+# -> READY / WAIT
+# -> Dashboard
+# =====================================================
+
+trade_state = "IDLE"
+confidence_score = 0.0
+profit_protection = False
+
+def trade_state_machine(signal, actual_group):
+    global pending_trade, trade_history, trade_state
+
+    if pending_trade is None:
+        if signal["state"] == "READY":
+            pending_trade = signal["next_group"]
+            trade_state = "PENDING"
+        return
+
+    hit = int(pending_trade == actual_group)
+    profit = WIN_GROUP if hit else LOSS_GROUP
+
+    trade_history.append({
+        "predict": pending_trade,
+        "actual": actual_group,
+        "hit": hit,
+        "profit": profit
+    })
+
+    pending_trade = None
+    trade_state = "IDLE"
+
+def get_confidence_engine(signal):
+    score = (
+        0.25*signal["consensus"]
+        +0.20*signal["health20"]
+        +0.20*signal["health50"]
+        +0.20*signal["stability"]
+        +0.15*signal["trend_score"]
+    )
+    return round(score,3)
+
+def get_profit_protection():
+    p10 = get_profit10()
+    p20 = get_profit20_trade()
+
+    if p10 < -3 or p20 < -5:
+        return True
+    return False
+
+
+
+# =====================================================
+# V39 ADVANCED ENGINE
+# =====================================================
+
+signal_flip_history = deque(maxlen=50)
+pause_counter = 0
+
+def get_flip_rate():
+    if len(signal_flip_history) < 2:
+        return 0
+
+    flip = 0
+    for i in range(1, len(signal_flip_history)):
+        if signal_flip_history[i] != signal_flip_history[i-1]:
+            flip += 1
+
+    return round(flip/(len(signal_flip_history)-1),3)
+
+
+def get_winrate_trade(n=20):
+    trades = trade_history[-n:]
+    if len(trades) == 0:
+        return 0
+    return round(sum(x["hit"] for x in trades)/len(trades),3)
+
+
+def get_drawdown():
+    equity = 0
+    peak = 0
+    dd = 0
+
+    for x in trade_history:
+        equity += x["profit"]
+        peak = max(peak, equity)
+        dd = min(dd, equity-peak)
+
+    return round(dd,2)
+
+
+def get_confidence_level(score):
+
+    if score >= 0.90:
+        return "VERY HIGH"
+
+    if score >= 0.80:
+        return "HIGH"
+
+    if score >= 0.70:
+        return "NORMAL"
+
+    if score >= 0.60:
+        return "LOW"
+
+    return "DANGER"
+
+
+def profit_protection_engine():
+    global pause_counter
+
+    p10 = get_profit10()
+    wr20 = get_winrate_trade(20)
+
+    if p10 < -3 or wr20 < 0.35:
+        pause_counter = 3
+
+    if pause_counter > 0:
+        pause_counter -= 1
+        return True
+
+    return False
+
+
+def final_ready_wait(signal):
+
+    confidence = get_confidence_engine(signal)
+
+    if profit_protection_engine():
+        return "WAIT"
+
+    if get_flip_rate() > 0.6:
+        return "WAIT"
+
+    if confidence < 0.70:
+        return "WAIT"
+
+    return "READY"
+
