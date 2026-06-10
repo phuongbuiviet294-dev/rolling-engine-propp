@@ -26,6 +26,28 @@ LEADER_HISTORY_LEN = 20
 leader_history = deque(maxlen=LEADER_HISTORY_LEN)
 group_history = deque(maxlen=20)
 
+signal_history = deque(maxlen=20)
+trade_history = []
+
+DEFAULT_SIGNAL = {
+    "state":"WAIT",
+    "next_group":None,
+    "health20":0,
+    "health50":0,
+    "consensus":0,
+    "stability":0,
+    "momentum":0,
+    "leader_change_rate":0,
+    "zigzag_score":0,
+    "trend_score":0,
+    "sideway_score":0,
+    "regime":"CHAOS",
+    "market_score":0,
+    "quality":"CHAOS",
+    "threshold":1
+}
+
+
 
 # =====================================================
 # LOAD DATA
