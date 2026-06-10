@@ -3399,17 +3399,14 @@ CONF = {confidence_score:.2f}
 
         ):
 
-            st.json(
-
-                persistence_engine.snapshot(
-
+            dbg = persistence_engine.snapshot(
                     signal,
-
                     confidence_score
-
                 )
-
-            )
+            dbg["pending_number"] = st.session_state.get("pending_number")
+            dbg["last_number"] = st.session_state.get("last_number")
+            dbg["trade_count"] = len(st.session_state.trade_history)
+            st.json(dbg)
 
 
 # ============================================================
