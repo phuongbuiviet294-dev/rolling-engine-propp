@@ -93,6 +93,7 @@ DEFAULT_SCALAR = {
     "pending_trade": None,
 
     "pending_number": None,
+    "pending_round": 0,
 
     "pending_round": 0,
 
@@ -1803,7 +1804,8 @@ class TradeEngine:
 
             return
 
-        if current_number == st.session_state.pending_number:
+        current_round = len(numbers) if "numbers" in globals() else 0
+        if current_round <= st.session_state.pending_round:
             return
 
         predict = (
@@ -1862,6 +1864,7 @@ class TradeEngine:
 
         st.session_state.pending_trade = None
         st.session_state.pending_number = None
+        st.session_state.pending_round = 0
         st.session_state.trade_state = "IDLE" 
 
     # ========================================================
@@ -3399,14 +3402,17 @@ CONF = {confidence_score:.2f}
 
         ):
 
-            dbg = persistence_engine.snapshot(
+            st.json(
+
+                persistence_engine.snapshot(
+
                     signal,
+
                     confidence_score
+
                 )
-            dbg["pending_number"] = st.session_state.get("pending_number")
-            dbg["last_number"] = st.session_state.get("last_number")
-            dbg["trade_count"] = len(st.session_state.trade_history)
-            st.json(dbg)
+
+            )
 
 
 # ============================================================
