@@ -469,17 +469,9 @@ def _legacy_disabled(
 
         round_id
 
-        >
-
-        st.session_state.last_round_id
-
+> -1
     ):
 
-        st.session_state.last_round_id = (
-
-            round_id
-
-        )
 
         return True
 
@@ -3485,13 +3477,12 @@ class EngineManager:
         # NEW ROUND
         # ====================================================
 
-        current_number = numbers[-1]
-
 
         current_length = len(numbers)
 
-        if st.session_state.last_length == 0:
-            st.session_state.last_length = current_length - 1
+        if "initialized" not in st.session_state:
+            st.session_state.initialized = True
+            st.session_state.last_length = current_length
 
         if current_length > st.session_state.last_length:
 
@@ -3667,4 +3658,8 @@ st.rerun()
 
 # ======================
 # V46 CLEAN FINAL
+# ======================
+
+# ======================
+# V46.1 FINAL POLISH
 # ======================
