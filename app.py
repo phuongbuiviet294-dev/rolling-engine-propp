@@ -1770,7 +1770,7 @@ class TradeEngine:
             return
 
         st.session_state.pending_trade = signal.next_group
-
+        st.session_state.pending_round = len(load_numbers())
         st.session_state.pending_number = st.session_state.last_number
 
         st.session_state.trade_state = (
@@ -1805,7 +1805,7 @@ class TradeEngine:
 
             return
 
-        current_round = len(numbers) if "numbers" in globals() else 0
+        current_round = len(load_numbers())
         if current_round <= st.session_state.pending_round:
             return
 
