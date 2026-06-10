@@ -1286,3 +1286,53 @@ def final_ready_wait(signal):
 
     return "READY"
 
+
+
+# =========================
+# V40 PATCH
+# =========================
+
+window_reward = {}
+
+def weighted_consensus(top_rows):
+    votes={}
+    for _,s in top_rows:
+        g=s["next_group"]
+        if g is None:
+            continue
+        votes[g]=votes.get(g,0)+max(0,s["score"])
+    if not votes:
+        return None,0
+    total=sum(votes.values())
+    group=max(votes,key=votes.get)
+    return group,round(votes[group]/total,3)
+
+def get_confidence_level_v2(signal):
+    score=get_confidence_engine(signal)
+
+    if score>=0.85:
+        return "VERY HIGH"
+    elif score>=0.75:
+        return "HIGH"
+    elif score>=0.65:
+        return "NORMAL"
+    elif score>=0.55:
+        return "LOW"
+    return "DANGER"
+
+def adaptive_lock(signal):
+
+    if profit_protection_engine():
+        return "WAIT"
+
+    if signal["zigzag_score"]>0.5:
+        return "WAIT"
+
+    if signal["leader_change_rate"]>0.5:
+        return "WAIT"
+
+    if get_drawdown()<-10:
+        return "WAIT"
+
+    return "READY"
+
