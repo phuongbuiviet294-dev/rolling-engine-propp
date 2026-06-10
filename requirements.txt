@@ -1,7 +1,5 @@
-
 streamlit
 pandas
 numpy
 plotly
 streamlit-autorefresh
-pip install streamlit pandas numpy
