@@ -1,5 +1,6 @@
 import time
 from collections import Counter, deque
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -1129,3 +1130,25 @@ st.dataframe(
 st.caption(
     "V36 Engine | Adaptive TopN | Regime Detect | Zigzag Filter | Market Quality"
 )
+
+
+# ================================
+# PROFIT ENGINE
+# ================================
+
+def get_total_profit():
+    return sum(x["profit"] for x in trade_history)
+
+def get_profit10():
+    return sum(x["profit"] for x in trade_history[-10:])
+
+def get_profit20_trade():
+    return sum(x["profit"] for x in trade_history[-20:])
+
+def get_profit50_trade():
+    return sum(x["profit"] for x in trade_history[-50:])
+
+def get_winrate():
+    if len(trade_history)==0:
+        return 0
+    return sum(x["hit"] for x in trade_history)/len(trade_history)
