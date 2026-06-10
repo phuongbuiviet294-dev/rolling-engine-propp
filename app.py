@@ -234,7 +234,11 @@ def load_numbers():
         f"{SHEET_ID}/export?format=csv&cache={time.time()}"
     )
 
-    df = pd.read_csv(url)
+    try:
+        df = pd.read_csv(url)
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
 
     df.columns = [
 
@@ -2727,13 +2731,19 @@ actual_group = groups[-1]
 # TRADE STATE MACHINE
 # ============================================================
 
-trade_state_machine(
 
-    signal,
+round_id = len(numbers)
 
-    actual_group
+if "last_round_id" not in st.session_state:
+    st.session_state.last_round_id = 0
 
-)
+if round_id > st.session_state.last_round_id:
+    st.session_state.last_round_id = round_id
+    trade_state_machine(
+        signal,
+        actual_group
+    )
+
 
 
 # ============================================================
