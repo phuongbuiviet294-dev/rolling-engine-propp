@@ -1758,7 +1758,9 @@ class TradeEngine:
             return
 
         if st.session_state.pending_trade is not None:
+            return
 
+        if round_id <= st.session_state.pending_round:
             return
 
         st.session_state.pending_trade = (
@@ -3532,46 +3534,22 @@ class EngineManager:
         # NEW ROUND
         # ====================================================
 
-        if persistence_engine.is_new_round(
+        # state machine v42.3
+        trade_engine.settle_trade(
+            actual_group,
+            round_id
+        )
 
-                round_id
-
-        ):
-
-            # --------------------------------------
-            # SETTLE OLD TRADE
-            # --------------------------------------
-
-            trade_engine.settle_trade(
-
-                actual_group,
-
-                round_id
-
-            )
-
-            # --------------------------------------
-            # OPEN NEW TRADE
-            # --------------------------------------
+        if round_id > st.session_state.signal_round_id:
 
             trade_engine.open_trade(
-
                 signal,
-
                 round_id
-
             )
 
-            # --------------------------------------
-            # UPDATE SIGNAL HISTORY
-            # --------------------------------------
-
             signal_engine.update_signal_history(
-
                 signal,
-
                 round_id
-
             )
 
         # ====================================================
