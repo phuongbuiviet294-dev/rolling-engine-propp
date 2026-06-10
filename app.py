@@ -3541,13 +3541,18 @@ class EngineManager:
         # NEW ROUND
         # ====================================================
 
-        # state machine v42.3
-        trade_engine.settle_trade(
-            actual_group,
-            round_id
-        )
+        current_number = numbers[-1]
 
-        if round_id > st.session_state.signal_round_id:
+        if st.session_state.last_number is None:
+            st.session_state.last_number = current_number
+
+        # only act when a real new number appears
+        if current_number != st.session_state.last_number:
+
+            trade_engine.settle_trade(
+                actual_group,
+                round_id
+            )
 
             trade_engine.open_trade(
                 signal,
@@ -3558,6 +3563,8 @@ class EngineManager:
                 signal,
                 round_id
             )
+
+            st.session_state.last_number = current_number
 
         # ====================================================
         # PERSISTENCE
