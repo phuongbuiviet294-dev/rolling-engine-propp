@@ -28,6 +28,7 @@ group_history = deque(maxlen=20)
 
 signal_history = deque(maxlen=20)
 trade_history = []
+pending_trade = None
 blacklist_leader=set()
 
 DEFAULT_SIGNAL = {
@@ -457,9 +458,9 @@ def get_zigzag_score():
     for i in range(2, len(signal_history)):
 
         if (
-            signal_history[i] == group_history[i-2]
+            signal_history[i] == signal_history[i-2]
             and
-            signal_history[i] != group_history[i-1]
+            signal_history[i] != signal_history[i-1]
         ):
             zigzag_count += 1
 
