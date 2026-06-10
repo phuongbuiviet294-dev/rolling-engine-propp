@@ -100,6 +100,10 @@ DEFAULT_SCALAR = {
 
     "signal_round_id": 0,
 
+    "last_signal_round": 0,
+
+    "last_open_round": 0,
+
     "cooldown_counter": 0
 
 }
@@ -663,7 +667,7 @@ class CoreEngine:
 
         reset_window_state()
 
-        st.session_state.leader_history.clear()
+        # keep leader history across reruns
 
         for idx in range(
 
@@ -1668,11 +1672,10 @@ class SignalEngine:
 
             return
 
-        st.session_state.signal_round_id = (
+        if round_id <= st.session_state.last_signal_round:
+            return
 
-            round_id
-
-        )
+        st.session_state.last_signal_round = round_id
 
         st.session_state.signal_history.append(
 
@@ -1763,10 +1766,13 @@ class TradeEngine:
         if round_id <= st.session_state.pending_round:
             return
 
+        if round_id <= st.session_state.last_open_round:
+            return
+
+        st.session_state.last_open_round = round_id
+
         st.session_state.pending_trade = (
-
             signal.next_group
-
         )
 
         st.session_state.pending_round = (
@@ -2292,7 +2298,7 @@ class ProtectionEngine:
     ):
 
         trade_count = len(st.session_state.trade_history)
-        if trade_count < 10:
+        if trade_count < 20:
             return False
 
         if (
@@ -2543,12 +2549,12 @@ class ProtectionEngine:
 
             )
 
-            st.session_state.window_reward[w] = round(
-
-                reward,
-
-                3
-
+            st.session_state.window_reward[w] = max(
+                -2,
+                min(
+                    2,
+                    round(reward,3)
+                )
             )
 
     # ========================================================
@@ -2736,11 +2742,10 @@ class PersistenceEngine:
 
             return
 
-        st.session_state.signal_round_id = (
+        if round_id <= st.session_state.last_signal_round:
+            return
 
-            round_id
-
-        )
+        st.session_state.last_signal_round = round_id
 
         st.session_state.signal_history.append(
 
