@@ -18,7 +18,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V43 Clean Trade Engine",
+    page_title="V44 Clean Rebuild Full",
     layout="wide"
 )
 
@@ -92,22 +92,22 @@ DEFAULT_SCALAR = {
 
     "pending_trade": None,
 
-    "pending_number": None,
+    
     "pending_round": 0,
 
     "pending_round": 0,
 
-    "last_round_id": 0,
+    
 
-    "last_settle_round": 0,
+    
 
-    "signal_round_id": 0,
+    
 
-    "last_signal_round": 0,
+    
 
-    "last_open_round": 0,
+    
 
-    "last_number": None,
+    
     "last_length": 0,
 
     "cooldown_counter": 0
@@ -2937,7 +2937,7 @@ class Dashboard:
 
         st.title(
 
-            "🚀 V43 Clean Trade Engine"
+            "🚀 V44 Clean Rebuild Full"
 
         )
 
@@ -3599,7 +3599,7 @@ class EngineManager:
         st.caption(
 
             f"""
-V43 Clean Trade Engine
+V44 Clean Rebuild Full
 
 Round : {round_id}
 
@@ -3680,3 +3680,8 @@ try:
 
 except Exception:
     pass
+
+
+# ======================
+# V44 CLEAN REBUILD FULL
+# ======================
