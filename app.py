@@ -1668,22 +1668,11 @@ class SignalEngine:
 
             return
 
-        if (
+        
 
-                round_id
+        
 
-                <=
-
-                st.session_state.signal_round_id
-
-        ):
-
-            return
-
-        if round_id <= st.session_state.last_signal_round:
-            return
-
-        st.session_state.last_signal_round = round_id
+        
 
         st.session_state.signal_history.append(
 
@@ -2693,22 +2682,11 @@ class PersistenceEngine:
 
             return
 
-        if (
+        
 
-                round_id
+        
 
-                <=
-
-                st.session_state.signal_round_id
-
-        ):
-
-            return
-
-        if round_id <= st.session_state.last_signal_round:
-            return
-
-        st.session_state.last_signal_round = round_id
+        
 
         st.session_state.signal_history.append(
 
