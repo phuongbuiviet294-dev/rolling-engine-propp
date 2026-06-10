@@ -1779,7 +1779,7 @@ class TradeEngine:
 
             actual_group,
 
-            current_number
+            current_round
 
     ):
 
@@ -1795,7 +1795,7 @@ class TradeEngine:
 
             return
 
-        current_round = len(load_numbers())
+        # current_round passed from manager
         if current_round <= st.session_state.pending_round:
             return
 
@@ -3488,7 +3488,7 @@ class EngineManager:
         current_length = len(numbers)
 
         if st.session_state.last_length == 0:
-            st.session_state.last_length = current_length
+            st.session_state.last_length = current_length - 1
 
         if current_length > st.session_state.last_length:
 
@@ -3503,7 +3503,7 @@ class EngineManager:
 
         trade_engine.open_trade(
             signal,
-            current_number
+            current_length
         )
 
         # ====================================================
@@ -3666,4 +3666,10 @@ except Exception:
 
 # ======================
 # V44.2 STABLE
+# ======================
+
+
+# ======================
+# V44.4 STABLE
+# TradeEngine/MainLoop rebuild marker
 # ======================
