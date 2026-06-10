@@ -1,24 +1,27 @@
 # ============================================================
-# app_v40.py
+# app_v42.py
 # PART 1/10
+# Config + Session + Dataclass
 # ============================================================
 
 import time
 from collections import deque, Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
 
 # ============================================================
 # PAGE
 # ============================================================
 
 st.set_page_config(
-    page_title="V40 Stable Engine",
+    page_title="V42 Adaptive AI Engine",
     layout="wide"
 )
+
 
 # ============================================================
 # CONFIG
@@ -27,137 +30,96 @@ st.set_page_config(
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-WINDOWS = range(6, 23)
+WINDOWS = list(range(6, 23))
 
 TOPN_TREND = 3
 TOPN_SIDEWAY = 5
 TOPN_CHAOS = 8
 
-LEADER_HISTORY_LEN = 20
 SIGNAL_HISTORY_LEN = 50
+LEADER_HISTORY_LEN = 50
+STATE_HISTORY_LEN = 200
 
 PROFIT10_STOP = -3
 WR20_STOP = 0.35
-FLIPRATE_STOP = 0.60
 DRAWDOWN_STOP = -10
+FLIPRATE_STOP = 0.60
 
 COOLDOWN_ROUNDS = 3
+
 
 # ============================================================
 # SESSION INIT
 # ============================================================
 
-if "trade_history" not in st.session_state:
-    st.session_state.trade_history = []
+DEFAULT_LIST = [
+    "trade_history",
+    "equity_curve",
+    "equity_history"
+]
 
-if "equity_curve" not in st.session_state:
-    st.session_state.equity_curve = []
+for key in DEFAULT_LIST:
 
-if "pending_trade" not in st.session_state:
-    st.session_state.pending_trade = None
+    if key not in st.session_state:
 
-if "trade_state" not in st.session_state:
-    st.session_state.trade_state = "IDLE"
-
-if "pending_round" not in st.session_state:
-    st.session_state.pending_round = 0
-
-if "last_settle_round" not in st.session_state:
-    st.session_state.last_settle_round = 0
+        st.session_state[key] = []
 
 
-if "cooldown_counter" not in st.session_state:
-    st.session_state.cooldown_counter = 0
+DEFAULT_DEQUE = {
 
-if "signal_history" not in st.session_state:
-    st.session_state.signal_history = deque(
-        maxlen=SIGNAL_HISTORY_LEN
-    )
+    "signal_history": SIGNAL_HISTORY_LEN,
 
-if "leader_history" not in st.session_state:
-    st.session_state.leader_history = deque(
-        maxlen=LEADER_HISTORY_LEN
-    )
+    "signal_flip_history": SIGNAL_HISTORY_LEN,
 
-# ============================================================
-# GROUP ENGINE
-# ============================================================
+    "leader_history": LEADER_HISTORY_LEN,
 
-def group_of(n):
-
-    if n <= 3:
-        return 1
-
-    elif n <= 6:
-        return 2
-
-    elif n <= 9:
-        return 3
-
-    else:
-        return 4
-
-
-# ============================================================
-# WINDOW STATE
-# ============================================================
-
-window_state = {
-
-    w: {
-
-        "results": [],
-
-        "profit20": 0,
-
-        "profit50": 0,
-
-        "loss_streak": 0,
-
-        "score": 0,
-
-        "next_group": None,
-
-        "reward": 0,
-
-        "blacklisted": False
-
-    }
-
-    for w in WINDOWS
+    "state_history": STATE_HISTORY_LEN
 
 }
 
+for key, size in DEFAULT_DEQUE.items():
+
+    if key not in st.session_state:
+
+        st.session_state[key] = deque(
+            maxlen=size
+        )
+
+
+DEFAULT_SCALAR = {
+
+    "trade_state": "IDLE",
+
+    "pending_trade": None,
+
+    "pending_round": 0,
+
+    "last_round_id": 0,
+
+    "last_settle_round": 0,
+
+    "signal_round_id": 0,
+
+    "cooldown_counter": 0
+
+}
+
+for key, value in DEFAULT_SCALAR.items():
+
+    if key not in st.session_state:
+
+        st.session_state[key] = value
+
 
 # ============================================================
-# RESET WINDOW STATE
+# WINDOW REWARD
 # ============================================================
 
-def reset_window_state():
+if "window_reward" not in st.session_state:
 
-    global window_state
+    st.session_state.window_reward = {
 
-    window_state = {
-
-        w: {
-
-            "results": [],
-
-            "profit20": 0,
-
-            "profit50": 0,
-
-            "loss_streak": 0,
-
-            "score": 0,
-
-            "next_group": None,
-
-            "reward": 0,
-
-            "blacklisted": False
-
-        }
+        w: 0
 
         for w in WINDOWS
 
@@ -165,7 +127,31 @@ def reset_window_state():
 
 
 # ============================================================
-# TRADE OBJECT
+# WINDOW BLACKLIST
+# ============================================================
+
+if "blacklist_window" not in st.session_state:
+
+    st.session_state.blacklist_window = set()
+
+
+# ============================================================
+# RECOVERY COUNTER
+# ============================================================
+
+if "recover_counter" not in st.session_state:
+
+    st.session_state.recover_counter = {
+
+        w: 0
+
+        for w in WINDOWS
+
+    }
+
+
+# ============================================================
+# TRADE RECORD
 # ============================================================
 
 @dataclass
@@ -181,71 +167,126 @@ class TradeRecord:
 
 
 # ============================================================
-# DEFAULT SIGNAL
+# SIGNAL RECORD
 # ============================================================
 
-DEFAULT_SIGNAL = {
+@dataclass
+class SignalRecord:
 
-    "state": "WAIT",
+    state: str = "WAIT"
 
-    "next_group": None,
+    next_group: int | None = None
 
-    "top_n": 5,
+    regime: str = "CHAOS"
 
-    "health20": 0,
+    top_n: int = 5
 
-    "health50": 0,
+    health20: float = 0
 
-    "consensus": 0,
+    health50: float = 0
 
-    "stability": 0,
+    consensus: float = 0
 
-    "momentum": 0,
+    stability: float = 0
 
-    "leader_change_rate": 0,
+    momentum: float = 0
 
-    "zigzag_score": 0,
+    trend_score: float = 0
 
-    "trend_score": 0,
+    zigzag_score: float = 0
 
-    "regime": "CHAOS",
+    leader_change_rate: float = 0
 
-    "market_score": 0,
+    market_score: float = 0
 
-    "confidence": 0
+    quality: str = "CHAOS"
+
+    threshold: float = 0.8
+
+
+# ============================================================
+# WINDOW RECORD
+# ============================================================
+
+@dataclass
+class WindowRecord:
+
+    results: list = field(default_factory=list)
+
+    profit20: float = 0
+
+    profit50: float = 0
+
+    loss_streak: int = 0
+
+    score: float = 0
+
+    next_group: int | None = None
+
+    reward: float = 0
+
+    blacklisted: bool = False
+
+
+# ============================================================
+# WINDOW STATE
+# ============================================================
+
+window_state = {
+
+    w: WindowRecord()
+
+    for w in WINDOWS
 
 }
+
 
 # ============================================================
 # END PART 1
 # ============================================================
-
-
 # ============================================================
-# app_v40.py
+# app_v42.py
 # PART 2/10
+# DataLoader Layer
 # ============================================================
 
 # ============================================================
-# GOOGLE SHEET
+# GOOGLE SHEET CONFIG
 # ============================================================
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
+
+# ============================================================
+# LOAD NUMBERS
+# ============================================================
 
 @st.cache_data(ttl=30)
 def load_numbers():
 
     url = (
         f"https://docs.google.com/spreadsheets/d/"
-        f"{SHEET_ID}/export?format=csv&cache={time.time()}"
+        f"{SHEET_ID}/export?format=csv"
+        f"&cache={time.time()}"
     )
 
     try:
+
         df = pd.read_csv(url)
+
     except Exception as e:
-        st.error(str(e))
+
+        st.error(
+
+            f"Load sheet error : {e}"
+
+        )
+
         st.stop()
+
+    # ---------------------
+    # normalize columns
+    # ---------------------
 
     df.columns = [
 
@@ -257,7 +298,11 @@ def load_numbers():
 
     if "number" not in df.columns:
 
-        st.error("Sheet must contain column number")
+        st.error(
+
+            "Sheet must contain column 'number'"
+
+        )
 
         st.stop()
 
@@ -293,2652 +338,86 @@ def load_numbers():
 
 
 # ============================================================
-# UPDATE WINDOW
+# GROUP ENGINE
 # ============================================================
 
-def update_window_state(groups, idx):
+def group_of(n):
 
-    for w in WINDOWS:
+    if n <= 3:
 
-        if idx - w < 0:
+        return 1
 
-            continue
+    elif n <= 6:
 
-        pred = groups[idx - w]
+        return 2
 
-        hit = int(
+    elif n <= 9:
 
-            pred == groups[idx]
+        return 3
 
-        )
+    else:
 
-        stt = window_state[w]
-
-        stt["results"].append(hit)
-
-        tail20 = stt["results"][-20:]
-
-        tail50 = stt["results"][-50:]
-
-        stt["profit20"] = sum(
-
-            WIN_GROUP if x else LOSS_GROUP
-
-            for x in tail20
-
-        )
-
-        stt["profit50"] = sum(
-
-            WIN_GROUP if x else LOSS_GROUP
-
-            for x in tail50
-
-        )
-
-        # -------------------
-        # loss streak
-        # -------------------
-
-        loss_streak = 0
-
-        for x in reversed(stt["results"]):
-
-            if x == 0:
-
-                loss_streak += 1
-
-            else:
-
-                break
-
-        stt["loss_streak"] = loss_streak
-
-        # -------------------
-        # blacklist
-        # -------------------
-
-        if loss_streak >= 3:
-
-            stt["blacklisted"] = True
-
-            stt["score"] = -9999
-
-        else:
-
-            stt["blacklisted"] = False
-
-            stt["score"] = (
-
-                stt["profit20"]
-
-                +
-
-                0.3 * stt["profit50"]
-
-                -
-
-                loss_streak
-
-            )
-
-        stt["next_group"] = pred
+        return 4
 
 
 # ============================================================
-# BUILD STATE
+# BUILD GROUPS
 # ============================================================
 
-def build_state(groups):
+def build_groups(
 
-    reset_window_state()
+        numbers
 
-    st.session_state.leader_history.clear()
+):
 
-    for idx in range(22, len(groups)):
+    return [
 
-        update_window_state(
+        group_of(x)
 
-            groups,
-
-            idx
-
-        )
-
-        rows = sorted(
-
-            window_state.items(),
-
-            key=lambda x: x[1]["score"],
-
-            reverse=True
-
-        )
-
-        if rows:
-
-            st.session_state.leader_history.append(
-
-                rows[0][0]
-
-            )
-
-
-# ============================================================
-# TOP WINDOWS
-# ============================================================
-
-def get_top_windows(top_n=5):
-
-    rows = sorted(
-
-        window_state.items(),
-
-        key=lambda x: x[1]["score"],
-
-        reverse=True
-
-    )
-
-    return rows[:top_n]
-
-
-# ============================================================
-# HEALTH ENGINE
-# ============================================================
-
-def get_health():
-
-    positive20 = sum(
-
-        1
-
-        for w in WINDOWS
-
-        if window_state[w]["profit20"] > 0
-
-    )
-
-    positive50 = sum(
-
-        1
-
-        for w in WINDOWS
-
-        if window_state[w]["profit50"] > 0
-
-    )
-
-    total = len(WINDOWS)
-
-    health20 = positive20 / total
-
-    health50 = positive50 / total
-
-    return health20, health50
-
-
-# ============================================================
-# CONSENSUS ENGINE
-# ============================================================
-
-def get_consensus(top_rows):
-
-    preds = [
-
-        row[1]["next_group"]
-
-        for row in top_rows
-
-        if row[1]["next_group"] is not None
+        for x in numbers
 
     ]
 
-    if len(preds) == 0:
-
-        return None, 0
-
-    group, count = Counter(
-
-        preds
-
-    ).most_common(1)[0]
-
-    consensus = count / len(preds)
-
-    return group, consensus
-
 
 # ============================================================
-# LEADER CHANGE ENGINE
+# RESET WINDOW STATE
 # ============================================================
 
-def get_leader_change_rate():
+def reset_window_state():
 
-    history = st.session_state.leader_history
+    global window_state
 
-    if len(history) < 2:
+    window_state = {
 
-        return 0
+        w: WindowRecord()
 
-    changes = 0
-
-    for i in range(
-
-        1,
-
-        len(history)
-
-    ):
-
-        if history[i] != history[i - 1]:
-
-            changes += 1
-
-    return round(
-
-        changes / (len(history) - 1),
-
-        3
-
-    )
-
-
-# ============================================================
-# STABILITY ENGINE
-# ============================================================
-
-def get_stability():
-
-    return round(
-
-        max(
-
-            0,
-
-            1 - get_leader_change_rate()
-
-        ),
-
-        3
-
-    )
-
-
-# ============================================================
-# END PART 2
-# ============================================================
-
-# ============================================================
-# app_v40.py
-# PART 3/10
-# Core Analysis Engine
-# ============================================================
-
-# ============================================================
-# MOMENTUM ENGINE
-# ============================================================
-
-def get_momentum(top_rows):
-
-    if len(top_rows) == 0:
-        return 0
-
-    value = np.mean(
-
-        [
-
-            row[1]["profit20"]
-
-            -
-
-            row[1]["profit50"]
-
-            for row in top_rows
-
-        ]
-
-    )
-
-    return round(float(value), 3)
-
-
-# ============================================================
-# ZIGZAG ENGINE
-# ============================================================
-
-def get_zigzag_score():
-
-    history = st.session_state.signal_history
-
-    if len(history) < 6:
-
-        return 0
-
-    zigzag_count = 0
-
-    for i in range(2, len(history)):
-
-        if (
-
-            history[i]
-
-            ==
-
-            history[i - 2]
-
-            and
-
-            history[i]
-
-            !=
-
-            history[i - 1]
-
-        ):
-
-            zigzag_count += 1
-
-    score = zigzag_count / (len(history) - 2)
-
-    return round(score, 3)
-
-
-# ============================================================
-# TREND ENGINE
-# ============================================================
-
-def get_trend_score(top_rows):
-
-    if len(top_rows) == 0:
-
-        return 0
-
-    p10 = np.mean(
-
-        [
-
-            sum(
-
-                WIN_GROUP if x else LOSS_GROUP
-
-                for x in row[1]["results"][-10:]
-
-            )
-
-            for row in top_rows
-
-        ]
-
-    )
-
-    p20 = np.mean(
-
-        [
-
-            row[1]["profit20"]
-
-            for row in top_rows
-
-        ]
-
-    )
-
-    p50 = np.mean(
-
-        [
-
-            row[1]["profit50"]
-
-            for row in top_rows
-
-        ]
-
-    )
-
-    score = 0
-
-    if p10 > p20:
-
-        score += 0.5
-
-    if p20 > p50:
-
-        score += 0.5
-
-    return round(score, 3)
-
-
-# ============================================================
-# SIDEWAY ENGINE
-# ============================================================
-
-def get_sideway_score(
-
-        consensus,
-
-        momentum
-
-):
-
-    score = 0
-
-    if consensus < 0.80:
-
-        score += 0.5
-
-    if abs(momentum) < 1:
-
-        score += 0.5
-
-    return round(score, 3)
-
-
-# ============================================================
-# REGIME ENGINE
-# ============================================================
-
-def get_regime(
-
-        consensus,
-
-        stability,
-
-        momentum,
-
-        zigzag_score,
-
-        leader_change_rate
-
-):
-
-    # CHAOS
-
-    if zigzag_score > 0.60:
-
-        return "CHAOS"
-
-    if leader_change_rate > 0.50:
-
-        return "CHAOS"
-
-    if consensus < 0.60:
-
-        return "CHAOS"
-
-    if stability < 0.50:
-
-        return "CHAOS"
-
-    # TREND
-
-    if momentum > 2:
-
-        return "TREND"
-
-    # SIDEWAY
-
-    return "SIDEWAY"
-
-
-# ============================================================
-# ADAPTIVE TOPN
-# ============================================================
-
-def get_adaptive_topn(
-
-        regime
-
-):
-
-    if regime == "TREND":
-
-        return TOPN_TREND
-
-    elif regime == "SIDEWAY":
-
-        return TOPN_SIDEWAY
-
-    else:
-
-        return TOPN_CHAOS
-
-
-# ============================================================
-# MARKET SCORE
-# ============================================================
-
-def get_market_score(
-
-        health20,
-
-        health50,
-
-        consensus,
-
-        stability,
-
-        trend_score
-
-):
-
-    score = (
-
-            0.30 * health20
-
-            +
-
-            0.20 * health50
-
-            +
-
-            0.25 * consensus
-
-            +
-
-            0.15 * stability
-
-            +
-
-            0.10 * trend_score
-
-    )
-
-    return round(score, 3)
-
-
-# ============================================================
-# MARKET QUALITY
-# ============================================================
-
-def get_market_quality(
-
-        market_score
-
-):
-
-    if market_score >= 0.90:
-
-        return "EXCELLENT"
-
-    elif market_score >= 0.80:
-
-        return "GOOD"
-
-    elif market_score >= 0.70:
-
-        return "NORMAL"
-
-    elif market_score >= 0.60:
-
-        return "BAD"
-
-    return "CHAOS"
-
-
-# ============================================================
-# DYNAMIC THRESHOLD
-# ============================================================
-
-def get_dynamic_threshold(
-
-        regime
-
-):
-
-    if regime == "TREND":
-
-        return 0.70
-
-    elif regime == "SIDEWAY":
-
-        return 0.80
-
-    else:
-
-        return 0.90
-
-
-# ============================================================
-# CORE SIGNAL ENGINE
-# ============================================================
-
-def get_next_signal():
-
-    top_rows = get_top_windows(5)
-
-    next_group, consensus = get_consensus(
-
-        top_rows
-
-    )
-
-    health20, health50 = get_health()
-
-    stability = get_stability()
-
-    momentum = get_momentum(
-
-        top_rows
-
-    )
-
-    leader_change_rate = get_leader_change_rate()
-
-    zigzag_score = get_zigzag_score()
-
-    trend_score = get_trend_score(
-
-        top_rows
-
-    )
-
-    sideway_score = get_sideway_score(
-
-        consensus,
-
-        momentum
-
-    )
-
-    regime = get_regime(
-
-        consensus,
-
-        stability,
-
-        momentum,
-
-        zigzag_score,
-
-        leader_change_rate
-
-    )
-
-    # adaptive top n
-
-    top_n = get_adaptive_topn(
-
-        regime
-
-    )
-
-    top_rows = get_top_windows(
-
-        top_n
-
-    )
-
-    next_group, consensus = get_consensus(
-
-        top_rows
-
-    )
-
-    market_score = get_market_score(
-
-        health20,
-
-        health50,
-
-        consensus,
-
-        stability,
-
-        trend_score
-
-    )
-
-    quality = get_market_quality(
-
-        market_score
-
-    )
-
-    threshold = get_dynamic_threshold(
-
-        regime
-
-    )
-
-    state = "READY"
-
-    if market_score < threshold:
-
-        state = "WAIT"
-
-    if zigzag_score > 0.60:
-
-        state = "WAIT"
-
-    if leader_change_rate > 0.50:
-
-        state = "WAIT"
-
-    signal = {
-
-        "state": state,
-
-        "next_group": next_group,
-
-        "top_n": top_n,
-
-        "health20": health20,
-
-        "health50": health50,
-
-        "consensus": consensus,
-
-        "stability": stability,
-
-        "momentum": momentum,
-
-        "leader_change_rate": leader_change_rate,
-
-        "zigzag_score": zigzag_score,
-
-        "trend_score": trend_score,
-
-        "sideway_score": sideway_score,
-
-        "regime": regime,
-
-        "market_score": market_score,
-
-        "quality": quality,
-
-        "threshold": threshold
+        for w in WINDOWS
 
     }
 
-    return signal
-
 
 # ============================================================
-# END PART 3
+# SAFE LAST VALUE
 # ============================================================
 
-# ============================================================
-# app_v40.py
-# PART 4/10
-# Trading Layer
-# ============================================================
+def safe_last(
 
-# ============================================================
-# TRADE HISTORY
-# ============================================================
+        arr,
 
-if "trade_history" not in st.session_state:
-    st.session_state.trade_history = []
-
-if "equity_curve" not in st.session_state:
-    st.session_state.equity_curve = []
-
-if "pending_trade" not in st.session_state:
-    st.session_state.pending_trade = None
-
-if "trade_state" not in st.session_state:
-    st.session_state.trade_state = "IDLE"
-
-if "pending_round" not in st.session_state:
-    st.session_state.pending_round = 0
-
-if "last_settle_round" not in st.session_state:
-    st.session_state.last_settle_round = 0
-
-
-
-# ============================================================
-# TOTAL PROFIT
-# ============================================================
-
-def get_total_profit():
-
-    return round(
-
-        sum(
-
-            x["profit"]
-
-            for x in st.session_state.trade_history
-
-        ),
-
-        2
-
-    )
-
-
-# ============================================================
-# PROFIT 10
-# ============================================================
-
-def get_profit10():
-
-    trades = st.session_state.trade_history[-10:]
-
-    return round(
-
-        sum(
-
-            x["profit"]
-
-            for x in trades
-
-        ),
-
-        2
-
-    )
-
-
-# ============================================================
-# PROFIT 20
-# ============================================================
-
-def get_profit20():
-
-    trades = st.session_state.trade_history[-20:]
-
-    return round(
-
-        sum(
-
-            x["profit"]
-
-            for x in trades
-
-        ),
-
-        2
-
-    )
-
-
-# ============================================================
-# PROFIT 50
-# ============================================================
-
-def get_profit50():
-
-    trades = st.session_state.trade_history[-50:]
-
-    return round(
-
-        sum(
-
-            x["profit"]
-
-            for x in trades
-
-        ),
-
-        2
-
-    )
-
-
-# ============================================================
-# WINRATE ENGINE
-# ============================================================
-
-def get_winrate(n=20):
-
-    trades = st.session_state.trade_history[-n:]
-
-    if len(trades) == 0:
-
-        return 0
-
-    wr = (
-
-        sum(
-
-            x["hit"]
-
-            for x in trades
-
-        )
-
-        /
-
-        len(trades)
-
-    )
-
-    return round(wr, 3)
-
-
-# ============================================================
-# DRAWDOWN ENGINE
-# ============================================================
-
-def get_drawdown():
-
-    equity = 0
-
-    peak = 0
-
-    dd = 0
-
-    for x in st.session_state.trade_history:
-
-        equity += x["profit"]
-
-        peak = max(
-
-            peak,
-
-            equity
-
-        )
-
-        dd = min(
-
-            dd,
-
-            equity - peak
-
-        )
-
-    return round(dd, 2)
-
-
-# ============================================================
-# CONFIDENCE ENGINE
-# ============================================================
-
-def get_confidence_score(
-
-        signal
+        default=None
 
 ):
 
-    score = (
+    if len(arr) == 0:
 
-        0.25 * signal["consensus"]
+        return default
 
-        +
+    return arr[-1]
 
-        0.20 * signal["health20"]
 
-        +
-
-        0.20 * signal["health50"]
-
-        +
-
-        0.20 * signal["stability"]
-
-        +
-
-        0.15 * signal["trend_score"]
-
-    )
-
-    return round(score, 3)
-
-
-# ============================================================
-# CONFIDENCE LEVEL
-# ============================================================
-
-def get_confidence_level(
-
-        score
-
-):
-
-    if score >= 0.90:
-
-        return "VERY HIGH"
-
-    elif score >= 0.80:
-
-        return "HIGH"
-
-    elif score >= 0.70:
-
-        return "NORMAL"
-
-    elif score >= 0.60:
-
-        return "LOW"
-
-    return "DANGER"
-
-
-# ============================================================
-# EQUITY CURVE
-# ============================================================
-
-def update_equity_curve():
-
-    equity = 0
-
-    curve = []
-
-    for x in st.session_state.trade_history:
-
-        equity += x["profit"]
-
-        curve.append(
-
-            equity
-
-        )
-
-    st.session_state.equity_curve = curve
-
-
-# ============================================================
-# TRADE STATE MACHINE
-# ============================================================
-
-def old_trade_state_machine(
-
-        signal,
-
-        actual_group
-
-):
-
-    # -----------------
-    # open trade
-    # -----------------
-
-    if (
-
-            st.session_state.pending_trade
-
-            is None
-
-    ):
-
-        if signal["state"] == "READY":
-
-            st.session_state.pending_trade = (
-
-                signal["next_group"]
-
-            )
-
-            st.session_state.trade_state = (
-
-                "PENDING"
-
-            )
-
-        return
-
-    # -----------------
-    # settle
-    # -----------------
-
-    predict = (
-
-        st.session_state.pending_trade
-
-    )
-
-    hit = int(
-
-        predict
-
-        ==
-
-        actual_group
-
-    )
-
-    profit = (
-
-        WIN_GROUP
-
-        if hit
-
-        else
-
-        LOSS_GROUP
-
-    )
-
-    record = {
-
-        "predict": predict,
-
-        "actual": actual_group,
-
-        "hit": hit,
-
-        "profit": profit
-
-    }
-
-    st.session_state.trade_history.append(
-
-        record
-
-    )
-
-    update_equity_curve()
-
-    st.session_state.pending_trade = None
-
-    st.session_state.trade_state = "IDLE"
-
-
-# ============================================================
-# TRADE SNAPSHOT
-# ============================================================
-
-def get_trade_snapshot(
-
-        signal
-
-):
-
-    confidence_score = (
-
-        get_confidence_score(
-
-            signal
-
-        )
-
-    )
-
-    snapshot = {
-
-        "trade_state":
-
-            st.session_state.trade_state,
-
-        "profit10":
-
-            get_profit10(),
-
-        "profit20":
-
-            get_profit20(),
-
-        "profit50":
-
-            get_profit50(),
-
-        "total_profit":
-
-            get_total_profit(),
-
-        "wr20":
-
-            get_winrate(20),
-
-        "drawdown":
-
-            get_drawdown(),
-
-        "confidence_score":
-
-            confidence_score,
-
-        "confidence_level":
-
-            get_confidence_level(
-
-                confidence_score
-
-            )
-
-    }
-
-    return snapshot
-
-
-# ============================================================
-# END PART 4
-# ============================================================
-
-# ============================================================
-# app_v40.py
-# PART 5/10
-# Risk Management Layer
-# ============================================================
-
-# ============================================================
-# SIGNAL FLIP HISTORY
-# ============================================================
-
-if "signal_flip_history" not in st.session_state:
-
-    st.session_state.signal_flip_history = deque(
-        maxlen=50
-    )
-
-# ============================================================
-# FLIP RATE ENGINE
-# ============================================================
-
-def get_flip_rate():
-
-    history = st.session_state.signal_flip_history
-
-    if len(history) < 2:
-
-        return 0
-
-    flip = 0
-
-    for i in range(
-
-            1,
-
-            len(history)
-
-    ):
-
-        if history[i] != history[i - 1]:
-
-            flip += 1
-
-    return round(
-
-        flip / (len(history) - 1),
-
-        3
-
-    )
-
-
-# ============================================================
-# COOLDOWN COUNTER
-# ============================================================
-
-if "cooldown_counter" not in st.session_state:
-
-    st.session_state.cooldown_counter = 0
-
-
-# ============================================================
-# LOSS STREAK ENGINE
-# ============================================================
-
-def get_trade_loss_streak():
-
-    streak = 0
-
-    trades = st.session_state.trade_history
-
-    for x in reversed(trades):
-
-        if x["hit"] == 0:
-
-            streak += 1
-
-        else:
-
-            break
-
-    return streak
-
-
-# ============================================================
-# PROFIT PROTECTION
-# ============================================================
-
-def profit_protection_engine():
-
-    p10 = get_profit10()
-
-    wr20 = get_winrate(20)
-
-    dd = get_drawdown()
-
-    flip_rate = get_flip_rate()
-
-    if p10 <= PROFIT10_STOP:
-
-        return True
-
-    if wr20 <= WR20_STOP:
-
-        return True
-
-    if dd <= DRAWDOWN_STOP:
-
-        return True
-
-    if flip_rate >= FLIPRATE_STOP:
-
-        return True
-
-    return False
-
-
-# ============================================================
-# COOLDOWN ENGINE
-# ============================================================
-
-def cooldown_engine():
-
-    if get_trade_loss_streak() >= 3:
-
-        st.session_state.cooldown_counter = COOLDOWN_ROUNDS
-
-    if st.session_state.cooldown_counter > 0:
-
-        st.session_state.cooldown_counter -= 1
-
-        return True
-
-    return False
-
-
-# ============================================================
-# RECOVERY ENGINE
-# ============================================================
-
-def recovery_engine(
-
-        signal,
-
-        confidence_score
-
-):
-
-    if signal["health20"] < 0.80:
-
-        return False
-
-    if confidence_score < 0.80:
-
-        return False
-
-    if get_flip_rate() > 0.30:
-
-        return False
-
-    if get_winrate(20) < 0.55:
-
-        return False
-
-    return True
-
-
-# ============================================================
-# READY WAIT ENGINE
-# ============================================================
-
-def final_ready_wait(
-
-        signal
-
-):
-
-    confidence_score = get_confidence_score(
-
-        signal
-
-    )
-
-    # -------------------
-    # Protection
-    # -------------------
-
-    if profit_protection_engine():
-
-        return "WAIT"
-
-    # -------------------
-    # Cooldown
-    # -------------------
-
-    if cooldown_engine():
-
-        return "WAIT"
-
-    # -------------------
-    # Flip Rate
-    # -------------------
-
-    if get_flip_rate() > 0.60:
-
-        return "WAIT"
-
-    # -------------------
-    # Confidence
-    # -------------------
-
-    if confidence_score < 0.70:
-
-        return "WAIT"
-
-    # -------------------
-    # Market
-    # -------------------
-
-    if signal["state"] != "READY":
-
-        return "WAIT"
-
-    return "READY"
-
-
-# ============================================================
-# ADAPTIVE LOCK ENGINE
-# ============================================================
-
-def adaptive_lock_engine(
-
-        signal
-
-):
-
-    state = final_ready_wait(
-
-        signal
-
-    )
-
-    confidence_score = get_confidence_score(
-
-        signal
-
-    )
-
-    if state == "WAIT":
-
-        if recovery_engine(
-
-                signal,
-
-                confidence_score
-
-        ):
-
-            state = "READY"
-
-    return state
-
-
-# ============================================================
-# TRADE SIGNAL SNAPSHOT
-# ============================================================
-
-def get_trade_signal(
-
-        signal
-
-):
-
-    confidence_score = get_confidence_score(
-
-        signal
-
-    )
-
-    trade_signal = {
-
-        "state":
-
-            adaptive_lock_engine(
-
-                signal
-
-            ),
-
-        "trade_state":
-
-            st.session_state.trade_state,
-
-        "confidence_score":
-
-            confidence_score,
-
-        "confidence_level":
-
-            get_confidence_level(
-
-                confidence_score
-
-            ),
-
-        "profit10":
-
-            get_profit10(),
-
-        "profit20":
-
-            get_profit20(),
-
-        "profit50":
-
-            get_profit50(),
-
-        "total_profit":
-
-            get_total_profit(),
-
-        "wr20":
-
-            get_winrate(
-
-                20
-
-            ),
-
-        "drawdown":
-
-            get_drawdown(),
-
-        "flip_rate":
-
-            get_flip_rate(),
-
-        "cooldown":
-
-            st.session_state.cooldown_counter
-
-    }
-
-    return trade_signal
-
-
-# ============================================================
-# END PART 5
-# ============================================================
-
-# ============================================================
-# app_v40.py
-# PART 6/10
-# Dashboard Layer
-# ============================================================
-
-# ============================================================
-# TITLE
-# ============================================================
-
-st.title(
-
-    "V40 STABLE ENGINE"
-
-)
-
-
-# ============================================================
-# READY PANEL
-# ============================================================
-
-def render_ready_panel(
-
-        trade_signal,
-
-        signal
-
-):
-
-    if trade_signal["state"] == "READY":
-
-        st.markdown(
-
-            f"""
-
-            <div style="
-
-            background:#008800;
-
-            padding:20px;
-
-            border-radius:15px;
-
-            text-align:center;
-
-            color:white;
-
-            font-size:30px;
-
-            font-weight:bold;
-
-            ">
-
-            READY
-
-            <br>
-
-            NEXT GROUP =
-
-            {signal["next_group"]}
-
-            </div>
-
-            """,
-
-            unsafe_allow_html=True
-
-        )
-
-    else:
-
-        st.markdown(
-
-            """
-
-            <div style="
-
-            background:#444444;
-
-            padding:20px;
-
-            border-radius:15px;
-
-            text-align:center;
-
-            color:white;
-
-            font-size:30px;
-
-            font-weight:bold;
-
-            ">
-
-            WAIT
-
-            </div>
-
-            """,
-
-            unsafe_allow_html=True
-
-        )
-
-
-# ============================================================
-# HEADER PANEL
-# ============================================================
-
-def render_header(
-
-        signal,
-
-        trade_signal
-
-):
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-
-        "STATE",
-
-        trade_signal["state"]
-
-    )
-
-    c2.metric(
-
-        "NEXT GROUP",
-
-        signal["next_group"]
-
-    )
-
-    c3.metric(
-
-        "REGIME",
-
-        signal["regime"]
-
-    )
-
-    c4.metric(
-
-        "CONFIDENCE",
-
-        trade_signal["confidence_level"]
-
-    )
-
-
-# ============================================================
-# HEALTH PANEL
-# ============================================================
-
-def render_health(
-
-        signal
-
-):
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-
-        "Health20",
-
-        round(
-
-            signal["health20"],
-
-            2
-
-        )
-
-    )
-
-    c2.metric(
-
-        "Health50",
-
-        round(
-
-            signal["health50"],
-
-            2
-
-        )
-
-    )
-
-    c3.metric(
-
-        "Consensus",
-
-        round(
-
-            signal["consensus"],
-
-            2
-
-        )
-
-    )
-
-    c4.metric(
-
-        "Stability",
-
-        round(
-
-            signal["stability"],
-
-            2
-
-        )
-
-    )
-
-
-# ============================================================
-# MARKET PANEL
-# ============================================================
-
-def render_market(
-
-        signal,
-
-        trade_signal
-
-):
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-
-        "Momentum",
-
-        round(
-
-            signal["momentum"],
-
-            2
-
-        )
-
-    )
-
-    c2.metric(
-
-        "TrendScore",
-
-        round(
-
-            signal["trend_score"],
-
-            2
-
-        )
-
-    )
-
-    c3.metric(
-
-        "Zigzag",
-
-        round(
-
-            signal["zigzag_score"],
-
-            2
-
-        )
-
-    )
-
-    c4.metric(
-
-        "FlipRate",
-
-        round(
-
-            trade_signal["flip_rate"],
-
-            2
-
-        )
-
-    )
-
-
-# ============================================================
-# PROFIT PANEL
-# ============================================================
-
-def render_profit(
-
-        trade_signal
-
-):
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-
-        "Profit10",
-
-        trade_signal["profit10"]
-
-    )
-
-    c2.metric(
-
-        "Profit20",
-
-        trade_signal["profit20"]
-
-    )
-
-    c3.metric(
-
-        "Profit50",
-
-        trade_signal["profit50"]
-
-    )
-
-    c4.metric(
-
-        "Total Profit",
-
-        trade_signal["total_profit"]
-
-    )
-
-
-# ============================================================
-# RISK PANEL
-# ============================================================
-
-def render_risk(
-
-        trade_signal
-
-):
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-
-        "WR20",
-
-        trade_signal["wr20"]
-
-    )
-
-    c2.metric(
-
-        "Drawdown",
-
-        trade_signal["drawdown"]
-
-    )
-
-    c3.metric(
-
-        "Cooldown",
-
-        trade_signal["cooldown"]
-
-    )
-
-    c4.metric(
-
-        "Trade State",
-
-        trade_signal["trade_state"]
-
-    )
-
-
-# ============================================================
-# CONTROL PANEL
-# ============================================================
-
-def render_control(
-
-        signal
-
-):
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-
-        "TopN",
-
-        signal["top_n"]
-
-    )
-
-    c2.metric(
-
-        "Quality",
-
-        signal["quality"]
-
-    )
-
-    c3.metric(
-
-        "MarketScore",
-
-        round(
-
-            signal["market_score"],
-
-            2
-
-        )
-
-    )
-
-    c4.metric(
-
-        "Threshold",
-
-        signal["threshold"]
-
-    )
-
-
-# ============================================================
-# END PART 6
-# ============================================================
-
-# ============================================================
-# app_v40.py
-# PART 7/10
-# Dashboard Tables + Charts
-# ============================================================
-
-# ============================================================
-# TOP WINDOWS TABLE
-# ============================================================
-
-def render_top_windows(
-
-        signal
-
-):
-
-    st.subheader(
-
-        "Top Windows"
-
-    )
-
-    top_rows = get_top_windows(
-
-        signal["top_n"]
-
-    )
-
-    rows = []
-
-    for w, s in top_rows:
-
-        rows.append(
-
-            {
-
-                "window":
-
-                    w,
-
-                "profit20":
-
-                    round(
-
-                        s["profit20"],
-
-                        2
-
-                    ),
-
-                "profit50":
-
-                    round(
-
-                        s["profit50"],
-
-                        2
-
-                    ),
-
-                "loss_streak":
-
-                    s["loss_streak"],
-
-                "score":
-
-                    round(
-
-                        s["score"],
-
-                        2
-
-                    ),
-
-                "next_group":
-
-                    s["next_group"]
-
-            }
-
-        )
-
-    df = pd.DataFrame(
-
-        rows
-
-    )
-
-    st.dataframe(
-
-        df,
-
-        use_container_width=True
-
-    )
-
-
-# ============================================================
-# WINDOW HEALTH TABLE
-# ============================================================
-
-def render_window_health():
-
-    st.subheader(
-
-        "Window Health"
-
-    )
-
-    rows = []
-
-    for w in WINDOWS:
-
-        rows.append(
-
-            {
-
-                "window":
-
-                    w,
-
-                "profit20":
-
-                    round(
-
-                        window_state[w]["profit20"],
-
-                        2
-
-                    ),
-
-                "profit50":
-
-                    round(
-
-                        window_state[w]["profit50"],
-
-                        2
-
-                    ),
-
-                "loss_streak":
-
-                    window_state[w]["loss_streak"],
-
-                "score":
-
-                    round(
-
-                        window_state[w]["score"],
-
-                        2
-
-                    )
-
-            }
-
-        )
-
-    df = pd.DataFrame(
-
-        rows
-
-    )
-
-    st.dataframe(
-
-        df,
-
-        use_container_width=True
-
-    )
-
-
-# ============================================================
-# TRADE HISTORY TABLE
-# ============================================================
-
-def render_trade_history():
-
-    st.subheader(
-
-        "Trade History"
-
-    )
-
-    trades = st.session_state.trade_history
-
-    if len(trades) == 0:
-
-        st.info(
-
-            "No trade history"
-
-        )
-
-        return
-
-    df = pd.DataFrame(
-
-        trades
-
-    )
-
-    st.dataframe(
-
-        df.iloc[::-1],
-
-        use_container_width=True
-
-    )
-
-
-# ============================================================
-# EQUITY CURVE
 # ============================================================
-
-def render_equity_curve():
-
-    st.subheader(
-
-        "Equity Curve"
-
-    )
-
-    curve = st.session_state.equity_curve
-
-    if len(curve) == 0:
-
-        return
-
-    curve_df = pd.DataFrame(
-
-        {
-
-            "equity":
-
-                curve
-
-        }
-
-    )
-
-    st.line_chart(
-
-        curve_df
-
-    )
-
-
-# ============================================================
-# SCORE SUMMARY
-# ============================================================
-
-def render_score_summary(
-
-        signal
-
-):
-
-    st.subheader(
-
-        "Score Summary"
-
-    )
-
-    summary_df = pd.DataFrame(
-
-        {
-
-            "metric": [
-
-                "Health20",
-
-                "Health50",
-
-                "Consensus",
-
-                "Stability",
-
-                "TrendScore",
-
-                "MarketScore"
-
-            ],
-
-            "value": [
-
-                signal["health20"],
-
-                signal["health50"],
-
-                signal["consensus"],
-
-                signal["stability"],
-
-                signal["trend_score"],
-
-                signal["market_score"]
-
-            ]
-
-        }
-
-    )
-
-    st.bar_chart(
-
-        summary_df.set_index(
-
-            "metric"
-
-        )
-
-    )
-
-
-# ============================================================
-# LAST NUMBERS
-# ============================================================
-
-def render_last_numbers(
-
-        numbers,
-
-        groups
-
-):
-
-    st.subheader(
-
-        "Last Numbers"
-
-    )
-
-    df = pd.DataFrame(
-
-        {
-
-            "number":
-
-                numbers[-30:],
-
-            "group":
-
-                groups[-30:]
-
-        }
-
-    )
-
-    st.dataframe(
-
-        df.iloc[::-1],
-
-        use_container_width=True
-
-    )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-def render_footer():
-
-    st.caption(
-
-        "V40 Stable Engine"
-
-    )
-
-
-# ============================================================
-# END PART 7
-# ============================================================
-
-# ============================================================
-# app_v40.py
-# PART 8/10
-# Main Pipeline
-# ============================================================
-
-# ============================================================
-# LOAD DATA
-# ============================================================
-
-numbers = load_numbers()
-
-if len(numbers) < 30:
-
-    st.error(
-
-        "Not enough data"
-
-    )
-
-    st.stop()
-
-
-# ============================================================
-# GROUPS
-# ============================================================
-
-groups = [
-
-    group_of(x)
-
-    for x in numbers
-
-]
-
-
-# ============================================================
-# BUILD STATE
-# ============================================================
-
-build_state(
-
-    groups
-
-)
-
-
-# ============================================================
-# CORE SIGNAL
-# ============================================================
-
-signal = get_next_signal()
-
-
-
-round_id = len(numbers)
-
-if "signal_round_id" not in st.session_state:
-    st.session_state.signal_round_id = 0
-
-# ============================================================
-# SIGNAL HISTORY
-# ============================================================
-
-if (
-    signal["next_group"] is not None
-    and round_id > st.session_state.signal_round_id
-):
-
-    st.session_state.signal_round_id = round_id
-
-    st.session_state.signal_history.append(signal["next_group"])
-
-    st.session_state.signal_flip_history.append(signal["next_group"])
-
-
-# ============================================================
-# ACTUAL GROUP
-# ============================================================
-
-actual_group = groups[-1]
-
-
-# ============================================================
-# TRADE STATE MACHINE
-# ============================================================
-
-
-round_id = len(numbers)
-
-if "last_round_id" not in st.session_state:
-    st.session_state.last_round_id = 0
-
-if "last_round_id" not in st.session_state:
-    st.session_state.last_round_id = 0
-
-if round_id > st.session_state.last_round_id:
-    st.session_state.last_round_id = round_id
-    settle_trade(actual_group, round_id)
-    open_trade(signal, round_id)
-
-
-
-# ============================================================
-# TRADE SIGNAL
-# ============================================================
-
-trade_signal = get_trade_signal(
-
-    signal
-
-)
-
-
-# ============================================================
-# READY PANEL
-# ============================================================
-
-render_ready_panel(
-
-    trade_signal,
-
-    signal
-
-)
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-render_header(
-
-    signal,
-
-    trade_signal
-
-)
-
-
-# ============================================================
-# HEALTH PANEL
-# ============================================================
-
-render_health(
-
-    signal
-
-)
-
-
-# ============================================================
-# MARKET PANEL
-# ============================================================
-
-render_market(
-
-    signal,
-
-    trade_signal
-
-)
-
-
-# ============================================================
-# PROFIT PANEL
-# ============================================================
-
-render_profit(
-
-    trade_signal
-
-)
-
-
-# ============================================================
-# RISK PANEL
+# GET ROUND ID
 # ============================================================
-
-render_risk(
-
-    trade_signal
-
-)
-
-
-# ============================================================
-# CONTROL PANEL
-# ============================================================
-
-render_control(
-
-    signal
-
-)
-
-
-# ============================================================
-# TOP WINDOWS
-# ============================================================
-
-render_top_windows(
-
-    signal
-
-)
-
-
-# ============================================================
-# WINDOW HEALTH
-# ============================================================
-
-render_window_health()
-
-
-# ============================================================
-# TRADE HISTORY
-# ============================================================
-
-render_trade_history()
-
-
-# ============================================================
-# EQUITY CURVE
-# ============================================================
-
-render_equity_curve()
-
-
-# ============================================================
-# SCORE SUMMARY
-# ============================================================
-
-render_score_summary(
-
-    signal
-
-)
-
-
-# ============================================================
-# LAST NUMBERS
-# ============================================================
-
-render_last_numbers(
-
-    numbers,
-
-    groups
-
-)
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-render_footer()
-
-
-# ============================================================
-# END PART 8
-# ============================================================
-
-# ============================================================
-# app_v40.py
-# PART 9/10
-# Persistence + Self Learning Layer
-# ============================================================
-
-# ============================================================
-# ROUND ID
-# ============================================================
-
-if "last_round_id" not in st.session_state:
-
-    st.session_state.last_round_id = 0
-
 
 def get_round_id(
 
@@ -2954,10 +433,10 @@ def get_round_id(
 
 
 # ============================================================
-# DUPLICATE ROUND PROTECTION
+# NEW ROUND DETECT
 # ============================================================
 
-def old_is_new_round(
+def is_new_round(
 
         numbers
 
@@ -2969,9 +448,21 @@ def old_is_new_round(
 
     )
 
-    if round_id > st.session_state.last_round_id:
+    if (
 
-        st.session_state.last_round_id = round_id
+        round_id
+
+        >
+
+        st.session_state.last_round_id
+
+    ):
+
+        st.session_state.last_round_id = (
+
+            round_id
+
+        )
 
         return True
 
@@ -2979,57 +470,312 @@ def old_is_new_round(
 
 
 # ============================================================
-# WINDOW REWARD
+# LOAD DATA PIPELINE
 # ============================================================
 
-if "window_reward" not in st.session_state:
+def load_data():
 
-    st.session_state.window_reward = {
+    numbers = load_numbers()
 
-        w: 0
+    if len(numbers) < 30:
 
-        for w in WINDOWS
+        st.warning(
 
-    }
-
-
-# ============================================================
-# SELF LEARNING ENGINE
-# ============================================================
-
-def update_window_reward(
-
-        hit
-
-):
-
-    top_rows = get_top_windows(3)
-
-    delta = 0.20 if hit else -0.30
-
-    for w, _ in top_rows:
-
-        old = (
-
-            st.session_state.window_reward[w]
+            "Waiting data..."
 
         )
 
-        new_reward = (
+        st.stop()
 
-                0.80 * old
+    groups = build_groups(
 
-                +
+        numbers
 
-                0.20 * delta
+    )
+
+    actual_group = safe_last(
+
+        groups
+
+    )
+
+    round_id = get_round_id(
+
+        numbers
+
+    )
+
+    return (
+
+        numbers,
+
+        groups,
+
+        actual_group,
+
+        round_id
+
+    )
+
+
+# ============================================================
+# END PART 2
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 3/10
+# CoreEngine
+# ============================================================
+
+class CoreEngine:
+
+    def __init__(self):
+
+        pass
+
+    # ========================================================
+    # UPDATE WINDOW
+    # ========================================================
+
+    def update_window(
+
+            self,
+
+            groups,
+
+            idx
+
+    ):
+
+        for w in WINDOWS:
+
+            if idx - w < 0:
+
+                continue
+
+            pred = groups[idx - w]
+
+            hit = int(
+
+                pred == groups[idx]
+
+            )
+
+            stt = window_state[w]
+
+            stt.results.append(
+
+                hit
+
+            )
+
+            # --------------------------------
+            # profit20
+            # --------------------------------
+
+            tail20 = stt.results[-20:]
+
+            stt.profit20 = sum(
+
+                WIN_GROUP if x else LOSS_GROUP
+
+                for x in tail20
+
+            )
+
+            # --------------------------------
+            # profit50
+            # --------------------------------
+
+            tail50 = stt.results[-50:]
+
+            stt.profit50 = sum(
+
+                WIN_GROUP if x else LOSS_GROUP
+
+                for x in tail50
+
+            )
+
+            # --------------------------------
+            # loss streak
+            # --------------------------------
+
+            loss_streak = 0
+
+            for x in reversed(
+
+                    stt.results
+
+            ):
+
+                if x == 0:
+
+                    loss_streak += 1
+
+                else:
+
+                    break
+
+            stt.loss_streak = loss_streak
+
+            # --------------------------------
+            # score
+            # --------------------------------
+
+            stt.score = (
+
+                    stt.profit20
+
+                    +
+
+                    0.30 * stt.profit50
+
+                    -
+
+                    loss_streak
+
+                    +
+
+                    st.session_state.window_reward[w]
+
+            )
+
+            # blacklist penalty
+
+            if w in st.session_state.blacklist_window:
+
+                stt.score -= 2
+
+            stt.next_group = pred
+
+    # ========================================================
+    # BUILD STATE
+    # ========================================================
+
+    def build_state(
+
+            self,
+
+            groups
+
+    ):
+
+        reset_window_state()
+
+        st.session_state.leader_history.clear()
+
+        for idx in range(
+
+                22,
+
+                len(groups)
+
+        ):
+
+            self.update_window(
+
+                groups,
+
+                idx
+
+            )
+
+            rows = sorted(
+
+                window_state.items(),
+
+                key=lambda x: x[1].score,
+
+                reverse=True
+
+            )
+
+            if len(rows) > 0:
+
+                st.session_state.leader_history.append(
+
+                    rows[0][0]
+
+                )
+
+    # ========================================================
+    # TOP WINDOWS
+    # ========================================================
+
+    def get_top_windows(
+
+            self,
+
+            top_n
+
+    ):
+
+        rows = sorted(
+
+            window_state.items(),
+
+            key=lambda x: x[1].score,
+
+            reverse=True
 
         )
 
-        st.session_state.window_reward[w] = (
+        return rows[:top_n]
+
+    # ========================================================
+    # HEALTH ENGINE
+    # ========================================================
+
+    def get_health(
+
+            self
+
+    ):
+
+        positive20 = sum(
+
+            1
+
+            for w in WINDOWS
+
+            if window_state[w].profit20 > 0
+
+        )
+
+        positive50 = sum(
+
+            1
+
+            for w in WINDOWS
+
+            if window_state[w].profit50 > 0
+
+        )
+
+        total = len(
+
+            WINDOWS
+
+        )
+
+        health20 = positive20 / total
+
+        health50 = positive50 / total
+
+        return (
 
             round(
 
-                new_reward,
+                health20,
+
+                3
+
+            ),
+
+            round(
+
+                health50,
 
                 3
 
@@ -3037,38 +783,1578 @@ def update_window_reward(
 
         )
 
+    # ========================================================
+    # CONSENSUS
+    # ========================================================
+
+    def get_consensus(
+
+            self,
+
+            top_rows
+
+    ):
+
+        preds = [
+
+            row[1].next_group
+
+            for row in top_rows
+
+            if row[1].next_group is not None
+
+        ]
+
+        if len(preds) == 0:
+
+            return None, 0
+
+        group, count = Counter(
+
+            preds
+
+        ).most_common(1)[0]
+
+        consensus = count / len(preds)
+
+        return (
+
+            group,
+
+            round(
+
+                consensus,
+
+                3
+
+            )
+
+        )
+
+    # ========================================================
+    # LEADER CHANGE RATE
+    # ========================================================
+
+    def get_leader_change_rate(
+
+            self
+
+    ):
+
+        history = (
+
+            st.session_state.leader_history
+
+        )
+
+        if len(history) < 2:
+
+            return 0
+
+        changes = 0
+
+        for i in range(
+
+                1,
+
+                len(history)
+
+        ):
+
+            if history[i] != history[i - 1]:
+
+                changes += 1
+
+        return round(
+
+            changes
+
+            /
+
+            (
+
+                len(history)
+
+                - 1
+
+            ),
+
+            3
+
+        )
+
+    # ========================================================
+    # STABILITY
+    # ========================================================
+
+    def get_stability(
+
+            self
+
+    ):
+
+        return round(
+
+            max(
+
+                0,
+
+                1
+
+                -
+
+                self.get_leader_change_rate()
+
+            ),
+
+            3
+
+        )
+
 
 # ============================================================
-# BLACKLIST
+# CORE INSTANCE
 # ============================================================
 
-if "blacklist_window" not in st.session_state:
-
-    st.session_state.blacklist_window = set()
-
-
-if "recover_counter" not in st.session_state:
-
-    st.session_state.recover_counter = {
-
-        w: 0
-
-        for w in WINDOWS
-
-    }
+core = CoreEngine()
 
 
 # ============================================================
-# BLACKLIST ENGINE
+# END PART 3
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 4/10
+# Market Analysis Engine
 # ============================================================
 
-def update_blacklist():
+class MarketEngine:
 
-    for w in WINDOWS:
+    # ========================================================
+    # MOMENTUM
+    # ========================================================
+
+    def get_momentum(
+
+            self,
+
+            top_rows
+
+    ):
+
+        if len(top_rows) == 0:
+
+            return 0
+
+        value = np.mean(
+
+            [
+
+                row[1].profit20
+
+                -
+
+                row[1].profit50
+
+                for row in top_rows
+
+            ]
+
+        )
+
+        return round(
+
+            float(value),
+
+            3
+
+        )
+
+    # ========================================================
+    # ZIGZAG SCORE
+    # ========================================================
+
+    def get_zigzag_score(
+
+            self
+
+    ):
+
+        history = st.session_state.signal_history
+
+        if len(history) < 6:
+
+            return 0
+
+        zigzag = 0
+
+        for i in range(
+
+                2,
+
+                len(history)
+
+        ):
+
+            if (
+
+                    history[i]
+
+                    ==
+
+                    history[i - 2]
+
+                    and
+
+                    history[i]
+
+                    !=
+
+                    history[i - 1]
+
+            ):
+
+                zigzag += 1
+
+        score = zigzag / (
+
+                len(history)
+
+                - 2
+
+        )
+
+        return round(
+
+            score,
+
+            3
+
+        )
+
+    # ========================================================
+    # TREND SCORE
+    # ========================================================
+
+    def get_trend_score(
+
+            self,
+
+            top_rows
+
+    ):
+
+        if len(top_rows) == 0:
+
+            return 0
+
+        p10 = np.mean(
+
+            [
+
+                sum(
+
+                    WIN_GROUP if x else LOSS_GROUP
+
+                    for x in row[1].results[-10:]
+
+                )
+
+                for row in top_rows
+
+            ]
+
+        )
+
+        p20 = np.mean(
+
+            [
+
+                row[1].profit20
+
+                for row in top_rows
+
+            ]
+
+        )
+
+        p50 = np.mean(
+
+            [
+
+                row[1].profit50
+
+                for row in top_rows
+
+            ]
+
+        )
+
+        score = 0
+
+        if p10 > p20:
+
+            score += 0.5
+
+        if p20 > p50:
+
+            score += 0.5
+
+        return round(
+
+            score,
+
+            3
+
+        )
+
+    # ========================================================
+    # SIDEWAY SCORE
+    # ========================================================
+
+    def get_sideway_score(
+
+            self,
+
+            consensus,
+
+            momentum
+
+    ):
+
+        score = 0
+
+        if consensus < 0.80:
+
+            score += 0.5
+
+        if abs(momentum) < 1:
+
+            score += 0.5
+
+        return round(
+
+            score,
+
+            3
+
+        )
+
+    # ========================================================
+    # REGIME
+    # ========================================================
+
+    def get_regime(
+
+            self,
+
+            consensus,
+
+            stability,
+
+            momentum,
+
+            zigzag_score,
+
+            leader_change_rate
+
+    ):
+
+        # --------------------
+        # CHAOS
+        # --------------------
+
+        if zigzag_score > 0.60:
+
+            return "CHAOS"
+
+        if leader_change_rate > 0.50:
+
+            return "CHAOS"
+
+        if consensus < 0.60:
+
+            return "CHAOS"
+
+        if stability < 0.50:
+
+            return "CHAOS"
+
+        # --------------------
+        # TREND
+        # --------------------
+
+        if momentum > 2:
+
+            return "TREND"
+
+        # --------------------
+        # SIDEWAY
+        # --------------------
+
+        return "SIDEWAY"
+
+    # ========================================================
+    # ADAPTIVE TOPN
+    # ========================================================
+
+    def get_top_n(
+
+            self,
+
+            regime
+
+    ):
+
+        if regime == "TREND":
+
+            return TOPN_TREND
+
+        elif regime == "SIDEWAY":
+
+            return TOPN_SIDEWAY
+
+        return TOPN_CHAOS
+
+    # ========================================================
+    # MARKET SCORE
+    # ========================================================
+
+    def get_market_score(
+
+            self,
+
+            health20,
+
+            health50,
+
+            consensus,
+
+            stability,
+
+            trend_score
+
+    ):
+
+        score = (
+
+                0.30 * health20
+
+                +
+
+                0.20 * health50
+
+                +
+
+                0.25 * consensus
+
+                +
+
+                0.15 * stability
+
+                +
+
+                0.10 * trend_score
+
+        )
+
+        return round(
+
+            score,
+
+            3
+
+        )
+
+    # ========================================================
+    # QUALITY
+    # ========================================================
+
+    def get_market_quality(
+
+            self,
+
+            market_score
+
+    ):
+
+        if market_score >= 0.90:
+
+            return "EXCELLENT"
+
+        elif market_score >= 0.80:
+
+            return "GOOD"
+
+        elif market_score >= 0.70:
+
+            return "NORMAL"
+
+        elif market_score >= 0.60:
+
+            return "BAD"
+
+        return "CHAOS"
+
+    # ========================================================
+    # DYNAMIC THRESHOLD
+    # ========================================================
+
+    def get_threshold(
+
+            self,
+
+            regime
+
+    ):
+
+        if regime == "TREND":
+
+            return 0.70
+
+        elif regime == "SIDEWAY":
+
+            return 0.80
+
+        return 0.90
+
+
+# ============================================================
+# MARKET INSTANCE
+# ============================================================
+
+market = MarketEngine()
+
+
+# ============================================================
+# END PART 4
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 5/10
+# Signal Engine
+# ============================================================
+
+class SignalEngine:
+
+    # ========================================================
+    # CONFIDENCE SCORE
+    # ========================================================
+
+    def get_confidence_score(
+
+            self,
+
+            signal
+
+    ):
+
+        score = (
+
+                0.25 * signal.consensus
+
+                +
+
+                0.20 * signal.health20
+
+                +
+
+                0.20 * signal.health50
+
+                +
+
+                0.20 * signal.stability
+
+                +
+
+                0.15 * signal.trend_score
+
+        )
+
+        return round(
+
+            score,
+
+            3
+
+        )
+
+    # ========================================================
+    # CONFIDENCE LEVEL
+    # ========================================================
+
+    def get_confidence_level(
+
+            self,
+
+            score
+
+    ):
+
+        if score >= 0.90:
+
+            return "VERY HIGH"
+
+        elif score >= 0.80:
+
+            return "HIGH"
+
+        elif score >= 0.70:
+
+            return "NORMAL"
+
+        elif score >= 0.60:
+
+            return "LOW"
+
+        return "DANGER"
+
+    # ========================================================
+    # BUILD SIGNAL
+    # ========================================================
+
+    def build_signal(
+
+            self
+
+    ):
+
+        signal = SignalRecord()
+
+        # -----------------------
+        # temporary topn
+        # -----------------------
+
+        top_rows = core.get_top_windows(
+
+            5
+
+        )
+
+        next_group, consensus = (
+
+            core.get_consensus(
+
+                top_rows
+
+            )
+
+        )
+
+        health20, health50 = (
+
+            core.get_health()
+
+        )
+
+        stability = (
+
+            core.get_stability()
+
+        )
+
+        momentum = (
+
+            market.get_momentum(
+
+                top_rows
+
+            )
+
+        )
+
+        leader_change_rate = (
+
+            core.get_leader_change_rate()
+
+        )
+
+        zigzag_score = (
+
+            market.get_zigzag_score()
+
+        )
+
+        trend_score = (
+
+            market.get_trend_score(
+
+                top_rows
+
+            )
+
+        )
+
+        sideway_score = (
+
+            market.get_sideway_score(
+
+                consensus,
+
+                momentum
+
+            )
+
+        )
+
+        regime = (
+
+            market.get_regime(
+
+                consensus,
+
+                stability,
+
+                momentum,
+
+                zigzag_score,
+
+                leader_change_rate
+
+            )
+
+        )
+
+        # -----------------------
+        # adaptive top n
+        # -----------------------
+
+        top_n = market.get_top_n(
+
+            regime
+
+        )
+
+        top_rows = core.get_top_windows(
+
+            top_n
+
+        )
+
+        next_group, consensus = (
+
+            core.get_consensus(
+
+                top_rows
+
+            )
+
+        )
+
+        market_score = (
+
+            market.get_market_score(
+
+                health20,
+
+                health50,
+
+                consensus,
+
+                stability,
+
+                trend_score
+
+            )
+
+        )
+
+        quality = (
+
+            market.get_market_quality(
+
+                market_score
+
+            )
+
+        )
+
+        threshold = (
+
+            market.get_threshold(
+
+                regime
+
+            )
+
+        )
+
+        state = "READY"
+
+        # -----------------------
+        # market filters
+        # -----------------------
+
+        if market_score < threshold:
+
+            state = "WAIT"
+
+        if zigzag_score > 0.60:
+
+            state = "WAIT"
+
+        if leader_change_rate > 0.50:
+
+            state = "WAIT"
+
+        # -----------------------
+        # fill signal
+        # -----------------------
+
+        signal.state = state
+
+        signal.next_group = next_group
+
+        signal.regime = regime
+
+        signal.top_n = top_n
+
+        signal.health20 = health20
+
+        signal.health50 = health50
+
+        signal.consensus = consensus
+
+        signal.stability = stability
+
+        signal.momentum = momentum
+
+        signal.trend_score = trend_score
+
+        signal.zigzag_score = zigzag_score
+
+        signal.leader_change_rate = (
+
+            leader_change_rate
+
+        )
+
+        signal.market_score = market_score
+
+        signal.quality = quality
+
+        signal.threshold = threshold
+
+        return signal
+
+    # ========================================================
+    # UPDATE SIGNAL HISTORY
+    # ========================================================
+
+    def update_signal_history(
+
+            self,
+
+            signal,
+
+            round_id
+
+    ):
 
         if (
 
-                window_state[w]["loss_streak"]
+                signal.next_group is None
+
+        ):
+
+            return
+
+        if (
+
+                round_id
+
+                <=
+
+                st.session_state.signal_round_id
+
+        ):
+
+            return
+
+        st.session_state.signal_round_id = (
+
+            round_id
+
+        )
+
+        st.session_state.signal_history.append(
+
+            signal.next_group
+
+        )
+
+        st.session_state.signal_flip_history.append(
+
+            signal.next_group
+
+        )
+
+
+# ============================================================
+# SIGNAL INSTANCE
+# ============================================================
+
+signal_engine = SignalEngine()
+
+
+# ============================================================
+# END PART 5
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 6/10
+# Trade Engine
+# ============================================================
+
+class TradeEngine:
+
+    # ========================================================
+    # EQUITY CURVE
+    # ========================================================
+
+    def update_equity_curve(self):
+
+        equity = 0
+
+        curve = []
+
+        for x in st.session_state.trade_history:
+
+            equity += x["profit"]
+
+            curve.append(
+
+                round(
+
+                    equity,
+
+                    2
+
+                )
+
+            )
+
+        st.session_state.equity_curve = curve
+
+        st.session_state.equity_history = curve.copy()
+
+    # ========================================================
+    # OPEN TRADE
+    # ========================================================
+
+    def open_trade(
+
+            self,
+
+            signal,
+
+            round_id
+
+    ):
+
+        if signal.state != "READY":
+
+            return
+
+        if signal.next_group is None:
+
+            return
+
+        if st.session_state.pending_trade is not None:
+
+            return
+
+        st.session_state.pending_trade = (
+
+            signal.next_group
+
+        )
+
+        st.session_state.pending_round = (
+
+            round_id
+
+        )
+
+        st.session_state.trade_state = (
+
+            "PENDING"
+
+        )
+
+    # ========================================================
+    # SETTLE TRADE
+    # ========================================================
+
+    def settle_trade(
+
+            self,
+
+            actual_group,
+
+            round_id
+
+    ):
+
+        # no pending trade
+
+        if (
+
+                st.session_state.pending_trade
+
+                is None
+
+        ):
+
+            return
+
+        # same round
+
+        if (
+
+                round_id
+
+                <=
+
+                st.session_state.pending_round
+
+        ):
+
+            return
+
+        # duplicate settle protection
+
+        if (
+
+                round_id
+
+                ==
+
+                st.session_state.last_settle_round
+
+        ):
+
+            return
+
+        predict = (
+
+            st.session_state.pending_trade
+
+        )
+
+        hit = int(
+
+            predict
+
+            ==
+
+            actual_group
+
+        )
+
+        profit = (
+
+            WIN_GROUP
+
+            if hit
+
+            else LOSS_GROUP
+
+        )
+
+        record = {
+
+            "predict":
+
+                predict,
+
+            "actual":
+
+                actual_group,
+
+            "hit":
+
+                hit,
+
+            "profit":
+
+                profit
+
+        }
+
+        st.session_state.trade_history.append(
+
+            record
+
+        )
+
+        self.update_equity_curve()
+
+        st.session_state.pending_trade = None
+
+        st.session_state.trade_state = "IDLE"
+
+        st.session_state.last_settle_round = (
+
+            round_id
+
+        )
+
+    # ========================================================
+    # TOTAL PROFIT
+    # ========================================================
+
+    def get_total_profit(
+
+            self
+
+    ):
+
+        return round(
+
+            sum(
+
+                x["profit"]
+
+                for x in st.session_state.trade_history
+
+            ),
+
+            2
+
+        )
+
+    # ========================================================
+    # PROFIT10
+    # ========================================================
+
+    def get_profit10(
+
+            self
+
+    ):
+
+        trades = (
+
+            st.session_state.trade_history[-10:]
+
+        )
+
+        return round(
+
+            sum(
+
+                x["profit"]
+
+                for x in trades
+
+            ),
+
+            2
+
+        )
+
+    # ========================================================
+    # PROFIT20
+    # ========================================================
+
+    def get_profit20(
+
+            self
+
+    ):
+
+        trades = (
+
+            st.session_state.trade_history[-20:]
+
+        )
+
+        return round(
+
+            sum(
+
+                x["profit"]
+
+                for x in trades
+
+            ),
+
+            2
+
+        )
+
+    # ========================================================
+    # PROFIT50
+    # ========================================================
+
+    def get_profit50(
+
+            self
+
+    ):
+
+        trades = (
+
+            st.session_state.trade_history[-50:]
+
+        )
+
+        return round(
+
+            sum(
+
+                x["profit"]
+
+                for x in trades
+
+            ),
+
+            2
+
+        )
+
+    # ========================================================
+    # WINRATE
+    # ========================================================
+
+    def get_winrate(
+
+            self,
+
+            n=20
+
+    ):
+
+        trades = (
+
+            st.session_state.trade_history[-n:]
+
+        )
+
+        if len(
+
+                trades
+
+        ) == 0:
+
+            return 0
+
+        wr = (
+
+                sum(
+
+                    x["hit"]
+
+                    for x in trades
+
+                )
+
+                /
+
+                len(trades)
+
+        )
+
+        return round(
+
+            wr,
+
+            3
+
+        )
+
+    # ========================================================
+    # LOSS STREAK
+    # ========================================================
+
+    def get_loss_streak(
+
+            self
+
+    ):
+
+        streak = 0
+
+        trades = (
+
+            st.session_state.trade_history
+
+        )
+
+        for x in reversed(
+
+                trades
+
+        ):
+
+            if x["hit"] == 0:
+
+                streak += 1
+
+            else:
+
+                break
+
+        return streak
+
+    # ========================================================
+    # DRAWDOWN
+    # ========================================================
+
+    def get_drawdown(
+
+            self
+
+    ):
+
+        equity = 0
+
+        peak = 0
+
+        dd = 0
+
+        for x in st.session_state.trade_history:
+
+            equity += x["profit"]
+
+            peak = max(
+
+                peak,
+
+                equity
+
+            )
+
+            dd = min(
+
+                dd,
+
+                equity - peak
+
+            )
+
+        return round(
+
+            dd,
+
+            2
+
+        )
+
+    # ========================================================
+    # SNAPSHOT
+    # ========================================================
+
+    def snapshot(
+
+            self
+
+    ):
+
+        return {
+
+            "trade_state":
+
+                st.session_state.trade_state,
+
+            "profit10":
+
+                self.get_profit10(),
+
+            "profit20":
+
+                self.get_profit20(),
+
+            "profit50":
+
+                self.get_profit50(),
+
+            "total_profit":
+
+                self.get_total_profit(),
+
+            "wr20":
+
+                self.get_winrate(
+
+                    20
+
+                ),
+
+            "drawdown":
+
+                self.get_drawdown(),
+
+            "pending_trade":
+
+                st.session_state.pending_trade
+
+        }
+
+
+# ============================================================
+# TRADE INSTANCE
+# ============================================================
+
+trade_engine = TradeEngine()
+
+
+# ============================================================
+# STATE MACHINE
+# ============================================================
+
+"""
+IDLE
+ ↓
+OPEN
+ ↓
+PENDING
+ ↓
+new round
+ ↓
+SETTLE
+ ↓
+IDLE
+"""
+
+
+# ============================================================
+# END PART 6
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 7/10
+# Protection Engine
+# ============================================================
+
+class ProtectionEngine:
+
+    # ========================================================
+    # FLIP RATE
+    # ========================================================
+
+    def get_flip_rate(
+
+            self
+
+    ):
+
+        history = (
+
+            st.session_state.signal_flip_history
+
+        )
+
+        if len(history) < 2:
+
+            return 0
+
+        flip = 0
+
+        for i in range(
+
+                1,
+
+                len(history)
+
+        ):
+
+            if history[i] != history[i - 1]:
+
+                flip += 1
+
+        return round(
+
+            flip
+
+            /
+
+            (
+
+                len(history)
+
+                - 1
+
+            ),
+
+            3
+
+        )
+
+    # ========================================================
+    # PROFIT PROTECTION
+    # ========================================================
+
+    def profit_protection(
+
+            self
+
+    ):
+
+        if (
+
+                trade_engine.get_profit10()
+
+                <=
+
+                PROFIT10_STOP
+
+        ):
+
+            return True
+
+        if (
+
+                trade_engine.get_winrate(20)
+
+                <=
+
+                WR20_STOP
+
+        ):
+
+            return True
+
+        if (
+
+                trade_engine.get_drawdown()
+
+                <=
+
+                DRAWDOWN_STOP
+
+        ):
+
+            return True
+
+        if (
+
+                self.get_flip_rate()
+
+                >=
+
+                FLIPRATE_STOP
+
+        ):
+
+            return True
+
+        return False
+
+    # ========================================================
+    # COOLDOWN ENGINE
+    # ========================================================
+
+    def cooldown_engine(
+
+            self
+
+    ):
+
+        if (
+
+                trade_engine.get_loss_streak()
 
                 >=
 
@@ -3076,28 +2362,15 @@ def update_blacklist():
 
         ):
 
-            st.session_state.blacklist_window.add(
+            st.session_state.cooldown_counter = (
 
-                w
+                COOLDOWN_ROUNDS
 
             )
 
-
-# ============================================================
-# RECOVERY ENGINE
-# ============================================================
-
-def recovery_window():
-
-    for w in WINDOWS:
-
-        if w not in st.session_state.blacklist_window:
-
-            continue
-
         if (
 
-                window_state[w]["profit20"]
+                st.session_state.cooldown_counter
 
                 >
 
@@ -3105,394 +2378,1315 @@ def recovery_window():
 
         ):
 
-            st.session_state.recover_counter[w] += 1
+            st.session_state.cooldown_counter -= 1
 
-        else:
+            return True
 
-            st.session_state.recover_counter[w] = 0
+        return False
 
-        if (
+    # ========================================================
+    # RECOVERY ENGINE
+    # ========================================================
 
-                st.session_state.recover_counter[w]
+    def recovery_engine(
 
-                >=
+            self,
 
-                5
+            signal,
 
-        ):
+            confidence_score
 
-            st.session_state.blacklist_window.remove(
+    ):
 
-                w
+        if signal.health20 < 0.80:
+
+            return False
+
+        if confidence_score < 0.80:
+
+            return False
+
+        if self.get_flip_rate() > 0.30:
+
+            return False
+
+        if trade_engine.get_winrate(20) < 0.55:
+
+            return False
+
+        return True
+
+    # ========================================================
+    # WINDOW BLACKLIST
+    # ========================================================
+
+    def update_blacklist(
+
+            self
+
+    ):
+
+        for w in WINDOWS:
+
+            if (
+
+                    window_state[w].loss_streak
+
+                    >=
+
+                    3
+
+            ):
+
+                st.session_state.blacklist_window.add(
+
+                    w
+
+                )
+
+    # ========================================================
+    # RECOVERY WINDOW
+    # ========================================================
+
+    def recovery_window(
+
+            self
+
+    ):
+
+        for w in WINDOWS:
+
+            if (
+
+                    w
+
+                    not in
+
+                    st.session_state.blacklist_window
+
+            ):
+
+                continue
+
+            if (
+
+                    window_state[w].profit20
+
+                    >
+
+                    0
+
+            ):
+
+                st.session_state.recover_counter[w] += 1
+
+            else:
+
+                st.session_state.recover_counter[w] = 0
+
+            if (
+
+                    st.session_state.recover_counter[w]
+
+                    >=
+
+                    5
+
+            ):
+
+                st.session_state.blacklist_window.remove(
+
+                    w
+
+                )
+
+                st.session_state.recover_counter[w] = 0
+
+    # ========================================================
+    # APPLY REWARD
+    # ========================================================
+
+    def update_reward(
+
+            self,
+
+            hit
+
+    ):
+
+        top_rows = core.get_top_windows(
+
+            3
+
+        )
+
+        delta = 0.20 if hit else -0.30
+
+        for w, _ in top_rows:
+
+            old = (
+
+                st.session_state.window_reward[w]
 
             )
 
-            st.session_state.recover_counter[w] = 0
+            reward = (
+
+                    0.80 * old
+
+                    +
+
+                    0.20 * delta
+
+            )
+
+            st.session_state.window_reward[w] = round(
+
+                reward,
+
+                3
+
+            )
+
+    # ========================================================
+    # ADAPTIVE READY WAIT
+    # ========================================================
+
+    def adaptive_ready_wait(
+
+            self,
+
+            signal,
+
+            confidence_score
+
+    ):
+
+        # ----------------
+        # protection
+        # ----------------
+
+        if self.profit_protection():
+
+            return "WAIT"
+
+        # ----------------
+        # cooldown
+        # ----------------
+
+        if self.cooldown_engine():
+
+            return "WAIT"
+
+        # ----------------
+        # flip rate
+        # ----------------
+
+        if self.get_flip_rate() > 0.60:
+
+            return "WAIT"
+
+        # ----------------
+        # confidence
+        # ----------------
+
+        if confidence_score < 0.70:
+
+            return "WAIT"
+
+        # ----------------
+        # market state
+        # ----------------
+
+        if signal.state != "READY":
+
+            return "WAIT"
+
+        # ----------------
+        # recovery override
+        # ----------------
+
+        if self.recovery_engine(
+
+                signal,
+
+                confidence_score
+
+        ):
+
+            return "READY"
+
+        return "READY"
 
 
 # ============================================================
-# APPLY REWARD
+# PROTECTION INSTANCE
 # ============================================================
 
-def apply_reward_score():
+protection_engine = ProtectionEngine()
 
-    for w in WINDOWS:
 
-        reward = (
+# ============================================================
+# END PART 7
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 8/10
+# Persistence Engine
+# ============================================================
 
-            st.session_state.window_reward[w]
+class PersistenceEngine:
+
+    # ========================================================
+    # UPDATE STATE HISTORY
+    # ========================================================
+
+    def update_state_history(
+
+            self,
+
+            state
+
+    ):
+
+        st.session_state.state_history.append(
+
+            state
 
         )
 
-        penalty = 0
+    # ========================================================
+    # UPDATE EQUITY HISTORY
+    # ========================================================
 
-        if w in st.session_state.blacklist_window:
+    def update_equity_history(
 
-            penalty = -2
+            self
 
-        window_state[w]["score"] += (
+    ):
 
-                reward
+        st.session_state.equity_history = (
 
-                +
-
-                penalty
+            st.session_state.equity_curve.copy()
 
         )
 
+    # ========================================================
+    # ROUND MANAGER
+    # ========================================================
+
+    def is_new_round(
+
+            self,
+
+            round_id
+
+    ):
+
+        if (
+
+                round_id
+
+                >
+
+                st.session_state.last_round_id
+
+        ):
+
+            st.session_state.last_round_id = (
+
+                round_id
+
+            )
+
+            return True
+
+        return False
+
+    # ========================================================
+    # SIGNAL HISTORY
+    # ========================================================
+
+    def update_signal_history(
+
+            self,
+
+            signal,
+
+            round_id
+
+    ):
+
+        if signal.next_group is None:
+
+            return
+
+        if (
+
+                round_id
+
+                <=
+
+                st.session_state.signal_round_id
+
+        ):
+
+            return
+
+        st.session_state.signal_round_id = (
+
+            round_id
+
+        )
+
+        st.session_state.signal_history.append(
+
+            signal.next_group
+
+        )
+
+        st.session_state.signal_flip_history.append(
+
+            signal.next_group
+
+        )
+
+    # ========================================================
+    # SNAPSHOT
+    # ========================================================
+
+    def snapshot(
+
+            self,
+
+            signal,
+
+            confidence_score
+
+    ):
+
+        return {
+
+            "trade_count":
+
+                len(
+
+                    st.session_state.trade_history
+
+                ),
+
+            "trade_state":
+
+                st.session_state.trade_state,
+
+            "pending_trade":
+
+                st.session_state.pending_trade,
+
+            "equity":
+
+                trade_engine.get_total_profit(),
+
+            "profit10":
+
+                trade_engine.get_profit10(),
+
+            "profit20":
+
+                trade_engine.get_profit20(),
+
+            "profit50":
+
+                trade_engine.get_profit50(),
+
+            "wr20":
+
+                trade_engine.get_winrate(
+
+                    20
+
+                ),
+
+            "drawdown":
+
+                trade_engine.get_drawdown(),
+
+            "flip_rate":
+
+                protection_engine.get_flip_rate(),
+
+            "cooldown":
+
+                st.session_state.cooldown_counter,
+
+            "confidence":
+
+                confidence_score,
+
+            "signal_state":
+
+                signal.state,
+
+            "regime":
+
+                signal.regime
+
+        }
+
+    # ========================================================
+    # SAVE SNAPSHOT
+    # ========================================================
+
+    def save_snapshot(
+
+            self,
+
+            signal,
+
+            confidence_score
+
+    ):
+
+        if "snapshot_history" not in st.session_state:
+
+            st.session_state.snapshot_history = []
+
+        st.session_state.snapshot_history.append(
+
+            self.snapshot(
+
+                signal,
+
+                confidence_score
+
+            )
+
+        )
+
+    # ========================================================
+    # APPLY SELF LEARNING
+    # ========================================================
+
+    def apply_self_learning(
+
+            self
+
+    ):
+
+        protection_engine.update_blacklist()
+
+        protection_engine.recovery_window()
+
+    # ========================================================
+    # RESET SESSION
+    # ========================================================
+
+    def reset_runtime(
+
+            self
+
+    ):
+
+        st.session_state.pending_trade = None
+
+        st.session_state.pending_round = 0
+
+        st.session_state.trade_state = "IDLE"
+
+    # ========================================================
+    # FULL UPDATE
+    # ========================================================
+
+    def update(
+
+            self,
+
+            signal,
+
+            confidence_score,
+
+            round_id
+
+    ):
+
+        self.update_state_history(
+
+            signal.state
+
+        )
+
+        self.update_equity_history()
+
+        self.update_signal_history(
+
+            signal,
+
+            round_id
+
+        )
+
+        self.save_snapshot(
+
+            signal,
+
+            confidence_score
+
+        )
+
+        self.apply_self_learning()
+
 
 # ============================================================
-# EQUITY HISTORY
+# PERSISTENCE INSTANCE
 # ============================================================
 
-if "equity_history" not in st.session_state:
-
-    st.session_state.equity_history = []
-
-
-def update_equity_history():
-
-    st.session_state.equity_history = (
-
-        st.session_state.equity_curve.copy()
-
-    )
+persistence_engine = PersistenceEngine()
 
 
 # ============================================================
-# PERSISTENCE SNAPSHOT
+# END PART 8
+# ============================================================
+# ============================================================
+# app_v42.py
+# PART 9/10
+# Dashboard
 # ============================================================
 
-def persistence_snapshot():
+class Dashboard:
 
-    snapshot = {
+    # ========================================================
+    # HEADER
+    # ========================================================
 
-        "trade_count":
+    def render_header(
 
-            len(
+            self
 
-                st.session_state.trade_history
+    ):
 
-            ),
+        st.title(
 
-        "equity":
+            "🚀 V42 Adaptive AI Engine"
 
-            get_total_profit(),
+        )
 
-        "drawdown":
+    # ========================================================
+    # SIGNAL PANEL
+    # ========================================================
 
-            get_drawdown(),
+    def render_signal(
 
-        "cooldown":
+            self,
+
+            signal,
+
+            confidence_score
+
+    ):
+
+        color = "#00aa00"
+
+        if signal.state != "READY":
+
+            color = "#555555"
+
+        st.markdown(
+
+            f"""
+<div style="
+background:{color};
+padding:20px;
+border-radius:15px;
+text-align:center;
+color:white;
+font-size:28px;
+font-weight:bold;
+">
+
+{signal.state}<br>
+
+NEXT GROUP = {signal.next_group}<br>
+
+CONF = {confidence_score:.2f}
+
+</div>
+""",
+
+            unsafe_allow_html=True
+
+        )
+
+    # ========================================================
+    # MARKET PANEL
+    # ========================================================
+
+    def render_market(
+
+            self,
+
+            signal
+
+    ):
+
+        c1, c2, c3, c4 = st.columns(
+
+            4
+
+        )
+
+        c1.metric(
+
+            "Regime",
+
+            signal.regime
+
+        )
+
+        c2.metric(
+
+            "MarketScore",
+
+            round(
+
+                signal.market_score,
+
+                3
+
+            )
+
+        )
+
+        c3.metric(
+
+            "Consensus",
+
+            round(
+
+                signal.consensus,
+
+                3
+
+            )
+
+        )
+
+        c4.metric(
+
+            "Quality",
+
+            signal.quality
+
+        )
+
+    # ========================================================
+    # HEALTH PANEL
+    # ========================================================
+
+    def render_health(
+
+            self,
+
+            signal
+
+    ):
+
+        c1, c2, c3, c4 = st.columns(
+
+            4
+
+        )
+
+        c1.metric(
+
+            "Health20",
+
+            signal.health20
+
+        )
+
+        c2.metric(
+
+            "Health50",
+
+            signal.health50
+
+        )
+
+        c3.metric(
+
+            "Stability",
+
+            signal.stability
+
+        )
+
+        c4.metric(
+
+            "Momentum",
+
+            signal.momentum
+
+        )
+
+    # ========================================================
+    # PROFIT PANEL
+    # ========================================================
+
+    def render_profit(
+
+            self
+
+    ):
+
+        snap = trade_engine.snapshot()
+
+        c1, c2, c3, c4 = st.columns(
+
+            4
+
+        )
+
+        c1.metric(
+
+            "Total Profit",
+
+            snap["total_profit"]
+
+        )
+
+        c2.metric(
+
+            "Profit20",
+
+            snap["profit20"]
+
+        )
+
+        c3.metric(
+
+            "WR20",
+
+            snap["wr20"]
+
+        )
+
+        c4.metric(
+
+            "Drawdown",
+
+            snap["drawdown"]
+
+        )
+
+    # ========================================================
+    # RISK PANEL
+    # ========================================================
+
+    def render_risk(
+
+            self
+
+    ):
+
+        c1, c2, c3 = st.columns(
+
+            3
+
+        )
+
+        c1.metric(
+
+            "FlipRate",
+
+            protection_engine.get_flip_rate()
+
+        )
+
+        c2.metric(
+
+            "LossStreak",
+
+            trade_engine.get_loss_streak()
+
+        )
+
+        c3.metric(
+
+            "Cooldown",
 
             st.session_state.cooldown_counter
 
-    }
+        )
 
-    return snapshot
+    # ========================================================
+    # TOP WINDOWS
+    # ========================================================
 
+    def render_top_windows(
 
-# ============================================================
-# BLACKLIST TABLE
-# ============================================================
+            self,
 
-def render_blacklist():
+            signal
 
-    st.subheader(
+    ):
 
-        "Blacklist"
+        rows = core.get_top_windows(
 
-    )
+            signal.top_n
 
-    rows = []
+        )
 
-    for w in WINDOWS:
+        data = []
 
-        rows.append(
+        for w, obj in rows:
 
-            {
+            data.append(
 
-                "window":
+                {
 
-                    w,
+                    "Window": w,
 
-                "blacklisted":
+                    "Score": round(
 
-                    w in st.session_state.blacklist_window,
+                        obj.score,
 
-                "reward":
-
-                    round(
-
-                        st.session_state.window_reward[w],
-
-                        3
+                        2
 
                     ),
 
-                "recover_counter":
+                    "Profit20": round(
 
-                    st.session_state.recover_counter[w]
+                        obj.profit20,
+
+                        2
+
+                    ),
+
+                    "Profit50": round(
+
+                        obj.profit50,
+
+                        2
+
+                    ),
+
+                    "LossStreak": obj.loss_streak,
+
+                    "Next": obj.next_group
+
+                }
+
+            )
+
+        st.subheader(
+
+            "Top Windows"
+
+        )
+
+        st.dataframe(
+
+            pd.DataFrame(
+
+                data
+
+            ),
+
+            use_container_width=True
+
+        )
+
+    # ========================================================
+    # TRADE HISTORY
+    # ========================================================
+
+    def render_trade_history(
+
+            self
+
+    ):
+
+        st.subheader(
+
+            "Trade History"
+
+        )
+
+        if len(
+
+                st.session_state.trade_history
+
+        ) == 0:
+
+            st.info(
+
+                "No trades"
+
+            )
+
+            return
+
+        df = pd.DataFrame(
+
+            st.session_state.trade_history
+
+        )
+
+        st.dataframe(
+
+            df.tail(
+
+                50
+
+            ),
+
+            use_container_width=True
+
+        )
+
+    # ========================================================
+    # EQUITY CURVE
+    # ========================================================
+
+    def render_equity(
+
+            self
+
+    ):
+
+        st.subheader(
+
+            "Equity Curve"
+
+        )
+
+        if len(
+
+                st.session_state.equity_curve
+
+        ) == 0:
+
+            return
+
+        df = pd.DataFrame(
+
+            {
+
+                "equity":
+
+                    st.session_state.equity_curve
 
             }
 
         )
 
-    df = pd.DataFrame(
+        st.line_chart(
 
-        rows
+            df
 
-    )
+        )
 
-    st.dataframe(
+    # ========================================================
+    # BLACKLIST
+    # ========================================================
 
-        df,
+    def render_blacklist(
 
-        use_container_width=True
+            self
 
-    )
+    ):
+
+        st.subheader(
+
+            "Blacklist"
+
+        )
+
+        st.write(
+
+            list(
+
+                st.session_state.blacklist_window
+
+            )
+
+        )
+
+    # ========================================================
+    # DEBUG
+    # ========================================================
+
+    def render_debug(
+
+            self,
+
+            signal,
+
+            confidence_score
+
+    ):
+
+        with st.expander(
+
+                "Debug"
+
+        ):
+
+            st.json(
+
+                persistence_engine.snapshot(
+
+                    signal,
+
+                    confidence_score
+
+                )
+
+            )
 
 
 # ============================================================
-# STATE HISTORY
+# DASHBOARD INSTANCE
 # ============================================================
 
-if "state_history" not in st.session_state:
-
-    st.session_state.state_history = deque(
-
-        maxlen=200
-
-    )
-
-
-def update_state_history(
-
-        trade_signal
-
-):
-
-    st.session_state.state_history.append(
-
-        trade_signal["state"]
-
-    )
+dashboard = Dashboard()
 
 
 # ============================================================
 # END PART 9
 # ============================================================
-
 # ============================================================
-# app_v40.py
+# app_v42.py
 # PART 10/10
-# Final Wiring + Timeline + Footer
+# Engine Manager + Main Pipeline
 # ============================================================
 
+class EngineManager:
+
+    def run(self):
+
+        # ====================================================
+        # LOAD DATA
+        # ====================================================
+
+        numbers, groups, actual_group, round_id = (
+
+            load_data()
+
+        )
+
+        # ====================================================
+        # CORE UPDATE
+        # ====================================================
+
+        core.build_state(
+
+            groups
+
+        )
+
+        # ====================================================
+        # BUILD SIGNAL
+        # ====================================================
+
+        signal = signal_engine.build_signal()
+
+        confidence_score = (
+
+            signal_engine.get_confidence_score(
+
+                signal
+
+            )
+
+        )
+
+        confidence_level = (
+
+            signal_engine.get_confidence_level(
+
+                confidence_score
+
+            )
+
+        )
+
+        # ====================================================
+        # PROTECTION LAYER
+        # ====================================================
+
+        signal.state = (
+
+            protection_engine.adaptive_ready_wait(
+
+                signal,
+
+                confidence_score
+
+            )
+
+        )
+
+        # ====================================================
+        # NEW ROUND
+        # ====================================================
+
+        if persistence_engine.is_new_round(
+
+                round_id
+
+        ):
+
+            # --------------------------------------
+            # SETTLE OLD TRADE
+            # --------------------------------------
+
+            trade_engine.settle_trade(
+
+                actual_group,
+
+                round_id
+
+            )
+
+            # --------------------------------------
+            # OPEN NEW TRADE
+            # --------------------------------------
+
+            trade_engine.open_trade(
+
+                signal,
+
+                round_id
+
+            )
+
+            # --------------------------------------
+            # UPDATE SIGNAL HISTORY
+            # --------------------------------------
+
+            signal_engine.update_signal_history(
+
+                signal,
+
+                round_id
+
+            )
+
+        # ====================================================
+        # PERSISTENCE
+        # ====================================================
+
+        persistence_engine.update(
+
+            signal,
+
+            confidence_score,
+
+            round_id
+
+        )
+
+        # ====================================================
+        # DASHBOARD
+        # ====================================================
+
+        dashboard.render_header()
+
+        dashboard.render_signal(
+
+            signal,
+
+            confidence_score
+
+        )
+
+        dashboard.render_market(
+
+            signal
+
+        )
+
+        dashboard.render_health(
+
+            signal
+
+        )
+
+        dashboard.render_profit()
+
+        dashboard.render_risk()
+
+        dashboard.render_top_windows(
+
+            signal
+
+        )
+
+        dashboard.render_trade_history()
+
+        dashboard.render_equity()
+
+        dashboard.render_blacklist()
+
+        dashboard.render_debug(
+
+            signal,
+
+            confidence_score
+
+        )
+
+        # ====================================================
+        # FOOTER
+        # ====================================================
+
+        st.caption(
+
+            f"""
+V42 Adaptive AI Engine
+
+Round : {round_id}
+
+Confidence : {confidence_level}
+
+Trade State : {st.session_state.trade_state}
+
+Pending Trade : {st.session_state.pending_trade}
+
+Regime : {signal.regime}
+"""
+        )
+
+
 # ============================================================
-# APPLY SELF LEARNING
+# MANAGER INSTANCE
 # ============================================================
 
-update_blacklist()
-
-recovery_window()
-
-apply_reward_score()
-
-update_equity_history()
-
-update_state_history(
-
-    trade_signal
-
-)
+manager = EngineManager()
 
 
 # ============================================================
-# BLACKLIST TABLE
+# MAIN
 # ============================================================
 
-render_blacklist()
+try:
 
+    manager.run()
 
-# ============================================================
-# STATE TIMELINE
-# ============================================================
+except Exception as e:
 
-st.subheader(
+    st.error(
 
-    "State Timeline"
-
-)
-
-if len(
-
-        st.session_state.state_history
-
-) > 0:
-
-    state_df = pd.DataFrame(
-
-        {
-
-            "state":
-
-                list(
-
-                    st.session_state.state_history
-
-                )
-
-        }
+        f"Engine Error : {e}"
 
     )
 
-    state_df["value"] = state_df["state"].apply(
+    import traceback
 
-        lambda x:
+    st.code(
 
-        1
-
-        if x == "READY"
-
-        else 0
-
-    )
-
-    st.line_chart(
-
-        state_df["value"]
-
-    )
-
-
-# ============================================================
-# EQUITY TIMELINE
-# ============================================================
-
-st.subheader(
-
-    "Equity Timeline"
-
-)
-
-if len(
-
-        st.session_state.equity_history
-
-) > 0:
-
-    eq_df = pd.DataFrame(
-
-        {
-
-            "equity":
-
-                st.session_state.equity_history
-
-        }
-
-    )
-
-    st.line_chart(
-
-        eq_df
-
-    )
-
-
-# ============================================================
-# SNAPSHOT
-# ============================================================
-
-snapshot = persistence_snapshot()
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric(
-
-    "Trades",
-
-    snapshot["trade_count"]
-
-)
-
-c2.metric(
-
-    "Equity",
-
-    snapshot["equity"]
-
-)
-
-c3.metric(
-
-    "Drawdown",
-
-    snapshot["drawdown"]
-
-)
-
-c4.metric(
-
-    "Cooldown",
-
-    snapshot["cooldown"]
-
-)
-
-
-# ============================================================
-# DEBUG
-# ============================================================
-
-with st.expander(
-
-        "Debug"
-
-):
-
-    st.write(
-
-        "Signal"
-
-    )
-
-    st.json(
-
-        signal
-
-    )
-
-    st.write(
-
-        "Trade Signal"
-
-    )
-
-    st.json(
-
-        trade_signal
+        traceback.format_exc()
 
     )
 
@@ -3507,80 +3701,9 @@ time.sleep(
 
 )
 
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.markdown(
-
-    """
-
-    ---
-
-    ### V40 Stable Engine
-
-    Adaptive TopN
-
-    Trend / Sideway / Chaos Detect
-
-    Trade State Machine
-
-    Profit Engine
-
-    Drawdown Engine
-
-    Protection Engine
-
-    Cooldown Engine
-
-    Self Learning
-
-    Persistence
-
-    Dashboard
-
-    Version V40 Stable
-
-    """
-
-)
+st.rerun()
 
 
 # ============================================================
 # END OF FILE
 # ============================================================
-
-
-def open_trade(signal, round_id):
-    if signal["state"] != "READY":
-        return
-    if signal["next_group"] is None:
-        return
-    if st.session_state.pending_trade is not None:
-        return
-    st.session_state.pending_trade = signal["next_group"]
-    st.session_state.pending_round = round_id
-    st.session_state.trade_state = "PENDING"
-
-def settle_trade(actual_group, round_id):
-    if st.session_state.pending_trade is None:
-        return
-    if round_id <= st.session_state.pending_round:
-        return
-    if round_id == st.session_state.last_settle_round:
-        return
-
-    predict = st.session_state.pending_trade
-    hit = int(predict == actual_group)
-    profit = WIN_GROUP if hit else LOSS_GROUP
-
-    st.session_state.trade_history.append(
-        {"predict":predict,"actual":actual_group,"hit":hit,"profit":profit}
-    )
-
-    update_equity_curve()
-
-    st.session_state.pending_trade = None
-    st.session_state.trade_state = "IDLE"
-    st.session_state.last_settle_round = round_id
