@@ -28,6 +28,7 @@ group_history = deque(maxlen=20)
 
 signal_history = deque(maxlen=20)
 trade_history = []
+blacklist_leader=set()
 
 DEFAULT_SIGNAL = {
     "state":"WAIT",
@@ -448,21 +449,21 @@ def get_basic_snapshot():
 
 def get_zigzag_score():
 
-    if len(group_history) < 6:
+    if len(signal_history) < 6:
         return 0
 
     zigzag_count = 0
 
-    for i in range(2, len(group_history)):
+    for i in range(2, len(signal_history)):
 
         if (
-            group_history[i] == group_history[i-2]
+            signal_history[i] == group_history[i-2]
             and
-            group_history[i] != group_history[i-1]
+            signal_history[i] != group_history[i-1]
         ):
             zigzag_count += 1
 
-    score = zigzag_count / (len(group_history)-2)
+    score = zigzag_count / (len(signal_history)-2)
 
     return score
 
@@ -836,6 +837,8 @@ for g in groups[-20:]:
 build_state(groups)
 
 signal = get_next_signal()
+if signal["next_group"] is not None:
+    signal_history.append(signal["next_group"])
 
 # =====================================================
 # TITLE
