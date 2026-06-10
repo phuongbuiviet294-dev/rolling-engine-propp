@@ -110,7 +110,7 @@ DEFAULT_SCALAR = {
     
     "last_length": 0,
 
-    "last_number": None,
+    
 
     "cooldown_counter": 0
 
@@ -448,11 +448,16 @@ def get_round_id(
 # NEW ROUND DETECT
 # ============================================================
 
-def is_new_round(
+def legacy_is_new_round(
 
         numbers
 
 ):
+    return False
+
+# legacy disabled
+
+def _legacy_disabled(
 
     round_id = get_round_id(
 
@@ -1674,17 +1679,15 @@ class SignalEngine:
 
         
 
-        st.session_state.signal_history.append(
+        if round_id > st.session_state.last_length:
 
-            signal.next_group
+            st.session_state.signal_history.append(
+                signal.next_group
+            )
 
-        )
-
-        st.session_state.signal_flip_history.append(
-
-            signal.next_group
-
-        )
+            st.session_state.signal_flip_history.append(
+                signal.next_group
+            )
 
 
 # ============================================================
@@ -1761,7 +1764,7 @@ class TradeEngine:
             return
 
         st.session_state.pending_trade = signal.next_group
-        st.session_state.pending_round = len(load_numbers())
+        st.session_state.pending_round = round_id
 
         st.session_state.trade_state = (
 
@@ -2636,13 +2639,17 @@ class PersistenceEngine:
     # ROUND MANAGER
     # ========================================================
 
-    def is_new_round(
+    def legacy_is_new_round(
 
             self,
 
             round_id
 
     ):
+        return False
+
+    # legacy disabled
+    def _legacy_disabled(
 
         if (
 
@@ -2688,17 +2695,15 @@ class PersistenceEngine:
 
         
 
-        st.session_state.signal_history.append(
+        if round_id > st.session_state.last_length:
 
-            signal.next_group
+            st.session_state.signal_history.append(
+                signal.next_group
+            )
 
-        )
-
-        st.session_state.signal_flip_history.append(
-
-            signal.next_group
-
-        )
+            st.session_state.signal_flip_history.append(
+                signal.next_group
+            )
 
     # ========================================================
     # SNAPSHOT
@@ -3482,8 +3487,6 @@ class EngineManager:
 
         current_number = numbers[-1]
 
-        if st.session_state.last_number is None:
-            st.session_state.last_number = current_number
 
         current_length = len(numbers)
 
@@ -3494,12 +3497,11 @@ class EngineManager:
 
             trade_engine.settle_trade(
                 actual_group,
-                current_number
+                current_length
             )
 
             st.session_state.last_length = current_length
 
-        st.session_state.last_number = current_number
 
         trade_engine.open_trade(
             signal,
@@ -3642,34 +3644,27 @@ st.rerun()
 # ============================================================
 
 
-# ===============================
-# V43_DEBUG_ENGINE
-# ===============================
-try:
-    st.subheader("V43 State Debug")
 
-    st.json({
-        "trade_state": st.session_state.get("trade_state"),
-        "pending_trade": st.session_state.get("pending_trade"),
-        "pending_number": st.session_state.get("pending_number"),
-        "last_number": st.session_state.get("last_number"),
-        "trade_count": len(st.session_state.get("trade_history", []))
-    })
 
-except Exception:
-    pass
+
+
+
+
+
 
 
 # ======================
-# V44 CLEAN REBUILD FULL
+# V45.1 TRADE ENGINE SYNC
 # ======================
 
 # ======================
-# V44.2 STABLE
+# V45.2 FINAL CLEANUP
 # ======================
 
+# ======================
+# V45.3 FINAL SIGNAL FIX
+# ======================
 
 # ======================
-# V44.4 STABLE
-# TradeEngine/MainLoop rebuild marker
+# V46 CLEAN FINAL
 # ======================
