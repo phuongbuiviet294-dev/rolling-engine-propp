@@ -104,6 +104,8 @@ DEFAULT_SCALAR = {
 
     "last_open_round": 0,
 
+    "last_number": None,
+
     "cooldown_counter": 0
 
 }
