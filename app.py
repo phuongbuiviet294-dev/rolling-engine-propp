@@ -1335,7 +1335,7 @@ def update_equity_curve():
 # TRADE STATE MACHINE
 # ============================================================
 
-def trade_state_machine(
+def old_trade_state_machine(
 
         signal,
 
@@ -2754,7 +2754,11 @@ round_id = len(numbers)
 if "last_round_id" not in st.session_state:
     st.session_state.last_round_id = 0
 
-if is_new_round(numbers):
+if "last_round_id" not in st.session_state:
+    st.session_state.last_round_id = 0
+
+if round_id > st.session_state.last_round_id:
+    st.session_state.last_round_id = round_id
     settle_trade(actual_group, round_id)
     open_trade(signal, round_id)
 
@@ -2953,7 +2957,7 @@ def get_round_id(
 # DUPLICATE ROUND PROTECTION
 # ============================================================
 
-def is_new_round(
+def old_is_new_round(
 
         numbers
 
