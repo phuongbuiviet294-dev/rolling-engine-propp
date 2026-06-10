@@ -2,7 +2,6 @@
 # app_v40.py
 # PART 1/10
 # ============================================================
-
 import time
 from collections import deque, Counter
 from dataclasses import dataclass
