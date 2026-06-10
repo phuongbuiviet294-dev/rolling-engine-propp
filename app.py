@@ -108,6 +108,7 @@ DEFAULT_SCALAR = {
     "last_open_round": 0,
 
     "last_number": None,
+    "last_length": 0,
 
     "cooldown_counter": 0
 
@@ -3506,14 +3507,21 @@ class EngineManager:
         if st.session_state.last_number is None:
             st.session_state.last_number = current_number
 
-        if current_number != st.session_state.last_number:
+        current_length = len(numbers)
+
+        if st.session_state.last_length == 0:
+            st.session_state.last_length = current_length
+
+        if current_length > st.session_state.last_length:
 
             trade_engine.settle_trade(
                 actual_group,
                 current_number
             )
 
-            st.session_state.last_number = current_number
+            st.session_state.last_length = current_length
+
+        st.session_state.last_number = current_number
 
         trade_engine.open_trade(
             signal,
