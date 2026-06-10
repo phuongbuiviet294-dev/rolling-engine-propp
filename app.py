@@ -2702,6 +2702,8 @@ signal = get_next_signal()
 
 
 
+round_id = len(numbers)
+
 if "signal_round_id" not in st.session_state:
     st.session_state.signal_round_id = 0
 
@@ -2709,7 +2711,10 @@ if "signal_round_id" not in st.session_state:
 # SIGNAL HISTORY
 # ============================================================
 
-if signal["next_group"] is not None and round_id > st.session_state.signal_round_id:
+if (
+    signal["next_group"] is not None
+    and round_id > st.session_state.signal_round_id
+):
 
     st.session_state.signal_round_id = round_id
 
@@ -2735,12 +2740,8 @@ round_id = len(numbers)
 if "last_round_id" not in st.session_state:
     st.session_state.last_round_id = 0
 
-if round_id > st.session_state.last_round_id:
-    st.session_state.last_round_id = round_id
-    trade_state_machine(
-        signal,
-        actual_group
-    )
+if is_new_round(numbers):
+    trade_state_machine(signal, actual_group)
 
 
 
