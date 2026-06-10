@@ -341,26 +341,7 @@ def get_consensus(top_rows):
 # =====================================================
 
 def get_stability():
-
-    if len(leader_history) < 2:
-
-        return 1.0
-
-    leader = leader_history[-1]
-
-    same_count = sum(
-
-        1
-
-        for x in leader_history
-
-        if x == leader
-
-    )
-
-    stability = same_count / len(leader_history)
-
-    return stability
+    return max(0,1-get_leader_change_rate())
 
 
 # =====================================================
@@ -1132,10 +1113,6 @@ st.caption(
 )
 
 
-# ================================
-# PROFIT ENGINE
-# ================================
-
 def get_total_profit():
     return sum(x["profit"] for x in trade_history)
 
@@ -1148,7 +1125,9 @@ def get_profit20_trade():
 def get_profit50_trade():
     return sum(x["profit"] for x in trade_history[-50:])
 
-def get_winrate():
-    if len(trade_history)==0:
-        return 0
-    return sum(x["hit"] for x in trade_history)/len(trade_history)
+def get_profit_score():
+    score=0
+    if get_profit10()>0: score+=0.4
+    if get_profit20_trade()>0: score+=0.3
+    if get_profit50_trade()>0: score+=0.3
+    return score
