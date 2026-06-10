@@ -1164,11 +1164,11 @@ class MarketEngine:
         # CHAOS
         # --------------------
 
-        if zigzag_score > 0.60:
+        if zigzag_score > 0.85:
 
             return "CHAOS"
 
-        if leader_change_rate > 0.50:
+        if leader_change_rate > 0.75:
 
             return "CHAOS"
 
@@ -1301,22 +1301,14 @@ class MarketEngine:
     # ========================================================
 
     def get_threshold(
-
             self,
-
             regime
-
     ):
-
         if regime == "TREND":
-
-            return 0.70
-
+            return 0.60
         elif regime == "SIDEWAY":
-
-            return 0.80
-
-        return 0.90
+            return 0.50
+        return 0.35
 
 
 # ============================================================
@@ -1589,11 +1581,11 @@ class SignalEngine:
 
             state = "WAIT"
 
-        if zigzag_score > 0.60:
+        if zigzag_score > 0.85:
 
             state = "WAIT"
 
-        if leader_change_rate > 0.50:
+        if leader_change_rate > 0.75:
 
             state = "WAIT"
 
@@ -2590,7 +2582,7 @@ class ProtectionEngine:
         # confidence
         # ----------------
 
-        if confidence_score < 0.70:
+        if confidence_score < 0.35:
 
             return "WAIT"
 
