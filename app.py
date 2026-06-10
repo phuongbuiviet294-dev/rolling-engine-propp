@@ -1627,6 +1627,11 @@ class SignalEngine:
 
         signal.threshold = threshold
 
+        # emergency override
+        confidence_score = self.get_confidence_score(signal)
+        if signal.market_score > 0.35 and confidence_score > 0.35:
+            signal.state = "READY"
+
         return signal
 
     # ========================================================
@@ -2283,6 +2288,10 @@ class ProtectionEngine:
             self
 
     ):
+
+        trade_count = len(st.session_state.trade_history)
+        if trade_count < 10:
+            return False
 
         if (
 
