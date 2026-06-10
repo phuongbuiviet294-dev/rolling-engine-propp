@@ -110,6 +110,8 @@ DEFAULT_SCALAR = {
     
     "last_length": 0,
 
+    "last_number": None,
+
     "cooldown_counter": 0
 
 }
