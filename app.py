@@ -1787,7 +1787,7 @@ class TradeEngine:
 
             actual_group,
 
-            round_id
+            current_number
 
     ):
 
@@ -1803,32 +1803,7 @@ class TradeEngine:
 
             return
 
-        # same round
-
-        if (
-
-                round_id
-
-                <=
-
-                st.session_state.pending_round
-
-        ):
-
-            return
-
-        # duplicate settle protection
-
-        if (
-
-                round_id
-
-                ==
-
-                st.session_state.last_settle_round
-
-        ):
-
+        if current_number == st.session_state.pending_number:
             return
 
         predict = (
@@ -1886,14 +1861,8 @@ class TradeEngine:
         self.update_equity_curve()
 
         st.session_state.pending_trade = None
-
-        st.session_state.trade_state = "IDLE"
-
-        st.session_state.last_settle_round = (
-
-            round_id
-
-        )
+        st.session_state.pending_number = None
+        st.session_state.trade_state = "IDLE" 
 
     # ========================================================
     # TOTAL PROFIT
@@ -3538,14 +3507,14 @@ class EngineManager:
 
             trade_engine.settle_trade(
                 actual_group,
-                round_id
+                current_number
             )
 
             st.session_state.last_number = current_number
 
         trade_engine.open_trade(
             signal,
-            round_id
+            current_number
         )
 
         # ====================================================
