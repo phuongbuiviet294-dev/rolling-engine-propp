@@ -59,6 +59,13 @@ if "pending_trade" not in st.session_state:
 if "trade_state" not in st.session_state:
     st.session_state.trade_state = "IDLE"
 
+if "pending_round" not in st.session_state:
+    st.session_state.pending_round = 0
+
+if "last_settle_round" not in st.session_state:
+    st.session_state.last_settle_round = 0
+
+
 if "cooldown_counter" not in st.session_state:
     st.session_state.cooldown_counter = 0
 
@@ -1072,6 +1079,13 @@ if "pending_trade" not in st.session_state:
 
 if "trade_state" not in st.session_state:
     st.session_state.trade_state = "IDLE"
+
+if "pending_round" not in st.session_state:
+    st.session_state.pending_round = 0
+
+if "last_settle_round" not in st.session_state:
+    st.session_state.last_settle_round = 0
+
 
 
 # ============================================================
@@ -2741,7 +2755,8 @@ if "last_round_id" not in st.session_state:
     st.session_state.last_round_id = 0
 
 if is_new_round(numbers):
-    trade_state_machine(signal, actual_group)
+    settle_trade(actual_group, round_id)
+    open_trade(signal, round_id)
 
 
 
@@ -3531,3 +3546,37 @@ st.markdown(
 # ============================================================
 # END OF FILE
 # ============================================================
+
+
+def open_trade(signal, round_id):
+    if signal["state"] != "READY":
+        return
+    if signal["next_group"] is None:
+        return
+    if st.session_state.pending_trade is not None:
+        return
+    st.session_state.pending_trade = signal["next_group"]
+    st.session_state.pending_round = round_id
+    st.session_state.trade_state = "PENDING"
+
+def settle_trade(actual_group, round_id):
+    if st.session_state.pending_trade is None:
+        return
+    if round_id <= st.session_state.pending_round:
+        return
+    if round_id == st.session_state.last_settle_round:
+        return
+
+    predict = st.session_state.pending_trade
+    hit = int(predict == actual_group)
+    profit = WIN_GROUP if hit else LOSS_GROUP
+
+    st.session_state.trade_history.append(
+        {"predict":predict,"actual":actual_group,"hit":hit,"profit":profit}
+    )
+
+    update_equity_curve()
+
+    st.session_state.pending_trade = None
+    st.session_state.trade_state = "IDLE"
+    st.session_state.last_settle_round = round_id
