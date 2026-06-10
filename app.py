@@ -2701,23 +2701,21 @@ build_state(
 signal = get_next_signal()
 
 
+
+if "signal_round_id" not in st.session_state:
+    st.session_state.signal_round_id = 0
+
 # ============================================================
 # SIGNAL HISTORY
 # ============================================================
 
-if signal["next_group"] is not None:
+if signal["next_group"] is not None and round_id > st.session_state.signal_round_id:
 
-    st.session_state.signal_history.append(
+    st.session_state.signal_round_id = round_id
 
-        signal["next_group"]
+    st.session_state.signal_history.append(signal["next_group"])
 
-    )
-
-    st.session_state.signal_flip_history.append(
-
-        signal["next_group"]
-
-    )
+    st.session_state.signal_flip_history.append(signal["next_group"])
 
 
 # ============================================================
