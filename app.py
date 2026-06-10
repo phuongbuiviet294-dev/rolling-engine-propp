@@ -1773,7 +1773,6 @@ class TradeEngine:
 
         st.session_state.pending_trade = signal.next_group
         st.session_state.pending_round = len(load_numbers())
-        st.session_state.pending_number = st.session_state.last_number
 
         st.session_state.trade_state = (
 
@@ -1866,7 +1865,6 @@ class TradeEngine:
         self.update_equity_curve()
 
         st.session_state.pending_trade = None
-        st.session_state.pending_number = None
         st.session_state.pending_round = 0
         st.session_state.trade_state = "IDLE" 
 
@@ -3686,4 +3684,8 @@ except Exception:
 
 # ======================
 # V44 CLEAN REBUILD FULL
+# ======================
+
+# ======================
+# V44.2 STABLE
 # ======================
