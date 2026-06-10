@@ -92,6 +92,8 @@ DEFAULT_SCALAR = {
 
     "pending_trade": None,
 
+    "pending_number": None,
+
     "pending_round": 0,
 
     "last_round_id": 0,
@@ -1765,23 +1767,9 @@ class TradeEngine:
         if st.session_state.pending_trade is not None:
             return
 
-        if round_id <= st.session_state.pending_round:
-            return
+        st.session_state.pending_trade = signal.next_group
 
-        if round_id <= st.session_state.last_open_round:
-            return
-
-        st.session_state.last_open_round = round_id
-
-        st.session_state.pending_trade = (
-            signal.next_group
-        )
-
-        st.session_state.pending_round = (
-
-            round_id
-
-        )
+        st.session_state.pending_number = st.session_state.last_number
 
         st.session_state.trade_state = (
 
@@ -3546,7 +3534,6 @@ class EngineManager:
         if st.session_state.last_number is None:
             st.session_state.last_number = current_number
 
-        # only act when a real new number appears
         if current_number != st.session_state.last_number:
 
             trade_engine.settle_trade(
@@ -3554,17 +3541,12 @@ class EngineManager:
                 round_id
             )
 
-            trade_engine.open_trade(
-                signal,
-                round_id
-            )
-
-            signal_engine.update_signal_history(
-                signal,
-                round_id
-            )
-
             st.session_state.last_number = current_number
+
+        trade_engine.open_trade(
+            signal,
+            round_id
+        )
 
         # ====================================================
         # PERSISTENCE
