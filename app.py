@@ -18,7 +18,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V42 Adaptive AI Engine",
+    page_title="V43 Clean Trade Engine",
     layout="wide"
 )
 
@@ -2976,7 +2976,7 @@ class Dashboard:
 
         st.title(
 
-            "🚀 V42 Adaptive AI Engine"
+            "🚀 V43 Clean Trade Engine"
 
         )
 
@@ -3637,7 +3637,7 @@ class EngineManager:
         st.caption(
 
             f"""
-V42 Adaptive AI Engine
+V43 Clean Trade Engine
 
 Round : {round_id}
 
@@ -3700,3 +3700,21 @@ st.rerun()
 # ============================================================
 # END OF FILE
 # ============================================================
+
+
+# ===============================
+# V43_DEBUG_ENGINE
+# ===============================
+try:
+    st.subheader("V43 State Debug")
+
+    st.json({
+        "trade_state": st.session_state.get("trade_state"),
+        "pending_trade": st.session_state.get("pending_trade"),
+        "pending_number": st.session_state.get("pending_number"),
+        "last_number": st.session_state.get("last_number"),
+        "trade_count": len(st.session_state.get("trade_history", []))
+    })
+
+except Exception:
+    pass
