@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Cloud Persistent",
+    page_title="V50 Hybrid Cloud Persistent UIFix",
     layout="wide"
 )
 
@@ -1244,10 +1244,17 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Cloud Persistent")
+        st.title("🚀 V50 Hybrid Cloud Persistent UIFix")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
+
+        title = "TRADE SIGNAL" if signal.state == "READY" else "NO TRADE"
+        action = (
+            f"BET GROUP = {signal.next_group}"
+            if signal.state == "READY" and signal.next_group is not None
+            else f"NEXT GROUP = {signal.next_group}"
+        )
 
         st.markdown(
             f"""
@@ -1260,8 +1267,9 @@ color:white;
 font-size:28px;
 font-weight:bold;
 ">
-{signal.state}<br>
-NEXT GROUP = {signal.next_group}<br>
+{title}<br>
+STATE = {signal.state}<br>
+{action}<br>
 CONF = {confidence_score:.2f}
 </div>
 """,
@@ -1300,6 +1308,26 @@ CONF = {confidence_score:.2f}
         c4.metric("Live From", LIVE_START_ROUND)
         c5.metric("Wait Reason", self.ctx.protection_reason)
         c6.metric("Open Reason", self.ctx.open_reason)
+
+    def render_current_trade(self) -> None:
+        st.subheader("Current Trade")
+
+        if self.ctx.pending_trade is None:
+            st.info("No pending trade. Follow the main signal panel.")
+            return
+
+        target_round = self.ctx.pending_round + 1
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Open Round", self.ctx.pending_round)
+        c2.metric("Target Round", target_round)
+        c3.metric("Bet Group", self.ctx.pending_trade)
+        c4.metric("Status", "WAIT RESULT")
+
+        st.caption(
+            f"Trade opened at round {self.ctx.pending_round}. "
+            f"Waiting for round {target_round} to settle WIN/LOSS."
+        )
 
     def render_top_windows(self) -> None:
         rows = self.window_engine.get_top_windows(TOPN)
@@ -1884,10 +1912,13 @@ class EngineManager:
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        # Display only: do not open trades or decrement cooldown on every rerun.
+        # UI rule:
+        # - Main panel shows the CURRENT signal only: READY / WAIT.
+        # - PENDING appears only in Trade History.
+        # - If a trade is already open, show it via Current Trade panel/reasons,
+        #   but do not replace the main signal with PENDING.
         if self.ctx.pending_trade is not None:
-            signal.state = "PENDING"
-            self.ctx.protection_reason = "WAITING_NEXT_ROUND"
+            self.ctx.protection_reason = "WAITING_RESULT"
             self.ctx.open_reason = "HAS_PENDING"
         elif self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
             signal.state = "WAIT"
@@ -1905,6 +1936,7 @@ class EngineManager:
         self.dashboard.render_market(signal)
         self.dashboard.render_profit()
         self.dashboard.render_risk()
+        self.dashboard.render_current_trade()
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
         self.dashboard.render_trade_history()
@@ -1912,13 +1944,14 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID CLOUD PERSISTENT LIVE
+V50 HYBRID CLOUD PERSISTENT LIVE - UI FIX
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
 Open/settle decisions happen only when a new round appears, not every rerun.
 Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
+Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
 Current Sheet Round : {self.round_id}
 
