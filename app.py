@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Final Reviewed",
+    page_title="V50 Hybrid Final Reviewed Fix",
     layout="wide"
 )
 
@@ -618,16 +618,23 @@ class SignalEngine:
                 "wr": 0.0,
             }
 
-        stat = self.ctx.window_real_stats.get(
-            int(window_id),
-            {
+        try:
+            int_key = int(window_id)
+        except Exception:
+            int_key = window_id
+
+        stat = self.ctx.window_real_stats.get(int_key)
+        if stat is None:
+            stat = self.ctx.window_real_stats.get(str(window_id))
+
+        if stat is None:
+            stat = {
                 "trade_count": 0,
                 "profit": 0.0,
                 "win": 0,
                 "loss": 0,
                 "loss_streak": 0,
             }
-        )
 
         trade_count = int(stat.get("trade_count", 0))
         win = int(stat.get("win", 0))
@@ -1251,7 +1258,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Final Reviewed")
+        st.title("🚀 V50 Hybrid Final Reviewed Fix")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1352,10 +1359,17 @@ CONF = {confidence_score:.2f}
 
         target_round = self.ctx.pending_round + 1
 
+        display_pending_window = self.ctx.pending_locked_window
+        if display_pending_window is None and self.ctx.pending_index is not None:
+            try:
+                display_pending_window = self.ctx.trade_history[self.ctx.pending_index].locked_window
+            except Exception:
+                display_pending_window = self.ctx.locked_window
+
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Open Round", self.ctx.pending_round)
         c2.metric("Target Round", target_round)
-        c3.metric("Locked Window", self.ctx.pending_locked_window)
+        c3.metric("Locked Window", display_pending_window)
         c4.metric("Bet Group", self.ctx.pending_trade)
         c5.metric("Status", "WAIT RESULT")
 
@@ -1451,6 +1465,7 @@ CONF = {confidence_score:.2f}
                     "last_settle_round": self.ctx.last_settle_round,
                     "trade_state": self.ctx.trade_state,
                     "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
+                    "real_stats_keys": list(self.ctx.window_real_stats.keys()),
                 }
             )
 
@@ -1741,7 +1756,10 @@ def save_live_state(ctx: EngineContext) -> None:
         "locked_live_win": ctx.locked_live_win,
         "locked_live_loss": ctx.locked_live_loss,
 
-        "window_real_stats": ctx.window_real_stats,
+        "window_real_stats": {
+            str(k): v
+            for k, v in ctx.window_real_stats.items()
+        },
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
 
@@ -1809,7 +1827,15 @@ def load_live_state() -> EngineContext:
     ctx.locked_live_win = int(data.get("locked_live_win", 0))
     ctx.locked_live_loss = int(data.get("locked_live_loss", 0))
 
-    ctx.window_real_stats = data.get("window_real_stats", {})
+    raw_real_stats = data.get("window_real_stats", {})
+    ctx.window_real_stats = {}
+    for k, v in raw_real_stats.items():
+        try:
+            kk = int(k)
+        except Exception:
+            kk = k
+        ctx.window_real_stats[kk] = v
+
     ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
 
     return ctx
@@ -1960,19 +1986,36 @@ class EngineManager:
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
+        # If a trade is pending, do not call build_signal(), because build_signal()
+        # can relock and mutate state during a pure UI refresh.
+        if self.ctx.pending_trade is not None:
+            locked_obj = None
+            if self.ctx.locked_window is not None:
+                locked_obj = self.window_engine.state.get(self.ctx.locked_window)
+
+            signal = SignalRecord()
+            signal.state = "READY"
+            signal.next_group = self.ctx.pending_trade
+            signal.regime = "WAIT_RESULT"
+            signal.locked_window = self.ctx.locked_window
+            signal.lock_reason = self.ctx.lock_reason
+            signal.consensus = 0.0
+            signal.required_consensus = CONSENSUS_READY
+            signal.stability = self.window_engine.get_stability()
+            signal.top_profit20 = locked_obj.profit20 if locked_obj is not None else 0.0
+
+            confidence_score = self.signal_engine.get_confidence_score(signal)
+            confidence_level = self.signal_engine.get_confidence_level(confidence_score)
+
+            self.ctx.protection_reason = "WAITING_RESULT"
+            self.ctx.open_reason = "HAS_PENDING"
+            return signal, confidence_score, confidence_level
+
         signal = self.signal_engine.build_signal(self.ctx.last_length)
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        # UI rule:
-        # - Main panel shows the CURRENT signal only: READY / WAIT.
-        # - PENDING appears only in Trade History.
-        # - If a trade is already open, show it via Current Trade panel/reasons,
-        #   but do not replace the main signal with PENDING.
-        if self.ctx.pending_trade is not None:
-            self.ctx.protection_reason = "WAITING_RESULT"
-            self.ctx.open_reason = "HAS_PENDING"
-        elif self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
+        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
             signal.state = "WAIT"
 
         return signal, confidence_score, confidence_level
@@ -1997,7 +2040,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID FINAL REVIEWED
+V50 HYBRID FINAL REVIEWED FIX
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
