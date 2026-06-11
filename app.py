@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Shadow Live Lock",
+    page_title="V50 Relock V2",
     layout="wide"
 )
 
@@ -56,6 +56,9 @@ LIVE_RELOCK_LOSS_STREAK = 2
 # Window selection will prefer live performance, not only historical profit.
 LEADER_MIN_LIVE_WR20 = 0.38
 LEADER_MIN_LIVE_PROFIT20 = 0.0
+CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
+CANDIDATE_MIN_LIVE_WR20 = 0.38
+CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
@@ -544,6 +547,77 @@ class SignalEngine:
             return "LOW"
         return "DANGER"
 
+    def candidate_score(self, obj: WindowRecord) -> float:
+        # Candidate score is based mainly on shadow/live performance from LIVE_START_ROUND.
+        # Historical profit is only a tie-breaker.
+        live_dd_penalty = 0.0
+
+        score = (
+            1.00 * obj.live_profit20 +
+            0.30 * obj.live_profit50 +
+            4.00 * obj.live_wr20 -
+            1.50 * obj.live_loss_streak +
+            0.10 * obj.profit20
+        )
+
+        return round(score - live_dd_penalty, 3)
+
+    def choose_relock_candidate(
+        self,
+        top_rows: list[tuple[int, WindowRecord]]
+    ) -> tuple[Optional[int], Optional[WindowRecord], str]:
+        # Check all windows, not only current TopN, because TopN may be noisy.
+        candidates = []
+
+        for w, obj in self.window_engine.state.items():
+            if obj.next_group is None:
+                continue
+
+            # Candidate must have acceptable shadow/live stats.
+            has_live = len(obj.live_hit_history) > 0
+
+            if has_live:
+                if obj.live_profit20 <= CANDIDATE_MIN_LIVE_PROFIT20:
+                    continue
+                if obj.live_wr20 < CANDIDATE_MIN_LIVE_WR20:
+                    continue
+                if int(obj.live_loss_streak) > CANDIDATE_MAX_LIVE_LOSS_STREAK:
+                    continue
+
+            # Historical fallback must also not be terrible.
+            if obj.profit50 <= 0:
+                continue
+            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+                continue
+
+            candidates.append(
+                (
+                    self.candidate_score(obj),
+                    obj.live_profit20,
+                    obj.live_wr20,
+                    obj.profit20,
+                    -int(obj.live_loss_streak),
+                    w,
+                    obj,
+                )
+            )
+
+        if candidates:
+            candidates.sort(reverse=True)
+            _, _, _, _, _, w, obj = candidates[0]
+            return w, obj, "RELOCK_BY_CANDIDATE_BACKTEST"
+
+        # Fallback: choose best current top row only if it is not awful.
+        for w, obj in top_rows:
+            if (
+                obj.next_group is not None
+                and obj.profit20 > LOCK_MIN_PROFIT20
+                and int(obj.loss_streak) <= LOCK_MAX_LOSS_STREAK
+            ):
+                return w, obj, "FALLBACK_TOP_WINDOW"
+
+        return None, None, "NO_VALID_CANDIDATE"
+
     def build_signal(self, round_id: int) -> SignalRecord:
         top_rows = self.window_engine.get_top_windows(TOPN)
 
@@ -594,47 +668,23 @@ class SignalEngine:
             lock_reason = "LOCK_LIVE_LOSS_STREAK"
 
         if relock_needed:
-            candidate = None
-            for w, obj in top_rows:
-                live_ok = True
-                if len(obj.live_hit_history) > 0:
-                    live_ok = (
-                        obj.live_profit20 > LEADER_MIN_LIVE_PROFIT20
-                        and obj.live_wr20 >= LEADER_MIN_LIVE_WR20
-                        and int(obj.live_loss_streak) <= LOCK_MAX_LOSS_STREAK
-                    )
+            candidate_w, candidate_obj, candidate_reason = self.choose_relock_candidate(top_rows)
 
-                if (
-                    obj.next_group is not None
-                    and live_ok
-                    and obj.profit20 > LOCK_MIN_PROFIT20
-                    and int(obj.loss_streak) <= LOCK_MAX_LOSS_STREAK
-                ):
-                    candidate = (w, obj)
-                    break
-
-            if candidate is not None:
-                locked_window, locked_obj = candidate
+            if candidate_obj is not None:
+                locked_window, locked_obj = candidate_w, candidate_obj
                 self.ctx.locked_window = locked_window
+
+                # Reset real trade stats for the newly locked window.
                 self.ctx.locked_live_profit = 0.0
                 self.ctx.locked_live_loss_streak = 0
                 self.ctx.locked_live_win = 0
                 self.ctx.locked_live_loss = 0
-                lock_reason = "RELOCK_" + lock_reason
+
+                lock_reason = f"{candidate_reason}_{lock_reason}"
             else:
-                # fallback to rank1 if no valid candidate
-                if top_rows:
-                    locked_window, locked_obj = top_rows[0]
-                    self.ctx.locked_window = locked_window
-                    self.ctx.locked_live_profit = 0.0
-                    self.ctx.locked_live_loss_streak = 0
-                    self.ctx.locked_live_win = 0
-                    self.ctx.locked_live_loss = 0
-                    lock_reason = "FORCE_RANK1_" + lock_reason
-                else:
-                    locked_window, locked_obj = None, None
-                    self.ctx.locked_window = None
-                    lock_reason = "NO_WINDOW"
+                locked_window, locked_obj = None, None
+                self.ctx.locked_window = None
+                lock_reason = candidate_reason
 
         self.ctx.lock_reason = lock_reason
 
@@ -1007,7 +1057,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Shadow Live Lock")
+        st.title("🚀 V50 Relock V2")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1090,6 +1140,7 @@ CONF = {confidence_score:.2f}
                     "LiveP50": round(float(obj.live_profit50), 2),
                     "LiveWR20": round(float(obj.live_wr20), 3),
                     "LiveLS": int(obj.live_loss_streak),
+                    "CandidateScore": self.signal_engine.candidate_score(obj),
                     "LossStreak": int(obj.loss_streak),
                     "Next": obj.next_group,
                     "HitLen": len(obj.hit_history),
@@ -1116,6 +1167,7 @@ CONF = {confidence_score:.2f}
                     "LiveP50",
                     "LiveWR20",
                     "LiveLS",
+                    "CandidateScore",
                     "LossStreak",
                     "Next",
                     "HitLen",
@@ -1179,6 +1231,7 @@ CONF = {confidence_score:.2f}
                         "LiveP20": round(float(obj.live_profit20), 2),
                         "LiveWR20": round(float(obj.live_wr20), 3),
                         "LiveLS": int(obj.live_loss_streak),
+                        "CandidateScore": self.signal_engine.candidate_score(obj),
                         "LossStreak": int(obj.loss_streak),
                         "Next": obj.next_group,
                         "UseInTop": int(obj.live_loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
