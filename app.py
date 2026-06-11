@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Trade Aware Lock",
+    page_title="V50 Shadow Live Lock",
     layout="wide"
 )
 
@@ -51,6 +51,11 @@ LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 3
 LIVE_RELOCK_PROFIT_STOP = 0.0
 LIVE_RELOCK_LOSS_STREAK = 2
+
+# Shadow live scoring per window from LIVE_START_ROUND.
+# Window selection will prefer live performance, not only historical profit.
+LEADER_MIN_LIVE_WR20 = 0.38
+LEADER_MIN_LIVE_PROFIT20 = 0.0
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
@@ -85,6 +90,15 @@ class TradeRecord:
 class SignalRecord:
     state: str = "WAIT"
     next_group: Optional[int] = None
+
+    # Shadow/live performance after LIVE_START_ROUND.
+    live_hit_history: deque = field(default_factory=lambda: deque(maxlen=50))
+    live_profit20: float = 0.0
+    live_profit50: float = 0.0
+    live_profit_total: float = 0.0
+    live_loss_streak: int = 0
+    live_score: float = 0.0
+    live_wr20: float = 0.0
     regime: str = "NORMAL"
     top_n: int = TOPN
     health20: float = 0.0
@@ -101,6 +115,8 @@ class SignalRecord:
     lock_reason: str = ""
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
+    shadow_live_profit20: float = 0.0
+    shadow_live_wr20: float = 0.0
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -266,7 +282,7 @@ class WindowEngine:
             return
 
         for w, stt in self.state.items():
-            # 1) Settle previous prediction for this window against the actual group.
+            # 1) Settle previous prediction for this window against actual.
             if stt.next_group is not None:
                 hit = int(stt.next_group == actual_group)
                 stt.hit_history.append(hit)
@@ -282,17 +298,46 @@ class WindowEngine:
                 else:
                     stt.loss_streak = int(stt.loss_streak) + 1
 
+                # Shadow/live performance starts from trades that would settle after LIVE_START_ROUND.
+                # This gives each window a fair live score, even when it was not actually selected.
+                if round_id > LIVE_START_ROUND:
+                    stt.live_hit_history.append(hit)
+                    live_tail20 = list(stt.live_hit_history)[-20:]
+                    live_tail50 = list(stt.live_hit_history)[-50:]
+
+                    stt.live_profit20 = self._calc_profit(live_tail20)
+                    stt.live_profit50 = self._calc_profit(live_tail50)
+                    stt.live_profit_total = round(
+                        stt.live_profit_total + (WIN_GROUP if hit else LOSS_GROUP),
+                        2
+                    )
+                    stt.live_wr20 = (
+                        round(sum(live_tail20) / len(live_tail20), 3)
+                        if live_tail20 else 0.0
+                    )
+
+                    if hit:
+                        stt.live_loss_streak = 0
+                    else:
+                        stt.live_loss_streak = int(stt.live_loss_streak) + 1
+
+                    stt.live_score = round(
+                        stt.live_profit20 +
+                        0.30 * stt.live_profit50 -
+                        stt.live_loss_streak,
+                        3
+                    )
+
             # 2) Update raw group history.
             stt.group_history.append(actual_group)
 
-            # 3) Generate next prediction using cycle logic:
-            #    next_group for the next round = group from w rounds ago.
+            # 3) Cycle prediction: next group = group from w rounds ago.
             if len(stt.group_history) >= w:
                 stt.next_group = list(stt.group_history)[-w]
             else:
                 stt.next_group = None
 
-            # 4) Score. Keep loss_streak as integer, score as float.
+            # 4) Historical score.
             stt.score = round(
                 float(stt.profit20) +
                 0.30 * float(stt.profit50) -
@@ -307,14 +352,45 @@ class WindowEngine:
         self.ctx.last_window_round = round_id
 
     def get_top_windows(self, top_n: int = TOPN) -> list[tuple[int, WindowRecord]]:
-        # Prefer windows that are not currently in a hot loss streak.
+        # Prefer windows with good shadow-live performance after LIVE_START_ROUND.
+        has_live = any(len(stt.live_hit_history) > 0 for stt in self.state.values())
+
+        if has_live:
+            valid_rows = [
+                (w, stt)
+                for w, stt in self.state.items()
+                if (
+                    int(stt.live_loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP
+                    and stt.next_group is not None
+                )
+            ]
+
+            rows_source = valid_rows if valid_rows else [
+                (w, stt)
+                for w, stt in self.state.items()
+                if stt.next_group is not None
+            ]
+
+            rows = sorted(
+                rows_source,
+                key=lambda x: (
+                    x[1].live_score,
+                    x[1].live_profit20,
+                    x[1].live_wr20,
+                    x[1].score,
+                ),
+                reverse=True
+            )
+
+            return rows[:top_n]
+
+        # Warm-up fallback: use historical score.
         valid_rows = [
             (w, stt)
             for w, stt in self.state.items()
             if int(stt.loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP
         ]
 
-        # If all windows are bad, fall back to all rows so engine still has a signal.
         rows_source = valid_rows if valid_rows else list(self.state.items())
 
         rows = sorted(
@@ -462,12 +538,21 @@ class SignalEngine:
         if locked_obj is None:
             relock_needed = True
             lock_reason = "NO_LOCK"
+        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20:
+            relock_needed = True
+            lock_reason = "LOCK_LIVE_WINDOW_PROFIT20_BAD"
+        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20:
+            relock_needed = True
+            lock_reason = "LOCK_LIVE_WINDOW_WR20_BAD"
+        elif int(locked_obj.live_loss_streak) > LOCK_MAX_LOSS_STREAK:
+            relock_needed = True
+            lock_reason = "LOCK_LIVE_WINDOW_LOSS_STREAK_BAD"
         elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
             relock_needed = True
-            lock_reason = "LOCK_PROFIT20_BAD"
+            lock_reason = "LOCK_HIST_PROFIT20_BAD"
         elif int(locked_obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
             relock_needed = True
-            lock_reason = "LOCK_LOSS_STREAK_BAD"
+            lock_reason = "LOCK_HIST_LOSS_STREAK_BAD"
         elif locked_obj.next_group is None:
             relock_needed = True
             lock_reason = "LOCK_NO_NEXT"
@@ -481,8 +566,17 @@ class SignalEngine:
         if relock_needed:
             candidate = None
             for w, obj in top_rows:
+                live_ok = True
+                if len(obj.live_hit_history) > 0:
+                    live_ok = (
+                        obj.live_profit20 > LEADER_MIN_LIVE_PROFIT20
+                        and obj.live_wr20 >= LEADER_MIN_LIVE_WR20
+                        and int(obj.live_loss_streak) <= LOCK_MAX_LOSS_STREAK
+                    )
+
                 if (
                     obj.next_group is not None
+                    and live_ok
                     and obj.profit20 > LOCK_MIN_PROFIT20
                     and int(obj.loss_streak) <= LOCK_MAX_LOSS_STREAK
                 ):
@@ -515,12 +609,19 @@ class SignalEngine:
         self.ctx.lock_reason = lock_reason
 
         next_group = locked_obj.next_group if locked_obj is not None else None
-        top_profit20 = locked_obj.profit20 if locked_obj is not None else 0.0
+        top_profit20 = (
+            locked_obj.live_profit20
+            if locked_obj is not None and len(locked_obj.live_hit_history) > 0
+            else (locked_obj.profit20 if locked_obj is not None else 0.0)
+        )
         leader_window = locked_window
         leader_loss_streak = int(locked_obj.loss_streak) if locked_obj is not None else 0
 
-        hits20 = list(locked_obj.hit_history)[-20:] if locked_obj is not None else []
-        leader_wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+        if locked_obj is not None and len(locked_obj.live_hit_history) > 0:
+            leader_wr20 = locked_obj.live_wr20
+        else:
+            hits20 = list(locked_obj.hit_history)[-20:] if locked_obj is not None else []
+            leader_wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
         # Dynamic READY rule.
         wr20 = TradeEngine(self.ctx).get_winrate(20)
@@ -541,6 +642,10 @@ class SignalEngine:
         elif locked_obj is None:
             state = "WAIT"
         elif next_group is None:
+            state = "WAIT"
+        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20:
+            state = "WAIT"
+        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20:
             state = "WAIT"
         elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
             state = "WAIT"
@@ -574,6 +679,8 @@ class SignalEngine:
             lock_reason=self.ctx.lock_reason,
             locked_live_profit=self.ctx.locked_live_profit,
             locked_live_loss_streak=self.ctx.locked_live_loss_streak,
+            shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
+            shadow_live_wr20=(locked_obj.live_wr20 if locked_obj is not None else 0.0),
         )
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
@@ -870,7 +977,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Trade Aware Lock")
+        st.title("🚀 V50 Shadow Live Lock")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -895,18 +1002,19 @@ CONF = {confidence_score:.2f}
         )
 
     def render_market(self, signal: SignalRecord) -> None:
-        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(11)
+        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(12)
         c1.metric("Regime", signal.regime)
         c2.metric("Locked W", signal.locked_window)
         c3.metric("Lock Reason", signal.lock_reason)
-        c4.metric("Live Lock Profit", round(signal.locked_live_profit, 2))
-        c5.metric("Live Lock LS", signal.locked_live_loss_streak)
-        c6.metric("Leader WR20", round(signal.leader_wr20, 3))
-        c7.metric("Leader LS", signal.leader_loss_streak)
-        c8.metric("Consensus", round(signal.consensus, 3))
-        c9.metric("Req Cons", round(signal.required_consensus, 3))
-        c10.metric("Stability", round(signal.stability, 3))
-        c11.metric("Top Profit20", round(signal.top_profit20, 2))
+        c4.metric("Trade Lock Profit", round(signal.locked_live_profit, 2))
+        c5.metric("Trade Lock LS", signal.locked_live_loss_streak)
+        c6.metric("Shadow Profit20", round(signal.shadow_live_profit20, 2))
+        c7.metric("Shadow WR20", round(signal.shadow_live_wr20, 3))
+        c8.metric("Leader LS", signal.leader_loss_streak)
+        c9.metric("Consensus", round(signal.consensus, 3))
+        c10.metric("Req Cons", round(signal.required_consensus, 3))
+        c11.metric("Stability", round(signal.stability, 3))
+        c12.metric("Top Profit20", round(signal.top_profit20, 2))
 
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
@@ -947,6 +1055,11 @@ CONF = {confidence_score:.2f}
                     "Profit50": round(float(obj.profit50), 2),
                     "WR20": wr20,
                     "WR50": wr50,
+                    "LiveScore": round(float(obj.live_score), 2),
+                    "LiveP20": round(float(obj.live_profit20), 2),
+                    "LiveP50": round(float(obj.live_profit50), 2),
+                    "LiveWR20": round(float(obj.live_wr20), 3),
+                    "LiveLS": int(obj.live_loss_streak),
                     "LossStreak": int(obj.loss_streak),
                     "Next": obj.next_group,
                     "HitLen": len(obj.hit_history),
@@ -968,6 +1081,11 @@ CONF = {confidence_score:.2f}
                     "Profit50",
                     "WR20",
                     "WR50",
+                    "LiveScore",
+                    "LiveP20",
+                    "LiveP50",
+                    "LiveWR20",
+                    "LiveLS",
                     "LossStreak",
                     "Next",
                     "HitLen",
@@ -1027,9 +1145,13 @@ CONF = {confidence_score:.2f}
                         "Profit50": round(float(obj.profit50), 2),
                         "WR20": round(sum(hit20) / len(hit20), 3) if hit20 else 0.0,
                         "WR50": round(sum(hit50) / len(hit50), 3) if hit50 else 0.0,
+                        "LiveScore": round(float(obj.live_score), 2),
+                        "LiveP20": round(float(obj.live_profit20), 2),
+                        "LiveWR20": round(float(obj.live_wr20), 3),
+                        "LiveLS": int(obj.live_loss_streak),
                         "LossStreak": int(obj.loss_streak),
                         "Next": obj.next_group,
-                        "UseInTop": int(obj.loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
+                        "UseInTop": int(obj.live_loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
                     }
                 )
 
