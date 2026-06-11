@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V52.1 Profit Engine Stable",
+    page_title="V53 Defensive Stable",
     layout="wide"
 )
 
@@ -88,7 +88,7 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.35
+LEADER_MIN_LIVE_WR20 = 0.40
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
@@ -105,24 +105,29 @@ REAL_MIN_WR_FOR_LOCK = 0.45
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.35
+FALLBACK_MIN_WR20 = 0.40
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.60
+LOW_WR_CONSENSUS_READY = 0.70
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 20
+WINDOW_COOLDOWN_ROUNDS = 30
 BLACKLIST_REAL_NEGATIVE = True
 
-PROFIT10_STOP = -3.0
-WR20_STOP = 0.35
-DRAWDOWN_STOP = -10.0
-FLIPRATE_STOP = 0.60
+PROFIT10_STOP = -2.0
+WR20_STOP = 0.38
+DRAWDOWN_STOP = -4.0
+FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.50
+CONSENSUS_READY = 0.60
 STABILITY_READY = 0.50
+
+# V53 defensive gates
+MIN_CONFIDENCE_READY = 0.45
+SAFE_DRAWDOWN_FROM_PEAK = -2.0
+SAFE_MODE_ROUNDS = 3
 
 
 # ============================================================
@@ -233,6 +238,7 @@ class EngineContext:
 
     cooldown_counter: int = 0
     cooldown_loss_streak_marker: int = -1
+    safe_mode_counter: int = 0
     protection_reason: str = ""
     open_reason: str = ""
     locked_window: Optional[int] = None
@@ -276,6 +282,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_win = 0
     if not hasattr(ctx, "locked_live_loss"):
         ctx.locked_live_loss = 0
+    if not hasattr(ctx, "safe_mode_counter"):
+        ctx.safe_mode_counter = 0
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -1278,7 +1286,7 @@ class ProtectionEngine:
         self.ctx.protection_reason = ""
 
         trade_count = len([x for x in self.ctx.trade_history if x.hit is not None])
-        if trade_count < 20:
+        if trade_count < 8:
             return False
 
         if self.trade_engine.get_profit(10) <= PROFIT10_STOP:
@@ -1322,6 +1330,25 @@ class ProtectionEngine:
 
         return False
 
+    def safe_mode_engine(self) -> bool:
+        """Pause trading when equity pulls back from recent peak."""
+        equity = list(self.ctx.equity_curve)
+        if len(equity) < 3:
+            return False
+
+        peak = max([0.0] + equity)
+        current = equity[-1]
+        pullback = round(current - peak, 2)
+
+        if pullback <= SAFE_DRAWDOWN_FROM_PEAK and self.ctx.safe_mode_counter == 0:
+            self.ctx.safe_mode_counter = SAFE_MODE_ROUNDS
+
+        if self.ctx.safe_mode_counter > 0:
+            self.ctx.safe_mode_counter -= 1
+            return True
+
+        return False
+
     def adaptive_ready_wait(self, signal: SignalRecord, confidence_score: float) -> str:
         self.ctx.protection_reason = ""
 
@@ -1336,7 +1363,11 @@ class ProtectionEngine:
             self.ctx.protection_reason = "COOLDOWN"
             return "WAIT"
 
-        if confidence_score < 0.35:
+        if self.safe_mode_engine():
+            self.ctx.protection_reason = "SAFE_MODE_DRAWDOWN"
+            return "WAIT"
+
+        if confidence_score < MIN_CONFIDENCE_READY:
             self.ctx.protection_reason = "LOW_CONFIDENCE"
             return "WAIT"
 
@@ -1364,7 +1395,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V52.1 Profit Engine Stable")
+        st.title("🚀 V53 Defensive Stable")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1425,13 +1456,14 @@ CONF = {confidence_score:.2f}
         c4.metric("Drawdown", snap["drawdown"])
 
     def render_risk(self) -> None:
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("FlipRate", self.protection_engine.get_flip_rate())
         c2.metric("LossStreak", self.trade_engine.get_loss_streak())
         c3.metric("Cooldown", self.ctx.cooldown_counter)
-        c4.metric("Live From", LIVE_START_ROUND)
-        c5.metric("Wait Reason", self.ctx.protection_reason)
-        c6.metric("Open Reason", self.ctx.open_reason)
+        c4.metric("SafeMode", getattr(self.ctx, "safe_mode_counter", 0))
+        c5.metric("Live From", LIVE_START_ROUND)
+        c6.metric("Wait Reason", self.ctx.protection_reason)
+        c7.metric("Open Reason", self.ctx.open_reason)
 
     def render_last_result(self) -> None:
         st.subheader("Last Result")
@@ -1501,6 +1533,9 @@ CONF = {confidence_score:.2f}
                     "WINDOW_COOLDOWN_ROUNDS": WINDOW_COOLDOWN_ROUNDS,
                     "BLACKLIST_REAL_NEGATIVE": BLACKLIST_REAL_NEGATIVE,
                     "TOPN": TOPN,
+                    "MIN_CONFIDENCE_READY": MIN_CONFIDENCE_READY,
+                    "SAFE_DRAWDOWN_FROM_PEAK": SAFE_DRAWDOWN_FROM_PEAK,
+                    "SAFE_MODE_ROUNDS": SAFE_MODE_ROUNDS,
                 }
             )
 
@@ -1595,6 +1630,7 @@ CONF = {confidence_score:.2f}
                     "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
                     "real_stats_keys": list(self.ctx.window_real_stats.keys()),
                     "cooled_windows": getattr(self.ctx, "cooled_windows", {}),
+                    "safe_mode_counter": getattr(self.ctx, "safe_mode_counter", 0),
                 }
             )
 
@@ -1973,6 +2009,7 @@ def save_live_state(ctx: EngineContext) -> None:
 
         "cooldown_counter": ctx.cooldown_counter,
         "cooldown_loss_streak_marker": ctx.cooldown_loss_streak_marker,
+        "safe_mode_counter": ctx.safe_mode_counter,
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2048,6 +2085,7 @@ def load_live_state() -> EngineContext:
 
     ctx.cooldown_counter = int(data.get("cooldown_counter", 0))
     ctx.cooldown_loss_streak_marker = int(data.get("cooldown_loss_streak_marker", -1))
+    ctx.safe_mode_counter = int(data.get("safe_mode_counter", 0))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2291,7 +2329,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V52.1 PROFIT ENGINE STABLE
+V53 DEFENSIVE STABLE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
