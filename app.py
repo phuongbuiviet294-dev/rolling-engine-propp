@@ -114,6 +114,7 @@ class EngineContext:
 
     cooldown_counter: int = 0
     cooldown_loss_streak_marker: int = -1
+    protection_reason: str = ""
 
 
 # ============================================================
@@ -591,17 +592,28 @@ class ProtectionEngine:
         return round(flips / (len(history) - 1), 3)
 
     def profit_protection(self) -> bool:
-        trade_count = len(self.ctx.trade_history)
+        # V50 Live: protection should explain WHY WAIT.
+        # It should not be a silent permanent stop.
+        self.ctx.protection_reason = ""
+
+        trade_count = len([x for x in self.ctx.trade_history if x.hit is not None])
         if trade_count < 20:
             return False
 
         if self.trade_engine.get_profit(10) <= PROFIT10_STOP:
+            self.ctx.protection_reason = "PROFIT10_STOP"
             return True
+
         if self.trade_engine.get_winrate(20) <= WR20_STOP:
+            self.ctx.protection_reason = "WR20_STOP"
             return True
+
         if self.trade_engine.get_drawdown() <= DRAWDOWN_STOP:
+            self.ctx.protection_reason = "DRAWDOWN_STOP"
             return True
+
         if self.get_flip_rate() >= FLIPRATE_STOP:
+            self.ctx.protection_reason = "FLIPRATE_STOP"
             return True
 
         return False
@@ -631,14 +643,24 @@ class ProtectionEngine:
         return False
 
     def adaptive_ready_wait(self, signal: SignalRecord, confidence_score: float) -> str:
+        self.ctx.protection_reason = ""
+
         if signal.state != "READY":
+            self.ctx.protection_reason = "SIGNAL_NOT_READY"
             return "WAIT"
+
         if self.profit_protection():
             return "WAIT"
+
         if self.cooldown_engine():
+            self.ctx.protection_reason = "COOLDOWN"
             return "WAIT"
+
         if confidence_score < 0.35:
+            self.ctx.protection_reason = "LOW_CONFIDENCE"
             return "WAIT"
+
+        self.ctx.protection_reason = "ALLOW"
         return "READY"
 
 
@@ -703,11 +725,12 @@ CONF = {confidence_score:.2f}
         c4.metric("Drawdown", snap["drawdown"])
 
     def render_risk(self) -> None:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("FlipRate", self.protection_engine.get_flip_rate())
         c2.metric("LossStreak", self.trade_engine.get_loss_streak())
         c3.metric("Cooldown", self.ctx.cooldown_counter)
         c4.metric("Live From", LIVE_START_ROUND)
+        c5.metric("Wait Reason", self.ctx.protection_reason)
 
     def render_top_windows(self) -> None:
         rows = self.window_engine.get_top_windows(TOPN)
@@ -772,6 +795,7 @@ CONF = {confidence_score:.2f}
                     "flip_rate": self.protection_engine.get_flip_rate(),
                     "confidence": confidence_score,
                     "signal_state": signal.state,
+                    "protection_reason": self.ctx.protection_reason,
                 }
             )
 
