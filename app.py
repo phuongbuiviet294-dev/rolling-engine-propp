@@ -785,10 +785,24 @@ class EngineManager:
         if self.ctx.last_length != 0:
             return
 
-        # Feed historical groups once, without opening trades.
-        # This gives windows enough history to generate next_group.
-        for idx, g in enumerate(groups, start=1):
-            self.window_engine.update_one_round(g, idx)
+        # Replay historical rounds using the same live pipeline:
+        # settle previous pending -> update windows -> build signal -> open next trade.
+        # Rounds before LIVE_START_ROUND are only used for learning/warm-up.
+        for idx, actual_group in enumerate(groups, start=1):
+
+            self.trade_engine.settle_trade(actual_group, idx)
+
+            self.window_engine.update_one_round(actual_group, idx)
+
+            signal = self.signal_engine.build_signal(idx)
+            confidence_score = self.signal_engine.get_confidence_score(signal)
+
+            signal.state = self.protection_engine.adaptive_ready_wait(
+                signal,
+                confidence_score
+            )
+
+            self.trade_engine.open_trade(signal, idx)
 
         self.ctx.last_length = len(groups)
 
