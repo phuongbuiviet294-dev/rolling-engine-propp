@@ -20,7 +20,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Auto Optimize",
+    page_title="V50 Auto Optimize Fast",
     layout="wide"
 )
 
@@ -51,13 +51,13 @@ FLIPRATE_STOP = 0.75
 # AUTO OPTIMIZER SEARCH SPACE
 # ============================================================
 
-TOPN_OPTIONS = [3, 5, 7]
-CONSENSUS_OPTIONS = [0.40, 0.50, 0.60]
-LOW_WR_CONSENSUS_OPTIONS = [0.60, 0.70, 0.80]
-MAX_WINDOW_LOSS_STREAK_OPTIONS = [3, 5, 8, 99]
-COOLDOWN_OPTIONS = [0, 2, 3, 5]
-GAP_OPTIONS = [0, 1, 2]
-STABILITY_OPTIONS = [0.40, 0.50, 0.60]
+TOPN_OPTIONS = [3, 5]
+CONSENSUS_OPTIONS = [0.50, 0.60]
+LOW_WR_CONSENSUS_OPTIONS = [0.70, 0.80]
+MAX_WINDOW_LOSS_STREAK_OPTIONS = [3, 5]
+COOLDOWN_OPTIONS = [2, 3]
+GAP_OPTIONS = [0, 1]
+STABILITY_OPTIONS = [0.50]
 
 
 # ============================================================
@@ -811,7 +811,7 @@ class Dashboard:
         self.opt_df = opt_df
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Auto Optimize")
+        st.title("🚀 V50 Auto Optimize Fast")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -864,6 +864,7 @@ CONF = {confidence_score:.2f}
 
     def render_config(self) -> None:
         st.subheader("Auto Selected Config")
+        st.caption("Fast optimizer: 64 configs, cached by current groups history.")
 
         c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("TopN", self.config.topn)
@@ -1044,7 +1045,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 Auto Optimize
+V50 Auto Optimize Fast
 
 Round : {self.round_id}
 
