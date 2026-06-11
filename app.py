@@ -61,9 +61,11 @@ STABILITY_READY = 0.50
 class TradeRecord:
     round_id: int
     predict: int
-    actual: int
-    hit: int
-    profit: float
+    actual: Optional[int] = None
+    hit: Optional[int] = None
+    profit: float = 0.0
+    status: str = "PENDING"
+    settle_round: Optional[int] = None
 
 
 @dataclass
@@ -100,6 +102,7 @@ class EngineContext:
 
     pending_trade: Optional[int] = None
     pending_round: int = 0
+    pending_index: Optional[int] = None
     trade_state: str = "IDLE"
 
     last_length: int = 0
@@ -443,6 +446,18 @@ class TradeEngine:
         if round_id == self.ctx.last_open_round:
             return
 
+        record = TradeRecord(
+            round_id=round_id,
+            predict=signal.next_group,
+            actual=None,
+            hit=None,
+            profit=0.0,
+            status="PENDING",
+            settle_round=None
+        )
+
+        self.ctx.trade_history.append(record)
+        self.ctx.pending_index = len(self.ctx.trade_history) - 1
         self.ctx.pending_trade = signal.next_group
         self.ctx.pending_round = round_id
         self.ctx.trade_state = "PENDING"
@@ -460,47 +475,60 @@ class TradeEngine:
         hit = int(predict == actual_group)
         profit = WIN_GROUP if hit else LOSS_GROUP
 
-        record = TradeRecord(
-            round_id=current_round,
-            predict=predict,
-            actual=actual_group,
-            hit=hit,
-            profit=profit
-        )
+        if self.ctx.pending_index is not None and 0 <= self.ctx.pending_index < len(self.ctx.trade_history):
+            record = self.ctx.trade_history[self.ctx.pending_index]
+            record.actual = actual_group
+            record.hit = hit
+            record.profit = profit
+            record.status = "WIN" if hit else "LOSS"
+            record.settle_round = current_round
+        else:
+            record = TradeRecord(
+                round_id=self.ctx.pending_round,
+                predict=predict,
+                actual=actual_group,
+                hit=hit,
+                profit=profit,
+                status="WIN" if hit else "LOSS",
+                settle_round=current_round
+            )
+            self.ctx.trade_history.append(record)
 
-        self.ctx.trade_history.append(record)
         self.update_equity(profit)
 
         self.ctx.pending_trade = None
         self.ctx.pending_round = 0
+        self.ctx.pending_index = None
         self.ctx.trade_state = "IDLE"
         self.ctx.last_settle_round = current_round
 
     def get_total_profit(self) -> float:
         return round(
-            sum(x.profit for x in self.ctx.trade_history),
+            sum(x.profit for x in self.ctx.trade_history if x.hit is not None),
             2
         )
 
     def get_profit(self, n: int) -> float:
-        trades = self.ctx.trade_history[-n:]
+        trades = [x for x in self.ctx.trade_history if x.hit is not None][-n:]
         return round(
             sum(x.profit for x in trades),
             2
         )
 
     def get_winrate(self, n: int = 20) -> float:
-        trades = self.ctx.trade_history[-n:]
+        trades = [x for x in self.ctx.trade_history if x.hit is not None][-n:]
         if not trades:
             return 0.0
         return round(
-            sum(x.hit for x in trades) / len(trades),
+            sum(int(x.hit) for x in trades) / len(trades),
             3
         )
 
     def get_loss_streak(self) -> int:
         streak = 0
         for x in reversed(self.ctx.trade_history):
+            if x.hit is None:
+                continue
             if x.hit == 0:
                 streak += 1
             else:
@@ -530,7 +558,7 @@ class TradeEngine:
             "wr20": self.get_winrate(20),
             "drawdown": self.get_drawdown(),
             "pending_trade": self.ctx.pending_trade,
-            "trade_count": len(self.ctx.trade_history),
+            "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
         }
 
 
@@ -689,11 +717,13 @@ CONF = {confidence_score:.2f}
         df = pd.DataFrame(
             [
                 {
-                    "round": x.round_id,
+                    "open_round": x.round_id,
+                    "settle_round": x.settle_round,
                     "predict": x.predict,
                     "actual": x.actual,
                     "hit": x.hit,
                     "profit": x.profit,
+                    "status": x.status,
                 }
                 for x in self.ctx.trade_history
             ]
@@ -802,7 +832,7 @@ Confidence : {confidence_level}
 
 Trade State : {self.ctx.trade_state}
 
-Pending Trade : {self.ctx.pending_trade}
+Pending Trade : {self.ctx.pending_trade} / Open Round : {self.ctx.pending_round}
 
 Regime : {signal.regime}
 """
