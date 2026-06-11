@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Final Reviewed Fix",
+    page_title="V50 Profit Optimized",
     layout="wide"
 )
 
@@ -46,6 +46,13 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
+
+# PROFIT OPTIMIZED CONFIG V51
+# Goal:
+# - trade more when real window is positive
+# - reduce over-wait from high consensus
+# - avoid gap delay
+# - relock quickly after 2 losses
 
 # Persistent live state.
 # Priority:
@@ -75,13 +82,13 @@ STATE_WORKSHEET_DEFAULT = "state"
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 5
 LOCK_MIN_PROFIT20 = 0.0
-LOCK_MAX_LOSS_STREAK = 3
+LOCK_MAX_LOSS_STREAK = 2
 LIVE_RELOCK_PROFIT_STOP = 0.0
 LIVE_RELOCK_LOSS_STREAK = 2
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.38
+LEADER_MIN_LIVE_WR20 = 0.35
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
@@ -92,16 +99,16 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 1
-REAL_MIN_WR_FOR_LOCK = 0.35
+REAL_MIN_WR_FOR_LOCK = 0.30
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.30
-FALLBACK_MAX_LOSS_STREAK = 3
-TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.80
+FALLBACK_MIN_WR20 = 0.35
+FALLBACK_MAX_LOSS_STREAK = 2
+TRADE_GAP_ROUNDS = 0
+LOW_WR_CONSENSUS_READY = 0.70
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
@@ -110,7 +117,7 @@ WR20_STOP = 0.35
 DRAWDOWN_STOP = -10.0
 FLIPRATE_STOP = 0.60
 
-CONSENSUS_READY = 0.50
+CONSENSUS_READY = 0.60
 STABILITY_READY = 0.50
 
 
@@ -654,12 +661,11 @@ class SignalEngine:
 
         # Real score first. Shadow/history are only tie-breakers.
         score = (
-            3.00 * stat["profit"] +
-            5.00 * stat["wr"] +
-            0.20 * stat["trade_count"] -
-            2.00 * stat["loss_streak"] +
-            0.20 * obj.profit20 +
-            0.10 * obj.profit50
+            5.00 * stat["profit"] +
+            4.00 * stat["wr"] +
+            0.10 * stat["trade_count"] -
+            3.00 * stat["loss_streak"] +
+            0.15 * obj.profit20
         )
 
         return round(score, 3)
@@ -671,12 +677,12 @@ class SignalEngine:
         wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
         score = (
-            1.50 * obj.profit20 +
-            3.00 * wr20 -
-            1.00 * int(obj.loss_streak) +
-            0.20 * obj.live_profit20 +
+            2.00 * obj.profit20 +
+            4.00 * wr20 -
+            1.50 * int(obj.loss_streak) +
+            0.30 * obj.live_profit20 +
             0.50 * obj.live_wr20 -
-            0.50 * int(obj.live_loss_streak)
+            1.00 * int(obj.live_loss_streak)
         )
 
         return round(score, 3)
@@ -905,8 +911,17 @@ class SignalEngine:
         elif stability < STABILITY_READY:
             state = "WAIT"
         else:
-            # Prediction follows locked leader. Consensus only blocks very noisy market.
-            if consensus >= required_consensus or leader_wr20 >= 0.50:
+            # Profit optimized:
+            # If real performance of locked window is positive, allow READY even
+            # when TopN consensus is not high. Consensus is only a market filter.
+            real_ok = (
+                real_locked_stat["trade_count"] >= 1
+                and real_locked_stat["profit"] > 0
+                and real_locked_stat["wr"] >= REAL_MIN_WR_FOR_LOCK
+                and real_locked_stat["loss_streak"] <= REAL_MAX_LOSS_STREAK_FOR_LOCK
+            )
+
+            if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
                 state = "READY"
 
         signal = SignalRecord(
@@ -1258,7 +1273,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Final Reviewed Fix")
+        st.title("🚀 V50 Profit Optimized")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1377,6 +1392,23 @@ CONF = {confidence_score:.2f}
             f"This pending trade was opened after round {self.ctx.pending_round}. "
             f"It will be settled when round {target_round} appears."
         )
+
+    def render_profit_config(self) -> None:
+        with st.expander("Profit Optimized Config"):
+            st.json(
+                {
+                    "CONSENSUS_READY": CONSENSUS_READY,
+                    "LOW_WR_CONSENSUS_READY": LOW_WR_CONSENSUS_READY,
+                    "TRADE_GAP_ROUNDS": TRADE_GAP_ROUNDS,
+                    "REAL_MIN_WR_FOR_LOCK": REAL_MIN_WR_FOR_LOCK,
+                    "REAL_MAX_LOSS_STREAK_FOR_LOCK": REAL_MAX_LOSS_STREAK_FOR_LOCK,
+                    "FALLBACK_MIN_WR20": FALLBACK_MIN_WR20,
+                    "FALLBACK_MAX_LOSS_STREAK": FALLBACK_MAX_LOSS_STREAK,
+                    "LIVE_RELOCK_LOSS_STREAK": LIVE_RELOCK_LOSS_STREAK,
+                    "LOCK_MAX_LOSS_STREAK": LOCK_MAX_LOSS_STREAK,
+                    "LEADER_MIN_LIVE_WR20": LEADER_MIN_LIVE_WR20,
+                }
+            )
 
     def render_top_windows(self) -> None:
         rows = self.window_engine.get_top_windows(TOPN)
@@ -2033,6 +2065,7 @@ class EngineManager:
         self.dashboard.render_risk()
         self.dashboard.render_last_result()
         self.dashboard.render_current_trade()
+        self.dashboard.render_profit_config()
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
         self.dashboard.render_trade_history()
@@ -2040,7 +2073,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID FINAL REVIEWED FIX
+V50 PROFIT OPTIMIZED V51
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
