@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Real Trade Lock V4",
+    page_title="V50 True Live",
     layout="wide"
 )
 
@@ -1217,7 +1217,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Real Trade Lock V4")
+        st.title("🚀 V50 True Live")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1435,66 +1435,99 @@ CONF = {confidence_score:.2f}
             )
 
 
+
+# ============================================================
+# TRUE LIVE SESSION STATE
+# ============================================================
+
+def get_live_ctx() -> EngineContext:
+    if "v50_true_live_ctx" not in st.session_state:
+        st.session_state.v50_true_live_ctx = EngineContext()
+    return st.session_state.v50_true_live_ctx
+
+
+def reset_live_state_button() -> None:
+    with st.sidebar:
+        st.subheader("Live Control")
+        if st.button("Reset Live State"):
+            if "v50_true_live_ctx" in st.session_state:
+                del st.session_state.v50_true_live_ctx
+            st.rerun()
+
+
 # ============================================================
 # ENGINE MANAGER
 # ============================================================
 
 class EngineManager:
     def __init__(self) -> None:
-        self.ctx = ctx
-        self.window_engine = WindowEngine(ctx, window_state)
-        self.signal_engine = SignalEngine(ctx, self.window_engine)
-        self.trade_engine = TradeEngine(ctx)
-        self.protection_engine = ProtectionEngine(ctx, self.trade_engine)
+        reset_live_state_button()
+
+        self.ctx = get_live_ctx()
+        self.numbers, self.groups, self.actual_group, self.round_id = load_data()
+
+        self.window_engine = WindowEngine(self.ctx)
+        self.trade_engine = TradeEngine(self.ctx)
+        self.signal_engine = SignalEngine(self.ctx, self.window_engine)
+        self.protection_engine = ProtectionEngine(self.ctx, self.trade_engine)
+
         self.dashboard = Dashboard(
-            ctx,
+            self.ctx,
             self.window_engine,
             self.signal_engine,
             self.trade_engine,
             self.protection_engine
         )
 
-    def initialize_from_history(self, groups: list[int]) -> None:
-        # Only initialize once after first load.
+    def warmup_windows_only(self) -> None:
+        # TRUE LIVE:
+        # Use historical data only to build window state.
+        # Do NOT replay historical trades from round 180.
         if self.ctx.last_length != 0:
             return
 
-        # Replay historical rounds using the same live pipeline:
-        # settle previous pending -> update windows -> build signal -> open next trade.
-        # Rounds before LIVE_START_ROUND are only used for learning/warm-up.
-        for idx, actual_group in enumerate(groups, start=1):
-
-            self.trade_engine.settle_trade(actual_group, idx)
-
+        for idx, actual_group in enumerate(self.groups, start=1):
             self.window_engine.update_one_round(actual_group, idx)
 
+        self.ctx.last_length = len(self.groups)
+
+    def process_new_rounds(self) -> None:
+        # Process only new rows added after the app started.
+        current_length = len(self.groups)
+
+        if current_length <= self.ctx.last_length:
+            return
+
+        # If more than one row was added while app was offline,
+        # process them in order.
+        for idx in range(self.ctx.last_length + 1, current_length + 1):
+            actual_group = self.groups[idx - 1]
+
+            self.trade_engine.settle_trade(actual_group, idx)
+            self.window_engine.update_one_round(actual_group, idx)
+
+            # build signal/open after each new round, so pending is correct
             signal = self.signal_engine.build_signal(idx)
-            confidence_score = self.signal_engine.get_confidence_score(signal)
+            confidence = self.signal_engine.get_confidence_score(signal)
 
             signal.state = self.protection_engine.adaptive_ready_wait(
                 signal,
-                confidence_score
+                confidence
             )
 
             self.trade_engine.open_trade(signal, idx)
 
-        self.ctx.last_length = len(groups)
+            self.ctx.last_length = idx
 
     def run(self) -> None:
-        numbers, groups, actual_group, round_id = load_data()
+        # 1) First run: warm up windows only.
+        self.warmup_windows_only()
 
-        self.initialize_from_history(groups)
+        # 2) Subsequent runs: process only newly appended rows.
+        self.process_new_rounds()
 
-        current_length = len(numbers)
-
-        # New round: settle previous pending, then update windows with actual.
-        if current_length > self.ctx.last_length:
-            self.trade_engine.settle_trade(actual_group, current_length)
-            self.window_engine.update_one_round(actual_group, current_length)
-            self.ctx.last_length = current_length
-
-        # Build signal after windows are current.
-        signal = self.signal_engine.build_signal(current_length)
+        # 3) Current display signal.
+        signal = self.signal_engine.build_signal(self.ctx.last_length)
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
@@ -1503,9 +1536,10 @@ class EngineManager:
             confidence_score
         )
 
-        self.trade_engine.open_trade(signal, current_length)
+        # 4) On first live run, if no pending exists and round >= 180,
+        # open a real pending trade for the NEXT new number.
+        self.trade_engine.open_trade(signal, self.ctx.last_length)
 
-        # Dashboard
         self.dashboard.render_header()
         self.dashboard.render_signal(signal, confidence_score)
         self.dashboard.render_market(signal)
@@ -1515,13 +1549,14 @@ class EngineManager:
         self.dashboard.render_window_debug()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
-        self.dashboard.render_debug(signal, confidence_score)
 
         st.caption(
             f"""
-V50 Single Clean
+V50 TRUE LIVE - warmup history only, trade from running time
 
-Round : {round_id}
+Current Sheet Round : {self.round_id}
+
+Engine Last Round : {self.ctx.last_length}
 
 Live Start : {LIVE_START_ROUND}
 
@@ -1530,6 +1565,8 @@ Confidence : {confidence_level}
 Trade State : {self.ctx.trade_state}
 
 Pending Trade : {self.ctx.pending_trade} / Open Round : {self.ctx.pending_round}
+
+Locked Window : {self.ctx.locked_window}
 
 Regime : {signal.regime}
 """
@@ -1554,5 +1591,5 @@ except Exception as e:
 # AUTO REFRESH
 # ============================================================
 
-time.sleep(1)
+time.sleep(5)
 st.rerun()
