@@ -135,6 +135,15 @@ class WindowRecord:
     next_group: Optional[int] = None
 
 
+
+    # Shadow/live performance after LIVE_START_ROUND.
+    live_hit_history: deque = field(default_factory=lambda: deque(maxlen=50))
+    live_profit20: float = 0.0
+    live_profit50: float = 0.0
+    live_profit_total: float = 0.0
+    live_loss_streak: int = 0
+    live_score: float = 0.0
+    live_wr20: float = 0.0
 @dataclass
 class EngineContext:
     trade_history: list[TradeRecord] = field(default_factory=list)
@@ -277,11 +286,29 @@ class WindowEngine:
             2
         )
 
+    def _ensure_live_fields(self, stt: WindowRecord) -> None:
+        if not hasattr(stt, "live_hit_history"):
+            stt.live_hit_history = deque(maxlen=50)
+        if not hasattr(stt, "live_profit20"):
+            stt.live_profit20 = 0.0
+        if not hasattr(stt, "live_profit50"):
+            stt.live_profit50 = 0.0
+        if not hasattr(stt, "live_profit_total"):
+            stt.live_profit_total = 0.0
+        if not hasattr(stt, "live_loss_streak"):
+            stt.live_loss_streak = 0
+        if not hasattr(stt, "live_score"):
+            stt.live_score = 0.0
+        if not hasattr(stt, "live_wr20"):
+            stt.live_wr20 = 0.0
+
     def update_one_round(self, actual_group: int, round_id: int) -> None:
         if round_id == self.ctx.last_window_round:
             return
 
         for w, stt in self.state.items():
+            self._ensure_live_fields(stt)
+
             # 1) Settle previous prediction for this window against actual.
             if stt.next_group is not None:
                 hit = int(stt.next_group == actual_group)
@@ -353,6 +380,9 @@ class WindowEngine:
 
     def get_top_windows(self, top_n: int = TOPN) -> list[tuple[int, WindowRecord]]:
         # Prefer windows with good shadow-live performance after LIVE_START_ROUND.
+        for stt in self.state.values():
+            self._ensure_live_fields(stt)
+
         has_live = any(len(stt.live_hit_history) > 0 for stt in self.state.values())
 
         if has_live:
