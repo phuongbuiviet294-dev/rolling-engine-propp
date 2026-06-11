@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Relock V2",
+    page_title="V50 Real Trade Lock V3",
     layout="wide"
 )
 
@@ -59,6 +59,13 @@ LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
 CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
+
+# Real trade-aware relock.
+# After a window has real trades, relock uses REAL performance first.
+REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
+REAL_MIN_PROFIT_FOR_LOCK = 0.0
+REAL_MAX_LOSS_STREAK_FOR_LOCK = 1
+REAL_MIN_WR_FOR_LOCK = 0.35
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
@@ -120,11 +127,22 @@ class SignalRecord:
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
     shadow_live_wr20: float = 0.0
+    real_window_profit: float = 0.0
+    real_window_wr: float = 0.0
+    real_window_trade_count: int = 0
+    real_window_loss_streak: int = 0
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     locked_live_win: int = 0
     locked_live_loss: int = 0
+
+    # Real performance per locked window.
+    # Example:
+    # {
+    #   6: {"trade_count": 2, "profit": 1.5, "win": 1, "loss": 1, "loss_streak": 0}
+    # }
+    window_real_stats: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -177,6 +195,13 @@ class EngineContext:
     locked_live_loss_streak: int = 0
     locked_live_win: int = 0
     locked_live_loss: int = 0
+
+    # Real performance per locked window.
+    # Example:
+    # {
+    #   6: {"trade_count": 2, "profit": 1.5, "win": 1, "loss": 1, "loss_streak": 0}
+    # }
+    window_real_stats: dict = field(default_factory=dict)
 
 
 # ============================================================
@@ -547,6 +572,56 @@ class SignalEngine:
             return "LOW"
         return "DANGER"
 
+    def get_real_stats(self, window_id: Optional[int]) -> dict:
+        if window_id is None:
+            return {
+                "trade_count": 0,
+                "profit": 0.0,
+                "win": 0,
+                "loss": 0,
+                "loss_streak": 0,
+                "wr": 0.0,
+            }
+
+        stat = self.ctx.window_real_stats.get(
+            int(window_id),
+            {
+                "trade_count": 0,
+                "profit": 0.0,
+                "win": 0,
+                "loss": 0,
+                "loss_streak": 0,
+            }
+        )
+
+        trade_count = int(stat.get("trade_count", 0))
+        win = int(stat.get("win", 0))
+        wr = round(win / trade_count, 3) if trade_count > 0 else 0.0
+
+        return {
+            "trade_count": trade_count,
+            "profit": round(float(stat.get("profit", 0.0)), 2),
+            "win": win,
+            "loss": int(stat.get("loss", 0)),
+            "loss_streak": int(stat.get("loss_streak", 0)),
+            "wr": wr,
+        }
+
+    def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
+        stat = self.get_real_stats(window_id)
+
+        # Real score first. Shadow/history are only tie-breakers.
+        score = (
+            3.00 * stat["profit"] +
+            5.00 * stat["wr"] +
+            0.20 * stat["trade_count"] -
+            2.00 * stat["loss_streak"] +
+            0.20 * obj.profit20 +
+            0.10 * obj.profit50
+        )
+
+        return round(score, 3)
+
     def candidate_score(self, obj: WindowRecord) -> float:
         # Candidate score is based mainly on shadow/live performance from LIVE_START_ROUND.
         # Historical profit is only a tie-breaker.
@@ -566,14 +641,69 @@ class SignalEngine:
         self,
         top_rows: list[tuple[int, WindowRecord]]
     ) -> tuple[Optional[int], Optional[WindowRecord], str]:
-        # Check all windows, not only current TopN, because TopN may be noisy.
+        # ====================================================
+        # 1) REAL TRADE-AWARE CANDIDATES
+        # ====================================================
+        # If any window has positive real trade performance, prefer it.
+        # This prevents relock to untested windows that only look good in shadow.
+        real_candidates = []
+
+        for w, obj in self.window_engine.state.items():
+            if obj.next_group is None:
+                continue
+
+            stat = self.get_real_stats(w)
+
+            if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
+                continue
+
+            if stat["profit"] <= REAL_MIN_PROFIT_FOR_LOCK:
+                continue
+
+            if stat["wr"] < REAL_MIN_WR_FOR_LOCK:
+                continue
+
+            if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
+                continue
+
+            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+                continue
+
+            real_candidates.append(
+                (
+                    self.real_candidate_score(w, obj),
+                    stat["profit"],
+                    stat["wr"],
+                    -stat["loss_streak"],
+                    w,
+                    obj,
+                )
+            )
+
+        if real_candidates:
+            real_candidates.sort(reverse=True)
+            _, _, _, _, w, obj = real_candidates[0]
+            return w, obj, "RELOCK_BY_REAL_WINDOW_PERFORMANCE"
+
+        # ====================================================
+        # 2) INITIAL FALLBACK ONLY
+        # ====================================================
+        # If no window has any positive real performance yet, use shadow/live
+        # and historical candidate checks for bootstrapping.
+        has_any_real_trade = any(
+            int(v.get("trade_count", 0)) > 0
+            for v in self.ctx.window_real_stats.values()
+        )
+
+        if has_any_real_trade:
+            return None, None, "NO_REAL_POSITIVE_CANDIDATE"
+
         candidates = []
 
         for w, obj in self.window_engine.state.items():
             if obj.next_group is None:
                 continue
 
-            # Candidate must have acceptable shadow/live stats.
             has_live = len(obj.live_hit_history) > 0
 
             if has_live:
@@ -584,7 +714,6 @@ class SignalEngine:
                 if int(obj.live_loss_streak) > CANDIDATE_MAX_LIVE_LOSS_STREAK:
                     continue
 
-            # Historical fallback must also not be terrible.
             if obj.profit50 <= 0:
                 continue
             if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
@@ -605,16 +734,16 @@ class SignalEngine:
         if candidates:
             candidates.sort(reverse=True)
             _, _, _, _, _, w, obj = candidates[0]
-            return w, obj, "RELOCK_BY_CANDIDATE_BACKTEST"
+            return w, obj, "BOOTSTRAP_BY_SHADOW_BACKTEST"
 
-        # Fallback: choose best current top row only if it is not awful.
+        # Fallback to current TopN only if truly no data.
         for w, obj in top_rows:
             if (
                 obj.next_group is not None
                 and obj.profit20 > LOCK_MIN_PROFIT20
                 and int(obj.loss_streak) <= LOCK_MAX_LOSS_STREAK
             ):
-                return w, obj, "FALLBACK_TOP_WINDOW"
+                return w, obj, "BOOTSTRAP_TOP_WINDOW"
 
         return None, None, "NO_VALID_CANDIDATE"
 
@@ -666,6 +795,17 @@ class SignalEngine:
         elif self.ctx.locked_live_loss_streak >= LIVE_RELOCK_LOSS_STREAK:
             relock_needed = True
             lock_reason = "LOCK_LIVE_LOSS_STREAK"
+        else:
+            real_stat = self.get_real_stats(locked_window)
+            if (
+                real_stat["trade_count"] >= REAL_MIN_TRADE_COUNT_FOR_LOCK
+                and (
+                    real_stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK
+                    or real_stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK
+                )
+            ):
+                relock_needed = True
+                lock_reason = "LOCK_REAL_PERFORMANCE_BAD"
 
         if relock_needed:
             candidate_w, candidate_obj, candidate_reason = self.choose_relock_candidate(top_rows)
@@ -702,6 +842,8 @@ class SignalEngine:
         else:
             hits20 = list(locked_obj.hit_history)[-20:] if locked_obj is not None else []
             leader_wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+
+        real_locked_stat = self.get_real_stats(locked_window)
 
         # Dynamic READY rule.
         wr20 = TradeEngine(self.ctx).get_winrate(20)
@@ -761,6 +903,10 @@ class SignalEngine:
             locked_live_loss_streak=self.ctx.locked_live_loss_streak,
             shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
             shadow_live_wr20=(locked_obj.live_wr20 if locked_obj is not None else 0.0),
+            real_window_profit=real_locked_stat["profit"],
+            real_window_wr=real_locked_stat["wr"],
+            real_window_trade_count=real_locked_stat["trade_count"],
+            real_window_loss_streak=real_locked_stat["loss_streak"],
         )
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
@@ -867,6 +1013,28 @@ class TradeEngine:
 
         # Trade-aware stats for currently locked window.
         # If locked window loses real trades, force relock on next signal.
+        if record.locked_window is not None:
+            w = int(record.locked_window)
+            if w not in self.ctx.window_real_stats:
+                self.ctx.window_real_stats[w] = {
+                    "trade_count": 0,
+                    "profit": 0.0,
+                    "win": 0,
+                    "loss": 0,
+                    "loss_streak": 0,
+                }
+
+            stat = self.ctx.window_real_stats[w]
+            stat["trade_count"] += 1
+            stat["profit"] = round(float(stat["profit"]) + profit, 2)
+
+            if hit:
+                stat["win"] += 1
+                stat["loss_streak"] = 0
+            else:
+                stat["loss"] += 1
+                stat["loss_streak"] += 1
+
         if record.locked_window == self.ctx.locked_window:
             self.ctx.locked_live_profit = round(self.ctx.locked_live_profit + profit, 2)
 
@@ -1057,7 +1225,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Relock V2")
+        st.title("🚀 V50 Real Trade Lock V3")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1086,15 +1254,15 @@ CONF = {confidence_score:.2f}
         c1.metric("Regime", signal.regime)
         c2.metric("Locked W", signal.locked_window)
         c3.metric("Lock Reason", signal.lock_reason)
-        c4.metric("Trade Lock Profit", round(signal.locked_live_profit, 2))
-        c5.metric("Trade Lock LS", signal.locked_live_loss_streak)
-        c6.metric("Shadow Profit20", round(signal.shadow_live_profit20, 2))
-        c7.metric("Shadow WR20", round(signal.shadow_live_wr20, 3))
-        c8.metric("Leader LS", signal.leader_loss_streak)
-        c9.metric("Consensus", round(signal.consensus, 3))
-        c10.metric("Req Cons", round(signal.required_consensus, 3))
-        c11.metric("Stability", round(signal.stability, 3))
-        c12.metric("Top Profit20", round(signal.top_profit20, 2))
+        c4.metric("Real W Profit", round(signal.real_window_profit, 2))
+        c5.metric("Real W WR", round(signal.real_window_wr, 3))
+        c6.metric("Real W Trades", signal.real_window_trade_count)
+        c7.metric("Real W LS", signal.real_window_loss_streak)
+        c8.metric("Shadow P20", round(signal.shadow_live_profit20, 2))
+        c9.metric("Shadow WR20", round(signal.shadow_live_wr20, 3))
+        c10.metric("Consensus", round(signal.consensus, 3))
+        c11.metric("Req Cons", round(signal.required_consensus, 3))
+        c12.metric("Stability", round(signal.stability, 3))
 
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
@@ -1141,6 +1309,11 @@ CONF = {confidence_score:.2f}
                     "LiveWR20": round(float(obj.live_wr20), 3),
                     "LiveLS": int(obj.live_loss_streak),
                     "CandidateScore": self.signal_engine.candidate_score(obj),
+                    "RealScore": self.signal_engine.real_candidate_score(w, obj),
+                    "RealProfit": self.signal_engine.get_real_stats(w)["profit"],
+                    "RealWR": self.signal_engine.get_real_stats(w)["wr"],
+                    "RealTrades": self.signal_engine.get_real_stats(w)["trade_count"],
+                    "RealLS": self.signal_engine.get_real_stats(w)["loss_streak"],
                     "LossStreak": int(obj.loss_streak),
                     "Next": obj.next_group,
                     "HitLen": len(obj.hit_history),
@@ -1168,6 +1341,11 @@ CONF = {confidence_score:.2f}
                     "LiveWR20",
                     "LiveLS",
                     "CandidateScore",
+                    "RealScore",
+                    "RealProfit",
+                    "RealWR",
+                    "RealTrades",
+                    "RealLS",
                     "LossStreak",
                     "Next",
                     "HitLen",
@@ -1232,6 +1410,11 @@ CONF = {confidence_score:.2f}
                         "LiveWR20": round(float(obj.live_wr20), 3),
                         "LiveLS": int(obj.live_loss_streak),
                         "CandidateScore": self.signal_engine.candidate_score(obj),
+                        "RealScore": self.signal_engine.real_candidate_score(w, obj),
+                        "RealProfit": self.signal_engine.get_real_stats(w)["profit"],
+                        "RealWR": self.signal_engine.get_real_stats(w)["wr"],
+                        "RealTrades": self.signal_engine.get_real_stats(w)["trade_count"],
+                        "RealLS": self.signal_engine.get_real_stats(w)["loss_streak"],
                         "LossStreak": int(obj.loss_streak),
                         "Next": obj.next_group,
                         "UseInTop": int(obj.live_loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
