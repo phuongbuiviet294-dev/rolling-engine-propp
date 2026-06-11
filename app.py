@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Real Trade Lock V3",
+    page_title="V50 Real Trade Lock V4",
     layout="wide"
 )
 
@@ -66,6 +66,13 @@ REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 1
 REAL_MIN_WR_FOR_LOCK = 0.35
+
+# V4 fallback/anti-deadlock.
+# If no real-positive window exists, use short-term candidate score
+# so the engine can continue testing instead of WAIT forever.
+FALLBACK_MIN_PROFIT20 = 0.0
+FALLBACK_MIN_WR20 = 0.30
+FALLBACK_MAX_LOSS_STREAK = 3
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
@@ -623,29 +630,29 @@ class SignalEngine:
         return round(score, 3)
 
     def candidate_score(self, obj: WindowRecord) -> float:
-        # Candidate score is based mainly on shadow/live performance from LIVE_START_ROUND.
-        # Historical profit is only a tie-breaker.
-        live_dd_penalty = 0.0
+        # V4 fallback candidate score:
+        # Use short-term behavior. Do NOT let Profit50 dominate.
+        hits20 = list(obj.hit_history)[-20:]
+        wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
         score = (
-            1.00 * obj.live_profit20 +
-            0.30 * obj.live_profit50 +
-            4.00 * obj.live_wr20 -
-            1.50 * obj.live_loss_streak +
-            0.10 * obj.profit20
+            1.50 * obj.profit20 +
+            3.00 * wr20 -
+            1.00 * int(obj.loss_streak) +
+            0.20 * obj.live_profit20 +
+            0.50 * obj.live_wr20 -
+            0.50 * int(obj.live_loss_streak)
         )
 
-        return round(score - live_dd_penalty, 3)
+        return round(score, 3)
 
     def choose_relock_candidate(
         self,
         top_rows: list[tuple[int, WindowRecord]]
     ) -> tuple[Optional[int], Optional[WindowRecord], str]:
         # ====================================================
-        # 1) REAL TRADE-AWARE CANDIDATES
+        # 1) Prefer REAL positive windows
         # ====================================================
-        # If any window has positive real trade performance, prefer it.
-        # This prevents relock to untested windows that only look good in shadow.
         real_candidates = []
 
         for w, obj in self.window_engine.state.items():
@@ -656,16 +663,12 @@ class SignalEngine:
 
             if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
                 continue
-
             if stat["profit"] <= REAL_MIN_PROFIT_FOR_LOCK:
                 continue
-
             if stat["wr"] < REAL_MIN_WR_FOR_LOCK:
                 continue
-
             if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
                 continue
-
             if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
                 continue
 
@@ -683,67 +686,56 @@ class SignalEngine:
         if real_candidates:
             real_candidates.sort(reverse=True)
             _, _, _, _, w, obj = real_candidates[0]
-            return w, obj, "RELOCK_BY_REAL_WINDOW_PERFORMANCE"
+            return w, obj, "RELOCK_BY_REAL_POSITIVE_WINDOW"
 
         # ====================================================
-        # 2) INITIAL FALLBACK ONLY
+        # 2) Fallback: short-term candidate score
         # ====================================================
-        # If no window has any positive real performance yet, use shadow/live
-        # and historical candidate checks for bootstrapping.
-        has_any_real_trade = any(
-            int(v.get("trade_count", 0)) > 0
-            for v in self.ctx.window_real_stats.values()
-        )
-
-        if has_any_real_trade:
-            return None, None, "NO_REAL_POSITIVE_CANDIDATE"
-
-        candidates = []
+        # Important: do not return None just because no real-positive
+        # candidate exists. Otherwise engine gets stuck after one loss.
+        fallback_candidates = []
 
         for w, obj in self.window_engine.state.items():
             if obj.next_group is None:
                 continue
 
-            has_live = len(obj.live_hit_history) > 0
+            hits20 = list(obj.hit_history)[-20:]
+            wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
-            if has_live:
-                if obj.live_profit20 <= CANDIDATE_MIN_LIVE_PROFIT20:
-                    continue
-                if obj.live_wr20 < CANDIDATE_MIN_LIVE_WR20:
-                    continue
-                if int(obj.live_loss_streak) > CANDIDATE_MAX_LIVE_LOSS_STREAK:
-                    continue
-
-            if obj.profit50 <= 0:
+            if obj.profit20 <= FALLBACK_MIN_PROFIT20:
                 continue
-            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+            if wr20 < FALLBACK_MIN_WR20:
+                continue
+            if int(obj.loss_streak) > FALLBACK_MAX_LOSS_STREAK:
                 continue
 
-            candidates.append(
+            fallback_candidates.append(
                 (
                     self.candidate_score(obj),
-                    obj.live_profit20,
-                    obj.live_wr20,
                     obj.profit20,
-                    -int(obj.live_loss_streak),
+                    wr20,
+                    -int(obj.loss_streak),
                     w,
                     obj,
                 )
             )
 
-        if candidates:
-            candidates.sort(reverse=True)
-            _, _, _, _, _, w, obj = candidates[0]
-            return w, obj, "BOOTSTRAP_BY_SHADOW_BACKTEST"
+        if fallback_candidates:
+            fallback_candidates.sort(reverse=True)
+            _, _, _, _, w, obj = fallback_candidates[0]
+            return w, obj, "RELOCK_BY_SHORT_TERM_FALLBACK"
 
-        # Fallback to current TopN only if truly no data.
+        # ====================================================
+        # 3) Last resort: current TopN best score
+        # ====================================================
         for w, obj in top_rows:
-            if (
-                obj.next_group is not None
-                and obj.profit20 > LOCK_MIN_PROFIT20
-                and int(obj.loss_streak) <= LOCK_MAX_LOSS_STREAK
-            ):
-                return w, obj, "BOOTSTRAP_TOP_WINDOW"
+            if obj.next_group is not None:
+                return w, obj, "FORCE_TOP_WINDOW_NO_DEADLOCK"
+
+        # Absolute final fallback: any window with next_group
+        for w, obj in self.window_engine.state.items():
+            if obj.next_group is not None:
+                return w, obj, "FORCE_ANY_WINDOW_NO_DEADLOCK"
 
         return None, None, "NO_VALID_CANDIDATE"
 
@@ -871,7 +863,7 @@ class SignalEngine:
             state = "WAIT"
         elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
             state = "WAIT"
-        elif leader_wr20 < 0.35:
+        elif leader_wr20 < FALLBACK_MIN_WR20:
             state = "WAIT"
         elif leader_loss_streak > LOCK_MAX_LOSS_STREAK:
             state = "WAIT"
@@ -1225,7 +1217,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Real Trade Lock V3")
+        st.title("🚀 V50 Real Trade Lock V4")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
