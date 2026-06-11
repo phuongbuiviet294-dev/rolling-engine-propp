@@ -217,9 +217,9 @@ class SignalRecord:
 
     market_score: float = 0
 
-    quality: str = "CHAOS"
+    quality: str = "NORMAL"
 
-    threshold: float = 0.8
+    threshold: float = 0.5
 
 
 # ============================================================
@@ -1207,30 +1207,10 @@ class MarketEngine:
     # ========================================================
 
     def get_market_quality(
-
             self,
-
             market_score
-
     ):
-
-        if market_score >= 0.90:
-
-            return "EXCELLENT"
-
-        elif market_score >= 0.80:
-
-            return "GOOD"
-
-        elif market_score >= 0.70:
-
-            return "NORMAL"
-
-        elif market_score >= 0.60:
-
-            return "BAD"
-
-        return "CHAOS"
+        return "NORMAL" 
 
     # ========================================================
     # DYNAMIC THRESHOLD
@@ -1240,11 +1220,7 @@ class MarketEngine:
             self,
             regime
     ):
-        if regime == "TREND":
-            return 0.60
-        elif regime == "SIDEWAY":
-            return 0.50
-        return 0.35
+        return 0.5
 
 
 # ============================================================
@@ -1507,7 +1483,10 @@ class SignalEngine:
 
         )
 
-        state = "READY"
+        state = "WAIT"
+
+        if consensus >= 0.50 and stability >= 0.50:
+            state = "READY" 
 
         # -----------------------
         # market filters
@@ -1566,7 +1545,10 @@ class SignalEngine:
         # emergency override
         confidence_score = self.get_confidence_score(signal)
         if signal.market_score > 0.35 and confidence_score > 0.35:
-            signal.state = "READY"
+            signal.state = "WAIT"
+
+        if consensus >= 0.50 and stability >= 0.50:
+            state = "READY" 
 
         return signal
 
