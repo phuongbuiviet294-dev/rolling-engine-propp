@@ -217,9 +217,9 @@ class SignalRecord:
 
     market_score: float = 0
 
-    quality: str = "NORMAL"
+    quality: str = "CHAOS"
 
-    threshold: float = 0.5
+    threshold: float = 0.8
 
 
 # ============================================================
@@ -1207,10 +1207,30 @@ class MarketEngine:
     # ========================================================
 
     def get_market_quality(
+
             self,
+
             market_score
+
     ):
-        return "NORMAL" 
+
+        if market_score >= 0.90:
+
+            return "EXCELLENT"
+
+        elif market_score >= 0.80:
+
+            return "GOOD"
+
+        elif market_score >= 0.70:
+
+            return "NORMAL"
+
+        elif market_score >= 0.60:
+
+            return "BAD"
+
+        return "CHAOS"
 
     # ========================================================
     # DYNAMIC THRESHOLD
@@ -1220,7 +1240,11 @@ class MarketEngine:
             self,
             regime
     ):
-        return 0.5
+        if regime == "TREND":
+            return 0.60
+        elif regime == "SIDEWAY":
+            return 0.50
+        return 0.35
 
 
 # ============================================================
@@ -1483,10 +1507,7 @@ class SignalEngine:
 
         )
 
-        state = "WAIT"
-
-        if consensus >= 0.50 and stability >= 0.50:
-            state = "READY" 
+        state = "READY"
 
         # -----------------------
         # market filters
@@ -1545,10 +1566,7 @@ class SignalEngine:
         # emergency override
         confidence_score = self.get_confidence_score(signal)
         if signal.market_score > 0.35 and confidence_score > 0.35:
-            signal.state = "WAIT"
-
-        if consensus >= 0.50 and stability >= 0.50:
-            state = "READY" 
+            signal.state = "READY"
 
         return signal
 
@@ -3065,6 +3083,32 @@ dashboard = Dashboard()
 # Engine Manager + Main Pipeline
 # ============================================================
 
+
+# ===== LOAD DATA FIX =====
+def load_data():
+
+    numbers = load_numbers()
+
+    if len(numbers) < 30:
+        st.warning("Waiting data...")
+        st.stop()
+
+    groups = build_groups(numbers)
+
+    actual_group = safe_last(groups)
+
+    round_id = get_round_id(numbers)
+
+    return (
+        numbers,
+        groups,
+        actual_group,
+        round_id
+    )
+
+
+
+
 class EngineManager:
 
     def run(self):
@@ -3247,6 +3291,26 @@ Regime : {signal.regime}
 # MANAGER INSTANCE
 # ============================================================
 
+
+# ===== PERSISTENCE FIX =====
+def _persistence_snapshot(self, signal, confidence_score):
+
+    return {
+        "trade_count": len(st.session_state.trade_history),
+        "trade_state": st.session_state.trade_state,
+        "pending_trade": st.session_state.pending_trade,
+        "equity": trade_engine.get_total_profit(),
+        "flip_rate": protection_engine.get_flip_rate(),
+        "confidence": confidence_score,
+        "signal_state": signal.state
+    }
+
+
+PersistenceEngine.snapshot = _persistence_snapshot
+PersistenceEngine.update = lambda self, signal, confidence_score, round_id: None
+
+
+
 manager = EngineManager()
 
 
@@ -3325,42 +3389,4 @@ st.rerun()
 # ======================
 # V47.1 RECOVERY PATCH
 # ======================
-
-def load_data():
-
-    numbers = load_numbers()
-
-    if len(numbers) < 30:
-        st.warning("Waiting data...")
-        st.stop()
-
-    groups = build_groups(numbers)
-
-    actual_group = safe_last(groups)
-
-    round_id = get_round_id(numbers)
-
-    return (
-        numbers,
-        groups,
-        actual_group,
-        round_id
-    )
-
-
-def _persistence_snapshot(self, signal, confidence_score):
-
-    return {
-        "trade_count": len(st.session_state.trade_history),
-        "trade_state": st.session_state.trade_state,
-        "pending_trade": st.session_state.pending_trade,
-        "equity": trade_engine.get_total_profit(),
-        "flip_rate": protection_engine.get_flip_rate(),
-        "confidence": confidence_score,
-        "signal_state": signal.state
-    }
-
-
-PersistenceEngine.snapshot = _persistence_snapshot
-PersistenceEngine.update = lambda self, signal, confidence_score, round_id: None
 
