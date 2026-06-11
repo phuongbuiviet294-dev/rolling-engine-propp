@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V52 Profit Engine",
+    page_title="V52.1 Profit Engine Stable",
     layout="wide"
 )
 
@@ -250,6 +250,57 @@ class EngineContext:
     # }
     window_real_stats: dict = field(default_factory=dict)
     cooled_windows: dict = field(default_factory=dict)
+
+
+
+# ============================================================
+# CONTEXT MIGRATION / COMPATIBILITY
+# ============================================================
+
+def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
+    """Make old session/state objects compatible with newer code."""
+    if not hasattr(ctx, "cooled_windows") or ctx.cooled_windows is None:
+        ctx.cooled_windows = {}
+
+    if not hasattr(ctx, "window_real_stats") or ctx.window_real_stats is None:
+        ctx.window_real_stats = {}
+
+    if not hasattr(ctx, "pending_locked_window"):
+        ctx.pending_locked_window = None
+
+    if not hasattr(ctx, "locked_live_profit"):
+        ctx.locked_live_profit = 0.0
+    if not hasattr(ctx, "locked_live_loss_streak"):
+        ctx.locked_live_loss_streak = 0
+    if not hasattr(ctx, "locked_live_win"):
+        ctx.locked_live_win = 0
+    if not hasattr(ctx, "locked_live_loss"):
+        ctx.locked_live_loss = 0
+
+    # Normalize keys loaded from JSON/Google Sheet.
+    normalized_stats = {}
+    for k, v in getattr(ctx, "window_real_stats", {}).items():
+        try:
+            kk = int(k)
+        except Exception:
+            kk = k
+        normalized_stats[kk] = v
+    ctx.window_real_stats = normalized_stats
+
+    normalized_cool = {}
+    for k, v in getattr(ctx, "cooled_windows", {}).items():
+        try:
+            kk = int(k)
+        except Exception:
+            kk = k
+        try:
+            vv = int(v)
+        except Exception:
+            vv = 0
+        normalized_cool[kk] = vv
+    ctx.cooled_windows = normalized_cool
+
+    return ctx
 
 
 # ============================================================
@@ -624,6 +675,8 @@ class SignalEngine:
         return get_history_real_stats(self.ctx, window_id)
 
     def is_window_cooled(self, window_id: int, current_round: Optional[int] = None) -> bool:
+        ensure_ctx_fields(self.ctx)
+
         if current_round is None:
             current_round = self.ctx.last_length
 
@@ -636,6 +689,8 @@ class SignalEngine:
         return current_round < until_round
 
     def cool_window(self, window_id: Optional[int], reason: str = "") -> None:
+        ensure_ctx_fields(self.ctx)
+
         if window_id is None:
             return
         try:
@@ -787,6 +842,20 @@ class SignalEngine:
             known_bad = self.known_bad_window(w)
             if obj.next_group is not None and not known_bad:
                 return w, obj, "FORCE_ANY_WINDOW_NO_DEADLOCK"
+
+        # If all windows are known bad, pick the least bad by candidate score instead of deadlocking.
+        emergency = []
+        for w, obj in self.window_engine.state.items():
+            if obj.next_group is None:
+                continue
+            if self.is_window_cooled(w):
+                continue
+            emergency.append((self.candidate_score(obj), w, obj))
+
+        if emergency:
+            emergency.sort(reverse=True)
+            _, w, obj = emergency[0]
+            return w, obj, "EMERGENCY_LEAST_BAD_UNCOOLED"
 
         return None, None, "NO_SAFE_CANDIDATE"
 
@@ -1118,6 +1187,7 @@ class TradeEngine:
                 w = int(record.locked_window)
             except Exception:
                 w = record.locked_window
+            ensure_ctx_fields(self.ctx)
             self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
 
     def get_total_profit(self) -> float:
@@ -1294,7 +1364,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V52 Profit Engine")
+        st.title("🚀 V52.1 Profit Engine Stable")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1524,7 +1594,7 @@ CONF = {confidence_score:.2f}
                     "trade_state": self.ctx.trade_state,
                     "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
                     "real_stats_keys": list(self.ctx.window_real_stats.keys()),
-                    "cooled_windows": self.ctx.cooled_windows,
+                    "cooled_windows": getattr(self.ctx, "cooled_windows", {}),
                 }
             )
 
@@ -1877,6 +1947,8 @@ def get_history_real_stats(ctx: EngineContext, window_id: Optional[int]) -> dict
 
 
 def save_live_state(ctx: EngineContext) -> None:
+    ensure_ctx_fields(ctx)
+
     data = {
         "trade_history": [
             trade_record_to_dict(x)
@@ -2012,7 +2084,7 @@ def load_live_state() -> EngineContext:
 
     ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
 
-    return ctx
+    return ensure_ctx_fields(ctx)
 
 
 # ============================================================
@@ -2021,7 +2093,9 @@ def load_live_state() -> EngineContext:
 
 def get_live_ctx() -> EngineContext:
     if "v50_true_live_ctx" not in st.session_state:
-        st.session_state.v50_true_live_ctx = load_live_state()
+        st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
+    else:
+        st.session_state.v50_true_live_ctx = ensure_ctx_fields(st.session_state.v50_true_live_ctx)
     return st.session_state.v50_true_live_ctx
 
 
@@ -2062,7 +2136,7 @@ class EngineManager:
     def __init__(self) -> None:
         reset_live_state_button()
 
-        self.ctx = get_live_ctx()
+        self.ctx = ensure_ctx_fields(get_live_ctx())
         self.window_state = get_live_window_state()
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
@@ -2217,7 +2291,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V52 PROFIT ENGINE
+V52.1 PROFIT ENGINE STABLE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
