@@ -1,14 +1,15 @@
 # ============================================================
-# APP V50 SINGLE CLEAN
-# Refactor from uploaded app_v50_fix_v7 source
+# APP V50 AUTO OPTIMIZE
+# Clean live engine with parameter backtest optimizer
 # ============================================================
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -19,13 +20,13 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Cycle ProfitFix V3",
+    page_title="V50 Auto Optimize",
     layout="wide"
 )
 
 
 # ============================================================
-# CONFIG
+# BASE CONFIG
 # ============================================================
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
@@ -34,46 +35,55 @@ WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
 WINDOWS = list(range(6, 23))
-TOPN = 5
-
-SIGNAL_HISTORY_LEN = 50
-LEADER_HISTORY_LEN = 50
-HIT_HISTORY_LEN = 50
-GROUP_HISTORY_LEN = 80
-
-COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 
-# V50 profit protection tuning
-LIVE_LOSS_COOLDOWN_ROUNDS = 5
-TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.80
-LOW_WR_LEVEL = 0.50
-MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
+HIT_HISTORY_LEN = 50
+GROUP_HISTORY_LEN = 80
 
 PROFIT10_STOP = -3.0
 WR20_STOP = 0.35
 DRAWDOWN_STOP = -10.0
-FLIPRATE_STOP = 0.60
+FLIPRATE_STOP = 0.75
 
-CONSENSUS_READY = 0.50
-STABILITY_READY = 0.50
+
+# ============================================================
+# AUTO OPTIMIZER SEARCH SPACE
+# ============================================================
+
+TOPN_OPTIONS = [3, 5, 7]
+CONSENSUS_OPTIONS = [0.40, 0.50, 0.60]
+LOW_WR_CONSENSUS_OPTIONS = [0.60, 0.70, 0.80]
+MAX_WINDOW_LOSS_STREAK_OPTIONS = [3, 5, 8, 99]
+COOLDOWN_OPTIONS = [0, 2, 3, 5]
+GAP_OPTIONS = [0, 1, 2]
+STABILITY_OPTIONS = [0.40, 0.50, 0.60]
 
 
 # ============================================================
 # DATA MODELS
 # ============================================================
 
+@dataclass(frozen=True)
+class EngineConfig:
+    topn: int = 5
+    consensus_ready: float = 0.50
+    low_wr_consensus_ready: float = 0.80
+    max_window_loss_streak_for_top: int = 5
+    cooldown_rounds: int = 3
+    trade_gap_rounds: int = 1
+    stability_ready: float = 0.50
+
+
 @dataclass
 class TradeRecord:
-    round_id: int
+    open_round: int
     predict: int
+    settle_round: Optional[int] = None
     actual: Optional[int] = None
     hit: Optional[int] = None
     profit: float = 0.0
     status: str = "PENDING"
-    settle_round: Optional[int] = None
 
 
 @dataclass
@@ -81,13 +91,12 @@ class SignalRecord:
     state: str = "WAIT"
     next_group: Optional[int] = None
     regime: str = "NORMAL"
-    top_n: int = TOPN
+    consensus: float = 0.0
+    required_consensus: float = 0.0
     health20: float = 0.0
     health50: float = 0.0
-    consensus: float = 0.0
     stability: float = 0.0
     momentum: float = 0.0
-    required_consensus: float = CONSENSUS_READY
     top_profit20: float = 0.0
 
 
@@ -103,12 +112,22 @@ class WindowRecord:
 
 
 @dataclass
+class BacktestResult:
+    config: EngineConfig
+    total_profit: float
+    trade_count: int
+    winrate: float
+    max_drawdown: float
+    score: float
+
+
+@dataclass
 class EngineContext:
     trade_history: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
-    signal_history: deque = field(default_factory=lambda: deque(maxlen=SIGNAL_HISTORY_LEN))
-    signal_flip_history: deque = field(default_factory=lambda: deque(maxlen=SIGNAL_HISTORY_LEN))
-    leader_history: deque = field(default_factory=lambda: deque(maxlen=LEADER_HISTORY_LEN))
+    signal_history: deque = field(default_factory=lambda: deque(maxlen=50))
+    signal_flip_history: deque = field(default_factory=lambda: deque(maxlen=50))
+    leader_history: deque = field(default_factory=lambda: deque(maxlen=50))
 
     pending_trade: Optional[int] = None
     pending_round: int = 0
@@ -123,31 +142,9 @@ class EngineContext:
 
     cooldown_counter: int = 0
     cooldown_loss_streak_marker: int = -1
+
     protection_reason: str = ""
     open_reason: str = ""
-
-
-# ============================================================
-# SESSION HELPERS
-# ============================================================
-
-def get_ctx() -> EngineContext:
-    if "v50_ctx" not in st.session_state:
-        st.session_state.v50_ctx = EngineContext()
-    return st.session_state.v50_ctx
-
-
-def get_window_state() -> dict[int, WindowRecord]:
-    if "v50_window_state" not in st.session_state:
-        st.session_state.v50_window_state = {
-            w: WindowRecord()
-            for w in WINDOWS
-        }
-    return st.session_state.v50_window_state
-
-
-ctx = get_ctx()
-window_state = get_window_state()
 
 
 # ============================================================
@@ -168,10 +165,7 @@ def load_numbers() -> list[int]:
         st.error(f"Load sheet error: {e}")
         st.stop()
 
-    df.columns = [
-        str(x).lower().strip()
-        for x in df.columns
-    ]
+    df.columns = [str(x).lower().strip() for x in df.columns]
 
     if "number" not in df.columns:
         st.error("Sheet must contain column 'number'")
@@ -184,11 +178,7 @@ def load_numbers() -> list[int]:
         .tolist()
     )
 
-    return [
-        x
-        for x in nums
-        if 1 <= x <= 12
-    ]
+    return [x for x in nums if 1 <= x <= 12]
 
 
 def group_of(n: int) -> int:
@@ -202,10 +192,7 @@ def group_of(n: int) -> int:
 
 
 def build_groups(numbers: list[int]) -> list[int]:
-    return [
-        group_of(x)
-        for x in numbers
-    ]
+    return [group_of(x) for x in numbers]
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
@@ -216,10 +203,68 @@ def load_data() -> tuple[list[int], list[int], int, int]:
         st.stop()
 
     groups = build_groups(numbers)
-    actual_group = groups[-1]
-    round_id = len(numbers)
+    return numbers, groups, groups[-1], len(numbers)
 
-    return numbers, groups, actual_group, round_id
+
+# ============================================================
+# CORE MATH HELPERS
+# ============================================================
+
+def calc_profit(hits: list[int]) -> float:
+    return round(sum(WIN_GROUP if x else LOSS_GROUP for x in hits), 2)
+
+
+def calc_drawdown(equity_curve: list[float]) -> float:
+    if not equity_curve:
+        return 0.0
+
+    peak = 0.0
+    dd = 0.0
+
+    for equity in equity_curve:
+        peak = max(peak, equity)
+        dd = min(dd, equity - peak)
+
+    return round(dd, 2)
+
+
+def winrate(records: list[TradeRecord], n: Optional[int] = None) -> float:
+    settled = [x for x in records if x.hit is not None]
+    if n is not None:
+        settled = settled[-n:]
+    if not settled:
+        return 0.0
+    return round(sum(int(x.hit) for x in settled) / len(settled), 3)
+
+
+def profit_n(records: list[TradeRecord], n: int) -> float:
+    settled = [x for x in records if x.hit is not None][-n:]
+    return round(sum(x.profit for x in settled), 2)
+
+
+def loss_streak(records: list[TradeRecord]) -> int:
+    streak = 0
+    for x in reversed(records):
+        if x.hit is None:
+            continue
+        if x.hit == 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def flip_rate(signal_flip_history: deque) -> float:
+    history = list(signal_flip_history)
+    if len(history) < 2:
+        return 0.0
+
+    flips = sum(
+        1 for i in range(1, len(history))
+        if history[i] != history[i - 1]
+    )
+
+    return round(flips / (len(history) - 1), 3)
 
 
 # ============================================================
@@ -227,52 +272,40 @@ def load_data() -> tuple[list[int], list[int], int, int]:
 # ============================================================
 
 class WindowEngine:
-    def __init__(self, ctx: EngineContext, state: dict[int, WindowRecord]):
+    def __init__(self, ctx: EngineContext, config: EngineConfig):
         self.ctx = ctx
-        self.state = state
-
-    def _calc_profit(self, hits: list[int]) -> float:
-        return round(
-            sum(WIN_GROUP if x else LOSS_GROUP for x in hits),
-            2
-        )
+        self.config = config
+        self.state = {w: WindowRecord() for w in WINDOWS}
 
     def update_one_round(self, actual_group: int, round_id: int) -> None:
         if round_id == self.ctx.last_window_round:
             return
 
         for w, stt in self.state.items():
-            # 1) Settle previous prediction for this window against the actual group.
             if stt.next_group is not None:
                 hit = int(stt.next_group == actual_group)
                 stt.hit_history.append(hit)
 
-                tail20 = list(stt.hit_history)[-20:]
-                tail50 = list(stt.hit_history)[-50:]
-
-                stt.profit20 = self._calc_profit(tail20)
-                stt.profit50 = self._calc_profit(tail50)
+                stt.profit20 = calc_profit(list(stt.hit_history)[-20:])
+                stt.profit50 = calc_profit(list(stt.hit_history)[-50:])
 
                 if hit:
                     stt.loss_streak = 0
                 else:
-                    stt.loss_streak = int(stt.loss_streak) + 1
+                    stt.loss_streak += 1
 
-            # 2) Update raw group history.
             stt.group_history.append(actual_group)
 
-            # 3) Generate next prediction using cycle logic:
-            #    next_group for the next round = group from w rounds ago.
+            # Cycle logic: next round prediction = group from w rounds ago.
             if len(stt.group_history) >= w:
                 stt.next_group = list(stt.group_history)[-w]
             else:
                 stt.next_group = None
 
-            # 4) Score. Keep loss_streak as integer, score as float.
             stt.score = round(
-                float(stt.profit20) +
-                0.30 * float(stt.profit50) -
-                float(stt.loss_streak),
+                stt.profit20 +
+                0.30 * stt.profit50 -
+                stt.loss_streak,
                 3
             )
 
@@ -282,15 +315,15 @@ class WindowEngine:
 
         self.ctx.last_window_round = round_id
 
-    def get_top_windows(self, top_n: int = TOPN) -> list[tuple[int, WindowRecord]]:
-        # Prefer windows that are not currently in a hot loss streak.
+    def get_top_windows(self, top_n: Optional[int] = None) -> list[tuple[int, WindowRecord]]:
+        top_n = self.config.topn if top_n is None else top_n
+
         valid_rows = [
             (w, stt)
             for w, stt in self.state.items()
-            if int(stt.loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP
+            if int(stt.loss_streak) <= self.config.max_window_loss_streak_for_top
         ]
 
-        # If all windows are bad, fall back to all rows so engine still has a signal.
         rows_source = valid_rows if valid_rows else list(self.state.items())
 
         rows = sorted(
@@ -298,14 +331,11 @@ class WindowEngine:
             key=lambda x: x[1].score,
             reverse=True
         )
+
         return rows[:top_n]
 
-    def get_consensus(
-        self,
-        top_rows: Optional[list[tuple[int, WindowRecord]]] = None
-    ) -> tuple[Optional[int], float]:
-        if top_rows is None:
-            top_rows = self.get_top_windows(TOPN)
+    def get_consensus(self, top_rows: Optional[list[tuple[int, WindowRecord]]] = None) -> tuple[Optional[int], float]:
+        top_rows = self.get_top_windows() if top_rows is None else top_rows
 
         preds = [
             stt.next_group
@@ -321,41 +351,22 @@ class WindowEngine:
 
     def get_health(self) -> tuple[float, float]:
         total = len(WINDOWS)
-        if total == 0:
-            return 0.0, 0.0
+        positive20 = sum(1 for w in WINDOWS if self.state[w].profit20 > 0)
+        positive50 = sum(1 for w in WINDOWS if self.state[w].profit50 > 0)
+        return round(positive20 / total, 3), round(positive50 / total, 3)
 
-        positive20 = sum(
-            1 for w in WINDOWS
-            if self.state[w].profit20 > 0
-        )
-        positive50 = sum(
-            1 for w in WINDOWS
-            if self.state[w].profit50 > 0
-        )
-
-        return (
-            round(positive20 / total, 3),
-            round(positive50 / total, 3)
-        )
-
-    def get_leader_change_rate(self) -> float:
+    def get_stability(self) -> float:
         history = list(self.ctx.leader_history)
         if len(history) < 2:
-            return 0.0
+            return 1.0
 
         changes = sum(
-            1
-            for i in range(1, len(history))
+            1 for i in range(1, len(history))
             if history[i] != history[i - 1]
         )
 
-        return round(changes / (len(history) - 1), 3)
-
-    def get_stability(self) -> float:
-        return round(
-            max(0.0, 1.0 - self.get_leader_change_rate()),
-            3
-        )
+        change_rate = changes / (len(history) - 1)
+        return round(max(0.0, 1.0 - change_rate), 3)
 
 
 # ============================================================
@@ -363,43 +374,28 @@ class WindowEngine:
 # ============================================================
 
 class SignalEngine:
-    def __init__(self, ctx: EngineContext, window_engine: WindowEngine):
+    def __init__(self, ctx: EngineContext, window_engine: WindowEngine, config: EngineConfig):
         self.ctx = ctx
         self.window_engine = window_engine
+        self.config = config
 
     def get_momentum(self, top_rows: list[tuple[int, WindowRecord]]) -> float:
         if not top_rows:
             return 0.0
 
-        value = sum(
-            stt.profit20 - stt.profit50
-            for _, stt in top_rows
-        ) / len(top_rows)
-
-        return round(float(value), 3)
-
-    def get_regime(
-        self,
-        consensus: float,
-        stability: float,
-        momentum: float
-    ) -> str:
-        if consensus < CONSENSUS_READY:
-            return "CHAOS"
-        if stability < STABILITY_READY:
-            return "CHAOS"
-        if momentum > 2:
-            return "TREND"
-        return "NORMAL"
+        return round(
+            sum(stt.profit20 - stt.profit50 for _, stt in top_rows) / len(top_rows),
+            3
+        )
 
     def get_confidence_score(self, signal: SignalRecord) -> float:
-        score = (
+        return round(
             0.35 * signal.consensus +
             0.25 * signal.health20 +
             0.20 * signal.health50 +
-            0.20 * signal.stability
+            0.20 * signal.stability,
+            3
         )
-        return round(score, 3)
 
     def get_confidence_level(self, score: float) -> str:
         if score >= 0.90:
@@ -412,32 +408,35 @@ class SignalEngine:
             return "LOW"
         return "DANGER"
 
-    def build_signal(self, round_id: int) -> SignalRecord:
-        top_rows = self.window_engine.get_top_windows(TOPN)
+    def build_signal(self, round_id: int, trade_engine: "TradeEngine") -> SignalRecord:
+        top_rows = self.window_engine.get_top_windows()
         next_group, consensus = self.window_engine.get_consensus(top_rows)
         health20, health50 = self.window_engine.get_health()
         stability = self.window_engine.get_stability()
         momentum = self.get_momentum(top_rows)
-        regime = self.get_regime(consensus, stability, momentum)
+        top_profit20 = top_rows[0][1].profit20 if top_rows else 0.0
 
-        # Dynamic READY rule.
-        # If live WR is weak, require stronger consensus.
-        wr20 = TradeEngine(self.ctx).get_winrate(20)
-        required_consensus = CONSENSUS_READY
-        if wr20 > 0 and wr20 < LOW_WR_LEVEL:
-            required_consensus = LOW_WR_CONSENSUS_READY
+        wr20 = trade_engine.get_winrate(20)
+        required_consensus = self.config.consensus_ready
+        if wr20 > 0 and wr20 < 0.50:
+            required_consensus = self.config.low_wr_consensus_ready
 
-        top_profit20 = top_rows[0][1].profit20 if top_rows else 0
+        if consensus < required_consensus:
+            regime = "CHAOS"
+        elif stability < self.config.stability_ready:
+            regime = "CHAOS"
+        elif momentum > 2:
+            regime = "TREND"
+        else:
+            regime = "NORMAL"
 
         state = "WAIT"
-        if round_id < LIVE_START_ROUND:
-            state = "WAIT"
-        elif top_profit20 < 0:
-            state = "WAIT"
-        elif (
-            next_group is not None
+        if (
+            round_id >= LIVE_START_ROUND
+            and next_group is not None
             and consensus >= required_consensus
-            and stability >= STABILITY_READY
+            and stability >= self.config.stability_ready
+            and top_profit20 >= 0
         ):
             state = "READY"
 
@@ -445,13 +444,12 @@ class SignalEngine:
             state=state,
             next_group=next_group,
             regime=regime,
-            top_n=TOPN,
+            consensus=consensus,
+            required_consensus=required_consensus,
             health20=health20,
             health50=health50,
-            consensus=consensus,
             stability=stability,
             momentum=momentum,
-            required_consensus=required_consensus,
             top_profit20=top_profit20
         )
 
@@ -468,8 +466,9 @@ class SignalEngine:
 # ============================================================
 
 class TradeEngine:
-    def __init__(self, ctx: EngineContext):
+    def __init__(self, ctx: EngineContext, config: EngineConfig):
         self.ctx = ctx
+        self.config = config
 
     def update_equity(self, profit: float) -> None:
         equity = 0.0 if not self.ctx.equity_curve else self.ctx.equity_curve[-1]
@@ -483,11 +482,9 @@ class TradeEngine:
             self.ctx.open_reason = "BEFORE_LIVE_START"
             return
 
-        # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
-        # before opening a new one.
         if (
             self.ctx.last_settle_round > 0
-            and round_id - self.ctx.last_settle_round <= TRADE_GAP_ROUNDS
+            and round_id - self.ctx.last_settle_round <= self.config.trade_gap_rounds
         ):
             self.ctx.open_reason = "TRADE_GAP"
             return
@@ -495,24 +492,22 @@ class TradeEngine:
         if signal.state != "READY":
             self.ctx.open_reason = "SIGNAL_WAIT"
             return
+
         if signal.next_group is None:
             self.ctx.open_reason = "NO_NEXT_GROUP"
             return
+
         if self.ctx.pending_trade is not None:
             self.ctx.open_reason = "HAS_PENDING"
             return
+
         if round_id == self.ctx.last_open_round:
             self.ctx.open_reason = "DUPLICATE_OPEN"
             return
 
         record = TradeRecord(
-            round_id=round_id,
-            predict=signal.next_group,
-            actual=None,
-            hit=None,
-            profit=0.0,
-            status="PENDING",
-            settle_round=None
+            open_round=round_id,
+            predict=signal.next_group
         )
 
         self.ctx.trade_history.append(record)
@@ -535,24 +530,23 @@ class TradeEngine:
         hit = int(predict == actual_group)
         profit = WIN_GROUP if hit else LOSS_GROUP
 
-        if self.ctx.pending_index is not None and 0 <= self.ctx.pending_index < len(self.ctx.trade_history):
+        if (
+            self.ctx.pending_index is not None
+            and 0 <= self.ctx.pending_index < len(self.ctx.trade_history)
+        ):
             record = self.ctx.trade_history[self.ctx.pending_index]
-            record.actual = actual_group
-            record.hit = hit
-            record.profit = profit
-            record.status = "WIN" if hit else "LOSS"
-            record.settle_round = current_round
         else:
             record = TradeRecord(
-                round_id=self.ctx.pending_round,
-                predict=predict,
-                actual=actual_group,
-                hit=hit,
-                profit=profit,
-                status="WIN" if hit else "LOSS",
-                settle_round=current_round
+                open_round=self.ctx.pending_round,
+                predict=predict
             )
             self.ctx.trade_history.append(record)
+
+        record.settle_round = current_round
+        record.actual = actual_group
+        record.hit = hit
+        record.profit = profit
+        record.status = "WIN" if hit else "LOSS"
 
         self.update_equity(profit)
 
@@ -569,46 +563,19 @@ class TradeEngine:
         )
 
     def get_profit(self, n: int) -> float:
-        trades = [x for x in self.ctx.trade_history if x.hit is not None][-n:]
-        return round(
-            sum(x.profit for x in trades),
-            2
-        )
+        return profit_n(self.ctx.trade_history, n)
 
     def get_winrate(self, n: int = 20) -> float:
-        trades = [x for x in self.ctx.trade_history if x.hit is not None][-n:]
-        if not trades:
-            return 0.0
-        return round(
-            sum(int(x.hit) for x in trades) / len(trades),
-            3
-        )
+        return winrate(self.ctx.trade_history, n)
 
     def get_loss_streak(self) -> int:
-        streak = 0
-        for x in reversed(self.ctx.trade_history):
-            if x.hit is None:
-                continue
-            if x.hit == 0:
-                streak += 1
-            else:
-                break
-        return streak
+        return loss_streak(self.ctx.trade_history)
 
     def get_drawdown(self) -> float:
-        if not self.ctx.equity_curve:
-            return 0.0
+        return calc_drawdown(self.ctx.equity_curve)
 
-        peak = 0.0
-        drawdown = 0.0
-
-        for equity in self.ctx.equity_curve:
-            peak = max(peak, equity)
-            drawdown = min(drawdown, equity - peak)
-
-        return round(drawdown, 2)
-
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> dict:
+        settled = [x for x in self.ctx.trade_history if x.hit is not None]
         return {
             "trade_state": self.ctx.trade_state,
             "profit10": self.get_profit(10),
@@ -618,7 +585,7 @@ class TradeEngine:
             "wr20": self.get_winrate(20),
             "drawdown": self.get_drawdown(),
             "pending_trade": self.ctx.pending_trade,
-            "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
+            "trade_count": len(settled),
         }
 
 
@@ -627,30 +594,19 @@ class TradeEngine:
 # ============================================================
 
 class ProtectionEngine:
-    def __init__(self, ctx: EngineContext, trade_engine: TradeEngine):
+    def __init__(self, ctx: EngineContext, trade_engine: TradeEngine, config: EngineConfig):
         self.ctx = ctx
         self.trade_engine = trade_engine
+        self.config = config
 
     def get_flip_rate(self) -> float:
-        history = list(self.ctx.signal_flip_history)
-        if len(history) < 2:
-            return 0.0
-
-        flips = sum(
-            1
-            for i in range(1, len(history))
-            if history[i] != history[i - 1]
-        )
-
-        return round(flips / (len(history) - 1), 3)
+        return flip_rate(self.ctx.signal_flip_history)
 
     def profit_protection(self) -> bool:
-        # V50 Live: protection should explain WHY WAIT.
-        # It should not be a silent permanent stop.
         self.ctx.protection_reason = ""
 
-        trade_count = len([x for x in self.ctx.trade_history if x.hit is not None])
-        if trade_count < 20:
+        settled = [x for x in self.ctx.trade_history if x.hit is not None]
+        if len(settled) < 20:
             return False
 
         if self.trade_engine.get_profit(10) <= PROFIT10_STOP:
@@ -672,21 +628,18 @@ class ProtectionEngine:
         return False
 
     def cooldown_engine(self) -> bool:
-        loss_streak = self.trade_engine.get_loss_streak()
+        streak = self.trade_engine.get_loss_streak()
 
-        # Nếu đã có WIN thì reset mốc cooldown.
-        if loss_streak == 0:
+        if streak == 0:
             self.ctx.cooldown_loss_streak_marker = -1
 
-        # Chặn sớm khi loss streak >= 3.
-        # Chỉ kích hoạt 1 lần cho mỗi mức streak để không bị WAIT mãi.
         if (
-            loss_streak >= 3
+            streak >= 3
             and self.ctx.cooldown_counter == 0
-            and self.ctx.cooldown_loss_streak_marker != loss_streak
+            and self.ctx.cooldown_loss_streak_marker != streak
         ):
-            self.ctx.cooldown_counter = LIVE_LOSS_COOLDOWN_ROUNDS
-            self.ctx.cooldown_loss_streak_marker = loss_streak
+            self.ctx.cooldown_counter = self.config.cooldown_rounds
+            self.ctx.cooldown_loss_streak_marker = streak
 
         if self.ctx.cooldown_counter > 0:
             self.ctx.cooldown_counter -= 1
@@ -717,6 +670,124 @@ class ProtectionEngine:
 
 
 # ============================================================
+# BACKTEST / AUTO OPTIMIZER
+# ============================================================
+
+def run_simulation(groups: list[int], config: EngineConfig) -> BacktestResult:
+    ctx_sim = EngineContext()
+    window_engine = WindowEngine(ctx_sim, config)
+    trade_engine = TradeEngine(ctx_sim, config)
+    signal_engine = SignalEngine(ctx_sim, window_engine, config)
+    protection_engine = ProtectionEngine(ctx_sim, trade_engine, config)
+
+    for idx, actual_group in enumerate(groups, start=1):
+        trade_engine.settle_trade(actual_group, idx)
+        window_engine.update_one_round(actual_group, idx)
+
+        signal = signal_engine.build_signal(idx, trade_engine)
+        confidence = signal_engine.get_confidence_score(signal)
+        signal.state = protection_engine.adaptive_ready_wait(signal, confidence)
+
+        trade_engine.open_trade(signal, idx)
+
+    settled = [x for x in ctx_sim.trade_history if x.hit is not None]
+    total_profit = trade_engine.get_total_profit()
+    wr = winrate(ctx_sim.trade_history, None)
+    dd = trade_engine.get_drawdown()
+
+    # Score favors profit, then lower drawdown, then sufficient trade count.
+    score = (
+        total_profit
+        + 0.20 * len(settled)
+        + 2.00 * wr
+        + 0.30 * dd
+    )
+
+    return BacktestResult(
+        config=config,
+        total_profit=total_profit,
+        trade_count=len(settled),
+        winrate=wr,
+        max_drawdown=dd,
+        score=round(score, 4)
+    )
+
+
+@st.cache_data(ttl=30)
+def optimize_config(groups_tuple: tuple[int, ...]) -> tuple[EngineConfig, pd.DataFrame]:
+    groups = list(groups_tuple)
+
+    results = []
+
+    for (
+        topn,
+        consensus_ready,
+        low_wr_consensus,
+        max_window_ls,
+        cooldown,
+        gap,
+        stability_ready
+    ) in itertools.product(
+        TOPN_OPTIONS,
+        CONSENSUS_OPTIONS,
+        LOW_WR_CONSENSUS_OPTIONS,
+        MAX_WINDOW_LOSS_STREAK_OPTIONS,
+        COOLDOWN_OPTIONS,
+        GAP_OPTIONS,
+        STABILITY_OPTIONS,
+    ):
+        cfg = EngineConfig(
+            topn=topn,
+            consensus_ready=consensus_ready,
+            low_wr_consensus_ready=low_wr_consensus,
+            max_window_loss_streak_for_top=max_window_ls,
+            cooldown_rounds=cooldown,
+            trade_gap_rounds=gap,
+            stability_ready=stability_ready,
+        )
+
+        res = run_simulation(groups, cfg)
+        results.append(res)
+
+    rows = [
+        {
+            "score": r.score,
+            "profit": r.total_profit,
+            "trade_count": r.trade_count,
+            "winrate": r.winrate,
+            "drawdown": r.max_drawdown,
+            "topn": r.config.topn,
+            "consensus_ready": r.config.consensus_ready,
+            "low_wr_consensus": r.config.low_wr_consensus_ready,
+            "max_window_ls": r.config.max_window_loss_streak_for_top,
+            "cooldown": r.config.cooldown_rounds,
+            "gap": r.config.trade_gap_rounds,
+            "stability": r.config.stability_ready,
+        }
+        for r in results
+    ]
+
+    df = pd.DataFrame(rows).sort_values(
+        ["score", "profit", "winrate"],
+        ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+    best_row = df.iloc[0]
+
+    best_config = EngineConfig(
+        topn=int(best_row["topn"]),
+        consensus_ready=float(best_row["consensus_ready"]),
+        low_wr_consensus_ready=float(best_row["low_wr_consensus"]),
+        max_window_loss_streak_for_top=int(best_row["max_window_ls"]),
+        cooldown_rounds=int(best_row["cooldown"]),
+        trade_gap_rounds=int(best_row["gap"]),
+        stability_ready=float(best_row["stability"]),
+    )
+
+    return best_config, df
+
+
+# ============================================================
 # DASHBOARD
 # ============================================================
 
@@ -724,19 +795,23 @@ class Dashboard:
     def __init__(
         self,
         ctx: EngineContext,
+        config: EngineConfig,
         window_engine: WindowEngine,
         signal_engine: SignalEngine,
         trade_engine: TradeEngine,
-        protection_engine: ProtectionEngine
+        protection_engine: ProtectionEngine,
+        opt_df: pd.DataFrame
     ):
         self.ctx = ctx
+        self.config = config
         self.window_engine = window_engine
         self.signal_engine = signal_engine
         self.trade_engine = trade_engine
         self.protection_engine = protection_engine
+        self.opt_df = opt_df
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Cycle ProfitFix V3")
+        st.title("🚀 V50 Auto Optimize")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -787,8 +862,20 @@ CONF = {confidence_score:.2f}
         c5.metric("Wait Reason", self.ctx.protection_reason)
         c6.metric("Open Reason", self.ctx.open_reason)
 
+    def render_config(self) -> None:
+        st.subheader("Auto Selected Config")
+
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        c1.metric("TopN", self.config.topn)
+        c2.metric("Consensus", self.config.consensus_ready)
+        c3.metric("LowWR Consensus", self.config.low_wr_consensus_ready)
+        c4.metric("Max W Loss", self.config.max_window_loss_streak_for_top)
+        c5.metric("Cooldown", self.config.cooldown_rounds)
+        c6.metric("Gap", self.config.trade_gap_rounds)
+        c7.metric("Stability", self.config.stability_ready)
+
     def render_top_windows(self) -> None:
-        rows = self.window_engine.get_top_windows(TOPN)
+        rows = self.window_engine.get_top_windows()
         data = []
 
         for rank, (w, obj) in enumerate(rows, start=1):
@@ -812,7 +899,7 @@ CONF = {confidence_score:.2f}
                     "Next": obj.next_group,
                     "HitLen": len(obj.hit_history),
                     "GroupLen": len(obj.group_history),
-                    "Filtered": int(obj.loss_streak) > MAX_WINDOW_LOSS_STREAK_FOR_TOP,
+                    "Filtered": int(obj.loss_streak) > self.config.max_window_loss_streak_for_top,
                 }
             )
 
@@ -821,18 +908,9 @@ CONF = {confidence_score:.2f}
         if not df.empty:
             df = df[
                 [
-                    "Rank",
-                    "Window",
-                    "Score",
-                    "Profit20",
-                    "Profit50",
-                    "WR20",
-                    "WR50",
-                    "LossStreak",
-                    "Next",
-                    "HitLen",
-                    "GroupLen",
-                    "Filtered",
+                    "Rank", "Window", "Score", "Profit20", "Profit50",
+                    "WR20", "WR50", "LossStreak", "Next",
+                    "HitLen", "GroupLen", "Filtered"
                 ]
             ]
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -847,7 +925,7 @@ CONF = {confidence_score:.2f}
         df = pd.DataFrame(
             [
                 {
-                    "open_round": x.round_id,
+                    "open_round": x.open_round,
                     "settle_round": x.settle_round,
                     "predict": x.predict,
                     "actual": x.actual,
@@ -859,7 +937,7 @@ CONF = {confidence_score:.2f}
             ]
         )
 
-        st.dataframe(df.tail(50), use_container_width=True)
+        st.dataframe(df.tail(50), use_container_width=True, hide_index=True)
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
@@ -870,13 +948,19 @@ CONF = {confidence_score:.2f}
         df = pd.DataFrame({"equity": self.ctx.equity_curve})
         st.line_chart(df)
 
+    def render_optimizer(self) -> None:
+        with st.expander("Optimizer Results - Top 20"):
+            st.dataframe(self.opt_df.head(20), use_container_width=True, hide_index=True)
+
     def render_window_debug(self) -> None:
         with st.expander("Window Debug - All Windows"):
             rows = []
+
             for w, obj in self.window_engine.state.items():
                 hits = list(obj.hit_history)
                 hit20 = hits[-20:]
                 hit50 = hits[-50:]
+
                 rows.append(
                     {
                         "Window": int(w),
@@ -887,7 +971,7 @@ CONF = {confidence_score:.2f}
                         "WR50": round(sum(hit50) / len(hit50), 3) if hit50 else 0.0,
                         "LossStreak": int(obj.loss_streak),
                         "Next": obj.next_group,
-                        "UseInTop": int(obj.loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
+                        "UseInTop": int(obj.loss_streak) <= self.config.max_window_loss_streak_for_top,
                     }
                 )
 
@@ -895,22 +979,8 @@ CONF = {confidence_score:.2f}
                 ["UseInTop", "Score"],
                 ascending=[False, False]
             )
-            st.dataframe(df, use_container_width=True, hide_index=True)
 
-    def render_debug(self, signal: SignalRecord, confidence_score: float) -> None:
-        with st.expander("Debug"):
-            st.json(
-                {
-                    "trade_count": len(self.ctx.trade_history),
-                    "trade_state": self.ctx.trade_state,
-                    "pending_trade": self.ctx.pending_trade,
-                    "equity": self.trade_engine.get_total_profit(),
-                    "flip_rate": self.protection_engine.get_flip_rate(),
-                    "confidence": confidence_score,
-                    "signal_state": signal.state,
-                    "protection_reason": self.ctx.protection_reason,
-                }
-            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -919,87 +989,64 @@ CONF = {confidence_score:.2f}
 
 class EngineManager:
     def __init__(self) -> None:
-        self.ctx = ctx
-        self.window_engine = WindowEngine(ctx, window_state)
-        self.signal_engine = SignalEngine(ctx, self.window_engine)
-        self.trade_engine = TradeEngine(ctx)
-        self.protection_engine = ProtectionEngine(ctx, self.trade_engine)
+        self.ctx = EngineContext()
+        self.numbers, self.groups, self.actual_group, self.round_id = load_data()
+
+        self.config, self.opt_df = optimize_config(tuple(self.groups))
+
+        self.window_engine = WindowEngine(self.ctx, self.config)
+        self.trade_engine = TradeEngine(self.ctx, self.config)
+        self.signal_engine = SignalEngine(self.ctx, self.window_engine, self.config)
+        self.protection_engine = ProtectionEngine(self.ctx, self.trade_engine, self.config)
+
         self.dashboard = Dashboard(
-            ctx,
+            self.ctx,
+            self.config,
             self.window_engine,
             self.signal_engine,
             self.trade_engine,
-            self.protection_engine
+            self.protection_engine,
+            self.opt_df
         )
 
-    def initialize_from_history(self, groups: list[int]) -> None:
-        # Only initialize once after first load.
-        if self.ctx.last_length != 0:
-            return
+    def replay(self) -> SignalRecord:
+        signal = SignalRecord()
 
-        # Replay historical rounds using the same live pipeline:
-        # settle previous pending -> update windows -> build signal -> open next trade.
-        # Rounds before LIVE_START_ROUND are only used for learning/warm-up.
-        for idx, actual_group in enumerate(groups, start=1):
-
+        for idx, actual_group in enumerate(self.groups, start=1):
             self.trade_engine.settle_trade(actual_group, idx)
-
             self.window_engine.update_one_round(actual_group, idx)
 
-            signal = self.signal_engine.build_signal(idx)
-            confidence_score = self.signal_engine.get_confidence_score(signal)
+            signal = self.signal_engine.build_signal(idx, self.trade_engine)
+            confidence = self.signal_engine.get_confidence_score(signal)
 
-            signal.state = self.protection_engine.adaptive_ready_wait(
-                signal,
-                confidence_score
-            )
+            signal.state = self.protection_engine.adaptive_ready_wait(signal, confidence)
 
             self.trade_engine.open_trade(signal, idx)
 
-        self.ctx.last_length = len(groups)
+        return signal
 
     def run(self) -> None:
-        numbers, groups, actual_group, round_id = load_data()
-
-        self.initialize_from_history(groups)
-
-        current_length = len(numbers)
-
-        # New round: settle previous pending, then update windows with actual.
-        if current_length > self.ctx.last_length:
-            self.trade_engine.settle_trade(actual_group, current_length)
-            self.window_engine.update_one_round(actual_group, current_length)
-            self.ctx.last_length = current_length
-
-        # Build signal after windows are current.
-        signal = self.signal_engine.build_signal(current_length)
+        signal = self.replay()
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        signal.state = self.protection_engine.adaptive_ready_wait(
-            signal,
-            confidence_score
-        )
-
-        self.trade_engine.open_trade(signal, current_length)
-
-        # Dashboard
         self.dashboard.render_header()
         self.dashboard.render_signal(signal, confidence_score)
+        self.dashboard.render_config()
         self.dashboard.render_market(signal)
         self.dashboard.render_profit()
         self.dashboard.render_risk()
         self.dashboard.render_top_windows()
-        self.dashboard.render_window_debug()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
-        self.dashboard.render_debug(signal, confidence_score)
+        self.dashboard.render_optimizer()
+        self.dashboard.render_window_debug()
 
         st.caption(
             f"""
-V50 Single Clean
+V50 Auto Optimize
 
-Round : {round_id}
+Round : {self.round_id}
 
 Live Start : {LIVE_START_ROUND}
 
@@ -1018,9 +1065,8 @@ Regime : {signal.regime}
 # MAIN
 # ============================================================
 
-manager = EngineManager()
-
 try:
+    manager = EngineManager()
     manager.run()
 except Exception as e:
     st.error(f"Engine Error: {e}")
