@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Cloud Persistent UIFix",
+    page_title="V50 Hybrid Cloud Persistent UI V2",
     layout="wide"
 )
 
@@ -1244,12 +1244,15 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Cloud Persistent UIFix")
+        st.title("🚀 V50 Hybrid Cloud Persistent UI V2")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
 
-        title = "TRADE SIGNAL" if signal.state == "READY" else "NO TRADE"
+        current_round = self.ctx.last_length
+        target_round = current_round + 1
+
+        title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
             f"BET GROUP = {signal.next_group}"
             if signal.state == "READY" and signal.next_group is not None
@@ -1269,6 +1272,7 @@ font-weight:bold;
 ">
 {title}<br>
 STATE = {signal.state}<br>
+CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
@@ -1309,6 +1313,29 @@ CONF = {confidence_score:.2f}
         c5.metric("Wait Reason", self.ctx.protection_reason)
         c6.metric("Open Reason", self.ctx.open_reason)
 
+    def render_last_result(self) -> None:
+        st.subheader("Last Result")
+
+        settled = [
+            x
+            for x in self.ctx.trade_history
+            if x.hit is not None
+        ]
+
+        if not settled:
+            st.info("No settled trade yet.")
+            return
+
+        last = settled[-1]
+
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Open Round", last.round_id)
+        c2.metric("Settle Round", last.settle_round)
+        c3.metric("Predict", last.predict)
+        c4.metric("Actual", last.actual)
+        c5.metric("Result", last.status)
+        c6.metric("Profit", last.profit)
+
     def render_current_trade(self) -> None:
         st.subheader("Current Trade")
 
@@ -1325,8 +1352,8 @@ CONF = {confidence_score:.2f}
         c4.metric("Status", "WAIT RESULT")
 
         st.caption(
-            f"Trade opened at round {self.ctx.pending_round}. "
-            f"Waiting for round {target_round} to settle WIN/LOSS."
+            f"This pending trade was opened after round {self.ctx.pending_round}. "
+            f"It will be settled when round {target_round} appears."
         )
 
     def render_top_windows(self) -> None:
@@ -1936,6 +1963,7 @@ class EngineManager:
         self.dashboard.render_market(signal)
         self.dashboard.render_profit()
         self.dashboard.render_risk()
+        self.dashboard.render_last_result()
         self.dashboard.render_current_trade()
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
@@ -1944,7 +1972,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID CLOUD PERSISTENT LIVE - UI FIX
+V50 HYBRID CLOUD PERSISTENT LIVE - UI V2
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
