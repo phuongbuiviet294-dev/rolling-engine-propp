@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Live Fast",
+    page_title="V50 Leader ProfitFix",
     layout="wide"
 )
 
@@ -89,6 +89,9 @@ class SignalRecord:
     momentum: float = 0.0
     required_consensus: float = CONSENSUS_READY
     top_profit20: float = 0.0
+    leader_window: Optional[int] = None
+    leader_wr20: float = 0.0
+    leader_loss_streak: int = 0
 
 
 @dataclass
@@ -393,11 +396,13 @@ class SignalEngine:
         return "NORMAL"
 
     def get_confidence_score(self, signal: SignalRecord) -> float:
+        # Leader-driven confidence:
+        # leader WR20 is more important than Top5 majority consensus.
         score = (
-            0.35 * signal.consensus +
-            0.25 * signal.health20 +
-            0.20 * signal.health50 +
-            0.20 * signal.stability
+            0.40 * signal.leader_wr20 +
+            0.30 * signal.stability +
+            0.20 * signal.health20 +
+            0.10 * signal.consensus
         )
         return round(score, 3)
 
@@ -414,32 +419,67 @@ class SignalEngine:
 
     def build_signal(self, round_id: int) -> SignalRecord:
         top_rows = self.window_engine.get_top_windows(TOPN)
-        next_group, consensus = self.window_engine.get_consensus(top_rows)
+
+        # Consensus is kept as a market-strength indicator only.
+        # Final prediction now follows the Rank1 / leader window.
+        consensus_group, consensus = self.window_engine.get_consensus(top_rows)
+
         health20, health50 = self.window_engine.get_health()
         stability = self.window_engine.get_stability()
         momentum = self.get_momentum(top_rows)
-        regime = self.get_regime(consensus, stability, momentum)
+
+        leader_window = None
+        leader = None
+        leader_wr20 = 0.0
+        leader_loss_streak = 0
+        next_group = None
+        top_profit20 = 0.0
+
+        if top_rows:
+            leader_window, leader = top_rows[0]
+            next_group = leader.next_group
+            top_profit20 = leader.profit20
+            leader_loss_streak = int(leader.loss_streak)
+
+            hits20 = list(leader.hit_history)[-20:]
+            if hits20:
+                leader_wr20 = round(sum(hits20) / len(hits20), 3)
 
         # Dynamic READY rule.
-        # If live WR is weak, require stronger consensus.
+        # If live WR is weak, require stronger market confirmation,
+        # but prediction still follows leader window.
         wr20 = TradeEngine(self.ctx).get_winrate(20)
         required_consensus = CONSENSUS_READY
         if wr20 > 0 and wr20 < LOW_WR_LEVEL:
             required_consensus = LOW_WR_CONSENSUS_READY
 
-        top_profit20 = top_rows[0][1].profit20 if top_rows else 0
+        if stability < STABILITY_READY:
+            regime = "CHAOS"
+        elif leader is not None and leader.profit20 > 0 and leader_wr20 >= 0.35:
+            regime = "TREND"
+        else:
+            regime = "NORMAL"
 
         state = "WAIT"
         if round_id < LIVE_START_ROUND:
             state = "WAIT"
-        elif top_profit20 < 0:
+        elif leader is None:
             state = "WAIT"
-        elif (
-            next_group is not None
-            and consensus >= required_consensus
-            and stability >= STABILITY_READY
-        ):
-            state = "READY"
+        elif next_group is None:
+            state = "WAIT"
+        elif leader.profit20 <= 0:
+            state = "WAIT"
+        elif leader_wr20 < 0.35:
+            state = "WAIT"
+        elif leader_loss_streak > 3:
+            state = "WAIT"
+        elif stability < STABILITY_READY:
+            state = "WAIT"
+        else:
+            # Consensus is not used to decide group anymore.
+            # It only blocks weak/noisy markets.
+            if consensus >= required_consensus or leader_wr20 >= 0.50:
+                state = "READY"
 
         signal = SignalRecord(
             state=state,
@@ -452,7 +492,10 @@ class SignalEngine:
             stability=stability,
             momentum=momentum,
             required_consensus=required_consensus,
-            top_profit20=top_profit20
+            top_profit20=top_profit20,
+            leader_window=leader_window,
+            leader_wr20=leader_wr20,
+            leader_loss_streak=leader_loss_streak,
         )
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
@@ -736,7 +779,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Live Fast")
+        st.title("🚀 V50 Leader ProfitFix")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -761,13 +804,15 @@ CONF = {confidence_score:.2f}
         )
 
     def render_market(self, signal: SignalRecord) -> None:
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
         c1.metric("Regime", signal.regime)
-        c2.metric("Consensus", round(signal.consensus, 3))
-        c3.metric("Req Consensus", round(signal.required_consensus, 3))
-        c4.metric("Stability", round(signal.stability, 3))
-        c5.metric("Momentum", round(signal.momentum, 3))
-        c6.metric("Top Profit20", round(signal.top_profit20, 2))
+        c2.metric("Leader W", signal.leader_window)
+        c3.metric("Leader WR20", round(signal.leader_wr20, 3))
+        c4.metric("Leader LS", signal.leader_loss_streak)
+        c5.metric("Consensus", round(signal.consensus, 3))
+        c6.metric("Req Cons", round(signal.required_consensus, 3))
+        c7.metric("Stability", round(signal.stability, 3))
+        c8.metric("Top Profit20", round(signal.top_profit20, 2))
 
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
@@ -1032,5 +1077,5 @@ except Exception as e:
 # AUTO REFRESH
 # ============================================================
 
-time.sleep(5)
+time.sleep(1)
 st.rerun()
