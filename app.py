@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 True Live",
+    page_title="V50 Hybrid Live",
     layout="wide"
 )
 
@@ -1217,7 +1217,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 True Live")
+        st.title("🚀 V50 Hybrid Live")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1476,9 +1476,10 @@ class EngineManager:
         reset_live_state_button()
 
         self.ctx = get_live_ctx()
+        self.window_state = get_live_window_state()
+
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
-        self.window_state = get_live_window_state()
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
         self.signal_engine = SignalEngine(self.ctx, self.window_engine)
@@ -1492,34 +1493,49 @@ class EngineManager:
             self.protection_engine
         )
 
-    def warmup_windows_only(self) -> None:
-        # TRUE LIVE:
-        # Use historical data only to build window state.
-        # Do NOT replay historical trades from round 180.
-        if self.ctx.last_length != 0:
+    def hybrid_replay_once(self) -> None:
+        # HYBRID LIVE:
+        # First run only:
+        # - rounds < LIVE_START_ROUND: warm-up windows only
+        # - rounds >= LIVE_START_ROUND: replay trade once to build initial history
+        # After that, state is kept in st.session_state and new rounds are processed live only.
+        if getattr(self.ctx, "hybrid_initialized", False):
             return
 
         for idx, actual_group in enumerate(self.groups, start=1):
+            if idx < LIVE_START_ROUND:
+                self.window_engine.update_one_round(actual_group, idx)
+                continue
+
+            self.trade_engine.settle_trade(actual_group, idx)
             self.window_engine.update_one_round(actual_group, idx)
 
+            signal = self.signal_engine.build_signal(idx)
+            confidence = self.signal_engine.get_confidence_score(signal)
+
+            signal.state = self.protection_engine.adaptive_ready_wait(
+                signal,
+                confidence
+            )
+
+            self.trade_engine.open_trade(signal, idx)
+
         self.ctx.last_length = len(self.groups)
+        self.ctx.hybrid_initialized = True
 
     def process_new_rounds(self) -> None:
-        # Process only new rows added after the app started.
+        # Process only rows added after the first hybrid replay.
         current_length = len(self.groups)
 
         if current_length <= self.ctx.last_length:
             return
 
-        # If more than one row was added while app was offline,
-        # process them in order.
         for idx in range(self.ctx.last_length + 1, current_length + 1):
             actual_group = self.groups[idx - 1]
 
             self.trade_engine.settle_trade(actual_group, idx)
             self.window_engine.update_one_round(actual_group, idx)
 
-            # build signal/open after each new round, so pending is correct
             signal = self.signal_engine.build_signal(idx)
             confidence = self.signal_engine.get_confidence_score(signal)
 
@@ -1533,13 +1549,9 @@ class EngineManager:
             self.ctx.last_length = idx
 
     def run(self) -> None:
-        # 1) First run: warm up windows only.
-        self.warmup_windows_only()
-
-        # 2) Subsequent runs: process only newly appended rows.
+        self.hybrid_replay_once()
         self.process_new_rounds()
 
-        # 3) Current display signal.
         signal = self.signal_engine.build_signal(self.ctx.last_length)
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
@@ -1549,8 +1561,7 @@ class EngineManager:
             confidence_score
         )
 
-        # 4) On first live run, if no pending exists and round >= 180,
-        # open a real pending trade for the NEXT new number.
+        # Do not force-open duplicate on rerun; open_trade has duplicate/pending guards.
         self.trade_engine.open_trade(signal, self.ctx.last_length)
 
         self.dashboard.render_header()
@@ -1565,7 +1576,11 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 TRUE LIVE - warmup history only, trade from running time
+V50 HYBRID LIVE
+
+First run: replay from round {LIVE_START_ROUND} to current once.
+
+After that: only process new Google Sheet rows.
 
 Current Sheet Round : {self.round_id}
 
