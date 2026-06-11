@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Cloud Persistent UI V2",
+    page_title="V50 Hybrid Final Reviewed",
     layout="wide"
 )
 
@@ -100,8 +100,8 @@ REAL_MIN_WR_FOR_LOCK = 0.35
 FALLBACK_MIN_PROFIT20 = 0.0
 FALLBACK_MIN_WR20 = 0.30
 FALLBACK_MAX_LOSS_STREAK = 3
-TRADE_GAP_ROUNDS = 0
-LOW_WR_CONSENSUS_READY = 0.60
+TRADE_GAP_ROUNDS = 1
+LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
@@ -110,8 +110,8 @@ WR20_STOP = 0.35
 DRAWDOWN_STOP = -10.0
 FLIPRATE_STOP = 0.60
 
-CONSENSUS_READY = 0.5
-STABILITY_READY = 0.5
+CONSENSUS_READY = 0.50
+STABILITY_READY = 0.50
 
 
 # ============================================================
@@ -210,6 +210,7 @@ class EngineContext:
     pending_trade: Optional[int] = None
     pending_round: int = 0
     pending_index: Optional[int] = None
+    pending_locked_window: Optional[int] = None
     trade_state: str = "IDLE"
 
     last_length: int = 0
@@ -978,10 +979,12 @@ class TradeEngine:
             self.ctx.open_reason = "DUPLICATE_OPEN"
             return
 
+        frozen_window = self.ctx.locked_window
+
         record = TradeRecord(
             round_id=round_id,
             predict=signal.next_group,
-            locked_window=self.ctx.locked_window,
+            locked_window=frozen_window,
             actual=None,
             hit=None,
             profit=0.0,
@@ -991,6 +994,7 @@ class TradeEngine:
 
         self.ctx.trade_history.append(record)
         self.ctx.pending_index = len(self.ctx.trade_history) - 1
+        self.ctx.pending_locked_window = frozen_window
         self.ctx.pending_trade = signal.next_group
         self.ctx.pending_round = round_id
         self.ctx.trade_state = "PENDING"
@@ -1032,8 +1036,10 @@ class TradeEngine:
 
         # Trade-aware stats for currently locked window.
         # If locked window loses real trades, force relock on next signal.
-        if record.locked_window is not None:
-            w = int(record.locked_window)
+        trade_window = record.locked_window
+
+        if trade_window is not None:
+            w = int(trade_window)
             if w not in self.ctx.window_real_stats:
                 self.ctx.window_real_stats[w] = {
                     "trade_count": 0,
@@ -1067,6 +1073,7 @@ class TradeEngine:
         self.ctx.pending_trade = None
         self.ctx.pending_round = 0
         self.ctx.pending_index = None
+        self.ctx.pending_locked_window = None
         self.ctx.trade_state = "IDLE"
         self.ctx.last_settle_round = current_round
 
@@ -1244,7 +1251,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Cloud Persistent UI V2")
+        st.title("🚀 V50 Hybrid Final Reviewed")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1345,11 +1352,12 @@ CONF = {confidence_score:.2f}
 
         target_round = self.ctx.pending_round + 1
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Open Round", self.ctx.pending_round)
         c2.metric("Target Round", target_round)
-        c3.metric("Bet Group", self.ctx.pending_trade)
-        c4.metric("Status", "WAIT RESULT")
+        c3.metric("Locked Window", self.ctx.pending_locked_window)
+        c4.metric("Bet Group", self.ctx.pending_trade)
+        c5.metric("Status", "WAIT RESULT")
 
         st.caption(
             f"This pending trade was opened after round {self.ctx.pending_round}. "
@@ -1429,6 +1437,22 @@ CONF = {confidence_score:.2f}
                 ]
             ]
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+    def render_state_debug(self) -> None:
+        with st.expander("State Debug"):
+            st.json(
+                {
+                    "last_length": self.ctx.last_length,
+                    "pending_trade": self.ctx.pending_trade,
+                    "pending_round": self.ctx.pending_round,
+                    "pending_locked_window": self.ctx.pending_locked_window,
+                    "current_locked_window": self.ctx.locked_window,
+                    "last_open_round": self.ctx.last_open_round,
+                    "last_settle_round": self.ctx.last_settle_round,
+                    "trade_state": self.ctx.trade_state,
+                    "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
+                }
+            )
 
     def render_trade_history(self) -> None:
         st.subheader("Trade History")
@@ -1652,9 +1676,10 @@ def delete_state_from_gsheet() -> bool:
 
 
 def trade_record_to_dict(x: TradeRecord) -> dict:
+    open_round = getattr(x, "round_id", getattr(x, "open_round", 0))
     return {
-        "round_id": getattr(x, "round_id", None),
-        "open_round": getattr(x, "round_id", None),
+        "round_id": open_round,
+        "open_round": open_round,
         "predict": x.predict,
         "locked_window": getattr(x, "locked_window", None),
         "actual": x.actual,
@@ -1666,9 +1691,7 @@ def trade_record_to_dict(x: TradeRecord) -> dict:
 
 
 def trade_record_from_dict(d: dict) -> TradeRecord:
-    # Compatible with both older `round_id` and newer `open_round`.
     round_id = d.get("round_id", d.get("open_round", 0))
-
     return TradeRecord(
         round_id=int(round_id or 0),
         predict=int(d.get("predict")) if d.get("predict") is not None else 0,
@@ -1695,6 +1718,7 @@ def save_live_state(ctx: EngineContext) -> None:
         "pending_trade": ctx.pending_trade,
         "pending_round": ctx.pending_round,
         "pending_index": ctx.pending_index,
+        "pending_locked_window": ctx.pending_locked_window,
         "trade_state": ctx.trade_state,
 
         "last_length": ctx.last_length,
@@ -1762,6 +1786,7 @@ def load_live_state() -> EngineContext:
     ctx.pending_trade = data.get("pending_trade")
     ctx.pending_round = int(data.get("pending_round", 0))
     ctx.pending_index = data.get("pending_index")
+    ctx.pending_locked_window = data.get("pending_locked_window")
     ctx.trade_state = data.get("trade_state", "IDLE")
 
     ctx.last_length = int(data.get("last_length", 0))
@@ -1972,7 +1997,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID CLOUD PERSISTENT LIVE - UI V2
+V50 HYBRID FINAL REVIEWED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
