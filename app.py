@@ -113,6 +113,7 @@ class EngineContext:
     last_signal_round: int = -1
 
     cooldown_counter: int = 0
+    cooldown_loss_streak_marker: int = -1
 
 
 # ============================================================
@@ -606,8 +607,22 @@ class ProtectionEngine:
         return False
 
     def cooldown_engine(self) -> bool:
-        if self.trade_engine.get_loss_streak() >= 3:
+        loss_streak = self.trade_engine.get_loss_streak()
+
+        # Nếu đã có WIN thì reset mốc cooldown.
+        if loss_streak == 0:
+            self.ctx.cooldown_loss_streak_marker = -1
+
+        # Chỉ kích hoạt cooldown 1 lần cho mỗi mức loss_streak.
+        # Tránh lỗi: loss_streak vẫn = 3 nhưng không có trade mới,
+        # cooldown bị set lại liên tục và app WAIT mãi.
+        if (
+            loss_streak >= 3
+            and self.ctx.cooldown_counter == 0
+            and self.ctx.cooldown_loss_streak_marker != loss_streak
+        ):
             self.ctx.cooldown_counter = COOLDOWN_ROUNDS
+            self.ctx.cooldown_loss_streak_marker = loss_streak
 
         if self.ctx.cooldown_counter > 0:
             self.ctx.cooldown_counter -= 1
