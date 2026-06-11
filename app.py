@@ -45,6 +45,12 @@ COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 
+# V50 profit protection tuning
+LIVE_LOSS_COOLDOWN_ROUNDS = 5
+TRADE_GAP_ROUNDS = 1
+LOW_WR_CONSENSUS_READY = 0.80
+LOW_WR_LEVEL = 0.50
+
 PROFIT10_STOP = -3.0
 WR20_STOP = 0.35
 DRAWDOWN_STOP = -10.0
@@ -80,6 +86,8 @@ class SignalRecord:
     consensus: float = 0.0
     stability: float = 0.0
     momentum: float = 0.0
+    required_consensus: float = CONSENSUS_READY
+    top_profit20: float = 0.0
 
 
 @dataclass
@@ -115,6 +123,7 @@ class EngineContext:
     cooldown_counter: int = 0
     cooldown_loss_streak_marker: int = -1
     protection_reason: str = ""
+    open_reason: str = ""
 
 
 # ============================================================
@@ -252,9 +261,13 @@ class WindowEngine:
             stt.group_history.append(actual_group)
 
             # generate next prediction for the next round
+            # V50 live cycle logic:
+            # at round t, prediction for round t+1 is group at (t+1-w),
+            # which is the first element of the last w groups.
+            # This avoids the majority-memory trap where the engine keeps
+            # predicting the same group repeatedly.
             if len(stt.group_history) >= w:
-                recent = list(stt.group_history)[-w:]
-                stt.next_group = Counter(recent).most_common(1)[0][0]
+                stt.next_group = list(stt.group_history)[-w]
 
             # score
             stt.score = round(
@@ -398,12 +411,23 @@ class SignalEngine:
         momentum = self.get_momentum(top_rows)
         regime = self.get_regime(consensus, stability, momentum)
 
+        # Dynamic READY rule.
+        # If live WR is weak, require stronger consensus.
+        wr20 = TradeEngine(self.ctx).get_winrate(20)
+        required_consensus = CONSENSUS_READY
+        if wr20 > 0 and wr20 < LOW_WR_LEVEL:
+            required_consensus = LOW_WR_CONSENSUS_READY
+
+        top_profit20 = top_rows[0][1].profit20 if top_rows else 0
+
         state = "WAIT"
         if round_id < LIVE_START_ROUND:
             state = "WAIT"
+        elif top_profit20 < 0:
+            state = "WAIT"
         elif (
             next_group is not None
-            and consensus >= CONSENSUS_READY
+            and consensus >= required_consensus
             and stability >= STABILITY_READY
         ):
             state = "READY"
@@ -417,7 +441,9 @@ class SignalEngine:
             health50=health50,
             consensus=consensus,
             stability=stability,
-            momentum=momentum
+            momentum=momentum,
+            required_consensus=required_consensus,
+            top_profit20=top_profit20
         )
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
@@ -442,15 +468,32 @@ class TradeEngine:
         self.ctx.equity_curve.append(round(equity, 2))
 
     def open_trade(self, signal: SignalRecord, round_id: int) -> None:
+        self.ctx.open_reason = ""
+
         if round_id < LIVE_START_ROUND:
+            self.ctx.open_reason = "BEFORE_LIVE_START"
             return
+
+        # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
+        # before opening a new one.
+        if (
+            self.ctx.last_settle_round > 0
+            and round_id - self.ctx.last_settle_round <= TRADE_GAP_ROUNDS
+        ):
+            self.ctx.open_reason = "TRADE_GAP"
+            return
+
         if signal.state != "READY":
+            self.ctx.open_reason = "SIGNAL_WAIT"
             return
         if signal.next_group is None:
+            self.ctx.open_reason = "NO_NEXT_GROUP"
             return
         if self.ctx.pending_trade is not None:
+            self.ctx.open_reason = "HAS_PENDING"
             return
         if round_id == self.ctx.last_open_round:
+            self.ctx.open_reason = "DUPLICATE_OPEN"
             return
 
         record = TradeRecord(
@@ -469,6 +512,7 @@ class TradeEngine:
         self.ctx.pending_round = round_id
         self.ctx.trade_state = "PENDING"
         self.ctx.last_open_round = round_id
+        self.ctx.open_reason = "OPENED"
 
     def settle_trade(self, actual_group: int, current_round: int) -> None:
         if self.ctx.pending_trade is None:
@@ -625,15 +669,14 @@ class ProtectionEngine:
         if loss_streak == 0:
             self.ctx.cooldown_loss_streak_marker = -1
 
-        # Chỉ kích hoạt cooldown 1 lần cho mỗi mức loss_streak.
-        # Tránh lỗi: loss_streak vẫn = 3 nhưng không có trade mới,
-        # cooldown bị set lại liên tục và app WAIT mãi.
+        # Chặn sớm khi loss streak >= 3.
+        # Chỉ kích hoạt 1 lần cho mỗi mức streak để không bị WAIT mãi.
         if (
             loss_streak >= 3
             and self.ctx.cooldown_counter == 0
             and self.ctx.cooldown_loss_streak_marker != loss_streak
         ):
-            self.ctx.cooldown_counter = COOLDOWN_ROUNDS
+            self.ctx.cooldown_counter = LIVE_LOSS_COOLDOWN_ROUNDS
             self.ctx.cooldown_loss_streak_marker = loss_streak
 
         if self.ctx.cooldown_counter > 0:
@@ -709,11 +752,13 @@ CONF = {confidence_score:.2f}
         )
 
     def render_market(self, signal: SignalRecord) -> None:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Regime", signal.regime)
         c2.metric("Consensus", round(signal.consensus, 3))
-        c3.metric("Stability", round(signal.stability, 3))
-        c4.metric("Momentum", round(signal.momentum, 3))
+        c3.metric("Req Consensus", round(signal.required_consensus, 3))
+        c4.metric("Stability", round(signal.stability, 3))
+        c5.metric("Momentum", round(signal.momentum, 3))
+        c6.metric("Top Profit20", round(signal.top_profit20, 2))
 
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
@@ -725,12 +770,13 @@ CONF = {confidence_score:.2f}
         c4.metric("Drawdown", snap["drawdown"])
 
     def render_risk(self) -> None:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("FlipRate", self.protection_engine.get_flip_rate())
         c2.metric("LossStreak", self.trade_engine.get_loss_streak())
         c3.metric("Cooldown", self.ctx.cooldown_counter)
         c4.metric("Live From", LIVE_START_ROUND)
         c5.metric("Wait Reason", self.ctx.protection_reason)
+        c6.metric("Open Reason", self.ctx.open_reason)
 
     def render_top_windows(self) -> None:
         rows = self.window_engine.get_top_windows(TOPN)
