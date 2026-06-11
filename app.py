@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Single Clean Live",
+    page_title="V50 Cycle ProfitFix",
     layout="wide"
 )
 
@@ -241,7 +241,7 @@ class WindowEngine:
             return
 
         for w, stt in self.state.items():
-            # settle previous prediction for this window
+            # 1) Settle previous prediction for this window against the actual group.
             if stt.next_group is not None:
                 hit = int(stt.next_group == actual_group)
                 stt.hit_history.append(hit)
@@ -255,25 +255,23 @@ class WindowEngine:
                 if hit:
                     stt.loss_streak = 0
                 else:
-                    stt.loss_streak += 1
+                    stt.loss_streak = int(stt.loss_streak) + 1
 
-            # update raw group history
+            # 2) Update raw group history.
             stt.group_history.append(actual_group)
 
-            # generate next prediction for the next round
-            # V50 live cycle logic:
-            # at round t, prediction for round t+1 is group at (t+1-w),
-            # which is the first element of the last w groups.
-            # This avoids the majority-memory trap where the engine keeps
-            # predicting the same group repeatedly.
+            # 3) Generate next prediction using cycle logic:
+            #    next_group for the next round = group from w rounds ago.
             if len(stt.group_history) >= w:
                 stt.next_group = list(stt.group_history)[-w]
+            else:
+                stt.next_group = None
 
-            # score
+            # 4) Score. Keep loss_streak as integer, score as float.
             stt.score = round(
-                stt.profit20 +
-                0.30 * stt.profit50 -
-                stt.loss_streak,
+                float(stt.profit20) +
+                0.30 * float(stt.profit50) -
+                float(stt.loss_streak),
                 3
             )
 
@@ -727,7 +725,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Single Clean Live")
+        st.title("🚀 V50 Single Clean Live - Cycle ProfitFix")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -785,12 +783,14 @@ CONF = {confidence_score:.2f}
         for w, obj in rows:
             data.append(
                 {
-                    "Window": w,
-                    "Score": round(obj.score, 2),
-                    "Profit20": round(obj.profit20, 2),
-                    "Profit50": round(obj.profit50, 2),
-                    "LossStreak": obj.loss_streak,
+                    "Window": int(w),
+                    "Score": round(float(obj.score), 2),
+                    "Profit20": round(float(obj.profit20), 2),
+                    "Profit50": round(float(obj.profit50), 2),
+                    "LossStreak": int(obj.loss_streak),
                     "Next": obj.next_group,
+                    "HitLen": len(obj.hit_history),
+                    "GroupLen": len(obj.group_history),
                 }
             )
 
