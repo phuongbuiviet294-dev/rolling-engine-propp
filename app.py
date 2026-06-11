@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Leader ProfitFix",
+    page_title="V50 Lock Leader ProfitFix",
     layout="wide"
 )
 
@@ -47,6 +47,8 @@ LIVE_START_ROUND = 180
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 5
+LOCK_MIN_PROFIT20 = 0.0
+LOCK_MAX_LOSS_STREAK = 3
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
@@ -92,6 +94,8 @@ class SignalRecord:
     leader_window: Optional[int] = None
     leader_wr20: float = 0.0
     leader_loss_streak: int = 0
+    locked_window: Optional[int] = None
+    lock_reason: str = ""
 
 
 @dataclass
@@ -128,6 +132,8 @@ class EngineContext:
     cooldown_loss_streak_marker: int = -1
     protection_reason: str = ""
     open_reason: str = ""
+    locked_window: Optional[int] = None
+    lock_reason: str = ""
 
 
 # ============================================================
@@ -420,34 +426,74 @@ class SignalEngine:
     def build_signal(self, round_id: int) -> SignalRecord:
         top_rows = self.window_engine.get_top_windows(TOPN)
 
-        # Consensus is kept as a market-strength indicator only.
-        # Final prediction now follows the Rank1 / leader window.
-        consensus_group, consensus = self.window_engine.get_consensus(top_rows)
+        # Consensus is only market confirmation. Prediction follows locked window.
+        _, consensus = self.window_engine.get_consensus(top_rows)
 
         health20, health50 = self.window_engine.get_health()
         stability = self.window_engine.get_stability()
         momentum = self.get_momentum(top_rows)
 
-        leader_window = None
-        leader = None
-        leader_wr20 = 0.0
-        leader_loss_streak = 0
-        next_group = None
-        top_profit20 = 0.0
+        # ====================================================
+        # LOCK / RELOCK LEADER WINDOW
+        # ====================================================
+        locked_window = self.ctx.locked_window
+        locked_obj = None
+        relock_needed = False
+        lock_reason = "KEEP_LOCK"
 
-        if top_rows:
-            leader_window, leader = top_rows[0]
-            next_group = leader.next_group
-            top_profit20 = leader.profit20
-            leader_loss_streak = int(leader.loss_streak)
+        if locked_window is not None:
+            locked_obj = self.window_engine.state.get(locked_window)
 
-            hits20 = list(leader.hit_history)[-20:]
-            if hits20:
-                leader_wr20 = round(sum(hits20) / len(hits20), 3)
+        if locked_obj is None:
+            relock_needed = True
+            lock_reason = "NO_LOCK"
+        elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
+            relock_needed = True
+            lock_reason = "LOCK_PROFIT20_BAD"
+        elif int(locked_obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+            relock_needed = True
+            lock_reason = "LOCK_LOSS_STREAK_BAD"
+        elif locked_obj.next_group is None:
+            relock_needed = True
+            lock_reason = "LOCK_NO_NEXT"
+
+        if relock_needed:
+            candidate = None
+            for w, obj in top_rows:
+                if (
+                    obj.next_group is not None
+                    and obj.profit20 > LOCK_MIN_PROFIT20
+                    and int(obj.loss_streak) <= LOCK_MAX_LOSS_STREAK
+                ):
+                    candidate = (w, obj)
+                    break
+
+            if candidate is not None:
+                locked_window, locked_obj = candidate
+                self.ctx.locked_window = locked_window
+                lock_reason = "RELOCK_" + lock_reason
+            else:
+                # fallback to rank1 if no valid candidate
+                if top_rows:
+                    locked_window, locked_obj = top_rows[0]
+                    self.ctx.locked_window = locked_window
+                    lock_reason = "FORCE_RANK1_" + lock_reason
+                else:
+                    locked_window, locked_obj = None, None
+                    self.ctx.locked_window = None
+                    lock_reason = "NO_WINDOW"
+
+        self.ctx.lock_reason = lock_reason
+
+        next_group = locked_obj.next_group if locked_obj is not None else None
+        top_profit20 = locked_obj.profit20 if locked_obj is not None else 0.0
+        leader_window = locked_window
+        leader_loss_streak = int(locked_obj.loss_streak) if locked_obj is not None else 0
+
+        hits20 = list(locked_obj.hit_history)[-20:] if locked_obj is not None else []
+        leader_wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
         # Dynamic READY rule.
-        # If live WR is weak, require stronger market confirmation,
-        # but prediction still follows leader window.
         wr20 = TradeEngine(self.ctx).get_winrate(20)
         required_consensus = CONSENSUS_READY
         if wr20 > 0 and wr20 < LOW_WR_LEVEL:
@@ -455,7 +501,7 @@ class SignalEngine:
 
         if stability < STABILITY_READY:
             regime = "CHAOS"
-        elif leader is not None and leader.profit20 > 0 and leader_wr20 >= 0.35:
+        elif locked_obj is not None and locked_obj.profit20 > 0 and leader_wr20 >= 0.35:
             regime = "TREND"
         else:
             regime = "NORMAL"
@@ -463,21 +509,20 @@ class SignalEngine:
         state = "WAIT"
         if round_id < LIVE_START_ROUND:
             state = "WAIT"
-        elif leader is None:
+        elif locked_obj is None:
             state = "WAIT"
         elif next_group is None:
             state = "WAIT"
-        elif leader.profit20 <= 0:
+        elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
             state = "WAIT"
         elif leader_wr20 < 0.35:
             state = "WAIT"
-        elif leader_loss_streak > 3:
+        elif leader_loss_streak > LOCK_MAX_LOSS_STREAK:
             state = "WAIT"
         elif stability < STABILITY_READY:
             state = "WAIT"
         else:
-            # Consensus is not used to decide group anymore.
-            # It only blocks weak/noisy markets.
+            # Prediction follows locked leader. Consensus only blocks very noisy market.
             if consensus >= required_consensus or leader_wr20 >= 0.50:
                 state = "READY"
 
@@ -496,6 +541,8 @@ class SignalEngine:
             leader_window=leader_window,
             leader_wr20=leader_wr20,
             leader_loss_streak=leader_loss_streak,
+            locked_window=self.ctx.locked_window,
+            lock_reason=self.ctx.lock_reason,
         )
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
@@ -779,7 +826,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Leader ProfitFix")
+        st.title("🚀 V50 Lock Leader ProfitFix")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -804,15 +851,16 @@ CONF = {confidence_score:.2f}
         )
 
     def render_market(self, signal: SignalRecord) -> None:
-        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+        c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
         c1.metric("Regime", signal.regime)
-        c2.metric("Leader W", signal.leader_window)
-        c3.metric("Leader WR20", round(signal.leader_wr20, 3))
-        c4.metric("Leader LS", signal.leader_loss_streak)
-        c5.metric("Consensus", round(signal.consensus, 3))
-        c6.metric("Req Cons", round(signal.required_consensus, 3))
-        c7.metric("Stability", round(signal.stability, 3))
-        c8.metric("Top Profit20", round(signal.top_profit20, 2))
+        c2.metric("Locked W", signal.locked_window)
+        c3.metric("Lock Reason", signal.lock_reason)
+        c4.metric("Leader WR20", round(signal.leader_wr20, 3))
+        c5.metric("Leader LS", signal.leader_loss_streak)
+        c6.metric("Consensus", round(signal.consensus, 3))
+        c7.metric("Req Cons", round(signal.required_consensus, 3))
+        c8.metric("Stability", round(signal.stability, 3))
+        c9.metric("Top Profit20", round(signal.top_profit20, 2))
 
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
@@ -858,6 +906,7 @@ CONF = {confidence_score:.2f}
                     "HitLen": len(obj.hit_history),
                     "GroupLen": len(obj.group_history),
                     "Filtered": int(obj.loss_streak) > MAX_WINDOW_LOSS_STREAK_FOR_TOP,
+                    "Locked": int(w) == self.ctx.locked_window,
                 }
             )
 
@@ -878,6 +927,7 @@ CONF = {confidence_score:.2f}
                     "HitLen",
                     "GroupLen",
                     "Filtered",
+                    "Locked",
                 ]
             ]
         st.dataframe(df, use_container_width=True, hide_index=True)
