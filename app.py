@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Single Clean",
+    page_title="V50 Single Clean Live",
     layout="wide"
 )
 
@@ -43,6 +43,7 @@ GROUP_HISTORY_LEN = 80
 
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
+LIVE_START_ROUND = 180
 
 PROFIT10_STOP = -3.0
 WR20_STOP = 0.35
@@ -396,7 +397,9 @@ class SignalEngine:
         regime = self.get_regime(consensus, stability, momentum)
 
         state = "WAIT"
-        if (
+        if round_id < LIVE_START_ROUND:
+            state = "WAIT"
+        elif (
             next_group is not None
             and consensus >= CONSENSUS_READY
             and stability >= STABILITY_READY
@@ -437,6 +440,8 @@ class TradeEngine:
         self.ctx.equity_curve.append(round(equity, 2))
 
     def open_trade(self, signal: SignalRecord, round_id: int) -> None:
+        if round_id < LIVE_START_ROUND:
+            return
         if signal.state != "READY":
             return
         if signal.next_group is None:
@@ -642,7 +647,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Single Clean")
+        st.title("🚀 V50 Single Clean Live")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -683,10 +688,11 @@ CONF = {confidence_score:.2f}
         c4.metric("Drawdown", snap["drawdown"])
 
     def render_risk(self) -> None:
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("FlipRate", self.protection_engine.get_flip_rate())
         c2.metric("LossStreak", self.trade_engine.get_loss_streak())
         c3.metric("Cooldown", self.ctx.cooldown_counter)
+        c4.metric("Live From", LIVE_START_ROUND)
 
     def render_top_windows(self) -> None:
         rows = self.window_engine.get_top_windows(TOPN)
@@ -827,6 +833,8 @@ class EngineManager:
 V50 Single Clean
 
 Round : {round_id}
+
+Live Start : {LIVE_START_ROUND}
 
 Confidence : {confidence_level}
 
