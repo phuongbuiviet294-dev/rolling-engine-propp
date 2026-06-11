@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Persistent",
+    page_title="V50 Hybrid Cloud Persistent",
     layout="wide"
 )
 
@@ -47,10 +47,30 @@ COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 
-# Persistent live state file.
-# On Streamlit Cloud this persists while the app container is alive.
-# Use Reset Live State to clear it.
-STATE_FILE = "v50_live_state.json"
+# Persistent live state.
+# Priority:
+# 1) Google Sheet state backend if Streamlit secrets are configured.
+# 2) Local JSON fallback.
+#
+# Optional Streamlit secrets:
+# [v50_state]
+# backend = "gsheet"
+# sheet_id = "YOUR_STATE_SHEET_ID"
+# worksheet = "state"
+#
+# [gcp_service_account]
+# type = "service_account"
+# project_id = "..."
+# private_key_id = "..."
+# private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+# client_email = "..."
+# client_id = "..."
+# auth_uri = "https://accounts.google.com/o/oauth2/auth"
+# token_uri = "https://oauth2.googleapis.com/token"
+# auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+# client_x509_cert_url = "..."
+STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
+STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 5
@@ -1224,7 +1244,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Persistent")
+        st.title("🚀 V50 Hybrid Cloud Persistent")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1448,6 +1468,134 @@ CONF = {confidence_score:.2f}
 # PERSISTENT STATE HELPERS
 # ============================================================
 
+
+def get_state_backend_config() -> dict:
+    try:
+        cfg = dict(st.secrets.get("v50_state", {}))
+    except Exception:
+        cfg = {}
+
+    backend = str(cfg.get("backend", "local")).lower().strip()
+    sheet_id = str(cfg.get("sheet_id", "")).strip()
+    worksheet = str(cfg.get("worksheet", STATE_WORKSHEET_DEFAULT)).strip()
+
+    return {
+        "backend": backend,
+        "sheet_id": sheet_id,
+        "worksheet": worksheet,
+    }
+
+
+def get_gsheet_client():
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except Exception:
+        return None
+
+    try:
+        sa_info = dict(st.secrets["gcp_service_account"])
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        credentials = Credentials.from_service_account_info(
+            sa_info,
+            scopes=scopes,
+        )
+        return gspread.authorize(credentials)
+    except Exception as e:
+        st.warning(f"Google state auth error, fallback local: {e}")
+        return None
+
+
+def load_state_from_gsheet() -> dict | None:
+    cfg = get_state_backend_config()
+
+    if cfg["backend"] != "gsheet" or not cfg["sheet_id"]:
+        return None
+
+    client = get_gsheet_client()
+    if client is None:
+        return None
+
+    try:
+        sh = client.open_by_key(cfg["sheet_id"])
+        try:
+            ws = sh.worksheet(cfg["worksheet"])
+        except Exception:
+            ws = sh.add_worksheet(
+                title=cfg["worksheet"],
+                rows=10,
+                cols=2,
+            )
+            ws.update("A1", [["{}"]])
+
+        raw = ws.acell("A1").value
+        if not raw:
+            return None
+
+        return json.loads(raw)
+    except Exception as e:
+        st.warning(f"Load Google state error, fallback local: {e}")
+        return None
+
+
+def save_state_to_gsheet(data: dict) -> bool:
+    cfg = get_state_backend_config()
+
+    if cfg["backend"] != "gsheet" or not cfg["sheet_id"]:
+        return False
+
+    client = get_gsheet_client()
+    if client is None:
+        return False
+
+    try:
+        sh = client.open_by_key(cfg["sheet_id"])
+        try:
+            ws = sh.worksheet(cfg["worksheet"])
+        except Exception:
+            ws = sh.add_worksheet(
+                title=cfg["worksheet"],
+                rows=10,
+                cols=2,
+            )
+
+        payload = json.dumps(data, ensure_ascii=False)
+        ws.update("A1", [[payload]])
+        ws.update("B1", [[time.strftime("%Y-%m-%d %H:%M:%S")]])
+        return True
+    except Exception as e:
+        st.warning(f"Save Google state error, fallback local: {e}")
+        return False
+
+
+def delete_state_from_gsheet() -> bool:
+    cfg = get_state_backend_config()
+
+    if cfg["backend"] != "gsheet" or not cfg["sheet_id"]:
+        return False
+
+    client = get_gsheet_client()
+    if client is None:
+        return False
+
+    try:
+        sh = client.open_by_key(cfg["sheet_id"])
+        try:
+            ws = sh.worksheet(cfg["worksheet"])
+        except Exception:
+            return False
+
+        ws.update("A1", [["{}"]])
+        ws.update("B1", [[time.strftime("%Y-%m-%d %H:%M:%S")]])
+        return True
+    except Exception as e:
+        st.warning(f"Delete Google state error: {e}")
+        return False
+
+
 def trade_record_to_dict(x: TradeRecord) -> dict:
     return {
         "round_id": getattr(x, "round_id", None),
@@ -1518,21 +1666,31 @@ def save_live_state(ctx: EngineContext) -> None:
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
 
+    # Try Google Sheet backend first. If unavailable, fallback to local JSON.
+    if save_state_to_gsheet(data):
+        return
+
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.warning(f"Save state error: {e}")
+        st.warning(f"Save local state error: {e}")
 
 
 def load_live_state() -> EngineContext:
-    if not os.path.exists(STATE_FILE):
-        return EngineContext()
+    data = load_state_from_gsheet()
 
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
+    if data is None:
+        if not os.path.exists(STATE_FILE):
+            return EngineContext()
+
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return EngineContext()
+
+    if not isinstance(data, dict) or not data:
         return EngineContext()
 
     ctx = EngineContext()
@@ -1600,11 +1758,17 @@ def get_live_window_state() -> dict[int, WindowRecord]:
 def reset_live_state_button() -> None:
     with st.sidebar:
         st.subheader("Live Control")
+        cfg = get_state_backend_config()
+        if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+            st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
+        else:
+            st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
             if "v50_true_live_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
             if "v50_true_live_window_state" in st.session_state:
                 del st.session_state.v50_true_live_window_state
+            delete_state_from_gsheet()
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
             st.rerun()
@@ -1646,11 +1810,11 @@ class EngineManager:
         if target <= 0:
             return
 
-        # Reset derived window state and replay only window calculations.
+        # Reset derived window state and derived leader history.
         for w in WINDOWS:
             self.window_state[w] = WindowRecord()
 
-        old_last_window_round = self.ctx.last_window_round
+        self.ctx.leader_history = deque(maxlen=LEADER_HISTORY_LEN)
         self.ctx.last_window_round = -1
 
         for idx in range(1, target + 1):
@@ -1748,13 +1912,13 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID PERSISTENT LIVE
+V50 HYBRID CLOUD PERSISTENT LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
 Open/settle decisions happen only when a new round appears, not every rerun.
-Trade state is saved to local JSON file so restart does not replay old trades.
+Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
 
 Current Sheet Round : {self.round_id}
 
