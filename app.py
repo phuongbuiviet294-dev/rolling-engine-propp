@@ -21,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Profit Optimized",
+    page_title="V50 Profit Optimized Fix3",
     layout="wide"
 )
 
@@ -615,46 +615,7 @@ class SignalEngine:
         return "DANGER"
 
     def get_real_stats(self, window_id: Optional[int]) -> dict:
-        if window_id is None:
-            return {
-                "trade_count": 0,
-                "profit": 0.0,
-                "win": 0,
-                "loss": 0,
-                "loss_streak": 0,
-                "wr": 0.0,
-            }
-
-        try:
-            int_key = int(window_id)
-        except Exception:
-            int_key = window_id
-
-        stat = self.ctx.window_real_stats.get(int_key)
-        if stat is None:
-            stat = self.ctx.window_real_stats.get(str(window_id))
-
-        if stat is None:
-            stat = {
-                "trade_count": 0,
-                "profit": 0.0,
-                "win": 0,
-                "loss": 0,
-                "loss_streak": 0,
-            }
-
-        trade_count = int(stat.get("trade_count", 0))
-        win = int(stat.get("win", 0))
-        wr = round(win / trade_count, 3) if trade_count > 0 else 0.0
-
-        return {
-            "trade_count": trade_count,
-            "profit": round(float(stat.get("profit", 0.0)), 2),
-            "win": win,
-            "loss": int(stat.get("loss", 0)),
-            "loss_streak": int(stat.get("loss_streak", 0)),
-            "wr": wr,
-        }
+        return get_history_real_stats(self.ctx, window_id)
 
     def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
         stat = self.get_real_stats(window_id)
@@ -740,6 +701,15 @@ class SignalEngine:
             if obj.next_group is None:
                 continue
 
+            # If a window has real trades and is negative or has active real loss streak,
+            # do NOT reselect it via fallback. This prevents repeating W9-like losing loops.
+            real_stat = self.get_real_stats(w)
+            if real_stat["trade_count"] > 0:
+                if real_stat["profit"] <= 0:
+                    continue
+                if real_stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK:
+                    continue
+
             hits20 = list(obj.hit_history)[-20:]
             wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
@@ -767,16 +737,34 @@ class SignalEngine:
             return w, obj, "RELOCK_BY_SHORT_TERM_FALLBACK"
 
         # ====================================================
-        # 3) Last resort: current TopN best score
+        # 3) Last resort: current TopN best score, but avoid known bad real windows
         # ====================================================
         for w, obj in top_rows:
-            if obj.next_group is not None:
+            real_stat = self.get_real_stats(w)
+            known_bad = (
+                real_stat["trade_count"] > 0
+                and (
+                    real_stat["profit"] <= 0
+                    or real_stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK
+                )
+            )
+            if obj.next_group is not None and not known_bad:
                 return w, obj, "FORCE_TOP_WINDOW_NO_DEADLOCK"
 
-        # Absolute final fallback: any window with next_group
+        # Absolute final fallback: any untested or not-bad window with next_group
         for w, obj in self.window_engine.state.items():
-            if obj.next_group is not None:
+            real_stat = self.get_real_stats(w)
+            known_bad = (
+                real_stat["trade_count"] > 0
+                and (
+                    real_stat["profit"] <= 0
+                    or real_stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK
+                )
+            )
+            if obj.next_group is not None and not known_bad:
                 return w, obj, "FORCE_ANY_WINDOW_NO_DEADLOCK"
+
+        return None, None, "NO_SAFE_CANDIDATE"
 
         return None, None, "NO_VALID_CANDIDATE"
 
@@ -822,12 +810,6 @@ class SignalEngine:
         elif locked_obj.next_group is None:
             relock_needed = True
             lock_reason = "LOCK_NO_NEXT"
-        elif self.ctx.locked_live_profit < LIVE_RELOCK_PROFIT_STOP:
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_PROFIT_NEGATIVE"
-        elif self.ctx.locked_live_loss_streak >= LIVE_RELOCK_LOSS_STREAK:
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_LOSS_STREAK"
         else:
             real_stat = self.get_real_stats(locked_window)
             if (
@@ -1099,6 +1081,9 @@ class TradeEngine:
         self.ctx.trade_state = "IDLE"
         self.ctx.last_settle_round = current_round
 
+        # Keep real stats/equity aligned with trade_history as source of truth.
+        rebuild_real_stats_from_history(self.ctx)
+
     def get_total_profit(self) -> float:
         return round(
             sum(x.profit for x in self.ctx.trade_history if x.hit is not None),
@@ -1273,7 +1258,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Profit Optimized")
+        st.title("🚀 V50 Profit Optimized Fix3")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1500,6 +1485,25 @@ CONF = {confidence_score:.2f}
                     "real_stats_keys": list(self.ctx.window_real_stats.keys()),
                 }
             )
+
+    def render_real_stats_summary(self) -> None:
+        with st.expander("Real Stats Summary - Source of Truth"):
+            rows = []
+            for w, stat in sorted(self.ctx.window_real_stats.items(), key=lambda x: int(x[0])):
+                trades = int(stat.get("trade_count", 0))
+                win = int(stat.get("win", 0))
+                rows.append(
+                    {
+                        "Window": int(w),
+                        "RealTrades": trades,
+                        "RealProfit": round(float(stat.get("profit", 0.0)), 2),
+                        "RealWR": round(win / trades, 3) if trades else 0.0,
+                        "RealLS": int(stat.get("loss_streak", 0)),
+                        "Win": win,
+                        "Loss": int(stat.get("loss", 0)),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     def render_trade_history(self) -> None:
         st.subheader("Trade History")
@@ -1751,6 +1755,84 @@ def trade_record_from_dict(d: dict) -> TradeRecord:
     )
 
 
+def rebuild_real_stats_from_history(ctx: EngineContext) -> None:
+    """Rebuild real performance from settled trade_history.
+
+    This is critical because JSON/Google Sheet state may be stale or may
+    have string keys. Trade history is the source of truth.
+    """
+    stats = {}
+    equity = []
+    total = 0.0
+
+    for rec in ctx.trade_history:
+        if rec.hit is None:
+            continue
+
+        profit = float(rec.profit)
+        total = round(total + profit, 2)
+        equity.append(total)
+
+        w = rec.locked_window
+        if w is None:
+            continue
+
+        try:
+            w = int(w)
+        except Exception:
+            pass
+
+        if w not in stats:
+            stats[w] = {
+                "trade_count": 0,
+                "profit": 0.0,
+                "win": 0,
+                "loss": 0,
+                "loss_streak": 0,
+            }
+
+        stt = stats[w]
+        stt["trade_count"] += 1
+        stt["profit"] = round(float(stt["profit"]) + profit, 2)
+
+        if int(rec.hit) == 1:
+            stt["win"] += 1
+            stt["loss_streak"] = 0
+        else:
+            stt["loss"] += 1
+            stt["loss_streak"] += 1
+
+    ctx.window_real_stats = stats
+    ctx.equity_curve = equity
+
+
+def get_history_real_stats(ctx: EngineContext, window_id: Optional[int]) -> dict:
+    if window_id is None:
+        return {"trade_count": 0, "profit": 0.0, "win": 0, "loss": 0, "loss_streak": 0, "wr": 0.0}
+
+    try:
+        key = int(window_id)
+    except Exception:
+        key = window_id
+
+    stat = ctx.window_real_stats.get(key, ctx.window_real_stats.get(str(window_id), None))
+    if stat is None:
+        return {"trade_count": 0, "profit": 0.0, "win": 0, "loss": 0, "loss_streak": 0, "wr": 0.0}
+
+    trades = int(stat.get("trade_count", 0))
+    win = int(stat.get("win", 0))
+    wr = round(win / trades, 3) if trades else 0.0
+    return {
+        "trade_count": trades,
+        "profit": round(float(stat.get("profit", 0.0)), 2),
+        "win": win,
+        "loss": int(stat.get("loss", 0)),
+        "loss_streak": int(stat.get("loss_streak", 0)),
+        "wr": wr,
+    }
+
+
+
 def save_live_state(ctx: EngineContext) -> None:
     data = {
         "trade_history": [
@@ -1867,6 +1949,10 @@ def load_live_state() -> EngineContext:
         except Exception:
             kk = k
         ctx.window_real_stats[kk] = v
+
+    # Trade history is the source of truth for real stats/equity.
+    # Rebuild every load to avoid stale/corrupt window_real_stats.
+    rebuild_real_stats_from_history(ctx)
 
     ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
 
@@ -1989,6 +2075,7 @@ class EngineManager:
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
+        rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
     def process_new_rounds(self) -> None:
@@ -2068,12 +2155,13 @@ class EngineManager:
         self.dashboard.render_profit_config()
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
+        self.dashboard.render_real_stats_summary()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
 
         st.caption(
             f"""
-V50 PROFIT OPTIMIZED V51
+V50 PROFIT OPTIMIZED V51 FIX3
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
