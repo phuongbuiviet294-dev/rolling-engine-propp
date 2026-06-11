@@ -1446,12 +1446,24 @@ def get_live_ctx() -> EngineContext:
     return st.session_state.v50_true_live_ctx
 
 
+
+def get_live_window_state() -> dict[int, WindowRecord]:
+    if "v50_true_live_window_state" not in st.session_state:
+        st.session_state.v50_true_live_window_state = {
+            w: WindowRecord()
+            for w in WINDOWS
+        }
+    return st.session_state.v50_true_live_window_state
+
+
 def reset_live_state_button() -> None:
     with st.sidebar:
         st.subheader("Live Control")
         if st.button("Reset Live State"):
             if "v50_true_live_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
+            if "v50_true_live_window_state" in st.session_state:
+                del st.session_state.v50_true_live_window_state
             st.rerun()
 
 
@@ -1466,7 +1478,8 @@ class EngineManager:
         self.ctx = get_live_ctx()
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
-        self.window_engine = WindowEngine(self.ctx)
+        self.window_state = get_live_window_state()
+        self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
         self.signal_engine = SignalEngine(self.ctx, self.window_engine)
         self.protection_engine = ProtectionEngine(self.ctx, self.trade_engine)
