@@ -1,4 +1,10 @@
 # ============================================================
+# app_v50.py
+# Generated from app_v47_1_stable(1).py
+# Base version for V50 refactor
+# ============================================================
+
+# ============================================================
 # app_v42.py
 # PART 1/10
 # Config + Session + Dataclass
@@ -3333,3 +3339,46 @@ st.rerun()
 # ======================
 # V46.1 FINAL POLISH
 # ======================
+
+# ======================
+# V47.1 RECOVERY PATCH
+# ======================
+
+def load_data():
+
+    numbers = load_numbers()
+
+    if len(numbers) < 30:
+        st.warning("Waiting data...")
+        st.stop()
+
+    groups = build_groups(numbers)
+
+    actual_group = safe_last(groups)
+
+    round_id = get_round_id(numbers)
+
+    return (
+        numbers,
+        groups,
+        actual_group,
+        round_id
+    )
+
+
+def _persistence_snapshot(self, signal, confidence_score):
+
+    return {
+        "trade_count": len(st.session_state.trade_history),
+        "trade_state": st.session_state.trade_state,
+        "pending_trade": st.session_state.pending_trade,
+        "equity": trade_engine.get_total_profit(),
+        "flip_rate": protection_engine.get_flip_rate(),
+        "confidence": confidence_score,
+        "signal_state": signal.state
+    }
+
+
+PersistenceEngine.snapshot = _persistence_snapshot
+PersistenceEngine.update = lambda self, signal, confidence_score, round_id: None
+
