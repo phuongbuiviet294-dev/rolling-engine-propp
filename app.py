@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Lock Leader ProfitFix",
+    page_title="V50 Trade Aware Lock",
     layout="wide"
 )
 
@@ -49,6 +49,8 @@ LIVE_START_ROUND = 180
 LIVE_LOSS_COOLDOWN_ROUNDS = 5
 LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 3
+LIVE_RELOCK_PROFIT_STOP = 0.0
+LIVE_RELOCK_LOSS_STREAK = 2
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
@@ -71,6 +73,7 @@ STABILITY_READY = 0.50
 class TradeRecord:
     round_id: int
     predict: int
+    locked_window: Optional[int] = None
     actual: Optional[int] = None
     hit: Optional[int] = None
     profit: float = 0.0
@@ -96,6 +99,13 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
+    locked_live_profit: float = 0.0
+    locked_live_loss_streak: int = 0
+
+    locked_live_profit: float = 0.0
+    locked_live_loss_streak: int = 0
+    locked_live_win: int = 0
+    locked_live_loss: int = 0
 
 
 @dataclass
@@ -134,6 +144,11 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
+
+    locked_live_profit: float = 0.0
+    locked_live_loss_streak: int = 0
+    locked_live_win: int = 0
+    locked_live_loss: int = 0
 
 
 # ============================================================
@@ -456,6 +471,12 @@ class SignalEngine:
         elif locked_obj.next_group is None:
             relock_needed = True
             lock_reason = "LOCK_NO_NEXT"
+        elif self.ctx.locked_live_profit < LIVE_RELOCK_PROFIT_STOP:
+            relock_needed = True
+            lock_reason = "LOCK_LIVE_PROFIT_NEGATIVE"
+        elif self.ctx.locked_live_loss_streak >= LIVE_RELOCK_LOSS_STREAK:
+            relock_needed = True
+            lock_reason = "LOCK_LIVE_LOSS_STREAK"
 
         if relock_needed:
             candidate = None
@@ -471,12 +492,20 @@ class SignalEngine:
             if candidate is not None:
                 locked_window, locked_obj = candidate
                 self.ctx.locked_window = locked_window
+                self.ctx.locked_live_profit = 0.0
+                self.ctx.locked_live_loss_streak = 0
+                self.ctx.locked_live_win = 0
+                self.ctx.locked_live_loss = 0
                 lock_reason = "RELOCK_" + lock_reason
             else:
                 # fallback to rank1 if no valid candidate
                 if top_rows:
                     locked_window, locked_obj = top_rows[0]
                     self.ctx.locked_window = locked_window
+                    self.ctx.locked_live_profit = 0.0
+                    self.ctx.locked_live_loss_streak = 0
+                    self.ctx.locked_live_win = 0
+                    self.ctx.locked_live_loss = 0
                     lock_reason = "FORCE_RANK1_" + lock_reason
                 else:
                     locked_window, locked_obj = None, None
@@ -543,6 +572,8 @@ class SignalEngine:
             leader_loss_streak=leader_loss_streak,
             locked_window=self.ctx.locked_window,
             lock_reason=self.ctx.lock_reason,
+            locked_live_profit=self.ctx.locked_live_profit,
+            locked_live_loss_streak=self.ctx.locked_live_loss_streak,
         )
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
@@ -598,6 +629,7 @@ class TradeEngine:
         record = TradeRecord(
             round_id=round_id,
             predict=signal.next_group,
+            locked_window=self.ctx.locked_window,
             actual=None,
             hit=None,
             profit=0.0,
@@ -645,6 +677,18 @@ class TradeEngine:
             self.ctx.trade_history.append(record)
 
         self.update_equity(profit)
+
+        # Trade-aware stats for currently locked window.
+        # If locked window loses real trades, force relock on next signal.
+        if record.locked_window == self.ctx.locked_window:
+            self.ctx.locked_live_profit = round(self.ctx.locked_live_profit + profit, 2)
+
+            if hit:
+                self.ctx.locked_live_loss_streak = 0
+                self.ctx.locked_live_win += 1
+            else:
+                self.ctx.locked_live_loss_streak += 1
+                self.ctx.locked_live_loss += 1
 
         self.ctx.pending_trade = None
         self.ctx.pending_round = 0
@@ -826,7 +870,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Lock Leader ProfitFix")
+        st.title("🚀 V50 Trade Aware Lock")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -851,16 +895,18 @@ CONF = {confidence_score:.2f}
         )
 
     def render_market(self, signal: SignalRecord) -> None:
-        c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
+        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(11)
         c1.metric("Regime", signal.regime)
         c2.metric("Locked W", signal.locked_window)
         c3.metric("Lock Reason", signal.lock_reason)
-        c4.metric("Leader WR20", round(signal.leader_wr20, 3))
-        c5.metric("Leader LS", signal.leader_loss_streak)
-        c6.metric("Consensus", round(signal.consensus, 3))
-        c7.metric("Req Cons", round(signal.required_consensus, 3))
-        c8.metric("Stability", round(signal.stability, 3))
-        c9.metric("Top Profit20", round(signal.top_profit20, 2))
+        c4.metric("Live Lock Profit", round(signal.locked_live_profit, 2))
+        c5.metric("Live Lock LS", signal.locked_live_loss_streak)
+        c6.metric("Leader WR20", round(signal.leader_wr20, 3))
+        c7.metric("Leader LS", signal.leader_loss_streak)
+        c8.metric("Consensus", round(signal.consensus, 3))
+        c9.metric("Req Cons", round(signal.required_consensus, 3))
+        c10.metric("Stability", round(signal.stability, 3))
+        c11.metric("Top Profit20", round(signal.top_profit20, 2))
 
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
@@ -944,6 +990,7 @@ CONF = {confidence_score:.2f}
                 {
                     "open_round": x.round_id,
                     "settle_round": x.settle_round,
+                    "locked_window": x.locked_window,
                     "predict": x.predict,
                     "actual": x.actual,
                     "hit": x.hit,
