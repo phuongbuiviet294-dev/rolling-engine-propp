@@ -19,7 +19,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Cycle ProfitFix",
+    page_title="V50 Cycle ProfitFix V3",
     layout="wide"
 )
 
@@ -50,6 +50,7 @@ LIVE_LOSS_COOLDOWN_ROUNDS = 5
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.80
 LOW_WR_LEVEL = 0.50
+MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 PROFIT10_STOP = -3.0
 WR20_STOP = 0.35
@@ -282,8 +283,18 @@ class WindowEngine:
         self.ctx.last_window_round = round_id
 
     def get_top_windows(self, top_n: int = TOPN) -> list[tuple[int, WindowRecord]]:
+        # Prefer windows that are not currently in a hot loss streak.
+        valid_rows = [
+            (w, stt)
+            for w, stt in self.state.items()
+            if int(stt.loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP
+        ]
+
+        # If all windows are bad, fall back to all rows so engine still has a signal.
+        rows_source = valid_rows if valid_rows else list(self.state.items())
+
         rows = sorted(
-            self.state.items(),
+            rows_source,
             key=lambda x: x[1].score,
             reverse=True
         )
@@ -725,7 +736,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Single Clean Live - Cycle ProfitFix")
+        st.title("🚀 V50 Cycle ProfitFix V3")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -780,22 +791,51 @@ CONF = {confidence_score:.2f}
         rows = self.window_engine.get_top_windows(TOPN)
         data = []
 
-        for w, obj in rows:
+        for rank, (w, obj) in enumerate(rows, start=1):
+            hits = list(obj.hit_history)
+            hit20 = hits[-20:]
+            hit50 = hits[-50:]
+
+            wr20 = round(sum(hit20) / len(hit20), 3) if hit20 else 0.0
+            wr50 = round(sum(hit50) / len(hit50), 3) if hit50 else 0.0
+
             data.append(
                 {
+                    "Rank": rank,
                     "Window": int(w),
                     "Score": round(float(obj.score), 2),
                     "Profit20": round(float(obj.profit20), 2),
                     "Profit50": round(float(obj.profit50), 2),
+                    "WR20": wr20,
+                    "WR50": wr50,
                     "LossStreak": int(obj.loss_streak),
                     "Next": obj.next_group,
                     "HitLen": len(obj.hit_history),
                     "GroupLen": len(obj.group_history),
+                    "Filtered": int(obj.loss_streak) > MAX_WINDOW_LOSS_STREAK_FOR_TOP,
                 }
             )
 
         st.subheader("Top Windows")
-        st.dataframe(pd.DataFrame(data), use_container_width=True)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df = df[
+                [
+                    "Rank",
+                    "Window",
+                    "Score",
+                    "Profit20",
+                    "Profit50",
+                    "WR20",
+                    "WR50",
+                    "LossStreak",
+                    "Next",
+                    "HitLen",
+                    "GroupLen",
+                    "Filtered",
+                ]
+            ]
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     def render_trade_history(self) -> None:
         st.subheader("Trade History")
@@ -829,6 +869,33 @@ CONF = {confidence_score:.2f}
 
         df = pd.DataFrame({"equity": self.ctx.equity_curve})
         st.line_chart(df)
+
+    def render_window_debug(self) -> None:
+        with st.expander("Window Debug - All Windows"):
+            rows = []
+            for w, obj in self.window_engine.state.items():
+                hits = list(obj.hit_history)
+                hit20 = hits[-20:]
+                hit50 = hits[-50:]
+                rows.append(
+                    {
+                        "Window": int(w),
+                        "Score": round(float(obj.score), 2),
+                        "Profit20": round(float(obj.profit20), 2),
+                        "Profit50": round(float(obj.profit50), 2),
+                        "WR20": round(sum(hit20) / len(hit20), 3) if hit20 else 0.0,
+                        "WR50": round(sum(hit50) / len(hit50), 3) if hit50 else 0.0,
+                        "LossStreak": int(obj.loss_streak),
+                        "Next": obj.next_group,
+                        "UseInTop": int(obj.loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
+                    }
+                )
+
+            df = pd.DataFrame(rows).sort_values(
+                ["UseInTop", "Score"],
+                ascending=[False, False]
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
     def render_debug(self, signal: SignalRecord, confidence_score: float) -> None:
         with st.expander("Debug"):
@@ -923,6 +990,7 @@ class EngineManager:
         self.dashboard.render_profit()
         self.dashboard.render_risk()
         self.dashboard.render_top_windows()
+        self.dashboard.render_window_debug()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
         self.dashboard.render_debug(signal, confidence_score)
