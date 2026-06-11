@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import time
+import json
+import os
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
 
 import pandas as pd
@@ -19,7 +21,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V50 Hybrid Live",
+    page_title="V50 Hybrid Persistent",
     layout="wide"
 )
 
@@ -44,6 +46,11 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
+
+# Persistent live state file.
+# On Streamlit Cloud this persists while the app container is alive.
+# Use Reset Live State to clear it.
+STATE_FILE = "v50_live_state.json"
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 5
@@ -1217,7 +1224,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V50 Hybrid Live")
+        st.title("🚀 V50 Hybrid Persistent")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1436,13 +1443,147 @@ CONF = {confidence_score:.2f}
 
 
 
+
+# ============================================================
+# PERSISTENT STATE HELPERS
+# ============================================================
+
+def trade_record_to_dict(x: TradeRecord) -> dict:
+    return {
+        "round_id": getattr(x, "round_id", None),
+        "open_round": getattr(x, "round_id", None),
+        "predict": x.predict,
+        "locked_window": getattr(x, "locked_window", None),
+        "actual": x.actual,
+        "hit": x.hit,
+        "profit": x.profit,
+        "status": x.status,
+        "settle_round": x.settle_round,
+    }
+
+
+def trade_record_from_dict(d: dict) -> TradeRecord:
+    # Compatible with both older `round_id` and newer `open_round`.
+    round_id = d.get("round_id", d.get("open_round", 0))
+
+    return TradeRecord(
+        round_id=int(round_id or 0),
+        predict=int(d.get("predict")) if d.get("predict") is not None else 0,
+        locked_window=d.get("locked_window"),
+        actual=d.get("actual"),
+        hit=d.get("hit"),
+        profit=float(d.get("profit", 0.0)),
+        status=d.get("status", "PENDING"),
+        settle_round=d.get("settle_round"),
+    )
+
+
+def save_live_state(ctx: EngineContext) -> None:
+    data = {
+        "trade_history": [
+            trade_record_to_dict(x)
+            for x in ctx.trade_history
+        ],
+        "equity_curve": list(ctx.equity_curve),
+        "signal_history": list(ctx.signal_history),
+        "signal_flip_history": list(ctx.signal_flip_history),
+        "leader_history": list(ctx.leader_history),
+
+        "pending_trade": ctx.pending_trade,
+        "pending_round": ctx.pending_round,
+        "pending_index": ctx.pending_index,
+        "trade_state": ctx.trade_state,
+
+        "last_length": ctx.last_length,
+        "last_open_round": ctx.last_open_round,
+        "last_settle_round": ctx.last_settle_round,
+        "last_window_round": ctx.last_window_round,
+        "last_signal_round": ctx.last_signal_round,
+
+        "cooldown_counter": ctx.cooldown_counter,
+        "cooldown_loss_streak_marker": ctx.cooldown_loss_streak_marker,
+
+        "protection_reason": ctx.protection_reason,
+        "open_reason": ctx.open_reason,
+
+        "locked_window": ctx.locked_window,
+        "lock_reason": ctx.lock_reason,
+
+        "locked_live_profit": ctx.locked_live_profit,
+        "locked_live_loss_streak": ctx.locked_live_loss_streak,
+        "locked_live_win": ctx.locked_live_win,
+        "locked_live_loss": ctx.locked_live_loss,
+
+        "window_real_stats": ctx.window_real_stats,
+        "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
+    }
+
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"Save state error: {e}")
+
+
+def load_live_state() -> EngineContext:
+    if not os.path.exists(STATE_FILE):
+        return EngineContext()
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return EngineContext()
+
+    ctx = EngineContext()
+
+    ctx.trade_history = [
+        trade_record_from_dict(x)
+        for x in data.get("trade_history", [])
+    ]
+    ctx.equity_curve = list(data.get("equity_curve", []))
+    ctx.signal_history.extend(data.get("signal_history", []))
+    ctx.signal_flip_history.extend(data.get("signal_flip_history", []))
+    ctx.leader_history.extend(data.get("leader_history", []))
+
+    ctx.pending_trade = data.get("pending_trade")
+    ctx.pending_round = int(data.get("pending_round", 0))
+    ctx.pending_index = data.get("pending_index")
+    ctx.trade_state = data.get("trade_state", "IDLE")
+
+    ctx.last_length = int(data.get("last_length", 0))
+    ctx.last_open_round = int(data.get("last_open_round", -1))
+    ctx.last_settle_round = int(data.get("last_settle_round", -1))
+    ctx.last_window_round = int(data.get("last_window_round", -1))
+    ctx.last_signal_round = int(data.get("last_signal_round", -1))
+
+    ctx.cooldown_counter = int(data.get("cooldown_counter", 0))
+    ctx.cooldown_loss_streak_marker = int(data.get("cooldown_loss_streak_marker", -1))
+
+    ctx.protection_reason = data.get("protection_reason", "")
+    ctx.open_reason = data.get("open_reason", "")
+
+    ctx.locked_window = data.get("locked_window")
+    ctx.lock_reason = data.get("lock_reason", "")
+
+    ctx.locked_live_profit = float(data.get("locked_live_profit", 0.0))
+    ctx.locked_live_loss_streak = int(data.get("locked_live_loss_streak", 0))
+    ctx.locked_live_win = int(data.get("locked_live_win", 0))
+    ctx.locked_live_loss = int(data.get("locked_live_loss", 0))
+
+    ctx.window_real_stats = data.get("window_real_stats", {})
+    ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
+
+    return ctx
+
+
 # ============================================================
 # TRUE LIVE SESSION STATE
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
     if "v50_true_live_ctx" not in st.session_state:
-        st.session_state.v50_true_live_ctx = EngineContext()
+        st.session_state.v50_true_live_ctx = load_live_state()
     return st.session_state.v50_true_live_ctx
 
 
@@ -1464,6 +1605,8 @@ def reset_live_state_button() -> None:
                 del st.session_state.v50_true_live_ctx
             if "v50_true_live_window_state" in st.session_state:
                 del st.session_state.v50_true_live_window_state
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
             st.rerun()
 
 
@@ -1492,6 +1635,28 @@ class EngineManager:
             self.trade_engine,
             self.protection_engine
         )
+
+        if getattr(self.ctx, "hybrid_initialized", False):
+            self.rebuild_windows_to_last_length()
+
+    def rebuild_windows_to_last_length(self) -> None:
+        # Window state is derived from number history, so rebuild it safely on every app start.
+        # Trade history is NOT replayed here.
+        target = min(self.ctx.last_length, len(self.groups))
+        if target <= 0:
+            return
+
+        # Reset derived window state and replay only window calculations.
+        for w in WINDOWS:
+            self.window_state[w] = WindowRecord()
+
+        old_last_window_round = self.ctx.last_window_round
+        self.ctx.last_window_round = -1
+
+        for idx in range(1, target + 1):
+            self.window_engine.update_one_round(self.groups[idx - 1], idx)
+
+        self.ctx.last_window_round = target
 
     def hybrid_replay_once(self) -> None:
         # HYBRID LIVE:
@@ -1522,6 +1687,7 @@ class EngineManager:
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
+        save_live_state(self.ctx)
 
     def process_new_rounds(self) -> None:
         # Process only rows added after the first hybrid replay.
@@ -1547,22 +1713,28 @@ class EngineManager:
             self.trade_engine.open_trade(signal, idx)
 
             self.ctx.last_length = idx
+            save_live_state(self.ctx)
+
+    def build_display_signal(self) -> tuple[SignalRecord, float, str]:
+        signal = self.signal_engine.build_signal(self.ctx.last_length)
+        confidence_score = self.signal_engine.get_confidence_score(signal)
+        confidence_level = self.signal_engine.get_confidence_level(confidence_score)
+
+        # Display only: do not open trades or decrement cooldown on every rerun.
+        if self.ctx.pending_trade is not None:
+            signal.state = "PENDING"
+            self.ctx.protection_reason = "WAITING_NEXT_ROUND"
+            self.ctx.open_reason = "HAS_PENDING"
+        elif self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
+            signal.state = "WAIT"
+
+        return signal, confidence_score, confidence_level
 
     def run(self) -> None:
         self.hybrid_replay_once()
         self.process_new_rounds()
 
-        signal = self.signal_engine.build_signal(self.ctx.last_length)
-        confidence_score = self.signal_engine.get_confidence_score(signal)
-        confidence_level = self.signal_engine.get_confidence_level(confidence_score)
-
-        signal.state = self.protection_engine.adaptive_ready_wait(
-            signal,
-            confidence_score
-        )
-
-        # Do not force-open duplicate on rerun; open_trade has duplicate/pending guards.
-        self.trade_engine.open_trade(signal, self.ctx.last_length)
+        signal, confidence_score, confidence_level = self.build_display_signal()
 
         self.dashboard.render_header()
         self.dashboard.render_signal(signal, confidence_score)
@@ -1576,11 +1748,13 @@ class EngineManager:
 
         st.caption(
             f"""
-V50 HYBRID LIVE
+V50 HYBRID PERSISTENT LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
+Open/settle decisions happen only when a new round appears, not every rerun.
+Trade state is saved to local JSON file so restart does not replay old trades.
 
 Current Sheet Round : {self.round_id}
 
