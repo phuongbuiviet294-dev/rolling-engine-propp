@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V54 LongRun Stable",
+    page_title="V55 Hybrid Stable",
     layout="wide"
 )
 
@@ -98,9 +98,9 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 # Real trade-aware relock.
 # After a window has real trades, relock uses REAL performance first.
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
-REAL_MIN_PROFIT_FOR_LOCK = 1.5
+REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.40
+REAL_MIN_WR_FOR_LOCK = 0.35
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
@@ -109,32 +109,41 @@ FALLBACK_MIN_PROFIT20 = 0.0
 FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.95
+LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 18
+WINDOW_COOLDOWN_ROUNDS = 12
 BLACKLIST_REAL_NEGATIVE = True
 
-PROFIT10_STOP = -2.5
+PROFIT10_STOP = -3.0
 WR20_STOP = 0.38
-DRAWDOWN_STOP = -5.0
-FLIPRATE_STOP = 0.62
+DRAWDOWN_STOP = -6.0
+FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.66
+CONSENSUS_READY = 0.667
 STABILITY_READY = 0.50
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.46
-SAFE_DRAWDOWN_FROM_PEAK = -2.5
+MIN_CONFIDENCE_READY = 0.43
+SAFE_DRAWDOWN_FROM_PEAK = -3.0
 SAFE_MODE_ROUNDS = 3
+
+# V55 Hybrid Stable: avoid trade starvation.
+REAL_SHADOW_BLEND_MIN_TRADES = 10
+REAL_SHADOW_BLEND_FULL_TRADES = 30
+MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
+MIN_SHADOW_WR20_FOR_TEST = 0.38
+MAX_REAL_NEGATIVE_SOFT = -2.0
+WINDOW_SELECTION_MODE = "hybrid"
+UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 4
-BLACKLIST_DURATION_ROUNDS = 45
+BLACKLIST_DURATION_ROUNDS = 20
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
-UCB_EXPLORATION_C = 0.55
+UCB_EXPLORATION_C = 0.45
 MIN_TRADES_FOR_PROTECTION = 8
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
@@ -798,52 +807,74 @@ class SignalEngine:
         self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
     def known_bad_window(self, window_id: int) -> bool:
+        """V55: negative RealStats is a penalty, not a permanent ban."""
         stat = self.get_real_stats(window_id)
 
         if self.is_window_cooled(window_id):
             return True
+
         if self.is_window_blacklisted(window_id):
             return True
 
-        if stat["trade_count"] > 0:
-            if BLACKLIST_REAL_NEGATIVE and stat["profit"] <= -2.0:
-                return True
-            if stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK:
-                return True
+        if stat["trade_count"] >= 3 and stat["profit"] <= MAX_REAL_NEGATIVE_SOFT and stat["loss_streak"] >= 2:
+            return True
 
         return False
 
-    def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
-        stat = self.get_real_stats(window_id)
-
-        # Real score first. Shadow/history are only tie-breakers.
-        score = (
-            6.00 * stat["profit"] +
-            8.00 * stat["wr"] -
-            5.00 * stat["loss_streak"] +
-            0.10 * stat["trade_count"] +
-            0.30 * obj.live_profit20 +
-            0.10 * obj.profit20
+    def shadow_candidate_score(self, obj: WindowRecord) -> float:
+        hits20 = list(obj.hit_history)[-20:]
+        wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+        return round(
+            1.20 * obj.live_profit20
+            + 8.00 * obj.live_wr20
+            + 0.80 * obj.profit20
+            + 3.00 * wr20
+            - 2.00 * int(obj.live_loss_streak)
+            - 1.50 * int(obj.loss_streak),
+            3
         )
 
+    def hybrid_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
+        stat = self.get_real_stats(window_id)
+        trades = int(stat["trade_count"])
+
+        real_score = (
+            4.00 * stat["profit"]
+            + 6.00 * stat["wr"]
+            - 3.00 * stat["loss_streak"]
+            + 0.05 * trades
+        )
+        shadow_score = self.shadow_candidate_score(obj)
+
+        if trades <= 0:
+            real_weight = 0.0
+        elif trades < REAL_SHADOW_BLEND_MIN_TRADES:
+            real_weight = 0.35
+        elif trades < REAL_SHADOW_BLEND_FULL_TRADES:
+            real_weight = 0.60
+        else:
+            real_weight = 0.85
+
+        score = real_weight * real_score + (1.0 - real_weight) * shadow_score
+
+        if trades > 0 and stat["profit"] < 0:
+            score -= min(3.0, abs(stat["profit"]) * 0.8)
+
+        return round(score, 3)
+
+    def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
+        stat = self.get_real_stats(window_id)
+        score = (
+            4.00 * stat["profit"]
+            + 6.00 * stat["wr"]
+            - 3.00 * stat["loss_streak"]
+            + 0.30 * obj.live_profit20
+            + 0.10 * obj.profit20
+        )
         return round(score, 3)
 
     def candidate_score(self, obj: WindowRecord) -> float:
-        # V4 fallback candidate score:
-        # Use short-term behavior. Do NOT let Profit50 dominate.
-        hits20 = list(obj.hit_history)[-20:]
-        wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
-
-        score = (
-            1.20 * obj.live_profit20 +
-            8.00 * obj.live_wr20 +
-            0.80 * obj.profit20 +
-            3.00 * wr20 -
-            3.00 * int(obj.live_loss_streak) -
-            2.00 * int(obj.loss_streak)
-        )
-
-        return round(score, 3)
+        return self.shadow_candidate_score(obj)
 
     def ucb_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
         stat = self.get_real_stats(window_id)
@@ -883,9 +914,9 @@ class SignalEngine:
 
             if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
                 continue
-            if stat["profit"] <= REAL_MIN_PROFIT_FOR_LOCK:
+            if stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK:
                 continue
-            if stat["wr"] < REAL_MIN_WR_FOR_LOCK:
+            if stat["wr"] < REAL_MIN_WR_FOR_LOCK and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
                 continue
             if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
                 continue
@@ -924,9 +955,9 @@ class SignalEngine:
             hits20 = list(obj.hit_history)[-20:]
             wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
-            if obj.profit20 <= FALLBACK_MIN_PROFIT20:
+            if obj.profit20 <= FALLBACK_MIN_PROFIT20 and obj.live_profit20 < MIN_SHADOW_PROFIT20_FOR_TEST:
                 continue
-            if wr20 < FALLBACK_MIN_WR20:
+            if wr20 < FALLBACK_MIN_WR20 and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
                 continue
             if int(obj.loss_streak) > FALLBACK_MAX_LOSS_STREAK:
                 continue
@@ -1169,7 +1200,7 @@ class TradeEngine:
         equity += profit
         self.ctx.equity_curve.append(round(equity, 2))
 
-    def open_trade(self, signal: SignalRecord, round_id: int) -> None:
+    def open_trade(self, signal: SignalRecord, round_id: int, confidence_score: float = 0.0) -> None:
         self.ctx.open_reason = ""
 
         if round_id < LIVE_START_ROUND:
@@ -1217,6 +1248,7 @@ class TradeEngine:
         self.ctx.pending_confidence = float(getattr(signal, "decision_confidence", getattr(self.ctx, "last_decision_confidence", 0.0)))
         self.ctx.pending_target_round = round_id + 1
         self.ctx.pending_trade = signal.next_group
+        self.ctx.pending_confidence = float(confidence_score)
         self.ctx.pending_round = round_id
         self.ctx.trade_state = "PENDING"
         self.ctx.last_open_round = round_id
@@ -1293,6 +1325,7 @@ class TradeEngine:
                 self.ctx.locked_live_loss += 1
 
         self.ctx.pending_trade = None
+        self.ctx.pending_confidence = 0.0
         self.ctx.pending_round = 0
         self.ctx.pending_index = None
         self.ctx.pending_locked_window = None
@@ -1312,6 +1345,10 @@ class TradeEngine:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
             self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
+            # V55: temporary blacklist losing trade window; expires automatically.
+            if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
+                self.ctx.blacklisted_windows = {}
+            self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
             # Only blacklist stronger losers; simple cooldown is enough for a single mild loss.
             stat = get_history_real_stats(self.ctx, w)
             if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
@@ -1530,7 +1567,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V54 LongRun Stable")
+        st.title("🚀 V55 Hybrid Stable")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1671,6 +1708,9 @@ CONF = {confidence_score:.2f}
                     "BLACKLIST_REAL_NEGATIVE": BLACKLIST_REAL_NEGATIVE,
                     "TOPN": TOPN,
                     "MIN_CONFIDENCE_READY": MIN_CONFIDENCE_READY,
+                    "BLACKLIST_DURATION_ROUNDS": BLACKLIST_DURATION_ROUNDS,
+                    "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
+                    "REAL_SHADOW_BLEND_MIN_TRADES": REAL_SHADOW_BLEND_MIN_TRADES,
                     "SAFE_DRAWDOWN_FROM_PEAK": SAFE_DRAWDOWN_FROM_PEAK,
                     "SAFE_MODE_ROUNDS": SAFE_MODE_ROUNDS,
                     "RISK_PAUSE_ROUNDS": RISK_PAUSE_ROUNDS,
@@ -2152,6 +2192,7 @@ def save_live_state(ctx: EngineContext) -> None:
         "pending_round": ctx.pending_round,
         "pending_index": ctx.pending_index,
         "pending_locked_window": ctx.pending_locked_window,
+        "pending_confidence": ctx.pending_confidence,
         "pending_confidence": getattr(ctx, "pending_confidence", 0.0),
         "pending_target_round": getattr(ctx, "pending_target_round", 0),
         "trade_state": ctx.trade_state,
@@ -2409,6 +2450,7 @@ class EngineManager:
                 self.window_engine.update_one_round(actual_group, idx)
                 continue
 
+            self.ctx.last_length = idx
             self.trade_engine.settle_trade(actual_group, idx)
             self.window_engine.update_one_round(actual_group, idx)
 
@@ -2422,7 +2464,7 @@ class EngineManager:
                 confidence
             )
 
-            self.trade_engine.open_trade(signal, idx)
+            self.trade_engine.open_trade(signal, idx, confidence)
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
@@ -2440,6 +2482,7 @@ class EngineManager:
             self.ctx.last_length = idx
             actual_group = self.groups[idx - 1]
 
+            self.ctx.last_length = idx
             self.trade_engine.settle_trade(actual_group, idx)
             self.window_engine.update_one_round(actual_group, idx)
 
@@ -2453,7 +2496,7 @@ class EngineManager:
                 confidence
             )
 
-            self.trade_engine.open_trade(signal, idx)
+            self.trade_engine.open_trade(signal, idx, confidence)
 
             save_live_state(self.ctx)
 
@@ -2514,7 +2557,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V54 LONGRUN STABLE
+V55 HYBRID STABLE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
