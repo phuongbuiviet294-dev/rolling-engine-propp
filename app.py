@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V55 Hybrid Stable",
+    page_title="V55.1 Hybrid Stable",
     layout="wide"
 )
 
@@ -130,7 +130,7 @@ MIN_CONFIDENCE_READY = 0.43
 SAFE_DRAWDOWN_FROM_PEAK = -3.0
 SAFE_MODE_ROUNDS = 3
 
-# V55 Hybrid Stable: avoid trade starvation.
+# V55.1 Hybrid Stable: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
 MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
@@ -1245,7 +1245,6 @@ class TradeEngine:
         self.ctx.trade_history.append(record)
         self.ctx.pending_index = len(self.ctx.trade_history) - 1
         self.ctx.pending_locked_window = frozen_window
-        self.ctx.pending_confidence = float(getattr(signal, "decision_confidence", getattr(self.ctx, "last_decision_confidence", 0.0)))
         self.ctx.pending_target_round = round_id + 1
         self.ctx.pending_trade = signal.next_group
         self.ctx.pending_confidence = float(confidence_score)
@@ -1345,11 +1344,13 @@ class TradeEngine:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
             self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
-            # V55: temporary blacklist losing trade window; expires automatically.
+
+            # V55.1:
+            # A single loss only cools the window.
+            # Blacklist is temporary and only for stronger losers.
             if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
                 self.ctx.blacklisted_windows = {}
-            self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
-            # Only blacklist stronger losers; simple cooldown is enough for a single mild loss.
+
             stat = get_history_real_stats(self.ctx, w)
             if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
                 self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
@@ -1567,7 +1568,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V55 Hybrid Stable")
+        st.title("🚀 V55.1 Hybrid Stable")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2519,7 +2520,7 @@ class EngineManager:
             signal.stability = self.window_engine.get_stability()
             signal.top_profit20 = locked_obj.profit20 if locked_obj is not None else 0.0
 
-            confidence_score = float(getattr(self.ctx, "pending_confidence", 0.0)) or self.signal_engine.get_confidence_score(signal)
+            confidence_score = float(getattr(self.ctx, "pending_confidence", 0.0))
             confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
             self.ctx.protection_reason = "WAITING_RESULT"
@@ -2557,7 +2558,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V55 HYBRID STABLE
+V55.1 HYBRID STABLE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
