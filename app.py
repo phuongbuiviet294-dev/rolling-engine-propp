@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 import json
 import os
+import math
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
@@ -21,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V53 Defensive Stable",
+    page_title="V54 LongRun Stable",
     layout="wide"
 )
 
@@ -88,7 +89,7 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.40
+LEADER_MIN_LIVE_WR20 = 0.38
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
@@ -97,37 +98,47 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 # Real trade-aware relock.
 # After a window has real trades, relock uses REAL performance first.
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
-REAL_MIN_PROFIT_FOR_LOCK = 2.5
+REAL_MIN_PROFIT_FOR_LOCK = 1.5
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.45
+REAL_MIN_WR_FOR_LOCK = 0.40
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.40
+FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.70
+LOW_WR_CONSENSUS_READY = 0.95
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 30
+WINDOW_COOLDOWN_ROUNDS = 18
 BLACKLIST_REAL_NEGATIVE = True
 
-PROFIT10_STOP = -2.0
+PROFIT10_STOP = -2.5
 WR20_STOP = 0.38
-DRAWDOWN_STOP = -4.0
-FLIPRATE_STOP = 0.65
+DRAWDOWN_STOP = -5.0
+FLIPRATE_STOP = 0.62
 
-CONSENSUS_READY = 0.60
+CONSENSUS_READY = 0.66
 STABILITY_READY = 0.50
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.45
-SAFE_DRAWDOWN_FROM_PEAK = -2.0
+MIN_CONFIDENCE_READY = 0.46
+SAFE_DRAWDOWN_FROM_PEAK = -2.5
 SAFE_MODE_ROUNDS = 3
+
+# V54 long-run controls
+RISK_PAUSE_ROUNDS = 4
+BLACKLIST_DURATION_ROUNDS = 45
+WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
+UCB_EXPLORATION_C = 0.55
+MIN_TRADES_FOR_PROTECTION = 8
+
+# Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
+INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 
 
 # ============================================================
@@ -194,6 +205,15 @@ class SignalRecord:
     # }
     window_real_stats: dict = field(default_factory=dict)
     cooled_windows: dict = field(default_factory=dict)
+    pending_confidence: float = 0.0
+    pending_target_round: int = 0
+    peak_equity: float = 0.0
+    last_safe_trigger_peak: float = 0.0
+    risk_pause_counter: int = 0
+    last_risk_trigger_trade_count: int = -1
+    blacklisted_windows: dict = field(default_factory=dict)
+    last_decision_confidence: float = 0.0
+
 
 
 @dataclass
@@ -256,6 +276,15 @@ class EngineContext:
     # }
     window_real_stats: dict = field(default_factory=dict)
     cooled_windows: dict = field(default_factory=dict)
+    pending_confidence: float = 0.0
+    pending_target_round: int = 0
+    peak_equity: float = 0.0
+    last_safe_trigger_peak: float = 0.0
+    risk_pause_counter: int = 0
+    last_risk_trigger_trade_count: int = -1
+    blacklisted_windows: dict = field(default_factory=dict)
+    last_decision_confidence: float = 0.0
+
 
 
 
@@ -285,6 +314,23 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
 
+    if not hasattr(ctx, "pending_confidence"):
+        ctx.pending_confidence = 0.0
+    if not hasattr(ctx, "pending_target_round"):
+        ctx.pending_target_round = 0
+    if not hasattr(ctx, "peak_equity"):
+        ctx.peak_equity = max([0.0] + list(getattr(ctx, "equity_curve", [])))
+    if not hasattr(ctx, "last_safe_trigger_peak"):
+        ctx.last_safe_trigger_peak = 0.0
+    if not hasattr(ctx, "risk_pause_counter"):
+        ctx.risk_pause_counter = 0
+    if not hasattr(ctx, "last_risk_trigger_trade_count"):
+        ctx.last_risk_trigger_trade_count = -1
+    if not hasattr(ctx, "blacklisted_windows") or ctx.blacklisted_windows is None:
+        ctx.blacklisted_windows = {}
+    if not hasattr(ctx, "last_decision_confidence"):
+        ctx.last_decision_confidence = 0.0
+
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
     for k, v in getattr(ctx, "window_real_stats", {}).items():
@@ -307,6 +353,19 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
             vv = 0
         normalized_cool[kk] = vv
     ctx.cooled_windows = normalized_cool
+
+    normalized_blacklist = {}
+    for k, v in getattr(ctx, "blacklisted_windows", {}).items():
+        try:
+            kk = int(k)
+        except Exception:
+            kk = k
+        try:
+            vv = int(v)
+        except Exception:
+            vv = 0
+        normalized_blacklist[kk] = vv
+    ctx.blacklisted_windows = normalized_blacklist
 
     return ctx
 
@@ -340,17 +399,24 @@ window_state = get_window_state()
 
 @st.cache_data(ttl=30)
 def load_numbers() -> list[int]:
-    url = (
-        f"https://docs.google.com/spreadsheets/d/"
-        f"{SHEET_ID}/export?format=csv"
-        f"&cache={time.time()}"
-    )
+    if INPUT_CSV_PATH:
+        try:
+            df = pd.read_csv(INPUT_CSV_PATH)
+        except Exception as e:
+            st.error(f"Load local CSV error: {e}")
+            st.stop()
+    else:
+        url = (
+            f"https://docs.google.com/spreadsheets/d/"
+            f"{SHEET_ID}/export?format=csv"
+            f"&cache={time.time()}"
+        )
 
-    try:
-        df = pd.read_csv(url)
-    except Exception as e:
-        st.error(f"Load sheet error: {e}")
-        st.stop()
+        try:
+            df = pd.read_csv(url)
+        except Exception as e:
+            st.error(f"Load sheet error: {e}")
+            st.stop()
 
     df.columns = [
         str(x).lower().strip()
@@ -708,14 +774,39 @@ class SignalEngine:
 
         self.ctx.cooled_windows[w] = int(self.ctx.last_length + WINDOW_COOLDOWN_ROUNDS)
 
+    def is_window_blacklisted(self, window_id: int, current_round: Optional[int] = None) -> bool:
+        ensure_ctx_fields(self.ctx)
+        if current_round is None:
+            current_round = self.ctx.last_length
+        try:
+            w = int(window_id)
+        except Exception:
+            w = window_id
+        until_round = int(getattr(self.ctx, "blacklisted_windows", {}).get(w, 0))
+        return current_round < until_round
+
+    def blacklist_window(self, window_id: Optional[int], current_round: Optional[int] = None) -> None:
+        ensure_ctx_fields(self.ctx)
+        if window_id is None:
+            return
+        if current_round is None:
+            current_round = self.ctx.last_length
+        try:
+            w = int(window_id)
+        except Exception:
+            w = window_id
+        self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
+
     def known_bad_window(self, window_id: int) -> bool:
         stat = self.get_real_stats(window_id)
 
         if self.is_window_cooled(window_id):
             return True
+        if self.is_window_blacklisted(window_id):
+            return True
 
         if stat["trade_count"] > 0:
-            if BLACKLIST_REAL_NEGATIVE and stat["profit"] <= 0:
+            if BLACKLIST_REAL_NEGATIVE and stat["profit"] <= -2.0:
                 return True
             if stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK:
                 return True
@@ -753,6 +844,25 @@ class SignalEngine:
         )
 
         return round(score, 3)
+
+    def ucb_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
+        stat = self.get_real_stats(window_id)
+        total_real_trades = sum(int(s.get("trade_count", 0)) for s in self.ctx.window_real_stats.values())
+        n = max(1, int(stat.get("trade_count", 0)))
+
+        real_mean = float(stat.get("profit", 0.0)) / n if stat.get("trade_count", 0) else 0.0
+        shadow_hits = list(obj.live_hit_history)[-20:]
+        shadow_wr = round(sum(shadow_hits) / len(shadow_hits), 3) if shadow_hits else obj.live_wr20
+        shadow_mean = (shadow_wr * WIN_GROUP) - ((1.0 - shadow_wr) * abs(LOSS_GROUP))
+
+        optimism = UCB_EXPLORATION_C * math.sqrt(math.log(max(total_real_trades + len(WINDOWS), 2)) / n)
+        penalty = 0.25 * int(obj.live_loss_streak) + 0.15 * int(obj.loss_streak)
+        return round(0.70 * real_mean + 0.30 * shadow_mean + optimism - penalty, 3)
+
+    def selection_score(self, window_id: int, obj: WindowRecord) -> float:
+        if WINDOW_SELECTION_MODE.lower() == "ucb":
+            return self.ucb_candidate_score(window_id, obj)
+        return self.candidate_score(obj)
 
     def choose_relock_candidate(
         self,
@@ -823,7 +933,7 @@ class SignalEngine:
 
             fallback_candidates.append(
                 (
-                    self.candidate_score(obj),
+                    self.selection_score(w, obj),
                     obj.profit20,
                     wr20,
                     -int(obj.loss_streak),
@@ -858,7 +968,7 @@ class SignalEngine:
                 continue
             if self.is_window_cooled(w):
                 continue
-            emergency.append((self.candidate_score(obj), w, obj))
+            emergency.append((self.selection_score(w, obj), w, obj))
 
         if emergency:
             emergency.sort(reverse=True)
@@ -1070,7 +1180,7 @@ class TradeEngine:
         # before opening a new one.
         if (
             self.ctx.last_settle_round > 0
-            and round_id - self.ctx.last_settle_round <= TRADE_GAP_ROUNDS
+            and round_id - self.ctx.last_settle_round < TRADE_GAP_ROUNDS
         ):
             self.ctx.open_reason = "TRADE_GAP"
             return
@@ -1104,6 +1214,8 @@ class TradeEngine:
         self.ctx.trade_history.append(record)
         self.ctx.pending_index = len(self.ctx.trade_history) - 1
         self.ctx.pending_locked_window = frozen_window
+        self.ctx.pending_confidence = float(getattr(signal, "decision_confidence", getattr(self.ctx, "last_decision_confidence", 0.0)))
+        self.ctx.pending_target_round = round_id + 1
         self.ctx.pending_trade = signal.next_group
         self.ctx.pending_round = round_id
         self.ctx.trade_state = "PENDING"
@@ -1133,6 +1245,7 @@ class TradeEngine:
             record = TradeRecord(
                 round_id=self.ctx.pending_round,
                 predict=predict,
+                locked_window=self.ctx.pending_locked_window,
                 actual=actual_group,
                 hit=hit,
                 profit=profit,
@@ -1183,6 +1296,8 @@ class TradeEngine:
         self.ctx.pending_round = 0
         self.ctx.pending_index = None
         self.ctx.pending_locked_window = None
+        self.ctx.pending_confidence = 0.0
+        self.ctx.pending_target_round = 0
         self.ctx.trade_state = "IDLE"
         self.ctx.last_settle_round = current_round
 
@@ -1197,6 +1312,10 @@ class TradeEngine:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
             self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
+            # Only blacklist stronger losers; simple cooldown is enough for a single mild loss.
+            stat = get_history_real_stats(self.ctx, w)
+            if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
+                self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
     def get_total_profit(self) -> float:
         return round(
@@ -1281,31 +1400,35 @@ class ProtectionEngine:
         return round(flips / (len(history) - 1), 3)
 
     def profit_protection(self) -> bool:
-        # V50 Live: protection should explain WHY WAIT.
-        # It should not be a silent permanent stop.
+        # Risk protection is a temporary pause, not a permanent hard stop.
         self.ctx.protection_reason = ""
+        ensure_ctx_fields(self.ctx)
 
         trade_count = len([x for x in self.ctx.trade_history if x.hit is not None])
-        if trade_count < 8:
+        if trade_count < MIN_TRADES_FOR_PROTECTION:
             return False
 
+        reason = ""
         if self.trade_engine.get_profit(10) <= PROFIT10_STOP:
-            self.ctx.protection_reason = "PROFIT10_STOP"
-            return True
+            reason = "PROFIT10_STOP"
+        elif self.trade_engine.get_winrate(20) <= WR20_STOP:
+            reason = "WR20_STOP"
+        elif self.trade_engine.get_drawdown() <= DRAWDOWN_STOP:
+            reason = "DRAWDOWN_STOP"
+        elif self.get_flip_rate() >= FLIPRATE_STOP:
+            reason = "FLIPRATE_STOP"
 
-        if self.trade_engine.get_winrate(20) <= WR20_STOP:
-            self.ctx.protection_reason = "WR20_STOP"
-            return True
+        if not reason:
+            return False
 
-        if self.trade_engine.get_drawdown() <= DRAWDOWN_STOP:
-            self.ctx.protection_reason = "DRAWDOWN_STOP"
-            return True
+        # Trigger risk pause only once for each new settled trade count.
+        if self.ctx.last_risk_trigger_trade_count == trade_count:
+            return self.ctx.risk_pause_counter > 0
 
-        if self.get_flip_rate() >= FLIPRATE_STOP:
-            self.ctx.protection_reason = "FLIPRATE_STOP"
-            return True
-
-        return False
+        self.ctx.risk_pause_counter = max(int(self.ctx.risk_pause_counter), RISK_PAUSE_ROUNDS)
+        self.ctx.last_risk_trigger_trade_count = trade_count
+        self.ctx.protection_reason = reason
+        return True
 
     def cooldown_engine(self) -> bool:
         loss_streak = self.trade_engine.get_loss_streak()
@@ -1331,17 +1454,23 @@ class ProtectionEngine:
         return False
 
     def safe_mode_engine(self) -> bool:
-        """Pause trading when equity pulls back from recent peak."""
+        """Pause trading when equity pulls back from a fresh peak; do not re-trigger on same peak."""
+        ensure_ctx_fields(self.ctx)
         equity = list(self.ctx.equity_curve)
         if len(equity) < 3:
             return False
 
-        peak = max([0.0] + equity)
         current = equity[-1]
-        pullback = round(current - peak, 2)
+        self.ctx.peak_equity = max(float(getattr(self.ctx, "peak_equity", 0.0)), current, 0.0)
+        pullback = round(current - self.ctx.peak_equity, 2)
 
-        if pullback <= SAFE_DRAWDOWN_FROM_PEAK and self.ctx.safe_mode_counter == 0:
+        if (
+            pullback <= SAFE_DRAWDOWN_FROM_PEAK
+            and self.ctx.safe_mode_counter == 0
+            and self.ctx.last_safe_trigger_peak < self.ctx.peak_equity
+        ):
             self.ctx.safe_mode_counter = SAFE_MODE_ROUNDS
+            self.ctx.last_safe_trigger_peak = self.ctx.peak_equity
 
         if self.ctx.safe_mode_counter > 0:
             self.ctx.safe_mode_counter -= 1
@@ -1354,6 +1483,12 @@ class ProtectionEngine:
 
         if signal.state != "READY":
             self.ctx.protection_reason = "SIGNAL_NOT_READY"
+            return "WAIT"
+
+        ensure_ctx_fields(self.ctx)
+        if self.ctx.risk_pause_counter > 0:
+            self.ctx.risk_pause_counter -= 1
+            self.ctx.protection_reason = "RISK_PAUSE"
             return "WAIT"
 
         if self.profit_protection():
@@ -1395,7 +1530,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V53 Defensive Stable")
+        st.title("🚀 V54 LongRun Stable")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1456,14 +1591,15 @@ CONF = {confidence_score:.2f}
         c4.metric("Drawdown", snap["drawdown"])
 
     def render_risk(self) -> None:
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
         c1.metric("FlipRate", self.protection_engine.get_flip_rate())
         c2.metric("LossStreak", self.trade_engine.get_loss_streak())
         c3.metric("Cooldown", self.ctx.cooldown_counter)
         c4.metric("SafeMode", getattr(self.ctx, "safe_mode_counter", 0))
-        c5.metric("Live From", LIVE_START_ROUND)
-        c6.metric("Wait Reason", self.ctx.protection_reason)
-        c7.metric("Open Reason", self.ctx.open_reason)
+        c5.metric("RiskPause", getattr(self.ctx, "risk_pause_counter", 0))
+        c6.metric("Live From", LIVE_START_ROUND)
+        c7.metric("Wait Reason", self.ctx.protection_reason)
+        c8.metric("Open Reason", self.ctx.open_reason)
 
     def render_last_result(self) -> None:
         st.subheader("Last Result")
@@ -1504,12 +1640,13 @@ CONF = {confidence_score:.2f}
             except Exception:
                 display_pending_window = self.ctx.locked_window
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Open Round", self.ctx.pending_round)
         c2.metric("Target Round", target_round)
         c3.metric("Locked Window", display_pending_window)
         c4.metric("Bet Group", self.ctx.pending_trade)
-        c5.metric("Status", "WAIT RESULT")
+        c5.metric("Open CONF", round(float(getattr(self.ctx, "pending_confidence", 0.0)), 3))
+        c6.metric("Status", "WAIT RESULT")
 
         st.caption(
             f"This pending trade was opened after round {self.ctx.pending_round}. "
@@ -1536,6 +1673,11 @@ CONF = {confidence_score:.2f}
                     "MIN_CONFIDENCE_READY": MIN_CONFIDENCE_READY,
                     "SAFE_DRAWDOWN_FROM_PEAK": SAFE_DRAWDOWN_FROM_PEAK,
                     "SAFE_MODE_ROUNDS": SAFE_MODE_ROUNDS,
+                    "RISK_PAUSE_ROUNDS": RISK_PAUSE_ROUNDS,
+                    "BLACKLIST_DURATION_ROUNDS": BLACKLIST_DURATION_ROUNDS,
+                    "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
+                    "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
+                    "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
                 }
             )
 
@@ -1576,6 +1718,8 @@ CONF = {confidence_score:.2f}
                     "HitLen": len(obj.hit_history),
                     "GroupLen": len(obj.group_history),
                     "Cooled": self.signal_engine.is_window_cooled(w),
+                    "Blacklisted": self.signal_engine.is_window_blacklisted(w),
+                    "UCBScore": self.signal_engine.ucb_candidate_score(w, obj),
                     "Filtered": int(obj.loss_streak) > MAX_WINDOW_LOSS_STREAK_FOR_TOP,
                     "Locked": int(w) == self.ctx.locked_window,
                 }
@@ -1609,6 +1753,8 @@ CONF = {confidence_score:.2f}
                     "HitLen",
                     "GroupLen",
                     "Cooled",
+                    "Blacklisted",
+                    "UCBScore",
                     "Filtered",
                     "Locked",
                 ]
@@ -1631,6 +1777,11 @@ CONF = {confidence_score:.2f}
                     "real_stats_keys": list(self.ctx.window_real_stats.keys()),
                     "cooled_windows": getattr(self.ctx, "cooled_windows", {}),
                     "safe_mode_counter": getattr(self.ctx, "safe_mode_counter", 0),
+                    "risk_pause_counter": getattr(self.ctx, "risk_pause_counter", 0),
+                    "peak_equity": getattr(self.ctx, "peak_equity", 0.0),
+                    "last_safe_trigger_peak": getattr(self.ctx, "last_safe_trigger_peak", 0.0),
+                    "blacklisted_windows": getattr(self.ctx, "blacklisted_windows", {}),
+                    "last_decision_confidence": getattr(self.ctx, "last_decision_confidence", 0.0),
                 }
             )
 
@@ -1715,6 +1866,8 @@ CONF = {confidence_score:.2f}
                         "LossStreak": int(obj.loss_streak),
                         "Next": obj.next_group,
                         "Cooled": self.signal_engine.is_window_cooled(w),
+                        "Blacklisted": self.signal_engine.is_window_blacklisted(w),
+                        "UCBScore": self.signal_engine.ucb_candidate_score(w, obj),
                         "UseInTop": int(obj.live_loss_streak) <= MAX_WINDOW_LOSS_STREAK_FOR_TOP,
                     }
                 )
@@ -1999,6 +2152,8 @@ def save_live_state(ctx: EngineContext) -> None:
         "pending_round": ctx.pending_round,
         "pending_index": ctx.pending_index,
         "pending_locked_window": ctx.pending_locked_window,
+        "pending_confidence": getattr(ctx, "pending_confidence", 0.0),
+        "pending_target_round": getattr(ctx, "pending_target_round", 0),
         "trade_state": ctx.trade_state,
 
         "last_length": ctx.last_length,
@@ -2010,6 +2165,11 @@ def save_live_state(ctx: EngineContext) -> None:
         "cooldown_counter": ctx.cooldown_counter,
         "cooldown_loss_streak_marker": ctx.cooldown_loss_streak_marker,
         "safe_mode_counter": ctx.safe_mode_counter,
+        "peak_equity": getattr(ctx, "peak_equity", 0.0),
+        "last_safe_trigger_peak": getattr(ctx, "last_safe_trigger_peak", 0.0),
+        "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
+        "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
+        "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2029,6 +2189,10 @@ def save_live_state(ctx: EngineContext) -> None:
         "cooled_windows": {
             str(k): int(v)
             for k, v in ctx.cooled_windows.items()
+        },
+        "blacklisted_windows": {
+            str(k): int(v)
+            for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
@@ -2075,6 +2239,8 @@ def load_live_state() -> EngineContext:
     ctx.pending_round = int(data.get("pending_round", 0))
     ctx.pending_index = data.get("pending_index")
     ctx.pending_locked_window = data.get("pending_locked_window")
+    ctx.pending_confidence = float(data.get("pending_confidence", 0.0))
+    ctx.pending_target_round = int(data.get("pending_target_round", 0))
     ctx.trade_state = data.get("trade_state", "IDLE")
 
     ctx.last_length = int(data.get("last_length", 0))
@@ -2086,6 +2252,11 @@ def load_live_state() -> EngineContext:
     ctx.cooldown_counter = int(data.get("cooldown_counter", 0))
     ctx.cooldown_loss_streak_marker = int(data.get("cooldown_loss_streak_marker", -1))
     ctx.safe_mode_counter = int(data.get("safe_mode_counter", 0))
+    ctx.peak_equity = float(data.get("peak_equity", 0.0))
+    ctx.last_safe_trigger_peak = float(data.get("last_safe_trigger_peak", 0.0))
+    ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
+    ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
+    ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2119,6 +2290,15 @@ def load_live_state() -> EngineContext:
         except Exception:
             kk = k
         ctx.cooled_windows[kk] = int(v)
+
+    raw_blacklisted_windows = data.get("blacklisted_windows", {})
+    ctx.blacklisted_windows = {}
+    for k, v in raw_blacklisted_windows.items():
+        try:
+            kk = int(k)
+        except Exception:
+            kk = k
+        ctx.blacklisted_windows[kk] = int(v)
 
     ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
 
@@ -2224,6 +2404,7 @@ class EngineManager:
             return
 
         for idx, actual_group in enumerate(self.groups, start=1):
+            self.ctx.last_length = idx
             if idx < LIVE_START_ROUND:
                 self.window_engine.update_one_round(actual_group, idx)
                 continue
@@ -2233,6 +2414,8 @@ class EngineManager:
 
             signal = self.signal_engine.build_signal(idx)
             confidence = self.signal_engine.get_confidence_score(signal)
+            self.ctx.last_decision_confidence = confidence
+            setattr(signal, "decision_confidence", confidence)
 
             signal.state = self.protection_engine.adaptive_ready_wait(
                 signal,
@@ -2254,6 +2437,7 @@ class EngineManager:
             return
 
         for idx in range(self.ctx.last_length + 1, current_length + 1):
+            self.ctx.last_length = idx
             actual_group = self.groups[idx - 1]
 
             self.trade_engine.settle_trade(actual_group, idx)
@@ -2261,6 +2445,8 @@ class EngineManager:
 
             signal = self.signal_engine.build_signal(idx)
             confidence = self.signal_engine.get_confidence_score(signal)
+            self.ctx.last_decision_confidence = confidence
+            setattr(signal, "decision_confidence", confidence)
 
             signal.state = self.protection_engine.adaptive_ready_wait(
                 signal,
@@ -2269,7 +2455,6 @@ class EngineManager:
 
             self.trade_engine.open_trade(signal, idx)
 
-            self.ctx.last_length = idx
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -2291,7 +2476,7 @@ class EngineManager:
             signal.stability = self.window_engine.get_stability()
             signal.top_profit20 = locked_obj.profit20 if locked_obj is not None else 0.0
 
-            confidence_score = self.signal_engine.get_confidence_score(signal)
+            confidence_score = float(getattr(self.ctx, "pending_confidence", 0.0)) or self.signal_engine.get_confidence_score(signal)
             confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
             self.ctx.protection_reason = "WAITING_RESULT"
@@ -2329,7 +2514,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V53 DEFENSIVE STABLE
+V54 LONGRUN STABLE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
