@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V55.1 Hybrid Stable",
+    page_title="V56 True Live Deterministic",
     layout="wide"
 )
 
@@ -130,7 +130,7 @@ MIN_CONFIDENCE_READY = 0.43
 SAFE_DRAWDOWN_FROM_PEAK = -3.0
 SAFE_MODE_ROUNDS = 3
 
-# V55.1 Hybrid Stable: avoid trade starvation.
+# V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
 MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
@@ -193,6 +193,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
+    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -272,6 +273,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
+    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -322,6 +324,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
+    ctx.state_version = "V56_TRUE_LIVE_DETERMINISTIC"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -1010,6 +1013,104 @@ class SignalEngine:
 
         return None, None, "NO_VALID_CANDIDATE"
 
+    def build_signal_snapshot(self, round_id: int) -> SignalRecord:
+        """Display-only signal.
+
+        IMPORTANT:
+        This function must not mutate ctx.locked_window, ctx.lock_reason,
+        cooldown, blacklist, signal_history, or any trading state.
+        It is used only by the dashboard when no new round appears.
+        """
+        top_rows = self.window_engine.get_top_windows(TOPN)
+        _, consensus = self.window_engine.get_consensus(top_rows)
+
+        health20, health50 = self.window_engine.get_health()
+        stability = self.window_engine.get_stability()
+        momentum = self.get_momentum(top_rows)
+
+        locked_window = self.ctx.locked_window
+        locked_obj = None
+        if locked_window is not None:
+            locked_obj = self.window_engine.state.get(locked_window)
+
+        if locked_obj is None:
+            # Snapshot fallback only; do not apply relock.
+            for w, obj in top_rows:
+                if obj.next_group is not None:
+                    locked_window, locked_obj = w, obj
+                    break
+
+        next_group = locked_obj.next_group if locked_obj is not None else None
+
+        if locked_obj is not None and len(locked_obj.live_hit_history) > 0:
+            leader_wr20 = locked_obj.live_wr20
+            top_profit20 = locked_obj.live_profit20
+        else:
+            hits20 = list(locked_obj.hit_history)[-20:] if locked_obj is not None else []
+            leader_wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+            top_profit20 = locked_obj.profit20 if locked_obj is not None else 0.0
+
+        leader_loss_streak = int(locked_obj.loss_streak) if locked_obj is not None else 0
+        real_locked_stat = self.get_real_stats(locked_window)
+
+        wr20 = TradeEngine(self.ctx).get_winrate(20)
+        required_consensus = CONSENSUS_READY
+        if wr20 > 0 and wr20 < LOW_WR_LEVEL:
+            required_consensus = LOW_WR_CONSENSUS_READY
+
+        if stability < STABILITY_READY:
+            regime = "CHAOS"
+        elif locked_obj is not None and locked_obj.profit20 > 0 and leader_wr20 >= 0.35:
+            regime = "TREND"
+        else:
+            regime = "NORMAL"
+
+        state = "WAIT"
+        if round_id >= LIVE_START_ROUND and locked_obj is not None and next_group is not None:
+            if (
+                not (len(locked_obj.live_hit_history) > 0 and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20)
+                and not (len(locked_obj.live_hit_history) > 0 and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20)
+                and not (locked_obj.profit20 <= LOCK_MIN_PROFIT20)
+                and not (leader_wr20 < FALLBACK_MIN_WR20)
+                and not (leader_loss_streak > LOCK_MAX_LOSS_STREAK)
+                and not (stability < STABILITY_READY)
+            ):
+                real_ok = (
+                    real_locked_stat["trade_count"] >= 1
+                    and real_locked_stat["profit"] > 0
+                    and real_locked_stat["wr"] >= REAL_MIN_WR_FOR_LOCK
+                    and real_locked_stat["loss_streak"] <= REAL_MAX_LOSS_STREAK_FOR_LOCK
+                )
+                if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
+                    state = "READY"
+
+        return SignalRecord(
+            state=state,
+            next_group=next_group,
+            regime=regime,
+            top_n=TOPN,
+            health20=health20,
+            health50=health50,
+            consensus=consensus,
+            stability=stability,
+            momentum=momentum,
+            required_consensus=required_consensus,
+            top_profit20=top_profit20,
+            leader_window=locked_window,
+            leader_wr20=leader_wr20,
+            leader_loss_streak=leader_loss_streak,
+            locked_window=self.ctx.locked_window,
+            lock_reason=self.ctx.lock_reason,
+            locked_live_profit=self.ctx.locked_live_profit,
+            locked_live_loss_streak=self.ctx.locked_live_loss_streak,
+            shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
+            shadow_live_wr20=(locked_obj.live_wr20 if locked_obj is not None else 0.0),
+            real_window_profit=real_locked_stat["profit"],
+            real_window_wr=real_locked_stat["wr"],
+            real_window_trade_count=real_locked_stat["trade_count"],
+            real_window_loss_streak=real_locked_stat["loss_streak"],
+        )
+
     def build_signal(self, round_id: int) -> SignalRecord:
         top_rows = self.window_engine.get_top_windows(TOPN)
 
@@ -1568,7 +1669,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V55.1 Hybrid Stable")
+        st.title("🚀 V56 True Live Deterministic")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1818,6 +1919,7 @@ CONF = {confidence_score:.2f}
                     "real_stats_keys": list(self.ctx.window_real_stats.keys()),
                     "cooled_windows": getattr(self.ctx, "cooled_windows", {}),
                     "safe_mode_counter": getattr(self.ctx, "safe_mode_counter", 0),
+                    "state_version": getattr(self.ctx, "state_version", ""),
                     "risk_pause_counter": getattr(self.ctx, "risk_pause_counter", 0),
                     "peak_equity": getattr(self.ctx, "peak_equity", 0.0),
                     "last_safe_trigger_peak": getattr(self.ctx, "last_safe_trigger_peak", 0.0),
@@ -2236,6 +2338,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
+        "state_version": getattr(ctx, "state_version", "V56_TRUE_LIVE_DETERMINISTIC"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
 
@@ -2527,7 +2630,8 @@ class EngineManager:
             self.ctx.open_reason = "HAS_PENDING"
             return signal, confidence_score, confidence_level
 
-        signal = self.signal_engine.build_signal(self.ctx.last_length)
+        # V56: display must be read-only. Never call build_signal() here.
+        signal = self.signal_engine.build_signal_snapshot(self.ctx.last_length)
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
@@ -2558,11 +2662,12 @@ class EngineManager:
 
         st.caption(
             f"""
-V55.1 HYBRID STABLE
+V56 TRUE LIVE DETERMINISTIC
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
+V56 rule: UI refresh is read-only; only new rounds can change trade state.
 Open/settle decisions happen only when a new round appears, not every rerun.
 Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
