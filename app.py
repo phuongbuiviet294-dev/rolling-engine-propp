@@ -36,7 +36,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-WINDOWS = list(range(6, 23))
+WINDOWS = list(range(6, 26))
 TOPN = 3
 
 SIGNAL_HISTORY_LEN = 50
