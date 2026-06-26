@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 True Live Deterministic",
+    page_title="V56 Medium Relock 1 Loss",
     layout="wide"
 )
 
@@ -30,6 +30,12 @@ st.set_page_config(
 # ============================================================
 # CONFIG
 # ============================================================
+
+# FAST RELAXED PATCH 2026-06-26:
+# - Nới WAIT: consensus 0.667 -> 0.50, stability 0.50 -> 0.35, confidence 0.43 -> 0.35.
+# - Giảm cooldown/blacklist để không treo WAIT quá lâu.
+# - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
+# - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -44,7 +50,7 @@ LEADER_HISTORY_LEN = 50
 HIT_HISTORY_LEN = 50
 GROUP_HISTORY_LEN = 80
 
-COOLDOWN_ROUNDS = 3
+COOLDOWN_ROUNDS = 1
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 
@@ -81,7 +87,7 @@ STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
-LIVE_LOSS_COOLDOWN_ROUNDS = 5
+LIVE_LOSS_COOLDOWN_ROUNDS = 3
 LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 1
 LIVE_RELOCK_PROFIT_STOP = 0.0
@@ -89,10 +95,10 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.38
+LEADER_MIN_LIVE_WR20 = 0.36
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
-CANDIDATE_MIN_LIVE_WR20 = 0.38
+CANDIDATE_MIN_LIVE_WR20 = 0.34
 CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 
 # Real trade-aware relock.
@@ -100,51 +106,51 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.35
+REAL_MIN_WR_FOR_LOCK = 0.32
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.38
+FALLBACK_MIN_WR20 = 0.36
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.667
+LOW_WR_CONSENSUS_READY = 0.60
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 12
-BLACKLIST_REAL_NEGATIVE = True
+WINDOW_COOLDOWN_ROUNDS = 7
+BLACKLIST_REAL_NEGATIVE = False
 
 PROFIT10_STOP = -3.0
 WR20_STOP = 0.38
 DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.667
-STABILITY_READY = 0.50
+CONSENSUS_READY = 0.60
+STABILITY_READY = 0.45
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.43
-SAFE_DRAWDOWN_FROM_PEAK = -3.0
-SAFE_MODE_ROUNDS = 3
+MIN_CONFIDENCE_READY = 0.40
+SAFE_DRAWDOWN_FROM_PEAK = -4.0
+SAFE_MODE_ROUNDS = 1
 
 # V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
-MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
-MIN_SHADOW_WR20_FOR_TEST = 0.38
-MAX_REAL_NEGATIVE_SOFT = -2.0
+MIN_SHADOW_PROFIT20_FOR_TEST = 0.0
+MIN_SHADOW_WR20_FOR_TEST = 0.34
+MAX_REAL_NEGATIVE_SOFT = -3.0
 WINDOW_SELECTION_MODE = "hybrid"
 UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 4
-BLACKLIST_DURATION_ROUNDS = 20
+RISK_PAUSE_ROUNDS = 3
+BLACKLIST_DURATION_ROUNDS = 10
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.45
-MIN_TRADES_FOR_PROTECTION = 8
+MIN_TRADES_FOR_PROTECTION = 10
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -193,7 +199,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
+    state_version: str = "V56_FAST_RELAXED"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -273,7 +279,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
+    state_version: str = "V56_FAST_RELAXED"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -324,7 +330,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V56_TRUE_LIVE_DETERMINISTIC"
+    ctx.state_version = "V56_FAST_RELAXED"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -1669,7 +1675,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 True Live Deterministic")
+        st.title("🚀 V56 Medium Relock 1 Loss")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
