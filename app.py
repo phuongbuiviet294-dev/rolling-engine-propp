@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 Medium Relock 1 Loss",
+    page_title="V56 TP20 Trailing Continue",
     layout="wide"
 )
 
@@ -37,6 +37,7 @@ st.set_page_config(
 # - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
 # - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
 
+APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE"
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
@@ -83,7 +84,7 @@ LIVE_START_ROUND = 180
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
+STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
@@ -152,6 +153,19 @@ WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.45
 MIN_TRADES_FOR_PROTECTION = 10
 
+# V56 TP20 TRAILING CONTINUE
+# Do not hard-lock at +10. After reaching +10, allow a small pullback and continue
+# toward +20. Lock only when target +20 is reached or profit gives back too much.
+TAKE_PROFIT_STOP = 20.0
+SESSION_HARD_STOP_ON_TAKE_PROFIT = True
+PROFIT_LOCK_ONCE_REACHED = True
+PROFIT_TRAIL_START = 10.0
+PROFIT_TRAIL_GIVEBACK = 3.0
+PROFIT_FLOOR_AFTER_TRAIL = 7.0
+POST10_MIN_CONFIDENCE = 0.45
+POST10_MIN_SHADOW_WR20 = 0.38
+POST10_BLOCK_REAL_LOSS_STREAK = 1
+
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 
@@ -199,7 +213,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_FAST_RELAXED"
+    state_version: str = APP_STATE_VERSION
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -279,7 +293,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_FAST_RELAXED"
+    state_version: str = APP_STATE_VERSION
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -301,6 +315,9 @@ class EngineContext:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
+    session_locked: bool = False
+    session_lock_reason: str = ""
+    session_peak_profit: float = 0.0
 
 
 
@@ -330,7 +347,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V56_FAST_RELAXED"
+    ctx.state_version = APP_STATE_VERSION
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -348,6 +365,12 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.blacklisted_windows = {}
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
+    if not hasattr(ctx, "session_locked"):
+        ctx.session_locked = False
+    if not hasattr(ctx, "session_lock_reason"):
+        ctx.session_lock_reason = ""
+    if not hasattr(ctx, "session_peak_profit"):
+        ctx.session_peak_profit = max([0.0] + list(getattr(ctx, "equity_curve", [])))
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -1302,6 +1325,41 @@ class TradeEngine:
     def __init__(self, ctx: EngineContext):
         self.ctx = ctx
 
+    def refresh_session_lock(self) -> bool:
+        ensure_ctx_fields(self.ctx)
+        total_profit = self.get_total_profit()
+        self.ctx.session_peak_profit = max(
+            float(getattr(self.ctx, "session_peak_profit", 0.0)),
+            float(total_profit),
+            0.0,
+        )
+
+        if (
+            SESSION_HARD_STOP_ON_TAKE_PROFIT
+            and PROFIT_LOCK_ONCE_REACHED
+            and self.ctx.session_locked
+        ):
+            return True
+
+        if SESSION_HARD_STOP_ON_TAKE_PROFIT and total_profit >= TAKE_PROFIT_STOP:
+            self.ctx.session_locked = True
+            self.ctx.session_lock_reason = "TAKE_PROFIT_20_LOCKED"
+            self.ctx.protection_reason = "TAKE_PROFIT_20_LOCKED"
+            return True
+
+        # After reaching +10, do not stop immediately. Allow a small pullback so
+        # the curve can recover and try to extend toward +20. Stop only if the
+        # giveback becomes too large or profit falls under the protected floor.
+        if self.ctx.session_peak_profit >= PROFIT_TRAIL_START:
+            giveback = round(float(total_profit) - float(self.ctx.session_peak_profit), 2)
+            if giveback <= -abs(PROFIT_TRAIL_GIVEBACK) or total_profit <= PROFIT_FLOOR_AFTER_TRAIL:
+                self.ctx.session_locked = True
+                self.ctx.session_lock_reason = "TRAILING_PROFIT_LOCKED"
+                self.ctx.protection_reason = "TRAILING_PROFIT_LOCKED"
+                return True
+
+        return False
+
     def update_equity(self, profit: float) -> None:
         equity = 0.0 if not self.ctx.equity_curve else self.ctx.equity_curve[-1]
         equity += profit
@@ -1312,6 +1370,10 @@ class TradeEngine:
 
         if round_id < LIVE_START_ROUND:
             self.ctx.open_reason = "BEFORE_LIVE_START"
+            return
+
+        if self.refresh_session_lock():
+            self.ctx.open_reason = getattr(self.ctx, "session_lock_reason", "TAKE_PROFIT_LOCKED") or "TAKE_PROFIT_LOCKED"
             return
 
         # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
@@ -1393,6 +1455,7 @@ class TradeEngine:
             self.ctx.trade_history.append(record)
 
         self.update_equity(profit)
+        self.refresh_session_lock()
 
         # Trade-aware stats for currently locked window.
         # If locked window loses real trades, force relock on next signal.
@@ -1631,6 +1694,26 @@ class ProtectionEngine:
             return "WAIT"
 
         ensure_ctx_fields(self.ctx)
+        if self.trade_engine.refresh_session_lock():
+            self.ctx.protection_reason = getattr(self.ctx, "session_lock_reason", "TAKE_PROFIT_LOCKED") or "TAKE_PROFIT_LOCKED"
+            return "WAIT"
+
+        # When profit has reached +10 but not yet +20, continue only with
+        # stronger signals. This allows the curve to dip slightly and recover,
+        # but avoids low-quality trades that can give back all profit.
+        total_profit = self.trade_engine.get_total_profit()
+        peak_profit = float(getattr(self.ctx, "session_peak_profit", 0.0))
+        if peak_profit >= PROFIT_TRAIL_START and total_profit < TAKE_PROFIT_STOP:
+            if confidence_score < POST10_MIN_CONFIDENCE:
+                self.ctx.protection_reason = "POST10_LOW_CONFIDENCE"
+                return "WAIT"
+            if signal.shadow_live_wr20 < POST10_MIN_SHADOW_WR20:
+                self.ctx.protection_reason = "POST10_LOW_SHADOW_WR"
+                return "WAIT"
+            if signal.real_window_loss_streak >= POST10_BLOCK_REAL_LOSS_STREAK:
+                self.ctx.protection_reason = "POST10_REAL_LOSS_STREAK"
+                return "WAIT"
+
         if self.ctx.risk_pause_counter > 0:
             self.ctx.risk_pause_counter -= 1
             self.ctx.protection_reason = "RISK_PAUSE"
@@ -1675,7 +1758,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 Medium Relock 1 Loss")
+        st.title("🚀 V56 TP20 Trailing Continue")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1826,6 +1909,14 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
+                    "TAKE_PROFIT_STOP": TAKE_PROFIT_STOP,
+                    "SESSION_HARD_STOP_ON_TAKE_PROFIT": SESSION_HARD_STOP_ON_TAKE_PROFIT,
+                    "PROFIT_LOCK_ONCE_REACHED": PROFIT_LOCK_ONCE_REACHED,
+                    "PROFIT_TRAIL_START": PROFIT_TRAIL_START,
+                    "PROFIT_TRAIL_GIVEBACK": PROFIT_TRAIL_GIVEBACK,
+                    "PROFIT_FLOOR_AFTER_TRAIL": PROFIT_FLOOR_AFTER_TRAIL,
+                    "POST10_MIN_CONFIDENCE": POST10_MIN_CONFIDENCE,
+                    "POST10_MIN_SHADOW_WR20": POST10_MIN_SHADOW_WR20,
                 }
             )
 
@@ -1931,6 +2022,9 @@ CONF = {confidence_score:.2f}
                     "last_safe_trigger_peak": getattr(self.ctx, "last_safe_trigger_peak", 0.0),
                     "blacklisted_windows": getattr(self.ctx, "blacklisted_windows", {}),
                     "last_decision_confidence": getattr(self.ctx, "last_decision_confidence", 0.0),
+                    "session_locked": getattr(self.ctx, "session_locked", False),
+                    "session_lock_reason": getattr(self.ctx, "session_lock_reason", ""),
+                    "session_peak_profit": getattr(self.ctx, "session_peak_profit", 0.0),
                 }
             )
 
@@ -2320,6 +2414,9 @@ def save_live_state(ctx: EngineContext) -> None:
         "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
+        "session_locked": getattr(ctx, "session_locked", False),
+        "session_lock_reason": getattr(ctx, "session_lock_reason", ""),
+        "session_peak_profit": getattr(ctx, "session_peak_profit", 0.0),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2344,7 +2441,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V56_TRUE_LIVE_DETERMINISTIC"),
+        "state_version": getattr(ctx, "state_version", APP_STATE_VERSION),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
 
@@ -2373,6 +2470,10 @@ def load_live_state() -> EngineContext:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
+        return EngineContext()
+
+    # Do not reuse state from older variants, because old states can show stale +10/-11 profit.
+    if data.get("state_version") and data.get("state_version") != APP_STATE_VERSION:
         return EngineContext()
 
     ctx = EngineContext()
@@ -2408,6 +2509,9 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
+    ctx.session_locked = bool(data.get("session_locked", False))
+    ctx.session_lock_reason = data.get("session_lock_reason", "")
+    ctx.session_peak_profit = float(data.get("session_peak_profit", 0.0))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2461,21 +2565,21 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    if "v50_true_live_ctx" not in st.session_state:
-        st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
+    if "v56_tp10_live_ctx" not in st.session_state:
+        st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(load_live_state())
     else:
-        st.session_state.v50_true_live_ctx = ensure_ctx_fields(st.session_state.v50_true_live_ctx)
-    return st.session_state.v50_true_live_ctx
+        st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(st.session_state.v56_tp10_live_ctx)
+    return st.session_state.v56_tp10_live_ctx
 
 
 
 def get_live_window_state() -> dict[int, WindowRecord]:
-    if "v50_true_live_window_state" not in st.session_state:
-        st.session_state.v50_true_live_window_state = {
+    if "v56_tp10_live_window_state" not in st.session_state:
+        st.session_state.v56_tp10_live_window_state = {
             w: WindowRecord()
             for w in WINDOWS
         }
-    return st.session_state.v50_true_live_window_state
+    return st.session_state.v56_tp10_live_window_state
 
 
 def reset_live_state_button() -> None:
@@ -2487,10 +2591,10 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            if "v50_true_live_ctx" in st.session_state:
-                del st.session_state.v50_true_live_ctx
-            if "v50_true_live_window_state" in st.session_state:
-                del st.session_state.v50_true_live_window_state
+            if "v56_tp10_live_ctx" in st.session_state:
+                del st.session_state.v56_tp10_live_ctx
+            if "v56_tp10_live_window_state" in st.session_state:
+                del st.session_state.v56_tp10_live_window_state
             delete_state_from_gsheet()
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
@@ -2668,7 +2772,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V56 TRUE LIVE DETERMINISTIC
+V56 TP10 PROFIT LOCK
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
