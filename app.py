@@ -87,7 +87,7 @@ STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
-LIVE_LOSS_COOLDOWN_ROUNDS = 3
+LIVE_LOSS_COOLDOWN_ROUNDS = 2
 LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 1
 LIVE_RELOCK_PROFIT_STOP = 0.0
@@ -95,7 +95,7 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.36
+LEADER_MIN_LIVE_WR20 = 0.35
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.34
@@ -106,33 +106,33 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.32
+REAL_MIN_WR_FOR_LOCK = 0.34
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.36
+FALLBACK_MIN_WR20 = 0.35
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 0
-LOW_WR_CONSENSUS_READY = 0.60
+LOW_WR_CONSENSUS_READY = 0.55
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 7
+WINDOW_COOLDOWN_ROUNDS = 5
 BLACKLIST_REAL_NEGATIVE = False
 
-PROFIT10_STOP = -3.0
-WR20_STOP = 0.38
+PROFIT10_STOP = -4.0
+WR20_STOP = 0.34
 DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.60
-STABILITY_READY = 0.45
+CONSENSUS_READY = 0.55
+STABILITY_READY = 0.40
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.40
+MIN_CONFIDENCE_READY = 0.38
 SAFE_DRAWDOWN_FROM_PEAK = -4.0
 SAFE_MODE_ROUNDS = 1
 
@@ -140,17 +140,28 @@ SAFE_MODE_ROUNDS = 1
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
 MIN_SHADOW_PROFIT20_FOR_TEST = 0.0
-MIN_SHADOW_WR20_FOR_TEST = 0.34
+MIN_SHADOW_WR20_FOR_TEST = 0.35
 MAX_REAL_NEGATIVE_SOFT = -3.0
 WINDOW_SELECTION_MODE = "hybrid"
-UCB_EXPLORATION_C = 0.45
+UCB_EXPLORATION_C = 0.30
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 10
+RISK_PAUSE_ROUNDS = 2
+BLACKLIST_DURATION_ROUNDS = 8
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
-UCB_EXPLORATION_C = 0.45
-MIN_TRADES_FOR_PROTECTION = 10
+UCB_EXPLORATION_C = 0.30
+MIN_TRADES_FOR_PROTECTION = 12
+
+# V56 Profit Plus tuning
+# Let a winning trend continue, while still relocking immediately after one loss.
+HOT_WIN_CONTINUE = True
+HOT_WIN_MIN_CONFIDENCE = 0.34
+HOT_WIN_MIN_REAL_PROFIT = 0.0
+HOT_WIN_MIN_SHADOW_WR20 = 0.35
+PROFIT_TRAIL_START = 6.0
+PROFIT_TRAIL_GIVEBACK = 3.0
+REAL_PROFIT_WEIGHT_BOOST = 1.25
+SHADOW_PROFIT_WEIGHT_BOOST = 1.10
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -874,10 +885,10 @@ class SignalEngine:
     def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
         stat = self.get_real_stats(window_id)
         score = (
-            4.00 * stat["profit"]
+            (4.00 * REAL_PROFIT_WEIGHT_BOOST) * stat["profit"]
             + 6.00 * stat["wr"]
             - 3.00 * stat["loss_streak"]
-            + 0.30 * obj.live_profit20
+            + (0.30 * SHADOW_PROFIT_WEIGHT_BOOST) * obj.live_profit20
             + 0.10 * obj.profit20
         )
         return round(score, 3)
@@ -897,7 +908,7 @@ class SignalEngine:
 
         optimism = UCB_EXPLORATION_C * math.sqrt(math.log(max(total_real_trades + len(WINDOWS), 2)) / n)
         penalty = 0.25 * int(obj.live_loss_streak) + 0.15 * int(obj.loss_streak)
-        return round(0.70 * real_mean + 0.30 * shadow_mean + optimism - penalty, 3)
+        return round((0.78 * real_mean + 0.22 * shadow_mean) + optimism - penalty, 3)
 
     def selection_score(self, window_id: int, obj: WindowRecord) -> float:
         if WINDOW_SELECTION_MODE.lower() == "ucb":
@@ -1508,6 +1519,12 @@ class TradeEngine:
 
         return round(drawdown, 2)
 
+    def get_last_settled(self) -> Optional[TradeRecord]:
+        for x in reversed(self.ctx.trade_history):
+            if x.hit is not None:
+                return x
+        return None
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "trade_state": self.ctx.trade_state,
@@ -1554,7 +1571,14 @@ class ProtectionEngine:
             return False
 
         reason = ""
-        if self.trade_engine.get_profit(10) <= PROFIT10_STOP:
+
+        # Profit trailing: once profit has reached a good peak, pause after giving back too much.
+        total_profit = self.trade_engine.get_total_profit()
+        peak_profit = max([0.0] + list(self.ctx.equity_curve)) if self.ctx.equity_curve else max(0.0, total_profit)
+        giveback = round(total_profit - peak_profit, 2)
+        if peak_profit >= PROFIT_TRAIL_START and giveback <= -PROFIT_TRAIL_GIVEBACK:
+            reason = "PROFIT_TRAIL_STOP"
+        elif self.trade_engine.get_profit(10) <= PROFIT10_STOP:
             reason = "PROFIT10_STOP"
         elif self.trade_engine.get_winrate(20) <= WR20_STOP:
             reason = "WR20_STOP"
@@ -1648,8 +1672,22 @@ class ProtectionEngine:
             return "WAIT"
 
         if confidence_score < MIN_CONFIDENCE_READY:
-            self.ctx.protection_reason = "LOW_CONFIDENCE"
-            return "WAIT"
+            # Profit Plus: if the previous trade won and current locked window is still positive,
+            # allow a lower confidence threshold to avoid missing a running trend.
+            last_trade = self.trade_engine.get_last_settled()
+            hot_win_ok = False
+            if HOT_WIN_CONTINUE and last_trade is not None and last_trade.hit == 1:
+                hot_win_ok = (
+                    confidence_score >= HOT_WIN_MIN_CONFIDENCE
+                    and signal.real_window_profit >= HOT_WIN_MIN_REAL_PROFIT
+                    and signal.shadow_live_wr20 >= HOT_WIN_MIN_SHADOW_WR20
+                    and signal.real_window_loss_streak == 0
+                )
+            if not hot_win_ok:
+                self.ctx.protection_reason = "LOW_CONFIDENCE"
+                return "WAIT"
+            self.ctx.protection_reason = "HOT_WIN_CONTINUE"
+            return "READY"
 
         self.ctx.protection_reason = "ALLOW"
         return "READY"
@@ -1826,6 +1864,12 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
+                    "HOT_WIN_CONTINUE": HOT_WIN_CONTINUE,
+                    "HOT_WIN_MIN_CONFIDENCE": HOT_WIN_MIN_CONFIDENCE,
+                    "PROFIT_TRAIL_START": PROFIT_TRAIL_START,
+                    "PROFIT_TRAIL_GIVEBACK": PROFIT_TRAIL_GIVEBACK,
+                    "REAL_PROFIT_WEIGHT_BOOST": REAL_PROFIT_WEIGHT_BOOST,
+                    "SHADOW_PROFIT_WEIGHT_BOOST": SHADOW_PROFIT_WEIGHT_BOOST,
                 }
             )
 
