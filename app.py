@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 Medium Relock 1 Loss",
+    page_title="V56 Medium TP10 Lock Clean State",
     layout="wide"
 )
 
@@ -36,6 +36,8 @@ st.set_page_config(
 # - Giảm cooldown/blacklist để không treo WAIT quá lâu.
 # - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
 # - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
+
+APP_STATE_VERSION = "V56_MEDIUM_TP10_LOCK_CLEAN_STATE"
 
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
@@ -83,7 +85,7 @@ LIVE_START_ROUND = 180
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
+STATE_FILE = os.environ.get("V56_STATE_FILE", "v56_medium_tp10_lock_clean_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
@@ -114,7 +116,7 @@ REAL_MIN_WR_FOR_LOCK = 0.32
 FALLBACK_MIN_PROFIT20 = 0.0
 FALLBACK_MIN_WR20 = 0.36
 FALLBACK_MAX_LOSS_STREAK = 1
-TRADE_GAP_ROUNDS = 0
+TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.60
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
@@ -151,6 +153,15 @@ BLACKLIST_DURATION_ROUNDS = 10
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.45
 MIN_TRADES_FOR_PROTECTION = 10
+
+# V56 TP10 LOCK PATCH:
+# Khi total profit đạt +10 thì dừng trade cứng để khóa lãi,
+# tránh trường hợp +10 tiếp tục trade rồi tụt về âm.
+TAKE_PROFIT_STOP = 10.0
+SESSION_HARD_STOP_ON_TAKE_PROFIT = True
+PROFIT_TRAIL_START = 7.5
+PROFIT_TRAIL_GIVEBACK = 2.5
+PROFIT_FLOOR_AFTER_PEAK = 5.0
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -199,7 +210,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_FAST_RELAXED"
+    state_version: str = "V56_MEDIUM_TP10_LOCK"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -279,7 +290,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_FAST_RELAXED"
+    state_version: str = "V56_MEDIUM_TP10_LOCK"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -330,7 +341,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V56_FAST_RELAXED"
+    ctx.state_version = "V56_MEDIUM_TP10_LOCK"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -1314,6 +1325,11 @@ class TradeEngine:
             self.ctx.open_reason = "BEFORE_LIVE_START"
             return
 
+        # Hard lock profit: if session already reaches target, never open new trade.
+        if SESSION_HARD_STOP_ON_TAKE_PROFIT and self.get_total_profit() >= TAKE_PROFIT_STOP:
+            self.ctx.open_reason = "TAKE_PROFIT_LOCKED"
+            return
+
         # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
         # before opening a new one.
         if (
@@ -1545,9 +1561,27 @@ class ProtectionEngine:
         return round(flips / (len(history) - 1), 3)
 
     def profit_protection(self) -> bool:
-        # Risk protection is a temporary pause, not a permanent hard stop.
+        # TP10 patch: take-profit lock is a hard stop, not a temporary pause.
         self.ctx.protection_reason = ""
         ensure_ctx_fields(self.ctx)
+
+        total_profit = self.trade_engine.get_total_profit()
+        equity = list(self.ctx.equity_curve)
+        peak_profit = max([0.0] + equity) if equity else max(0.0, total_profit)
+        self.ctx.peak_equity = max(float(getattr(self.ctx, "peak_equity", 0.0)), peak_profit, total_profit)
+        pullback_from_peak = round(total_profit - self.ctx.peak_equity, 2)
+
+        if SESSION_HARD_STOP_ON_TAKE_PROFIT and total_profit >= TAKE_PROFIT_STOP:
+            self.ctx.protection_reason = "TAKE_PROFIT_LOCKED"
+            return True
+
+        if self.ctx.peak_equity >= PROFIT_TRAIL_START:
+            if pullback_from_peak <= -abs(PROFIT_TRAIL_GIVEBACK):
+                self.ctx.protection_reason = "PROFIT_TRAIL_LOCKED"
+                return True
+            if total_profit <= PROFIT_FLOOR_AFTER_PEAK:
+                self.ctx.protection_reason = "PROFIT_FLOOR_LOCKED"
+                return True
 
         trade_count = len([x for x in self.ctx.trade_history if x.hit is not None])
         if trade_count < MIN_TRADES_FOR_PROTECTION:
@@ -1675,7 +1709,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 Medium Relock 1 Loss")
+        st.title("🚀 V56 Medium TP10 Lock Clean State")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1826,6 +1860,11 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
+                    "TAKE_PROFIT_STOP": TAKE_PROFIT_STOP,
+                    "SESSION_HARD_STOP_ON_TAKE_PROFIT": SESSION_HARD_STOP_ON_TAKE_PROFIT,
+                    "PROFIT_TRAIL_START": PROFIT_TRAIL_START,
+                    "PROFIT_TRAIL_GIVEBACK": PROFIT_TRAIL_GIVEBACK,
+                    "PROFIT_FLOOR_AFTER_PEAK": PROFIT_FLOOR_AFTER_PEAK,
                 }
             )
 
@@ -2344,7 +2383,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V56_TRUE_LIVE_DETERMINISTIC"),
+        "state_version": APP_STATE_VERSION,
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
 
@@ -2373,6 +2412,12 @@ def load_live_state() -> EngineContext:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
+        return EngineContext()
+
+    # CLEAN STATE GUARD:
+    # Do not reuse trade history from older app versions/parameter sets.
+    # This prevents showing +10 or -11 immediately from stale v50_live_state.json / Google state.
+    if data.get("state_version") != APP_STATE_VERSION:
         return EngineContext()
 
     ctx = EngineContext()
@@ -2461,7 +2506,7 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    if "v50_true_live_ctx" not in st.session_state:
+    if "v56_tp10_clean_ctx" not in st.session_state:
         st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
     else:
         st.session_state.v50_true_live_ctx = ensure_ctx_fields(st.session_state.v50_true_live_ctx)
@@ -2470,7 +2515,7 @@ def get_live_ctx() -> EngineContext:
 
 
 def get_live_window_state() -> dict[int, WindowRecord]:
-    if "v50_true_live_window_state" not in st.session_state:
+    if "v56_tp10_clean_window_state" not in st.session_state:
         st.session_state.v50_true_live_window_state = {
             w: WindowRecord()
             for w in WINDOWS
@@ -2487,9 +2532,9 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            if "v50_true_live_ctx" in st.session_state:
+            if "v56_tp10_clean_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
-            if "v50_true_live_window_state" in st.session_state:
+            if "v56_tp10_clean_window_state" in st.session_state:
                 del st.session_state.v50_true_live_window_state
             delete_state_from_gsheet()
             if os.path.exists(STATE_FILE):
