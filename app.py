@@ -37,7 +37,7 @@ st.set_page_config(
 # - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
 # - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
 
-APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE"
+APP_STATE_VERSION = "V56_RUN_TO_30_STEP_TRAILING"
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
@@ -153,18 +153,41 @@ WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.45
 MIN_TRADES_FOR_PROTECTION = 10
 
-# V56 TP20 TRAILING CONTINUE
-# Do not hard-lock at +10. After reaching +10, allow a small pullback and continue
-# toward +20. Lock only when target +20 is reached or profit gives back too much.
-TAKE_PROFIT_STOP = 20.0
+# V56 RUN TO 30 STEP TRAILING
+# Goal: do not lock too early at +10. Let profit breathe and try to extend
+# toward +20/+30, but protect a stair-step floor once peaks are reached.
+TAKE_PROFIT_STOP = 30.0
 SESSION_HARD_STOP_ON_TAKE_PROFIT = True
 PROFIT_LOCK_ONCE_REACHED = True
 PROFIT_TRAIL_START = 10.0
-PROFIT_TRAIL_GIVEBACK = 3.0
-PROFIT_FLOOR_AFTER_TRAIL = 7.0
-POST10_MIN_CONFIDENCE = 0.45
-POST10_MIN_SHADOW_WR20 = 0.38
-POST10_BLOCK_REAL_LOSS_STREAK = 1
+
+# Dynamic trailing by peak:
+#   peak 10-15  => allow giveback 6.0, protect floor +4
+#   peak 15-20  => allow giveback 5.0, protect floor +8
+#   peak 20-25  => allow giveback 4.5, protect floor +12
+#   peak 25-30  => allow giveback 4.0, protect floor +18
+#   peak >= 30  => hard lock
+PROFIT_TRAIL_GIVEBACK = 6.0
+PROFIT_FLOOR_AFTER_TRAIL = 4.0
+POST10_MIN_CONFIDENCE = 0.40
+POST10_MIN_SHADOW_WR20 = 0.34
+POST10_BLOCK_REAL_LOSS_STREAK = 3
+
+PROFIT_STEP_1 = 10.0
+PROFIT_STEP_2 = 15.0
+PROFIT_STEP_3 = 20.0
+PROFIT_STEP_4 = 25.0
+PROFIT_STEP_5 = 30.0
+PROFIT_FLOOR_10 = 4.0
+PROFIT_FLOOR_15 = 8.0
+PROFIT_FLOOR_20 = 12.0
+PROFIT_FLOOR_25 = 18.0
+PROFIT_GIVEBACK_10 = 6.0
+PROFIT_GIVEBACK_15 = 5.0
+PROFIT_GIVEBACK_20 = 4.5
+PROFIT_GIVEBACK_25 = 4.0
+POST20_MIN_CONFIDENCE = 0.43
+POST20_MIN_SHADOW_WR20 = 0.36
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -1325,6 +1348,18 @@ class TradeEngine:
     def __init__(self, ctx: EngineContext):
         self.ctx = ctx
 
+    def _profit_step_guard(self, peak_profit: float) -> tuple[float, float, str]:
+        """Return allowed giveback and protected floor by profit peak."""
+        if peak_profit >= PROFIT_STEP_4:
+            return PROFIT_GIVEBACK_25, PROFIT_FLOOR_25, "TRAIL_STEP_25"
+        if peak_profit >= PROFIT_STEP_3:
+            return PROFIT_GIVEBACK_20, PROFIT_FLOOR_20, "TRAIL_STEP_20"
+        if peak_profit >= PROFIT_STEP_2:
+            return PROFIT_GIVEBACK_15, PROFIT_FLOOR_15, "TRAIL_STEP_15"
+        if peak_profit >= PROFIT_STEP_1:
+            return PROFIT_GIVEBACK_10, PROFIT_FLOOR_10, "TRAIL_STEP_10"
+        return 999.0, -999.0, "NO_TRAIL"
+
     def refresh_session_lock(self) -> bool:
         ensure_ctx_fields(self.ctx)
         total_profit = self.get_total_profit()
@@ -1343,19 +1378,21 @@ class TradeEngine:
 
         if SESSION_HARD_STOP_ON_TAKE_PROFIT and total_profit >= TAKE_PROFIT_STOP:
             self.ctx.session_locked = True
-            self.ctx.session_lock_reason = "TAKE_PROFIT_20_LOCKED"
-            self.ctx.protection_reason = "TAKE_PROFIT_20_LOCKED"
+            self.ctx.session_lock_reason = "TAKE_PROFIT_30_LOCKED"
+            self.ctx.protection_reason = "TAKE_PROFIT_30_LOCKED"
             return True
 
-        # After reaching +10, do not stop immediately. Allow a small pullback so
-        # the curve can recover and try to extend toward +20. Stop only if the
-        # giveback becomes too large or profit falls under the protected floor.
-        if self.ctx.session_peak_profit >= PROFIT_TRAIL_START:
-            giveback = round(float(total_profit) - float(self.ctx.session_peak_profit), 2)
-            if giveback <= -abs(PROFIT_TRAIL_GIVEBACK) or total_profit <= PROFIT_FLOOR_AFTER_TRAIL:
+        # Step trailing: after +10, allow pullback so profit can recover and
+        # continue to +20/+30. Only lock when drawdown from peak exceeds the
+        # current step allowance or profit falls below that step's floor.
+        peak = float(self.ctx.session_peak_profit)
+        if peak >= PROFIT_TRAIL_START:
+            allowed_giveback, floor_profit, step_name = self._profit_step_guard(peak)
+            giveback = round(float(total_profit) - peak, 2)
+            if giveback <= -abs(allowed_giveback) or total_profit <= floor_profit:
                 self.ctx.session_locked = True
-                self.ctx.session_lock_reason = "TRAILING_PROFIT_LOCKED"
-                self.ctx.protection_reason = "TRAILING_PROFIT_LOCKED"
+                self.ctx.session_lock_reason = f"{step_name}_LOCKED"
+                self.ctx.protection_reason = f"{step_name}_LOCKED"
                 return True
 
         return False
@@ -1698,18 +1735,26 @@ class ProtectionEngine:
             self.ctx.protection_reason = getattr(self.ctx, "session_lock_reason", "TAKE_PROFIT_LOCKED") or "TAKE_PROFIT_LOCKED"
             return "WAIT"
 
-        # When profit has reached +10 but not yet +20, continue only with
-        # stronger signals. This allows the curve to dip slightly and recover,
-        # but avoids low-quality trades that can give back all profit.
+        # Runner mode after +10: do not block too tightly, otherwise profit can
+        # never grow to +20/+30. Tighten gradually after +20 only.
         total_profit = self.trade_engine.get_total_profit()
         peak_profit = float(getattr(self.ctx, "session_peak_profit", 0.0))
-        if peak_profit >= PROFIT_TRAIL_START and total_profit < TAKE_PROFIT_STOP:
+        if peak_profit >= PROFIT_STEP_3 and total_profit < TAKE_PROFIT_STOP:
+            if confidence_score < POST20_MIN_CONFIDENCE:
+                self.ctx.protection_reason = "POST20_LOW_CONFIDENCE"
+                return "WAIT"
+            if signal.shadow_live_wr20 < POST20_MIN_SHADOW_WR20:
+                self.ctx.protection_reason = "POST20_LOW_SHADOW_WR"
+                return "WAIT"
+        elif peak_profit >= PROFIT_STEP_1 and total_profit < TAKE_PROFIT_STOP:
             if confidence_score < POST10_MIN_CONFIDENCE:
                 self.ctx.protection_reason = "POST10_LOW_CONFIDENCE"
                 return "WAIT"
             if signal.shadow_live_wr20 < POST10_MIN_SHADOW_WR20:
                 self.ctx.protection_reason = "POST10_LOW_SHADOW_WR"
                 return "WAIT"
+            # Do not stop after only one real loss in runner mode. Relock will
+            # change the window; trade can continue if the new signal is good.
             if signal.real_window_loss_streak >= POST10_BLOCK_REAL_LOSS_STREAK:
                 self.ctx.protection_reason = "POST10_REAL_LOSS_STREAK"
                 return "WAIT"
@@ -1917,6 +1962,19 @@ CONF = {confidence_score:.2f}
                     "PROFIT_FLOOR_AFTER_TRAIL": PROFIT_FLOOR_AFTER_TRAIL,
                     "POST10_MIN_CONFIDENCE": POST10_MIN_CONFIDENCE,
                     "POST10_MIN_SHADOW_WR20": POST10_MIN_SHADOW_WR20,
+                    "PROFIT_STEP_1": PROFIT_STEP_1,
+                    "PROFIT_STEP_2": PROFIT_STEP_2,
+                    "PROFIT_STEP_3": PROFIT_STEP_3,
+                    "PROFIT_STEP_4": PROFIT_STEP_4,
+                    "PROFIT_STEP_5": PROFIT_STEP_5,
+                    "PROFIT_FLOOR_10": PROFIT_FLOOR_10,
+                    "PROFIT_FLOOR_15": PROFIT_FLOOR_15,
+                    "PROFIT_FLOOR_20": PROFIT_FLOOR_20,
+                    "PROFIT_FLOOR_25": PROFIT_FLOOR_25,
+                    "PROFIT_GIVEBACK_10": PROFIT_GIVEBACK_10,
+                    "PROFIT_GIVEBACK_15": PROFIT_GIVEBACK_15,
+                    "PROFIT_GIVEBACK_20": PROFIT_GIVEBACK_20,
+                    "PROFIT_GIVEBACK_25": PROFIT_GIVEBACK_25,
                 }
             )
 
@@ -2745,7 +2803,19 @@ class EngineManager:
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
+        # Display fix:
+        # If profit protection/trailing has locked the session, do not show
+        # CURRENT SIGNAL/READY on the main panel. A READY snapshot is only
+        # a potential signal; it is not a real opened trade unless open_trade()
+        # appends a TradeRecord.
+        if self.trade_engine.refresh_session_lock():
+            signal.state = "WAIT"
+            signal.regime = "PROFIT_LOCK"
+            self.ctx.open_reason = getattr(self.ctx, "session_lock_reason", "PROFIT_LOCKED") or "PROFIT_LOCKED"
+            self.ctx.protection_reason = self.ctx.open_reason
+            save_live_state(self.ctx)
+
+        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN", "TRAILING_PROFIT_LOCKED", "TAKE_PROFIT_20_LOCKED"):
             signal.state = "WAIT"
 
         return signal, confidence_score, confidence_level
@@ -2772,7 +2842,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V56 TP10 PROFIT LOCK
+V56 RUN TO 30 STEP TRAILING
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
