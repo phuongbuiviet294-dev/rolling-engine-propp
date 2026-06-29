@@ -37,7 +37,7 @@ st.set_page_config(
 # - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
 # - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
 
-APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE"
+APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE_TIME_SAFE"
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
@@ -84,7 +84,7 @@ LIVE_START_ROUND = 180
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_state.json")
+STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_time_safe_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
@@ -439,7 +439,15 @@ window_state = get_window_state()
 # ============================================================
 
 @st.cache_data(ttl=30)
-def load_numbers() -> list[int]:
+def load_sheet_data() -> tuple[list[int], list[str]]:
+    """Load number and round/time from the SAME sheet snapshot.
+
+    Important: number and round labels must be filtered from the same DataFrame.
+    Loading them in two separate functions can temporarily read two different
+    Google Sheet snapshots when a new row is being edited, which may display a
+    wrong current time. It should not change hit/loss logic, but this single-load
+    version removes that risk completely.
+    """
     if INPUT_CSV_PATH:
         try:
             df = pd.read_csv(INPUT_CSV_PATH)
@@ -452,68 +460,67 @@ def load_numbers() -> list[int]:
             f"{SHEET_ID}/export?format=csv"
             f"&cache={time.time()}"
         )
-
         try:
             df = pd.read_csv(url)
         except Exception as e:
             st.error(f"Load sheet error: {e}")
             st.stop()
 
-    df.columns = [
-        str(x).lower().strip()
-        for x in df.columns
-    ]
+    df.columns = [str(x).lower().strip() for x in df.columns]
 
     if "number" not in df.columns:
         st.error("Sheet must contain column 'number'")
         st.stop()
 
-    nums = (
-        pd.to_numeric(df["number"], errors="coerce")
-        .dropna()
-        .astype(int)
-        .tolist()
-    )
-
-    return [
-        x
-        for x in nums
-        if 1 <= x <= 12
-    ]
-
-
-@st.cache_data(ttl=30)
-def load_round_labels() -> list[str]:
-    """Load the Google Sheet round/time column aligned with valid number rows."""
-    if INPUT_CSV_PATH:
-        try:
-            df = pd.read_csv(INPUT_CSV_PATH)
-        except Exception:
-            return []
-    else:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/"
-            f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time()}"
-        )
-        try:
-            df = pd.read_csv(url)
-        except Exception:
-            return []
-
-    df.columns = [str(x).lower().strip() for x in df.columns]
-    if "number" not in df.columns:
-        return []
-
     num_series = pd.to_numeric(df["number"], errors="coerce")
-    mask = num_series.between(1, 12)
+    valid_mask = num_series.between(1, 12)
+    df_valid = df.loc[valid_mask].copy()
+    nums = num_series.loc[valid_mask].astype(int).tolist()
 
-    if "round" in df.columns:
-        labels = df.loc[mask, "round"].astype(str).fillna("").tolist()
+    labels: list[str] = []
+    if "round" in df_valid.columns:
+        for raw in df_valid["round"].tolist():
+            labels.append(_format_round_label(raw))
     else:
-        labels = [str(i) for i in range(1, int(mask.sum()) + 1)]
+        labels = [str(i) for i in range(1, len(nums) + 1)]
 
-    return labels
+    if len(labels) != len(nums):
+        labels = [str(i) for i in range(1, len(nums) + 1)]
+
+    return nums, labels
+
+
+def _format_round_label(value: Any) -> str:
+    """Return a clean HH:MM/time string for dashboard display only."""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    s = str(value).strip()
+    if not s:
+        return ""
+
+    # Google may export times as '00:05:00'; dashboard only needs HH:MM.
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) >= 2:
+            try:
+                return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+            except Exception:
+                return ":".join(parts[:2])
+
+    # Google Sheets sometimes exports time as fraction of a day, e.g. 0.00347.
+    try:
+        f = float(s)
+        if 0 <= f < 1:
+            total = int(round(f * 24 * 60)) % (24 * 60)
+            return f"{total // 60:02d}:{total % 60:02d}"
+    except Exception:
+        pass
+
+    return s
 
 
 def _next_time_label(label: str) -> str:
@@ -549,15 +556,11 @@ def build_groups(numbers: list[int]) -> list[int]:
 
 
 def load_data() -> tuple[list[int], list[int], int, int, list[str]]:
-    numbers = load_numbers()
-    round_labels = load_round_labels()
+    numbers, round_labels = load_sheet_data()
 
     if len(numbers) < MIN_DATA_LEN:
         st.warning("Waiting data...")
         st.stop()
-
-    if len(round_labels) != len(numbers):
-        round_labels = [str(i) for i in range(1, len(numbers) + 1)]
 
     groups = build_groups(numbers)
     actual_group = groups[-1]
@@ -2621,7 +2624,7 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    if "v56_tp10_live_ctx" not in st.session_state:
+    if "v56_tp20_time_safe_live_ctx" not in st.session_state:
         st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(load_live_state())
     else:
         st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(st.session_state.v56_tp10_live_ctx)
@@ -2630,7 +2633,7 @@ def get_live_ctx() -> EngineContext:
 
 
 def get_live_window_state() -> dict[int, WindowRecord]:
-    if "v56_tp10_live_window_state" not in st.session_state:
+    if "v56_tp20_time_safe_live_window_state" not in st.session_state:
         st.session_state.v56_tp10_live_window_state = {
             w: WindowRecord()
             for w in WINDOWS
@@ -2647,9 +2650,9 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            if "v56_tp10_live_ctx" in st.session_state:
+            if "v56_tp20_time_safe_live_ctx" in st.session_state:
                 del st.session_state.v56_tp10_live_ctx
-            if "v56_tp10_live_window_state" in st.session_state:
+            if "v56_tp20_time_safe_live_window_state" in st.session_state:
                 del st.session_state.v56_tp10_live_window_state
             delete_state_from_gsheet()
             if os.path.exists(STATE_FILE):
