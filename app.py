@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 TP20 Trailing Continue Time",
+    page_title="V56 TP20 Trailing Continue",
     layout="wide"
 )
 
@@ -37,7 +37,7 @@ st.set_page_config(
 # - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
 # - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
 
-APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE_TIME_SAFE"
+APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE"
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
@@ -84,7 +84,7 @@ LIVE_START_ROUND = 180
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_time_safe_state.json")
+STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
@@ -160,10 +160,10 @@ TAKE_PROFIT_STOP = 20.0
 SESSION_HARD_STOP_ON_TAKE_PROFIT = True
 PROFIT_LOCK_ONCE_REACHED = True
 PROFIT_TRAIL_START = 10.0
-PROFIT_TRAIL_GIVEBACK = 4.0
-PROFIT_FLOOR_AFTER_TRAIL = 6.0
-POST10_MIN_CONFIDENCE = 0.43
-POST10_MIN_SHADOW_WR20 = 0.36
+PROFIT_TRAIL_GIVEBACK = 3.0
+PROFIT_FLOOR_AFTER_TRAIL = 7.0
+POST10_MIN_CONFIDENCE = 0.45
+POST10_MIN_SHADOW_WR20 = 0.38
 POST10_BLOCK_REAL_LOSS_STREAK = 1
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
@@ -439,15 +439,7 @@ window_state = get_window_state()
 # ============================================================
 
 @st.cache_data(ttl=30)
-def load_sheet_data() -> tuple[list[int], list[str]]:
-    """Load number and round/time from the SAME sheet snapshot.
-
-    Important: number and round labels must be filtered from the same DataFrame.
-    Loading them in two separate functions can temporarily read two different
-    Google Sheet snapshots when a new row is being edited, which may display a
-    wrong current time. It should not change hit/loss logic, but this single-load
-    version removes that risk completely.
-    """
+def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
             df = pd.read_csv(INPUT_CSV_PATH)
@@ -460,82 +452,34 @@ def load_sheet_data() -> tuple[list[int], list[str]]:
             f"{SHEET_ID}/export?format=csv"
             f"&cache={time.time()}"
         )
+
         try:
             df = pd.read_csv(url)
         except Exception as e:
             st.error(f"Load sheet error: {e}")
             st.stop()
 
-    df.columns = [str(x).lower().strip() for x in df.columns]
+    df.columns = [
+        str(x).lower().strip()
+        for x in df.columns
+    ]
 
     if "number" not in df.columns:
         st.error("Sheet must contain column 'number'")
         st.stop()
 
-    num_series = pd.to_numeric(df["number"], errors="coerce")
-    valid_mask = num_series.between(1, 12)
-    df_valid = df.loc[valid_mask].copy()
-    nums = num_series.loc[valid_mask].astype(int).tolist()
+    nums = (
+        pd.to_numeric(df["number"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .tolist()
+    )
 
-    labels: list[str] = []
-    if "round" in df_valid.columns:
-        for raw in df_valid["round"].tolist():
-            labels.append(_format_round_label(raw))
-    else:
-        labels = [str(i) for i in range(1, len(nums) + 1)]
-
-    if len(labels) != len(nums):
-        labels = [str(i) for i in range(1, len(nums) + 1)]
-
-    return nums, labels
-
-
-def _format_round_label(value: Any) -> str:
-    """Return a clean HH:MM/time string for dashboard display only."""
-    try:
-        if pd.isna(value):
-            return ""
-    except Exception:
-        pass
-
-    s = str(value).strip()
-    if not s:
-        return ""
-
-    # Google may export times as '00:05:00'; dashboard only needs HH:MM.
-    if ":" in s:
-        parts = s.split(":")
-        if len(parts) >= 2:
-            try:
-                return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
-            except Exception:
-                return ":".join(parts[:2])
-
-    # Google Sheets sometimes exports time as fraction of a day, e.g. 0.00347.
-    try:
-        f = float(s)
-        if 0 <= f < 1:
-            total = int(round(f * 24 * 60)) % (24 * 60)
-            return f"{total // 60:02d}:{total % 60:02d}"
-    except Exception:
-        pass
-
-    return s
-
-
-def _next_time_label(label: str) -> str:
-    """Infer next 5-minute time label from HH:MM when possible."""
-    try:
-        s = str(label).strip()
-        if not s or ":" not in s:
-            return "NEXT"
-        parts = s.split(":")
-        hh = int(parts[0])
-        mm = int(parts[1])
-        total = (hh * 60 + mm + 5) % (24 * 60)
-        return f"{total // 60:02d}:{total % 60:02d}"
-    except Exception:
-        return "NEXT"
+    return [
+        x
+        for x in nums
+        if 1 <= x <= 12
+    ]
 
 
 def group_of(n: int) -> int:
@@ -555,8 +499,8 @@ def build_groups(numbers: list[int]) -> list[int]:
     ]
 
 
-def load_data() -> tuple[list[int], list[int], int, int, list[str]]:
-    numbers, round_labels = load_sheet_data()
+def load_data() -> tuple[list[int], list[int], int, int]:
+    numbers = load_numbers()
 
     if len(numbers) < MIN_DATA_LEN:
         st.warning("Waiting data...")
@@ -566,7 +510,7 @@ def load_data() -> tuple[list[int], list[int], int, int, list[str]]:
     actual_group = groups[-1]
     round_id = len(numbers)
 
-    return numbers, groups, actual_group, round_id, round_labels
+    return numbers, groups, actual_group, round_id
 
 
 # ============================================================
@@ -1814,15 +1758,13 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 TP20 Trailing Continue Time")
+        st.title("🚀 V56 TP20 Trailing Continue")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-        current_time = getattr(self.ctx, "current_round_time", "N/A")
-        target_time = getattr(self.ctx, "target_round_time", "N/A")
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -1845,7 +1787,6 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
@@ -2624,7 +2565,7 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    if "v56_tp20_time_safe_live_ctx" not in st.session_state:
+    if "v56_tp10_live_ctx" not in st.session_state:
         st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(load_live_state())
     else:
         st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(st.session_state.v56_tp10_live_ctx)
@@ -2633,7 +2574,7 @@ def get_live_ctx() -> EngineContext:
 
 
 def get_live_window_state() -> dict[int, WindowRecord]:
-    if "v56_tp20_time_safe_live_window_state" not in st.session_state:
+    if "v56_tp10_live_window_state" not in st.session_state:
         st.session_state.v56_tp10_live_window_state = {
             w: WindowRecord()
             for w in WINDOWS
@@ -2650,9 +2591,9 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            if "v56_tp20_time_safe_live_ctx" in st.session_state:
+            if "v56_tp10_live_ctx" in st.session_state:
                 del st.session_state.v56_tp10_live_ctx
-            if "v56_tp20_time_safe_live_window_state" in st.session_state:
+            if "v56_tp10_live_window_state" in st.session_state:
                 del st.session_state.v56_tp10_live_window_state
             delete_state_from_gsheet()
             if os.path.exists(STATE_FILE):
@@ -2671,12 +2612,7 @@ class EngineManager:
         self.ctx = ensure_ctx_fields(get_live_ctx())
         self.window_state = get_live_window_state()
 
-        self.numbers, self.groups, self.actual_group, self.round_id, self.round_labels = load_data()
-
-        current_time = self.round_labels[self.round_id - 1] if self.round_labels and self.round_id <= len(self.round_labels) else str(self.round_id)
-        target_time = self.round_labels[self.round_id] if self.round_labels and self.round_id < len(self.round_labels) else _next_time_label(current_time)
-        self.ctx.current_round_time = current_time
-        self.ctx.target_round_time = target_time
+        self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
@@ -2809,19 +2745,7 @@ class EngineManager:
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        # Display fix:
-        # If profit protection/trailing has locked the session, do not show
-        # CURRENT SIGNAL/READY on the main panel. A READY snapshot is only
-        # a potential signal; it is not a real opened trade unless open_trade()
-        # appends a TradeRecord.
-        if self.trade_engine.refresh_session_lock():
-            signal.state = "WAIT"
-            signal.regime = "PROFIT_LOCK"
-            self.ctx.open_reason = getattr(self.ctx, "session_lock_reason", "PROFIT_LOCKED") or "PROFIT_LOCKED"
-            self.ctx.protection_reason = self.ctx.open_reason
-            save_live_state(self.ctx)
-
-        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN", "TRAILING_PROFIT_LOCKED", "TAKE_PROFIT_20_LOCKED"):
+        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
             signal.state = "WAIT"
 
         return signal, confidence_score, confidence_level
@@ -2848,7 +2772,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V56 TP20 TRAILING CONTINUE V2
+V56 TP10 PROFIT LOCK
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
