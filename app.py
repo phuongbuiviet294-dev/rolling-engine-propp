@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 TP20 Round180 Live Safe",
+    page_title="V56 TP20 Trailing Continue Time",
     layout="wide"
 )
 
@@ -37,7 +37,7 @@ st.set_page_config(
 # - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
 # - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
 
-APP_STATE_VERSION = "V56_TP20_ROUND180_LIVE_SAFE"
+APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE_TIME_SAFE"
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
@@ -54,8 +54,6 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 1
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
-# True live mode: first run only warms up windows to current data; it does NOT create old trades from replay.
-LIVE_ONLY_START_NOW = False
 
 # PROFIT OPTIMIZED CONFIG V51
 # Goal:
@@ -86,7 +84,7 @@ LIVE_ONLY_START_NOW = False
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V56_TP20_ROUND180_STATE_FILE", "v56_tp20_round180_live_safe_state.json")
+STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_time_safe_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
@@ -126,9 +124,9 @@ MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 WINDOW_COOLDOWN_ROUNDS = 7
 BLACKLIST_REAL_NEGATIVE = False
 
-PROFIT10_STOP = -2.0
-WR20_STOP = 0.45
-DRAWDOWN_STOP = -3.0
+PROFIT10_STOP = -3.0
+WR20_STOP = 0.38
+DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
 CONSENSUS_READY = 0.60
@@ -142,18 +140,18 @@ SAFE_MODE_ROUNDS = 1
 # V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
-MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
-MIN_SHADOW_WR20_FOR_TEST = 0.38
+MIN_SHADOW_PROFIT20_FOR_TEST = 0.0
+MIN_SHADOW_WR20_FOR_TEST = 0.34
 MAX_REAL_NEGATIVE_SOFT = -3.0
 WINDOW_SELECTION_MODE = "hybrid"
-UCB_EXPLORATION_C = 0.25
+UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 5
+RISK_PAUSE_ROUNDS = 3
 BLACKLIST_DURATION_ROUNDS = 10
-WINDOW_SELECTION_MODE = "hybrid"  # "hybrid", "ucb" or "score"
-UCB_EXPLORATION_C = 0.25
-MIN_TRADES_FOR_PROTECTION = 3
+WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
+UCB_EXPLORATION_C = 0.45
+MIN_TRADES_FOR_PROTECTION = 10
 
 # V56 TP20 TRAILING CONTINUE
 # Do not hard-lock at +10. After reaching +10, allow a small pullback and continue
@@ -418,18 +416,18 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
 # ============================================================
 
 def get_ctx() -> EngineContext:
-    if "v56_round180_ctx" not in st.session_state:
-        st.session_state.v56_round180_ctx = EngineContext()
-    return st.session_state.v56_round180_ctx
+    if "v50_ctx" not in st.session_state:
+        st.session_state.v50_ctx = EngineContext()
+    return st.session_state.v50_ctx
 
 
 def get_window_state() -> dict[int, WindowRecord]:
-    if "v56_round180_window_state" not in st.session_state:
-        st.session_state.v56_round180_window_state = {
+    if "v50_window_state" not in st.session_state:
+        st.session_state.v50_window_state = {
             w: WindowRecord()
             for w in WINDOWS
         }
-    return st.session_state.v56_round180_window_state
+    return st.session_state.v50_window_state
 
 
 ctx = get_ctx()
@@ -1816,7 +1814,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 TP20 Round180 Live Safe")
+        st.title("🚀 V56 TP20 Trailing Continue Time")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2716,55 +2714,13 @@ class EngineManager:
         self.ctx.last_window_round = target
 
     def hybrid_replay_once(self) -> None:
-        # ROUND180 LIVE SAFE:
-        # First run replays true trade decisions from LIVE_START_ROUND to current once.
-        # This keeps the user's required live start at round 180 while using
-        # safer window selection/protection to avoid uncontrolled drawdown.
+        # HYBRID LIVE:
+        # First run only:
+        # - rounds < LIVE_START_ROUND: warm-up windows only
+        # - rounds >= LIVE_START_ROUND: replay trade once to build initial history
+        # After that, state is kept in st.session_state and new rounds are processed live only.
         if getattr(self.ctx, "hybrid_initialized", False):
             return
-
-        if LIVE_ONLY_START_NOW:
-            for idx, actual_group in enumerate(self.groups, start=1):
-                self.ctx.last_length = idx
-                self.window_engine.update_one_round(actual_group, idx)
-
-            self.ctx.last_length = len(self.groups)
-            self.ctx.hybrid_initialized = True
-            self.ctx.trade_history = []
-            self.ctx.equity_curve = []
-            self.ctx.pending_trade = None
-            self.ctx.pending_round = 0
-            self.ctx.pending_index = None
-            self.ctx.pending_locked_window = None
-            self.ctx.trade_state = "IDLE"
-            rebuild_real_stats_from_history(self.ctx)
-            save_live_state(self.ctx)
-            return
-
-        # Replay trades from LIVE_START_ROUND to current once.
-        # Start from a clean trading state for this app version; window stats are rebuilt by replay.
-        self.ctx.trade_history = []
-        self.ctx.equity_curve = []
-        self.ctx.pending_trade = None
-        self.ctx.pending_round = 0
-        self.ctx.pending_index = None
-        self.ctx.pending_locked_window = None
-        self.ctx.trade_state = "IDLE"
-        self.ctx.window_real_stats = {}
-        self.ctx.cooled_windows = {}
-        self.ctx.blacklisted_windows = {}
-        self.ctx.cooldown_counter = 0
-        self.ctx.risk_pause_counter = 0
-        self.ctx.safe_mode_counter = 0
-        self.ctx.locked_window = None
-        self.ctx.lock_reason = ""
-        self.ctx.last_open_round = -1
-        self.ctx.last_settle_round = -1
-        self.ctx.last_signal_round = -1
-        self.ctx.last_window_round = -1
-
-        for w in WINDOWS:
-            self.window_state[w] = WindowRecord()
 
         for idx, actual_group in enumerate(self.groups, start=1):
             self.ctx.last_length = idx
@@ -2781,7 +2737,11 @@ class EngineManager:
             self.ctx.last_decision_confidence = confidence
             setattr(signal, "decision_confidence", confidence)
 
-            signal.state = self.protection_engine.adaptive_ready_wait(signal, confidence)
+            signal.state = self.protection_engine.adaptive_ready_wait(
+                signal,
+                confidence
+            )
+
             self.trade_engine.open_trade(signal, idx, confidence)
 
         self.ctx.last_length = len(self.groups)
@@ -2888,9 +2848,9 @@ class EngineManager:
 
         st.caption(
             f"""
-V56 TP20 ROUND180 LIVE SAFE
+V56 TP20 TRAILING CONTINUE V2
 
-First run: TRUE LIVE replay from round {LIVE_START_ROUND} to current once.
+First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
 V56 rule: UI refresh is read-only; only new rounds can change trade state.
