@@ -409,7 +409,7 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_sheet_dataframe() -> pd.DataFrame:
     """Load Google Sheet/CSV once so number and round time always come from the same snapshot."""
     if INPUT_CSV_PATH:
