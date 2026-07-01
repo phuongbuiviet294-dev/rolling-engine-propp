@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 TP20 Trailing Continue Time",
+    page_title="V56 True Live Deterministic",
     layout="wide"
 )
 
@@ -31,13 +31,6 @@ st.set_page_config(
 # CONFIG
 # ============================================================
 
-# FAST RELAXED PATCH 2026-06-26:
-# - Nới WAIT: consensus 0.667 -> 0.50, stability 0.50 -> 0.35, confidence 0.43 -> 0.35.
-# - Giảm cooldown/blacklist để không treo WAIT quá lâu.
-# - Cho phép lock chịu tối đa 2 loss streak thay vì 1, trade nhiều hơn.
-# - Protection chỉ kích hoạt sau 12 trade để tránh pause quá sớm.
-
-APP_STATE_VERSION = "V56_TP20_TRAILING_CONTINUE_TIME_SAFE"
 SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 
 WIN_GROUP = 2.5
@@ -51,7 +44,7 @@ LEADER_HISTORY_LEN = 50
 HIT_HISTORY_LEN = 50
 GROUP_HISTORY_LEN = 80
 
-COOLDOWN_ROUNDS = 1
+COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 
@@ -84,11 +77,11 @@ LIVE_START_ROUND = 180
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V56_TP20_STATE_FILE", "v56_tp20_trailing_continue_time_safe_state.json")
+STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
-LIVE_LOSS_COOLDOWN_ROUNDS = 3
+LIVE_LOSS_COOLDOWN_ROUNDS = 5
 LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 1
 LIVE_RELOCK_PROFIT_STOP = 0.0
@@ -96,10 +89,10 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.36
+LEADER_MIN_LIVE_WR20 = 0.38
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
-CANDIDATE_MIN_LIVE_WR20 = 0.34
+CANDIDATE_MIN_LIVE_WR20 = 0.38
 CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 
 # Real trade-aware relock.
@@ -107,64 +100,51 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.32
+REAL_MIN_WR_FOR_LOCK = 0.35
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.36
+FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
-TRADE_GAP_ROUNDS = 0
-LOW_WR_CONSENSUS_READY = 0.60
+TRADE_GAP_ROUNDS = 1
+LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 7
-BLACKLIST_REAL_NEGATIVE = False
+WINDOW_COOLDOWN_ROUNDS = 12
+BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -3.0
 WR20_STOP = 0.38
 DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.60
-STABILITY_READY = 0.45
+CONSENSUS_READY = 0.667
+STABILITY_READY = 0.50
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.40
-SAFE_DRAWDOWN_FROM_PEAK = -4.0
-SAFE_MODE_ROUNDS = 1
+MIN_CONFIDENCE_READY = 0.43
+SAFE_DRAWDOWN_FROM_PEAK = -3.0
+SAFE_MODE_ROUNDS = 3
 
 # V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
-MIN_SHADOW_PROFIT20_FOR_TEST = 0.0
-MIN_SHADOW_WR20_FOR_TEST = 0.34
-MAX_REAL_NEGATIVE_SOFT = -3.0
+MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
+MIN_SHADOW_WR20_FOR_TEST = 0.38
+MAX_REAL_NEGATIVE_SOFT = -2.0
 WINDOW_SELECTION_MODE = "hybrid"
 UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 10
+RISK_PAUSE_ROUNDS = 4
+BLACKLIST_DURATION_ROUNDS = 20
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.45
-MIN_TRADES_FOR_PROTECTION = 10
-
-# V56 TP20 TRAILING CONTINUE
-# Do not hard-lock at +10. After reaching +10, allow a small pullback and continue
-# toward +20. Lock only when target +20 is reached or profit gives back too much.
-TAKE_PROFIT_STOP = 20.0
-SESSION_HARD_STOP_ON_TAKE_PROFIT = True
-PROFIT_LOCK_ONCE_REACHED = True
-PROFIT_TRAIL_START = 10.0
-PROFIT_TRAIL_GIVEBACK = 4.0
-PROFIT_FLOOR_AFTER_TRAIL = 6.0
-POST10_MIN_CONFIDENCE = 0.43
-POST10_MIN_SHADOW_WR20 = 0.36
-POST10_BLOCK_REAL_LOSS_STREAK = 1
+MIN_TRADES_FOR_PROTECTION = 8
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -213,7 +193,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = APP_STATE_VERSION
+    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -293,7 +273,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = APP_STATE_VERSION
+    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -315,9 +295,6 @@ class EngineContext:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
-    session_locked: bool = False
-    session_lock_reason: str = ""
-    session_peak_profit: float = 0.0
 
 
 
@@ -347,7 +324,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = APP_STATE_VERSION
+    ctx.state_version = "V56_TRUE_LIVE_DETERMINISTIC"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -365,12 +342,6 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.blacklisted_windows = {}
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
-    if not hasattr(ctx, "session_locked"):
-        ctx.session_locked = False
-    if not hasattr(ctx, "session_lock_reason"):
-        ctx.session_lock_reason = ""
-    if not hasattr(ctx, "session_peak_profit"):
-        ctx.session_peak_profit = max([0.0] + list(getattr(ctx, "equity_curve", [])))
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -439,15 +410,8 @@ window_state = get_window_state()
 # ============================================================
 
 @st.cache_data(ttl=30)
-def load_sheet_data() -> tuple[list[int], list[str]]:
-    """Load number and round/time from the SAME sheet snapshot.
-
-    Important: number and round labels must be filtered from the same DataFrame.
-    Loading them in two separate functions can temporarily read two different
-    Google Sheet snapshots when a new row is being edited, which may display a
-    wrong current time. It should not change hit/loss logic, but this single-load
-    version removes that risk completely.
-    """
+def load_sheet_dataframe() -> pd.DataFrame:
+    """Load Google Sheet/CSV once so number and round time always come from the same snapshot."""
     if INPUT_CSV_PATH:
         try:
             df = pd.read_csv(INPUT_CSV_PATH)
@@ -460,82 +424,104 @@ def load_sheet_data() -> tuple[list[int], list[str]]:
             f"{SHEET_ID}/export?format=csv"
             f"&cache={time.time()}"
         )
+
         try:
             df = pd.read_csv(url)
         except Exception as e:
             st.error(f"Load sheet error: {e}")
             st.stop()
 
-    df.columns = [str(x).lower().strip() for x in df.columns]
+    df.columns = [
+        str(x).lower().strip()
+        for x in df.columns
+    ]
 
     if "number" not in df.columns:
         st.error("Sheet must contain column 'number'")
         st.stop()
 
-    num_series = pd.to_numeric(df["number"], errors="coerce")
-    valid_mask = num_series.between(1, 12)
-    df_valid = df.loc[valid_mask].copy()
-    nums = num_series.loc[valid_mask].astype(int).tolist()
-
-    labels: list[str] = []
-    if "round" in df_valid.columns:
-        for raw in df_valid["round"].tolist():
-            labels.append(_format_round_label(raw))
-    else:
-        labels = [str(i) for i in range(1, len(nums) + 1)]
-
-    if len(labels) != len(nums):
-        labels = [str(i) for i in range(1, len(nums) + 1)]
-
-    return nums, labels
+    return df
 
 
 def _format_round_label(value: Any) -> str:
-    """Return a clean HH:MM/time string for dashboard display only."""
+    """Format Google Sheet round/time values to HH:MM where possible."""
     try:
         if pd.isna(value):
             return ""
     except Exception:
         pass
 
+    # Google Sheet time may be exported as a fraction of day, e.g. 0.00347.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            v = float(value)
+            if 0 <= v < 1:
+                total_minutes = int(round(v * 24 * 60)) % (24 * 60)
+                return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+        except Exception:
+            pass
+
     s = str(value).strip()
     if not s:
         return ""
 
-    # Google may export times as '00:05:00'; dashboard only needs HH:MM.
-    if ":" in s:
-        parts = s.split(":")
-        if len(parts) >= 2:
-            try:
-                return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
-            except Exception:
-                return ":".join(parts[:2])
-
-    # Google Sheets sometimes exports time as fraction of a day, e.g. 0.00347.
+    # Common forms: 00:05, 00:05:00, 2026-06-30 00:05:00.
     try:
-        f = float(s)
-        if 0 <= f < 1:
-            total = int(round(f * 24 * 60)) % (24 * 60)
-            return f"{total // 60:02d}:{total % 60:02d}"
+        dt = pd.to_datetime(s, errors="coerce")
+        if not pd.isna(dt):
+            return dt.strftime("%H:%M")
     except Exception:
         pass
+
+    parts = s.split(":")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{int(parts[0]) % 24:02d}:{int(parts[1]) % 60:02d}"
 
     return s
 
 
-def _next_time_label(label: str) -> str:
-    """Infer next 5-minute time label from HH:MM when possible."""
+def _add_minutes_to_label(label: str, minutes: int = 5) -> str:
     try:
-        s = str(label).strip()
-        if not s or ":" not in s:
-            return "NEXT"
-        parts = s.split(":")
-        hh = int(parts[0])
-        mm = int(parts[1])
-        total = (hh * 60 + mm + 5) % (24 * 60)
+        h, m = [int(x) for x in str(label).strip().split(":")[:2]]
+        total = (h * 60 + m + minutes) % (24 * 60)
         return f"{total // 60:02d}:{total % 60:02d}"
     except Exception:
-        return "NEXT"
+        return ""
+
+
+def load_numbers() -> list[int]:
+    df = load_sheet_dataframe()
+
+    nums = (
+        pd.to_numeric(df["number"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .tolist()
+    )
+
+    return [
+        x
+        for x in nums
+        if 1 <= x <= 12
+    ]
+
+
+def load_numbers_and_round_labels() -> tuple[list[int], list[str]]:
+    df = load_sheet_dataframe()
+    number_series = pd.to_numeric(df["number"], errors="coerce")
+    valid_mask = number_series.between(1, 12)
+
+    numbers = number_series[valid_mask].astype(int).tolist()
+
+    if "round" in df.columns:
+        labels = [
+            _format_round_label(x)
+            for x in df.loc[valid_mask, "round"].tolist()
+        ]
+    else:
+        labels = ["" for _ in numbers]
+
+    return numbers, labels
 
 
 def group_of(n: int) -> int:
@@ -556,7 +542,7 @@ def build_groups(numbers: list[int]) -> list[int]:
 
 
 def load_data() -> tuple[list[int], list[int], int, int, list[str]]:
-    numbers, round_labels = load_sheet_data()
+    numbers, round_labels = load_numbers_and_round_labels()
 
     if len(numbers) < MIN_DATA_LEN:
         st.warning("Waiting data...")
@@ -1381,41 +1367,6 @@ class TradeEngine:
     def __init__(self, ctx: EngineContext):
         self.ctx = ctx
 
-    def refresh_session_lock(self) -> bool:
-        ensure_ctx_fields(self.ctx)
-        total_profit = self.get_total_profit()
-        self.ctx.session_peak_profit = max(
-            float(getattr(self.ctx, "session_peak_profit", 0.0)),
-            float(total_profit),
-            0.0,
-        )
-
-        if (
-            SESSION_HARD_STOP_ON_TAKE_PROFIT
-            and PROFIT_LOCK_ONCE_REACHED
-            and self.ctx.session_locked
-        ):
-            return True
-
-        if SESSION_HARD_STOP_ON_TAKE_PROFIT and total_profit >= TAKE_PROFIT_STOP:
-            self.ctx.session_locked = True
-            self.ctx.session_lock_reason = "TAKE_PROFIT_20_LOCKED"
-            self.ctx.protection_reason = "TAKE_PROFIT_20_LOCKED"
-            return True
-
-        # After reaching +10, do not stop immediately. Allow a small pullback so
-        # the curve can recover and try to extend toward +20. Stop only if the
-        # giveback becomes too large or profit falls under the protected floor.
-        if self.ctx.session_peak_profit >= PROFIT_TRAIL_START:
-            giveback = round(float(total_profit) - float(self.ctx.session_peak_profit), 2)
-            if giveback <= -abs(PROFIT_TRAIL_GIVEBACK) or total_profit <= PROFIT_FLOOR_AFTER_TRAIL:
-                self.ctx.session_locked = True
-                self.ctx.session_lock_reason = "TRAILING_PROFIT_LOCKED"
-                self.ctx.protection_reason = "TRAILING_PROFIT_LOCKED"
-                return True
-
-        return False
-
     def update_equity(self, profit: float) -> None:
         equity = 0.0 if not self.ctx.equity_curve else self.ctx.equity_curve[-1]
         equity += profit
@@ -1426,10 +1377,6 @@ class TradeEngine:
 
         if round_id < LIVE_START_ROUND:
             self.ctx.open_reason = "BEFORE_LIVE_START"
-            return
-
-        if self.refresh_session_lock():
-            self.ctx.open_reason = getattr(self.ctx, "session_lock_reason", "TAKE_PROFIT_LOCKED") or "TAKE_PROFIT_LOCKED"
             return
 
         # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
@@ -1511,7 +1458,6 @@ class TradeEngine:
             self.ctx.trade_history.append(record)
 
         self.update_equity(profit)
-        self.refresh_session_lock()
 
         # Trade-aware stats for currently locked window.
         # If locked window loses real trades, force relock on next signal.
@@ -1750,26 +1696,6 @@ class ProtectionEngine:
             return "WAIT"
 
         ensure_ctx_fields(self.ctx)
-        if self.trade_engine.refresh_session_lock():
-            self.ctx.protection_reason = getattr(self.ctx, "session_lock_reason", "TAKE_PROFIT_LOCKED") or "TAKE_PROFIT_LOCKED"
-            return "WAIT"
-
-        # When profit has reached +10 but not yet +20, continue only with
-        # stronger signals. This allows the curve to dip slightly and recover,
-        # but avoids low-quality trades that can give back all profit.
-        total_profit = self.trade_engine.get_total_profit()
-        peak_profit = float(getattr(self.ctx, "session_peak_profit", 0.0))
-        if peak_profit >= PROFIT_TRAIL_START and total_profit < TAKE_PROFIT_STOP:
-            if confidence_score < POST10_MIN_CONFIDENCE:
-                self.ctx.protection_reason = "POST10_LOW_CONFIDENCE"
-                return "WAIT"
-            if signal.shadow_live_wr20 < POST10_MIN_SHADOW_WR20:
-                self.ctx.protection_reason = "POST10_LOW_SHADOW_WR"
-                return "WAIT"
-            if signal.real_window_loss_streak >= POST10_BLOCK_REAL_LOSS_STREAK:
-                self.ctx.protection_reason = "POST10_REAL_LOSS_STREAK"
-                return "WAIT"
-
         if self.ctx.risk_pause_counter > 0:
             self.ctx.risk_pause_counter -= 1
             self.ctx.protection_reason = "RISK_PAUSE"
@@ -1805,24 +1731,38 @@ class Dashboard:
         window_engine: WindowEngine,
         signal_engine: SignalEngine,
         trade_engine: TradeEngine,
-        protection_engine: ProtectionEngine
+        protection_engine: ProtectionEngine,
+        round_labels: Optional[list[str]] = None
     ):
         self.ctx = ctx
         self.window_engine = window_engine
         self.signal_engine = signal_engine
         self.trade_engine = trade_engine
         self.protection_engine = protection_engine
+        self.round_labels = round_labels or []
+
+    def _round_time_label(self, round_id: int) -> str:
+        if 1 <= int(round_id) <= len(self.round_labels):
+            return self.round_labels[int(round_id) - 1]
+        return ""
 
     def render_header(self) -> None:
-        st.title("🚀 V56 TP20 Trailing Continue Time")
+        st.title("🚀 V56 True Live Deterministic")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-        current_time = getattr(self.ctx, "current_round_time", "N/A")
-        target_time = getattr(self.ctx, "target_round_time", "N/A")
+        current_time = self._round_time_label(current_round)
+        target_time = self._round_time_label(target_round)
+        if not target_time and current_time:
+            target_time = _add_minutes_to_label(current_time, 5)
+        time_line = (
+            f"CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>"
+            if current_time or target_time
+            else ""
+        )
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -1845,8 +1785,7 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>
-{action}<br>
+{time_line}{action}<br>
 CONF = {confidence_score:.2f}
 </div>
 """,
@@ -1968,14 +1907,6 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
-                    "TAKE_PROFIT_STOP": TAKE_PROFIT_STOP,
-                    "SESSION_HARD_STOP_ON_TAKE_PROFIT": SESSION_HARD_STOP_ON_TAKE_PROFIT,
-                    "PROFIT_LOCK_ONCE_REACHED": PROFIT_LOCK_ONCE_REACHED,
-                    "PROFIT_TRAIL_START": PROFIT_TRAIL_START,
-                    "PROFIT_TRAIL_GIVEBACK": PROFIT_TRAIL_GIVEBACK,
-                    "PROFIT_FLOOR_AFTER_TRAIL": PROFIT_FLOOR_AFTER_TRAIL,
-                    "POST10_MIN_CONFIDENCE": POST10_MIN_CONFIDENCE,
-                    "POST10_MIN_SHADOW_WR20": POST10_MIN_SHADOW_WR20,
                 }
             )
 
@@ -2081,9 +2012,6 @@ CONF = {confidence_score:.2f}
                     "last_safe_trigger_peak": getattr(self.ctx, "last_safe_trigger_peak", 0.0),
                     "blacklisted_windows": getattr(self.ctx, "blacklisted_windows", {}),
                     "last_decision_confidence": getattr(self.ctx, "last_decision_confidence", 0.0),
-                    "session_locked": getattr(self.ctx, "session_locked", False),
-                    "session_lock_reason": getattr(self.ctx, "session_lock_reason", ""),
-                    "session_peak_profit": getattr(self.ctx, "session_peak_profit", 0.0),
                 }
             )
 
@@ -2473,9 +2401,6 @@ def save_live_state(ctx: EngineContext) -> None:
         "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
-        "session_locked": getattr(ctx, "session_locked", False),
-        "session_lock_reason": getattr(ctx, "session_lock_reason", ""),
-        "session_peak_profit": getattr(ctx, "session_peak_profit", 0.0),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2500,7 +2425,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", APP_STATE_VERSION),
+        "state_version": getattr(ctx, "state_version", "V56_TRUE_LIVE_DETERMINISTIC"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
     }
 
@@ -2529,10 +2454,6 @@ def load_live_state() -> EngineContext:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
-        return EngineContext()
-
-    # Do not reuse state from older variants, because old states can show stale +10/-11 profit.
-    if data.get("state_version") and data.get("state_version") != APP_STATE_VERSION:
         return EngineContext()
 
     ctx = EngineContext()
@@ -2568,9 +2489,6 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
-    ctx.session_locked = bool(data.get("session_locked", False))
-    ctx.session_lock_reason = data.get("session_lock_reason", "")
-    ctx.session_peak_profit = float(data.get("session_peak_profit", 0.0))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2624,21 +2542,21 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    if "v56_tp20_time_safe_live_ctx" not in st.session_state:
-        st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(load_live_state())
+    if "v50_true_live_ctx" not in st.session_state:
+        st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
     else:
-        st.session_state.v56_tp10_live_ctx = ensure_ctx_fields(st.session_state.v56_tp10_live_ctx)
-    return st.session_state.v56_tp10_live_ctx
+        st.session_state.v50_true_live_ctx = ensure_ctx_fields(st.session_state.v50_true_live_ctx)
+    return st.session_state.v50_true_live_ctx
 
 
 
 def get_live_window_state() -> dict[int, WindowRecord]:
-    if "v56_tp20_time_safe_live_window_state" not in st.session_state:
-        st.session_state.v56_tp10_live_window_state = {
+    if "v50_true_live_window_state" not in st.session_state:
+        st.session_state.v50_true_live_window_state = {
             w: WindowRecord()
             for w in WINDOWS
         }
-    return st.session_state.v56_tp10_live_window_state
+    return st.session_state.v50_true_live_window_state
 
 
 def reset_live_state_button() -> None:
@@ -2650,10 +2568,10 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            if "v56_tp20_time_safe_live_ctx" in st.session_state:
-                del st.session_state.v56_tp10_live_ctx
-            if "v56_tp20_time_safe_live_window_state" in st.session_state:
-                del st.session_state.v56_tp10_live_window_state
+            if "v50_true_live_ctx" in st.session_state:
+                del st.session_state.v50_true_live_ctx
+            if "v50_true_live_window_state" in st.session_state:
+                del st.session_state.v50_true_live_window_state
             delete_state_from_gsheet()
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
@@ -2673,11 +2591,6 @@ class EngineManager:
 
         self.numbers, self.groups, self.actual_group, self.round_id, self.round_labels = load_data()
 
-        current_time = self.round_labels[self.round_id - 1] if self.round_labels and self.round_id <= len(self.round_labels) else str(self.round_id)
-        target_time = self.round_labels[self.round_id] if self.round_labels and self.round_id < len(self.round_labels) else _next_time_label(current_time)
-        self.ctx.current_round_time = current_time
-        self.ctx.target_round_time = target_time
-
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
         self.signal_engine = SignalEngine(self.ctx, self.window_engine)
@@ -2688,7 +2601,8 @@ class EngineManager:
             self.window_engine,
             self.signal_engine,
             self.trade_engine,
-            self.protection_engine
+            self.protection_engine,
+            self.round_labels
         )
 
         if getattr(self.ctx, "hybrid_initialized", False):
@@ -2809,19 +2723,7 @@ class EngineManager:
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        # Display fix:
-        # If profit protection/trailing has locked the session, do not show
-        # CURRENT SIGNAL/READY on the main panel. A READY snapshot is only
-        # a potential signal; it is not a real opened trade unless open_trade()
-        # appends a TradeRecord.
-        if self.trade_engine.refresh_session_lock():
-            signal.state = "WAIT"
-            signal.regime = "PROFIT_LOCK"
-            self.ctx.open_reason = getattr(self.ctx, "session_lock_reason", "PROFIT_LOCKED") or "PROFIT_LOCKED"
-            self.ctx.protection_reason = self.ctx.open_reason
-            save_live_state(self.ctx)
-
-        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN", "TRAILING_PROFIT_LOCKED", "TAKE_PROFIT_20_LOCKED"):
+        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
             signal.state = "WAIT"
 
         return signal, confidence_score, confidence_level
@@ -2848,7 +2750,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V56 TP20 TRAILING CONTINUE V2
+V56 TRUE LIVE DETERMINISTIC
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
