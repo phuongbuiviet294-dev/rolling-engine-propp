@@ -36,7 +36,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-WINDOWS = list(range(6, 22))
+WINDOWS = list(range(6, 26))
 TOPN = 3
 
 SIGNAL_HISTORY_LEN = 50
@@ -108,7 +108,7 @@ REAL_MIN_WR_FOR_LOCK = 0.35
 FALLBACK_MIN_PROFIT20 = 0.0
 FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
-TRADE_GAP_ROUNDS = 0
+TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
@@ -409,9 +409,8 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=5)
-def load_sheet_dataframe() -> pd.DataFrame:
-    """Load Google Sheet/CSV once so number and round time always come from the same snapshot."""
+@st.cache_data(ttl=30)
+def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
             df = pd.read_csv(INPUT_CSV_PATH)
@@ -440,58 +439,6 @@ def load_sheet_dataframe() -> pd.DataFrame:
         st.error("Sheet must contain column 'number'")
         st.stop()
 
-    return df
-
-
-def _format_round_label(value: Any) -> str:
-    """Format Google Sheet round/time values to HH:MM where possible."""
-    try:
-        if pd.isna(value):
-            return ""
-    except Exception:
-        pass
-
-    # Google Sheet time may be exported as a fraction of day, e.g. 0.00347.
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        try:
-            v = float(value)
-            if 0 <= v < 1:
-                total_minutes = int(round(v * 24 * 60)) % (24 * 60)
-                return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
-        except Exception:
-            pass
-
-    s = str(value).strip()
-    if not s:
-        return ""
-
-    # Common forms: 00:05, 00:05:00, 2026-06-30 00:05:00.
-    try:
-        dt = pd.to_datetime(s, errors="coerce")
-        if not pd.isna(dt):
-            return dt.strftime("%H:%M")
-    except Exception:
-        pass
-
-    parts = s.split(":")
-    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        return f"{int(parts[0]) % 24:02d}:{int(parts[1]) % 60:02d}"
-
-    return s
-
-
-def _add_minutes_to_label(label: str, minutes: int = 5) -> str:
-    try:
-        h, m = [int(x) for x in str(label).strip().split(":")[:2]]
-        total = (h * 60 + m + minutes) % (24 * 60)
-        return f"{total // 60:02d}:{total % 60:02d}"
-    except Exception:
-        return ""
-
-
-def load_numbers() -> list[int]:
-    df = load_sheet_dataframe()
-
     nums = (
         pd.to_numeric(df["number"], errors="coerce")
         .dropna()
@@ -504,24 +451,6 @@ def load_numbers() -> list[int]:
         for x in nums
         if 1 <= x <= 12
     ]
-
-
-def load_numbers_and_round_labels() -> tuple[list[int], list[str]]:
-    df = load_sheet_dataframe()
-    number_series = pd.to_numeric(df["number"], errors="coerce")
-    valid_mask = number_series.between(1, 12)
-
-    numbers = number_series[valid_mask].astype(int).tolist()
-
-    if "round" in df.columns:
-        labels = [
-            _format_round_label(x)
-            for x in df.loc[valid_mask, "round"].tolist()
-        ]
-    else:
-        labels = ["" for _ in numbers]
-
-    return numbers, labels
 
 
 def group_of(n: int) -> int:
@@ -541,8 +470,8 @@ def build_groups(numbers: list[int]) -> list[int]:
     ]
 
 
-def load_data() -> tuple[list[int], list[int], int, int, list[str]]:
-    numbers, round_labels = load_numbers_and_round_labels()
+def load_data() -> tuple[list[int], list[int], int, int]:
+    numbers = load_numbers()
 
     if len(numbers) < MIN_DATA_LEN:
         st.warning("Waiting data...")
@@ -552,7 +481,7 @@ def load_data() -> tuple[list[int], list[int], int, int, list[str]]:
     actual_group = groups[-1]
     round_id = len(numbers)
 
-    return numbers, groups, actual_group, round_id, round_labels
+    return numbers, groups, actual_group, round_id
 
 
 # ============================================================
@@ -1731,20 +1660,13 @@ class Dashboard:
         window_engine: WindowEngine,
         signal_engine: SignalEngine,
         trade_engine: TradeEngine,
-        protection_engine: ProtectionEngine,
-        round_labels: Optional[list[str]] = None
+        protection_engine: ProtectionEngine
     ):
         self.ctx = ctx
         self.window_engine = window_engine
         self.signal_engine = signal_engine
         self.trade_engine = trade_engine
         self.protection_engine = protection_engine
-        self.round_labels = round_labels or []
-
-    def _round_time_label(self, round_id: int) -> str:
-        if 1 <= int(round_id) <= len(self.round_labels):
-            return self.round_labels[int(round_id) - 1]
-        return ""
 
     def render_header(self) -> None:
         st.title("🚀 V56 True Live Deterministic")
@@ -1754,15 +1676,6 @@ class Dashboard:
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-        current_time = self._round_time_label(current_round)
-        target_time = self._round_time_label(target_round)
-        if not target_time and current_time:
-            target_time = _add_minutes_to_label(current_time, 5)
-        time_line = (
-            f"CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>"
-            if current_time or target_time
-            else ""
-        )
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -1785,7 +1698,7 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-{time_line}{action}<br>
+{action}<br>
 CONF = {confidence_score:.2f}
 </div>
 """,
@@ -2589,7 +2502,7 @@ class EngineManager:
         self.ctx = ensure_ctx_fields(get_live_ctx())
         self.window_state = get_live_window_state()
 
-        self.numbers, self.groups, self.actual_group, self.round_id, self.round_labels = load_data()
+        self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
@@ -2601,8 +2514,7 @@ class EngineManager:
             self.window_engine,
             self.signal_engine,
             self.trade_engine,
-            self.protection_engine,
-            self.round_labels
+            self.protection_engine
         )
 
         if getattr(self.ctx, "hybrid_initialized", False):
