@@ -9,6 +9,7 @@ import time
 import json
 import os
 import math
+import re
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
@@ -108,7 +109,7 @@ REAL_MIN_WR_FOR_LOCK = 0.35
 FALLBACK_MIN_PROFIT20 = 0.0
 FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
-TRADE_GAP_ROUNDS = 0
+TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
@@ -451,6 +452,115 @@ def load_numbers() -> list[int]:
         for x in nums
         if 1 <= x <= 12
     ]
+
+
+
+# ============================================================
+# DISPLAY-ONLY ROUND TIME HELPERS
+# IMPORTANT:
+# - These functions are UI-only.
+# - They do NOT modify numbers, groups, round_id, replay, state,
+#   window selection, signal, trade history, or profit.
+# ============================================================
+
+@st.cache_data(ttl=30)
+def load_round_labels_display_only() -> list[str]:
+    """Read the Sheet 'round' column only for UI display."""
+    if INPUT_CSV_PATH:
+        try:
+            df = pd.read_csv(INPUT_CSV_PATH)
+        except Exception:
+            return []
+    else:
+        url = (
+            f"https://docs.google.com/spreadsheets/d/"
+            f"{SHEET_ID}/export?format=csv"
+            f"&cache={time.time()}"
+        )
+        try:
+            df = pd.read_csv(url)
+        except Exception:
+            return []
+
+    df.columns = [str(x).lower().strip() for x in df.columns]
+
+    if "round" not in df.columns or "number" not in df.columns:
+        return []
+
+    number_series = pd.to_numeric(df["number"], errors="coerce")
+    valid_mask = number_series.between(1, 12, inclusive="both")
+
+    labels = df.loc[valid_mask, "round"].tolist()
+    return [_format_round_time_display_only(x) for x in labels]
+
+
+def _format_round_time_display_only(value: Any) -> str:
+    """Format a Sheet time value as HH:MM for UI only."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "--:--"
+
+    try:
+        if hasattr(value, "strftime"):
+            return value.strftime("%H:%M")
+    except Exception:
+        pass
+
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "nat", "none"}:
+        return "--:--"
+
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\s*$", s)
+    if m:
+        hh = int(m.group(1)) % 24
+        mm = int(m.group(2)) % 60
+        return f"{hh:02d}:{mm:02d}"
+
+    try:
+        v = float(s)
+        if 0.0 <= v < 1.0:
+            total_minutes = int(round(v * 24 * 60)) % (24 * 60)
+            return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+    except Exception:
+        pass
+
+    try:
+        dt = pd.to_datetime(s, errors="coerce")
+        if not pd.isna(dt):
+            return dt.strftime("%H:%M")
+    except Exception:
+        pass
+
+    return s
+
+
+def _add_minutes_display_only(hhmm: str, minutes: int = 5) -> str:
+    """Add minutes to HH:MM for UI only."""
+    m = re.match(r"^(\d{2}):(\d{2})$", str(hhmm))
+    if not m:
+        return "--:--"
+    total = (int(m.group(1)) * 60 + int(m.group(2)) + minutes) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def get_current_target_time_display_only(current_round: int) -> tuple[str, str]:
+    """Return current and target times without touching engine state."""
+    try:
+        labels = load_round_labels_display_only()
+    except Exception:
+        return "--:--", "--:--"
+
+    idx = int(current_round) - 1
+    if idx < 0 or idx >= len(labels):
+        return "--:--", "--:--"
+
+    current_time = labels[idx]
+
+    if idx + 1 < len(labels) and labels[idx + 1] != "--:--":
+        target_time = labels[idx + 1]
+    else:
+        target_time = _add_minutes_display_only(current_time, 5)
+
+    return current_time, target_time
 
 
 def group_of(n: int) -> int:
@@ -1677,6 +1787,9 @@ class Dashboard:
         current_round = self.ctx.last_length
         target_round = current_round + 1
 
+        # UI-only time labels. These values never enter the trading engine.
+        current_time, target_time = get_current_target_time_display_only(current_round)
+
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
             f"BET GROUP = {signal.next_group}"
@@ -1698,6 +1811,7 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
+CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
