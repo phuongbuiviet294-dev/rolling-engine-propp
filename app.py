@@ -453,6 +453,83 @@ def load_numbers() -> list[int]:
     ]
 
 
+
+@st.cache_data(ttl=30)
+def load_round_labels_display_only() -> list[str]:
+    """DISPLAY ONLY: read column `round` without changing engine number/groups/replay logic."""
+    try:
+        if INPUT_CSV_PATH:
+            df = pd.read_csv(INPUT_CSV_PATH)
+        else:
+            url = (
+                f"https://docs.google.com/spreadsheets/d/"
+                f"{SHEET_ID}/export?format=csv"
+                f"&cache={time.time()}"
+            )
+            df = pd.read_csv(url)
+
+        df.columns = [str(x).lower().strip() for x in df.columns]
+        if "number" not in df.columns or "round" not in df.columns:
+            return []
+
+        # IMPORTANT: mirror the original load_numbers() filtering order exactly.
+        num = pd.to_numeric(df["number"], errors="coerce")
+        valid_mask = num.notna() & (num.astype("Float64") >= 1) & (num.astype("Float64") <= 12)
+        values = df.loc[valid_mask, "round"].tolist()
+
+        labels: list[str] = []
+        for value in values:
+            try:
+                if pd.isna(value):
+                    labels.append("")
+                    continue
+            except Exception:
+                pass
+
+            # Google Sheets may export time as fraction of one day.
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    v = float(value)
+                    if 0 <= v < 1:
+                        total_minutes = int(round(v * 24 * 60)) % (24 * 60)
+                        labels.append(f"{total_minutes // 60:02d}:{total_minutes % 60:02d}")
+                        continue
+                except Exception:
+                    pass
+
+            text = str(value).strip()
+            if not text:
+                labels.append("")
+                continue
+
+            try:
+                dt = pd.to_datetime(text, errors="coerce")
+                if not pd.isna(dt):
+                    labels.append(dt.strftime("%H:%M"))
+                    continue
+            except Exception:
+                pass
+
+            parts = text.split(":")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                labels.append(f"{int(parts[0]) % 24:02d}:{int(parts[1]) % 60:02d}")
+            else:
+                labels.append(text)
+
+        return labels
+    except Exception:
+        # Time display must never break or change trading logic.
+        return []
+
+
+def add_minutes_display_only(label: str, minutes: int = 5) -> str:
+    try:
+        h, m = [int(x) for x in str(label).strip().split(":")[:2]]
+        total = (h * 60 + m + minutes) % (24 * 60)
+        return f"{total // 60:02d}:{total % 60:02d}"
+    except Exception:
+        return ""
+
 def group_of(n: int) -> int:
     if n <= 3:
         return 1
@@ -1677,6 +1754,26 @@ class Dashboard:
         current_round = self.ctx.last_length
         target_round = current_round + 1
 
+        # DISPLAY ONLY: time labels do not feed number/groups/window/trade state.
+        round_labels = load_round_labels_display_only()
+        current_time = (
+            round_labels[current_round - 1]
+            if 1 <= current_round <= len(round_labels)
+            else ""
+        )
+        target_time = (
+            round_labels[target_round - 1]
+            if 1 <= target_round <= len(round_labels)
+            else ""
+        )
+        if not target_time and current_time:
+            target_time = add_minutes_display_only(current_time, 5)
+        time_line = (
+            f"CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>"
+            if current_time or target_time
+            else ""
+        )
+
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
             f"BET GROUP = {signal.next_group}"
@@ -1698,7 +1795,7 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-{action}<br>
+{time_line}{action}<br>
 CONF = {confidence_score:.2f}
 </div>
 """,
