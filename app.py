@@ -23,7 +23,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 Profit Optimized Balanced",
+    page_title="V57 Adaptive Hybrid",
     layout="wide"
 )
 
@@ -48,12 +48,6 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
-
-# PROFIT OPTIMIZED BALANCED 2026-07-04
-# - Keep relock after 1 real loss.
-# - Reduce UCB exploration to avoid testing weak windows too aggressively.
-# - Shorten cooldown/blacklist to reduce FORCE_ANY_WINDOW_NO_DEADLOCK.
-# - Moderate READY gates: still requires quality, but less WAIT starvation.
 
 # PROFIT OPTIMIZED CONFIG V51
 # Goal:
@@ -96,7 +90,7 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.36
+LEADER_MIN_LIVE_WR20 = 0.38
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
@@ -107,35 +101,35 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.34
+REAL_MIN_WR_FOR_LOCK = 0.35
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.36
+FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.60
+LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 7
+WINDOW_COOLDOWN_ROUNDS = 12
 BLACKLIST_REAL_NEGATIVE = True
 
-PROFIT10_STOP = -2.0
-WR20_STOP = 0.35
-DRAWDOWN_STOP = -5.0
+PROFIT10_STOP = -3.0
+WR20_STOP = 0.38
+DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.60
-STABILITY_READY = 0.45
+CONSENSUS_READY = 0.667
+STABILITY_READY = 0.50
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.42
-SAFE_DRAWDOWN_FROM_PEAK = -4.0
-SAFE_MODE_ROUNDS = 2
+MIN_CONFIDENCE_READY = 0.43
+SAFE_DRAWDOWN_FROM_PEAK = -3.0
+SAFE_MODE_ROUNDS = 3
 
 # V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
@@ -144,14 +138,28 @@ MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
 MIN_SHADOW_WR20_FOR_TEST = 0.38
 MAX_REAL_NEGATIVE_SOFT = -2.0
 WINDOW_SELECTION_MODE = "hybrid"
-UCB_EXPLORATION_C = 0.22
+UCB_EXPLORATION_C = 0.45  # fallback only; adaptive UCB is used dynamically
+
+# V57 Adaptive Hybrid
+BEST_WINDOW_SUPPORT_MIN = 2
+DYNAMIC_UCB_C_EARLY = 0.35
+DYNAMIC_UCB_C_MID = 0.22
+DYNAMIC_UCB_C_MATURE = 0.12
+DYNAMIC_COOLDOWN_FIRST_LOSS = 5
+DYNAMIC_COOLDOWN_REAL_NEGATIVE = 8
+DYNAMIC_COOLDOWN_LOSS_STREAK_2 = 12
+DYNAMIC_BLACKLIST_PROFIT_STOP = -2.0
+DYNAMIC_BLACKLIST_ROUNDS = 15
+TREND_MIN_CONFIDENCE = 0.40
+NORMAL_MIN_CONFIDENCE = 0.43
+CHAOS_MIN_CONFIDENCE = 0.48
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 10
-WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
-UCB_EXPLORATION_C = 0.22
-MIN_TRADES_FOR_PROTECTION = 6
+RISK_PAUSE_ROUNDS = 4
+BLACKLIST_DURATION_ROUNDS = 20
+# V57: keep one source of truth; do not override hybrid mode.
+# WINDOW_SELECTION_MODE remains "hybrid" above.
+MIN_TRADES_FOR_PROTECTION = 8
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -890,17 +898,27 @@ class SignalEngine:
         until_round = int(self.ctx.cooled_windows.get(w, 0))
         return current_round < until_round
 
+    def get_dynamic_cooldown_rounds(self, window_id: Optional[int]) -> int:
+        """V57: short cooldown after one loss, longer only for proven bad windows."""
+        if window_id is None:
+            return DYNAMIC_COOLDOWN_FIRST_LOSS
+        stat = self.get_real_stats(window_id)
+        if int(stat.get("loss_streak", 0)) >= 2:
+            return DYNAMIC_COOLDOWN_LOSS_STREAK_2
+        if float(stat.get("profit", 0.0)) < 0:
+            return DYNAMIC_COOLDOWN_REAL_NEGATIVE
+        return DYNAMIC_COOLDOWN_FIRST_LOSS
+
     def cool_window(self, window_id: Optional[int], reason: str = "") -> None:
         ensure_ctx_fields(self.ctx)
-
         if window_id is None:
             return
         try:
             w = int(window_id)
         except Exception:
             w = window_id
-
-        self.ctx.cooled_windows[w] = int(self.ctx.last_length + WINDOW_COOLDOWN_ROUNDS)
+        cooldown_rounds = self.get_dynamic_cooldown_rounds(w)
+        self.ctx.cooled_windows[w] = int(self.ctx.last_length + cooldown_rounds)
 
     def is_window_blacklisted(self, window_id: int, current_round: Optional[int] = None) -> bool:
         ensure_ctx_fields(self.ctx)
@@ -995,24 +1013,43 @@ class SignalEngine:
     def candidate_score(self, obj: WindowRecord) -> float:
         return self.shadow_candidate_score(obj)
 
+    def get_dynamic_ucb_c(self) -> float:
+        """V57: explore early, exploit proven windows as real trades accumulate."""
+        settled_trades = len([x for x in self.ctx.trade_history if x.hit is not None])
+        if settled_trades < 5:
+            return DYNAMIC_UCB_C_EARLY
+        if settled_trades < 15:
+            return DYNAMIC_UCB_C_MID
+        return DYNAMIC_UCB_C_MATURE
+
     def ucb_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
         stat = self.get_real_stats(window_id)
         total_real_trades = sum(int(s.get("trade_count", 0)) for s in self.ctx.window_real_stats.values())
         n = max(1, int(stat.get("trade_count", 0)))
-
         real_mean = float(stat.get("profit", 0.0)) / n if stat.get("trade_count", 0) else 0.0
         shadow_hits = list(obj.live_hit_history)[-20:]
         shadow_wr = round(sum(shadow_hits) / len(shadow_hits), 3) if shadow_hits else obj.live_wr20
         shadow_mean = (shadow_wr * WIN_GROUP) - ((1.0 - shadow_wr) * abs(LOSS_GROUP))
-
-        optimism = UCB_EXPLORATION_C * math.sqrt(math.log(max(total_real_trades + len(WINDOWS), 2)) / n)
+        dynamic_c = self.get_dynamic_ucb_c()
+        optimism = dynamic_c * math.sqrt(math.log(max(total_real_trades + len(WINDOWS), 2)) / n)
         penalty = 0.25 * int(obj.live_loss_streak) + 0.15 * int(obj.loss_streak)
         return round(0.70 * real_mean + 0.30 * shadow_mean + optimism - penalty, 3)
 
     def selection_score(self, window_id: int, obj: WindowRecord) -> float:
-        if WINDOW_SELECTION_MODE.lower() == "ucb":
+        mode = WINDOW_SELECTION_MODE.lower()
+        if mode == "ucb":
             return self.ucb_candidate_score(window_id, obj)
+        if mode == "hybrid":
+            return self.hybrid_candidate_score(window_id, obj)
         return self.candidate_score(obj)
+
+    def get_locked_group_support(self, locked_obj: Optional[WindowRecord], top_rows: list[tuple[int, WindowRecord]]) -> tuple[int, int]:
+        """Count how many TopN windows confirm the locked best-window prediction."""
+        if locked_obj is None or locked_obj.next_group is None:
+            return 0, 0
+        valid = [obj for _, obj in top_rows if obj.next_group is not None]
+        support = sum(1 for obj in valid if obj.next_group == locked_obj.next_group)
+        return support, len(valid)
 
     def choose_relock_candidate(
         self,
@@ -1197,7 +1234,9 @@ class SignalEngine:
                     and real_locked_stat["wr"] >= REAL_MIN_WR_FOR_LOCK
                     and real_locked_stat["loss_streak"] <= REAL_MAX_LOSS_STREAK_FOR_LOCK
                 )
-                if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
+                support_count, support_total = self.get_locked_group_support(locked_obj, top_rows)
+                support_ok = support_count >= min(BEST_WINDOW_SUPPORT_MIN, max(1, support_total))
+                if real_ok or support_ok or leader_wr20 >= 0.55:
                     state = "READY"
 
         return SignalRecord(
@@ -1366,7 +1405,9 @@ class SignalEngine:
                 and real_locked_stat["loss_streak"] <= REAL_MAX_LOSS_STREAK_FOR_LOCK
             )
 
-            if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
+            support_count, support_total = self.get_locked_group_support(locked_obj, top_rows)
+            support_ok = support_count >= min(BEST_WINDOW_SUPPORT_MIN, max(1, support_total))
+            if real_ok or support_ok or leader_wr20 >= 0.55:
                 state = "READY"
 
         signal = SignalRecord(
@@ -1560,7 +1601,14 @@ class TradeEngine:
             except Exception:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
-            self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
+            stat_now = get_history_real_stats(self.ctx, w)
+            if int(stat_now.get("loss_streak", 0)) >= 2:
+                cooldown_rounds = DYNAMIC_COOLDOWN_LOSS_STREAK_2
+            elif float(stat_now.get("profit", 0.0)) < 0:
+                cooldown_rounds = DYNAMIC_COOLDOWN_REAL_NEGATIVE
+            else:
+                cooldown_rounds = DYNAMIC_COOLDOWN_FIRST_LOSS
+            self.ctx.cooled_windows[w] = int(current_round + cooldown_rounds)
 
             # V55.1:
             # A single loss only cools the window.
@@ -1569,8 +1617,8 @@ class TradeEngine:
                 self.ctx.blacklisted_windows = {}
 
             stat = get_history_real_stats(self.ctx, w)
-            if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
-                self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
+            if stat["profit"] <= DYNAMIC_BLACKLIST_PROFIT_STOP or stat["loss_streak"] >= 2:
+                self.ctx.blacklisted_windows[w] = int(current_round + DYNAMIC_BLACKLIST_ROUNDS)
 
     def get_total_profit(self) -> float:
         return round(
@@ -1757,8 +1805,15 @@ class ProtectionEngine:
             self.ctx.protection_reason = "SAFE_MODE_DRAWDOWN"
             return "WAIT"
 
-        if confidence_score < MIN_CONFIDENCE_READY:
-            self.ctx.protection_reason = "LOW_CONFIDENCE"
+        if signal.regime == "TREND":
+            required_confidence = TREND_MIN_CONFIDENCE
+        elif signal.regime == "CHAOS":
+            required_confidence = CHAOS_MIN_CONFIDENCE
+        else:
+            required_confidence = NORMAL_MIN_CONFIDENCE
+
+        if confidence_score < required_confidence:
+            self.ctx.protection_reason = f"LOW_CONFIDENCE_{signal.regime}_{required_confidence:.2f}"
             return "WAIT"
 
         self.ctx.protection_reason = "ALLOW"
@@ -1785,7 +1840,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 Profit Optimized Balanced")
+        st.title("🚀 V57 Adaptive Hybrid")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -1929,6 +1984,13 @@ CONF = {confidence_score:.2f}
                     "WINDOW_COOLDOWN_ROUNDS": WINDOW_COOLDOWN_ROUNDS,
                     "BLACKLIST_REAL_NEGATIVE": BLACKLIST_REAL_NEGATIVE,
                     "TOPN": TOPN,
+                    "BEST_WINDOW_SUPPORT_MIN": BEST_WINDOW_SUPPORT_MIN,
+                    "DYNAMIC_UCB_C_EARLY": DYNAMIC_UCB_C_EARLY,
+                    "DYNAMIC_UCB_C_MID": DYNAMIC_UCB_C_MID,
+                    "DYNAMIC_UCB_C_MATURE": DYNAMIC_UCB_C_MATURE,
+                    "TREND_MIN_CONFIDENCE": TREND_MIN_CONFIDENCE,
+                    "NORMAL_MIN_CONFIDENCE": NORMAL_MIN_CONFIDENCE,
+                    "CHAOS_MIN_CONFIDENCE": CHAOS_MIN_CONFIDENCE,
                     "MIN_CONFIDENCE_READY": MIN_CONFIDENCE_READY,
                     "BLACKLIST_DURATION_ROUNDS": BLACKLIST_DURATION_ROUNDS,
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
