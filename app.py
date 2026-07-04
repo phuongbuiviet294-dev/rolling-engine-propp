@@ -121,7 +121,7 @@ LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 7
+WINDOW_COOLDOWN_ROUNDS = 8
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -2.0
@@ -144,13 +144,13 @@ MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
 MIN_SHADOW_WR20_FOR_TEST = 0.38
 MAX_REAL_NEGATIVE_SOFT = -2.0
 WINDOW_SELECTION_MODE = "hybrid"
-UCB_EXPLORATION_C = 0.15
+UCB_EXPLORATION_C = 0.22
 
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 10
+BLACKLIST_DURATION_ROUNDS = 12
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
-UCB_EXPLORATION_C = 0.15
+UCB_EXPLORATION_C = 0.22
 MIN_TRADES_FOR_PROTECTION = 6
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
