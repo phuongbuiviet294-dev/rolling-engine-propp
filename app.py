@@ -23,7 +23,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 Profit Optimized Balanced",
+    page_title="V56 True Live Deterministic",
     layout="wide"
 )
 
@@ -48,12 +48,6 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
-
-# PROFIT OPTIMIZED BALANCED 2026-07-04
-# - Keep relock after 1 real loss.
-# - Reduce UCB exploration to avoid testing weak windows too aggressively.
-# - Shorten cooldown/blacklist to reduce FORCE_ANY_WINDOW_NO_DEADLOCK.
-# - Moderate READY gates: still requires quality, but less WAIT starvation.
 
 # PROFIT OPTIMIZED CONFIG V51
 # Goal:
@@ -96,7 +90,7 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.36
+LEADER_MIN_LIVE_WR20 = 0.38
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
@@ -107,35 +101,35 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.34
+REAL_MIN_WR_FOR_LOCK = 0.35
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.36
+FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.60
+LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 7
+WINDOW_COOLDOWN_ROUNDS = 12
 BLACKLIST_REAL_NEGATIVE = True
 
-PROFIT10_STOP = -2.0
-WR20_STOP = 0.35
-DRAWDOWN_STOP = -5.0
+PROFIT10_STOP = -3.0
+WR20_STOP = 0.38
+DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.60
-STABILITY_READY = 0.45
+CONSENSUS_READY = 0.667
+STABILITY_READY = 0.50
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.42
-SAFE_DRAWDOWN_FROM_PEAK = -4.0
-SAFE_MODE_ROUNDS = 2
+MIN_CONFIDENCE_READY = 0.43
+SAFE_DRAWDOWN_FROM_PEAK = -3.0
+SAFE_MODE_ROUNDS = 3
 
 # V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
@@ -144,14 +138,14 @@ MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
 MIN_SHADOW_WR20_FOR_TEST = 0.38
 MAX_REAL_NEGATIVE_SOFT = -2.0
 WINDOW_SELECTION_MODE = "hybrid"
-UCB_EXPLORATION_C = 0.22
+UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 10
+RISK_PAUSE_ROUNDS = 4
+BLACKLIST_DURATION_ROUNDS = 20
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
-UCB_EXPLORATION_C = 0.22
-MIN_TRADES_FOR_PROTECTION = 6
+UCB_EXPLORATION_C = 0.45
+MIN_TRADES_FOR_PROTECTION = 8
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -1785,7 +1779,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 Profit Optimized Balanced")
+        st.title("🚀 V56 True Live Deterministic")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
