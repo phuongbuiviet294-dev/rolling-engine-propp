@@ -410,7 +410,7 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=15)
 def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
