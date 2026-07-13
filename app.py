@@ -9,6 +9,7 @@ import time
 import json
 import os
 import math
+import hashlib
 import re
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -585,6 +586,20 @@ def build_groups(numbers: list[int]) -> list[int]:
         group_of(x)
         for x in numbers
     ]
+
+
+
+
+def make_numbers_signature(numbers: list[int], length: Optional[int] = None) -> str:
+    """Signature of number sequence prefix.
+
+    Used only to detect Sheet reset/replacement. It does NOT affect prediction.
+    """
+    if length is None:
+        length = len(numbers)
+    length = max(0, min(int(length), len(numbers)))
+    payload = ",".join(str(int(x)) for x in numbers[:length])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
@@ -2029,6 +2044,8 @@ CONF = {confidence_score:.2f}
             st.json(
                 {
                     "last_length": self.ctx.last_length,
+                    "data_length": getattr(self.ctx, "data_length", 0),
+                    "data_signature_short": str(getattr(self.ctx, "data_signature", ""))[:12],
                     "pending_trade": self.ctx.pending_trade,
                     "pending_round": self.ctx.pending_round,
                     "pending_locked_window": self.ctx.pending_locked_window,
@@ -2461,6 +2478,8 @@ def save_live_state(ctx: EngineContext) -> None:
         },
         "state_version": getattr(ctx, "state_version", "V56_TRUE_LIVE_DETERMINISTIC"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
+        "data_signature": getattr(ctx, "data_signature", ""),
+        "data_length": getattr(ctx, "data_length", 0),
     }
 
     # Try Google Sheet backend first. If unavailable, fallback to local JSON.
@@ -2567,6 +2586,8 @@ def load_live_state() -> EngineContext:
         ctx.blacklisted_windows[kk] = int(v)
 
     ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
+    ctx.data_signature = str(data.get("data_signature", ""))
+    ctx.data_length = int(data.get("data_length", ctx.last_length))
 
     return ensure_ctx_fields(ctx)
 
@@ -2638,8 +2659,74 @@ class EngineManager:
             self.protection_engine
         )
 
+        self.maybe_auto_reset_for_new_dataset()
+
         if getattr(self.ctx, "hybrid_initialized", False):
             self.rebuild_windows_to_last_length()
+
+
+    def reset_context_for_new_dataset(self, reason: str) -> None:
+        """Auto reset persisted live state when Sheet data is reset/replaced.
+
+        This is required when every day the user clears/replaces the number column.
+        Without this, old last_length/trade_history/locked_window can survive and
+        new daily rows may not be processed.
+        """
+        try:
+            delete_state_from_gsheet()
+        except Exception:
+            pass
+
+        try:
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
+        except Exception:
+            pass
+
+        self.ctx = ensure_ctx_fields(EngineContext())
+        self.ctx.protection_reason = f"AUTO_RESET_{reason}"
+        st.session_state.v50_true_live_ctx = self.ctx
+
+        self.window_state = {
+            w: WindowRecord()
+            for w in WINDOWS
+        }
+        st.session_state.v50_true_live_window_state = self.window_state
+
+    def maybe_auto_reset_for_new_dataset(self) -> None:
+        """Detect daily Sheet reset/replacement before any replay/live step.
+
+        Rules:
+        1) If current Sheet has fewer valid numbers than saved last_length -> reset.
+        2) If the prefix up to saved last_length changed -> reset.
+           This catches replacing/copying a new day with the same or larger row count.
+        3) If no saved signature exists for an already initialized state, create it.
+        """
+        current_length = len(self.numbers)
+        saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
+        saved_signature = str(getattr(self.ctx, "data_signature", "") or "")
+
+        if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
+            return
+
+        if current_length < saved_length:
+            self.reset_context_for_new_dataset(
+                f"SHEET_LENGTH_DROPPED_{saved_length}_TO_{current_length}"
+            )
+            return
+
+        current_prefix_signature = make_numbers_signature(self.numbers, saved_length)
+
+        if saved_signature:
+            if current_prefix_signature != saved_signature:
+                self.reset_context_for_new_dataset("SHEET_PREFIX_CHANGED")
+                return
+        else:
+            # Backward compatibility for old state files.
+            self.ctx.data_signature = current_prefix_signature
+            self.ctx.data_length = saved_length
+            save_live_state(self.ctx)
+
 
     def rebuild_windows_to_last_length(self) -> None:
         # Window state is derived from number history, so rebuild it safely on every app start.
@@ -2693,6 +2780,8 @@ class EngineManager:
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
+        self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
+        self.ctx.data_length = self.ctx.last_length
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
