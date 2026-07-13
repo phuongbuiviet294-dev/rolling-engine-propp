@@ -16,6 +16,7 @@ from typing import Optional, Any
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # ============================================================
@@ -416,7 +417,7 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=30)
 def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
@@ -2826,8 +2827,36 @@ except Exception as e:
 
 
 # ============================================================
-# AUTO REFRESH
+# AUTO REFRESH - BROWSER SIDE ONLY
 # ============================================================
+# Do NOT use:
+#     time.sleep(5)
+#     st.rerun()
+# on Streamlit Cloud. It keeps the server script thread alive and can crash
+# the app when mobile/browser sessions reconnect repeatedly.
+#
+# This JS refresh runs in the browser, releases the Python script after render,
+# and is much more stable for Streamlit Community Cloud.
 
-time.sleep(5)
-st.rerun()
+with st.sidebar:
+    st.divider()
+    auto_refresh_enabled = st.checkbox("Auto refresh", value=True)
+    refresh_seconds = st.number_input(
+        "Refresh seconds",
+        min_value=5,
+        max_value=60,
+        value=10,
+        step=5,
+    )
+
+if auto_refresh_enabled:
+    components.html(
+        f"""
+        <script>
+        setTimeout(function() {{
+            window.parent.location.reload();
+        }}, {int(refresh_seconds) * 1000});
+        </script>
+        """,
+        height=0,
+    )
