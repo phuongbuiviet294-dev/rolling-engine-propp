@@ -2693,6 +2693,14 @@ class EngineManager:
         }
         st.session_state.v50_true_live_window_state = self.window_state
 
+        # Critical:
+        # After replacing ctx/window_state, existing WindowEngine/TradeEngine/
+        # SignalEngine/Dashboard objects still point to the old objects created
+        # earlier in this script run. Force a clean rerun so every engine is
+        # rebuilt from the new blank state and then hybrid_replay_once() runs
+        # correctly from the current Sheet.
+        st.rerun()
+
     def maybe_auto_reset_for_new_dataset(self) -> None:
         """Detect daily Sheet reset/replacement before any replay/live step.
 
