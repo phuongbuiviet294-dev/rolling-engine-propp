@@ -123,7 +123,7 @@ LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 6
+WINDOW_COOLDOWN_ROUNDS = 7
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -2.0
