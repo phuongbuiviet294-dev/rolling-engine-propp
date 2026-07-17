@@ -149,11 +149,11 @@ WINDOW_SELECTION_MODE = "hybrid"
 UCB_EXPLORATION_C = 0.22
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 3
+RISK_PAUSE_ROUNDS = 2
 BLACKLIST_DURATION_ROUNDS = 12
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
-MIN_TRADES_FOR_PROTECTION = 6
+MIN_TRADES_FOR_PROTECTION = 5
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
