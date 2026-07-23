@@ -149,11 +149,18 @@ WINDOW_SELECTION_MODE = "hybrid"
 UCB_EXPLORATION_C = 0.22
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 2
+RISK_PAUSE_ROUNDS = 3
 BLACKLIST_DURATION_ROUNDS = 12
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
-MIN_TRADES_FOR_PROTECTION = 5
+MIN_TRADES_FOR_PROTECTION = 6
+
+# Daily Stop Guard - protect against deep negative days.
+# These guards only block opening NEW trades. Pending trades still settle normally.
+DAILY_STOP_LOSS = -3.0
+DAILY_MAX_LOSS_STREAK = 3
+DAILY_MAX_DRAWDOWN = -4.0
+DAILY_PROFIT_LOCK = 6.5
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -232,6 +239,8 @@ class SignalRecord:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
+    daily_stop_active: bool = False
+    daily_stop_reason: str = ""
 
 
 
@@ -351,6 +360,10 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.blacklisted_windows = {}
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
+    if not hasattr(ctx, "daily_stop_active"):
+        ctx.daily_stop_active = False
+    if not hasattr(ctx, "daily_stop_reason"):
+        ctx.daily_stop_reason = ""
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -1634,6 +1647,48 @@ class TradeEngine:
 
         return round(drawdown, 2)
 
+
+    def get_daily_equity_current(self) -> float:
+        if not self.ctx.equity_curve:
+            return 0.0
+        return round(float(self.ctx.equity_curve[-1]), 2)
+
+    def get_daily_equity_peak(self) -> float:
+        if not self.ctx.equity_curve:
+            return 0.0
+        return round(max([0.0] + [float(x) for x in self.ctx.equity_curve]), 2)
+
+    def get_daily_pullback_from_peak(self) -> float:
+        current = self.get_daily_equity_current()
+        peak = self.get_daily_equity_peak()
+        return round(current - peak, 2)
+
+    def daily_stop_status(self) -> tuple[bool, str]:
+        """Return whether new trades should be blocked for the current day.
+
+        This guard is designed for a daily sheet reset workflow. It uses the
+        current day's trade_history/equity_curve only. It does NOT block pending
+        settlement; it only blocks opening the next trade.
+        """
+        total_profit = self.get_total_profit()
+        loss_streak = self.get_loss_streak()
+        drawdown = self.get_drawdown()
+        pullback = self.get_daily_pullback_from_peak()
+
+        if total_profit <= DAILY_STOP_LOSS:
+            return True, "DAILY_STOP_LOSS"
+
+        if loss_streak >= DAILY_MAX_LOSS_STREAK:
+            return True, "DAILY_MAX_LOSS_STREAK"
+
+        if drawdown <= DAILY_MAX_DRAWDOWN or pullback <= DAILY_MAX_DRAWDOWN:
+            return True, "DAILY_MAX_DRAWDOWN"
+
+        if total_profit >= DAILY_PROFIT_LOCK:
+            return True, "DAILY_PROFIT_LOCK"
+
+        return False, ""
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "trade_state": self.ctx.trade_state,
@@ -1645,6 +1700,8 @@ class TradeEngine:
             "drawdown": self.get_drawdown(),
             "pending_trade": self.ctx.pending_trade,
             "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
+            "daily_stop_active": getattr(self.ctx, "daily_stop_active", False),
+            "daily_stop_reason": getattr(self.ctx, "daily_stop_reason", ""),
         }
 
 
@@ -1757,6 +1814,15 @@ class ProtectionEngine:
             return "WAIT"
 
         ensure_ctx_fields(self.ctx)
+        daily_stop, daily_reason = self.trade_engine.daily_stop_status()
+        if daily_stop:
+            self.ctx.daily_stop_active = True
+            self.ctx.daily_stop_reason = daily_reason
+            self.ctx.protection_reason = daily_reason
+            return "WAIT"
+        self.ctx.daily_stop_active = False
+        self.ctx.daily_stop_reason = ""
+
         if self.ctx.risk_pause_counter > 0:
             self.ctx.risk_pause_counter -= 1
             self.ctx.protection_reason = "RISK_PAUSE"
@@ -1859,11 +1925,13 @@ CONF = {confidence_score:.2f}
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Total Profit", snap["total_profit"])
         c2.metric("Profit20", snap["profit20"])
         c3.metric("WR20", snap["wr20"])
         c4.metric("Drawdown", snap["drawdown"])
+        c5.metric("Daily Stop", "ON" if snap.get("daily_stop_active") else "OFF")
+        c6.metric("Stop Reason", snap.get("daily_stop_reason", ""))
 
     def render_risk(self) -> None:
         c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
@@ -1956,6 +2024,10 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
+                    "DAILY_STOP_LOSS": DAILY_STOP_LOSS,
+                    "DAILY_MAX_LOSS_STREAK": DAILY_MAX_LOSS_STREAK,
+                    "DAILY_MAX_DRAWDOWN": DAILY_MAX_DRAWDOWN,
+                    "DAILY_PROFIT_LOCK": DAILY_PROFIT_LOCK,
                 }
             )
 
@@ -2063,6 +2135,8 @@ CONF = {confidence_score:.2f}
                     "last_safe_trigger_peak": getattr(self.ctx, "last_safe_trigger_peak", 0.0),
                     "blacklisted_windows": getattr(self.ctx, "blacklisted_windows", {}),
                     "last_decision_confidence": getattr(self.ctx, "last_decision_confidence", 0.0),
+                    "daily_stop_active": getattr(self.ctx, "daily_stop_active", False),
+                    "daily_stop_reason": getattr(self.ctx, "daily_stop_reason", ""),
                 }
             )
 
@@ -2452,6 +2526,8 @@ def save_live_state(ctx: EngineContext) -> None:
         "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
+        "daily_stop_active": getattr(ctx, "daily_stop_active", False),
+        "daily_stop_reason": getattr(ctx, "daily_stop_reason", ""),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2542,6 +2618,8 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
+    ctx.daily_stop_active = bool(data.get("daily_stop_active", False))
+    ctx.daily_stop_reason = str(data.get("daily_stop_reason", ""))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
