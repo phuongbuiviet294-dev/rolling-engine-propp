@@ -157,10 +157,10 @@ MIN_TRADES_FOR_PROTECTION = 6
 
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -5.0
-DAILY_MAX_LOSS_STREAK = 5
+DAILY_STOP_LOSS = -4.0
+DAILY_MAX_LOSS_STREAK = 4
 DAILY_MAX_DRAWDOWN = -4.0
-DAILY_PROFIT_LOCK = 20.5
+DAILY_PROFIT_LOCK = 30.5
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
