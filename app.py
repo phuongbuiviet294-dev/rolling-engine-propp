@@ -1260,8 +1260,6 @@ class SignalEngine:
 
         return None, None, "NO_SAFE_CANDIDATE"
 
-        return None, None, "NO_VALID_CANDIDATE"
-
     def build_signal_snapshot(self, round_id: int) -> SignalRecord:
         """Display-only signal.
 
@@ -2659,7 +2657,6 @@ def save_live_state(ctx: EngineContext) -> None:
         "pending_round": ctx.pending_round,
         "pending_index": ctx.pending_index,
         "pending_locked_window": ctx.pending_locked_window,
-        "pending_confidence": ctx.pending_confidence,
         "pending_confidence": getattr(ctx, "pending_confidence", 0.0),
         "pending_target_round": getattr(ctx, "pending_target_round", 0),
         "trade_state": ctx.trade_state,
@@ -2876,6 +2873,10 @@ class EngineManager:
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
+        # IMPORTANT: detect/reset the daily dataset BEFORE creating any engine.
+        # All engines must receive the same fresh ctx/window_state object.
+        self.maybe_auto_reset_for_new_dataset()
+
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
         self.signal_engine = SignalEngine(self.ctx, self.window_engine)
@@ -2889,19 +2890,35 @@ class EngineManager:
             self.protection_engine
         )
 
-        self.maybe_auto_reset_for_new_dataset()
-
         if getattr(self.ctx, "hybrid_initialized", False):
             self.rebuild_windows_to_last_length()
 
 
     def reset_context_for_new_dataset(self, reason: str) -> None:
-        """Auto reset persisted live state when Sheet data is reset/replaced.
+        """Reset the live state for a newly replaced daily Sheet dataset.
 
-        This is required when every day the user clears/replaces the number column.
-        Without this, old last_length/trade_history/locked_window can survive and
-        new daily rows may not be processed.
+        This is intentionally done in-place during EngineManager.__init__, before
+        WindowEngine/TradeEngine/SignalEngine are created. It avoids the previous
+        bug where engines still referenced the old ctx/window_state after reset,
+        and avoids rerun loops if a Google state backend cannot be cleared.
+        The fresh state is persisted normally after replay.
         """
+        old_ctx = self.ctx
+
+        self.ctx = ensure_ctx_fields(EngineContext())
+        self.ctx.protection_reason = f"AUTO_RESET_{reason}"
+        self.ctx.open_reason = "DAILY_DATASET_RESET"
+
+        self.window_state = {
+            w: WindowRecord()
+            for w in WINDOWS
+        }
+
+        st.session_state.v50_true_live_ctx = self.ctx
+        st.session_state.v50_true_live_window_state = self.window_state
+
+        # Best-effort cleanup of old persistent state. The current in-memory
+        # state is authoritative for this run even if the backend cleanup fails.
         try:
             delete_state_from_gsheet()
         except Exception:
@@ -2912,24 +2929,6 @@ class EngineManager:
                 os.remove(STATE_FILE)
         except Exception:
             pass
-
-        self.ctx = ensure_ctx_fields(EngineContext())
-        self.ctx.protection_reason = f"AUTO_RESET_{reason}"
-        st.session_state.v50_true_live_ctx = self.ctx
-
-        self.window_state = {
-            w: WindowRecord()
-            for w in WINDOWS
-        }
-        st.session_state.v50_true_live_window_state = self.window_state
-
-        # Critical:
-        # After replacing ctx/window_state, existing WindowEngine/TradeEngine/
-        # SignalEngine/Dashboard objects still point to the old objects created
-        # earlier in this script run. Force a clean rerun so every engine is
-        # rebuilt from the new blank state and then hybrid_replay_once() runs
-        # correctly from the current Sheet.
-        st.rerun()
 
     def maybe_auto_reset_for_new_dataset(self) -> None:
         """Detect daily Sheet reset/replacement before any replay/live step.
