@@ -1043,6 +1043,110 @@ class SignalEngine:
             return self.ucb_candidate_score(window_id, obj)
         return self.candidate_score(obj)
 
+    def build_relock_debug(self, top_rows: list[tuple[int, WindowRecord]], selected_window: Optional[int] = None, selected_branch: str = "") -> dict:
+        """Read-only diagnostic for the exact RELOCK candidate pipeline.
+
+        This mirrors choose_relock_candidate() without changing engine state.
+        It is intentionally verbose so the dashboard can explain why a window
+        such as W20 can be selected even when it is not in the visible TopN.
+        """
+        top_rank = {int(w): i for i, (w, _) in enumerate(top_rows, start=1)}
+        rows = []
+        real_eligible = []
+        fallback_eligible = []
+
+        for w, obj in self.window_engine.state.items():
+            stat = self.get_real_stats(w)
+            hits20 = list(obj.hit_history)[-20:]
+            wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+            cooled = self.is_window_cooled(w)
+            blacklisted = self.is_window_blacklisted(w)
+            known_bad = self.known_bad_window(w)
+
+            real_reasons = []
+            if obj.next_group is None:
+                real_reasons.append("NO_NEXT")
+            if known_bad:
+                if cooled:
+                    real_reasons.append("COOLED")
+                if blacklisted:
+                    real_reasons.append("BLACKLISTED")
+                if stat["trade_count"] >= 3 and stat["profit"] <= MAX_REAL_NEGATIVE_SOFT and stat["loss_streak"] >= 2:
+                    real_reasons.append("KNOWN_BAD_REAL")
+            if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
+                real_reasons.append(f"REAL_TRADES<{REAL_MIN_TRADE_COUNT_FOR_LOCK}")
+            if stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK:
+                real_reasons.append(f"REAL_PROFIT<{REAL_MIN_PROFIT_FOR_LOCK}")
+            if stat["wr"] < REAL_MIN_WR_FOR_LOCK and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
+                real_reasons.append("REAL_WR_AND_SHADOW_WR_LOW")
+            if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
+                real_reasons.append(f"REAL_LS>{REAL_MAX_LOSS_STREAK_FOR_LOCK}")
+            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+                real_reasons.append(f"HIST_LS>{LOCK_MAX_LOSS_STREAK}")
+
+            real_ok = len(real_reasons) == 0
+            if real_ok:
+                real_eligible.append((self.real_candidate_score(w, obj), stat["profit"], stat["wr"], -stat["loss_streak"], w))
+
+            fallback_reasons = []
+            if obj.next_group is None:
+                fallback_reasons.append("NO_NEXT")
+            if known_bad:
+                if cooled:
+                    fallback_reasons.append("COOLED")
+                if blacklisted:
+                    fallback_reasons.append("BLACKLISTED")
+                if stat["trade_count"] >= 3 and stat["profit"] <= MAX_REAL_NEGATIVE_SOFT and stat["loss_streak"] >= 2:
+                    fallback_reasons.append("KNOWN_BAD_REAL")
+            if obj.profit20 <= FALLBACK_MIN_PROFIT20 and obj.live_profit20 < MIN_SHADOW_PROFIT20_FOR_TEST:
+                fallback_reasons.append("PROFIT20_AND_LIVE_PROFIT20_LOW")
+            if wr20 < FALLBACK_MIN_WR20 and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
+                fallback_reasons.append("WR20_AND_LIVE_WR20_LOW")
+            if int(obj.loss_streak) > FALLBACK_MAX_LOSS_STREAK:
+                fallback_reasons.append(f"HIST_LS>{FALLBACK_MAX_LOSS_STREAK}")
+
+            fallback_ok = len(fallback_reasons) == 0
+            if fallback_ok:
+                fallback_eligible.append((self.selection_score(w, obj), obj.profit20, wr20, -int(obj.loss_streak), w))
+
+            rows.append({
+                "Window": int(w),
+                "TopRank": top_rank.get(int(w), "-"),
+                "Score": round(float(obj.score), 3),
+                "RealScore": self.real_candidate_score(w, obj),
+                "UCBScore": self.ucb_candidate_score(w, obj),
+                "RealTrades": int(stat["trade_count"]),
+                "RealProfit": round(float(stat["profit"]), 3),
+                "RealWR": round(float(stat["wr"]), 3),
+                "RealLS": int(stat["loss_streak"]),
+                "Profit20": round(float(obj.profit20), 3),
+                "LiveP20": round(float(obj.live_profit20), 3),
+                "LiveWR20": round(float(obj.live_wr20), 3),
+                "HistLS": int(obj.loss_streak),
+                "Cooled": cooled,
+                "Blacklisted": blacklisted,
+                "RealEligible": real_ok,
+                "RealReject": ", ".join(real_reasons) if real_reasons else "-",
+                "FallbackEligible": fallback_ok,
+                "FallbackReject": ", ".join(fallback_reasons) if fallback_reasons else "-",
+                "Selected": int(selected_window is not None and int(w) == int(selected_window)),
+            })
+
+        real_eligible.sort(reverse=True)
+        fallback_eligible.sort(reverse=True)
+        real_best = int(real_eligible[0][4]) if real_eligible else None
+        fallback_best = int(fallback_eligible[0][4]) if fallback_eligible else None
+
+        return {
+            "current_locked_window": self.ctx.locked_window,
+            "selected_window": selected_window,
+            "selected_branch": selected_branch,
+            "real_best": real_best,
+            "fallback_best": fallback_best,
+            "selection_mode": WINDOW_SELECTION_MODE,
+            "rows": rows,
+        }
+
     def choose_relock_candidate(
         self,
         top_rows: list[tuple[int, WindowRecord]]
@@ -1315,7 +1419,13 @@ class SignalEngine:
             self.cool_window(locked_window, lock_reason)
 
         if relock_needed:
+            # Capture the candidate decision inputs after the old lock has been cooled,
+            # because choose_relock_candidate() runs after cool_window().
+            self.ctx.last_relock_debug = self.build_relock_debug(top_rows)
             candidate_w, candidate_obj, candidate_reason = self.choose_relock_candidate(top_rows)
+            self.ctx.last_relock_debug = self.build_relock_debug(
+                top_rows, selected_window=candidate_w, selected_branch=candidate_reason
+            )
 
             if candidate_obj is not None:
                 locked_window, locked_obj = candidate_w, candidate_obj
@@ -1334,6 +1444,11 @@ class SignalEngine:
                 lock_reason = candidate_reason
 
         self.ctx.lock_reason = lock_reason
+
+        if not relock_needed:
+            self.ctx.last_relock_debug = self.build_relock_debug(
+                top_rows, selected_window=locked_window, selected_branch="KEEP_LOCK"
+            )
 
         next_group = locked_obj.next_group if locked_obj is not None else None
         top_profit20 = (
@@ -2110,6 +2225,43 @@ CONF = {confidence_score:.2f}
                 ]
             ]
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+    def render_relock_decision_debug(self) -> None:
+        with st.expander("RELOCK Decision Debug - Why This Window Was Selected"):
+            dbg = getattr(self.ctx, "last_relock_debug", None)
+            if not dbg:
+                st.info("No RELOCK decision has been captured yet.")
+                return
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Current Lock", dbg.get("current_locked_window"))
+            c2.metric("Selected", dbg.get("selected_window"))
+            c3.metric("Branch", dbg.get("selected_branch", ""))
+            c4.metric("Real Best", dbg.get("real_best"))
+            c5.metric("Fallback Best", dbg.get("fallback_best"))
+
+            st.caption(
+                f"Selection mode: {dbg.get('selection_mode', '')}. "
+                "This table mirrors the candidate filters used by choose_relock_candidate()."
+            )
+
+            df = pd.DataFrame(dbg.get("rows", []))
+            if df.empty:
+                st.info("No window diagnostics available.")
+                return
+
+            preferred = [
+                "Window", "TopRank", "Selected", "RealEligible", "RealReject",
+                "FallbackEligible", "FallbackReject", "RealScore", "UCBScore",
+                "RealTrades", "RealProfit", "RealWR", "RealLS",
+                "Score", "Profit20", "LiveP20", "LiveWR20", "HistLS",
+                "Cooled", "Blacklisted"
+            ]
+            df = df[[c for c in preferred if c in df.columns]]
+            if "Selected" in df.columns:
+                df = df.sort_values(["Selected", "RealEligible", "FallbackEligible", "RealScore"],
+                                    ascending=[False, False, False, False])
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
     def render_state_debug(self) -> None:
         with st.expander("State Debug"):
@@ -2952,6 +3104,7 @@ class EngineManager:
         self.dashboard.render_profit_config()
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
+        self.dashboard.render_relock_decision_debug()
         self.dashboard.render_real_stats_summary()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
