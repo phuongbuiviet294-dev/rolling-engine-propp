@@ -1823,6 +1823,21 @@ class TradeEngine:
         self.ctx.last_open_round = round_id
         self.ctx.open_reason = "OPENED"
 
+    def clear_stale_pending(self, current_round: int) -> bool:
+        pending = getattr(self.ctx, "pending_trade", None)
+        if pending is None:
+            return False
+        try:
+            open_round = int(getattr(pending, "open_round", 0) or 0)
+        except Exception:
+            open_round = 0
+        if open_round > 0 and int(current_round) > open_round + 1:
+            self.ctx.pending_trade = None
+            self.ctx.trade_state = "IDLE"
+            self.ctx.protection_reason = "STALE_PENDING_RECOVERED"
+            self.ctx.open_reason = "STALE_PENDING_RECOVERED"
+            return True
+        return False
     def settle_trade(self, actual_group: int, current_round: int) -> None:
         if self.ctx.pending_trade is None:
             return
@@ -3305,6 +3320,37 @@ class EngineManager:
         if current_length <= self.ctx.last_length:
             return
 
+
+        # ============================================================
+        # STATE_MACHINE_FIX_SETTLE_FIRST
+        # ============================================================
+        # A pending trade must be settled from the newly arrived Sheet round
+        # before ANY new-signal guard, confidence, cooldown or lock decision.
+        pending = getattr(self.ctx, "pending_trade", None)
+        if pending is not None:
+            try:
+                open_round = int(getattr(pending, "open_round", 0) or 0)
+            except Exception:
+                open_round = 0
+
+            if open_round > 0 and current_length >= open_round + 1:
+                # Let the existing settle path consume the exact next round.
+                self.trade_engine.settle_trade(current_length - 1, current_length)
+
+            # If state survived beyond its only valid settlement round, clear it
+            # so it cannot freeze the live engine indefinitely.
+            pending_after = getattr(self.ctx, "pending_trade", None)
+            if pending_after is not None:
+                try:
+                    stale_open = int(getattr(pending_after, "open_round", 0) or 0)
+                except Exception:
+                    stale_open = 0
+                if stale_open > 0 and current_length > stale_open + 1:
+                    self.ctx.pending_trade = None
+                    self.ctx.trade_state = "IDLE"
+                    self.ctx.protection_reason = "STALE_PENDING_RECOVERED"
+                    self.ctx.open_reason = "STALE_PENDING_RECOVERED"
+
         for idx in range(self.ctx.last_length + 1, current_length + 1):
             self.ctx.last_length = idx
             actual_group = self.groups[idx - 1]
@@ -3448,3 +3494,4 @@ else:
             st.code(traceback.format_exc())
 
     live_engine_loop()
+
