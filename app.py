@@ -1297,7 +1297,7 @@ class SignalEngine:
         all_candidates.sort(key=rank_key, reverse=True)
 
         if not all_candidates:
-            return None
+            return None, None, "NO_VALID_CANDIDATE"
 
         best_w, best_obj = all_candidates[0]
 
@@ -1318,7 +1318,7 @@ class SignalEngine:
 
         # Last resort: do not fabricate a trade. WAIT is safer than selecting
         # a weak window simply because it is available.
-        return None
+        return None, None, "NO_VALID_CANDIDATE"
 
     def build_signal_snapshot(self, round_id: int) -> SignalRecord:
         """Display-only signal.
@@ -1480,7 +1480,13 @@ class SignalEngine:
             # Capture the candidate decision inputs after the old lock has been cooled,
             # because choose_relock_candidate() runs after cool_window().
             self.ctx.last_relock_debug = self.build_relock_debug(top_rows)
-            candidate_w, candidate_obj, candidate_reason = self.choose_relock_candidate(top_rows)
+            candidate_result = self.choose_relock_candidate(top_rows)
+            if candidate_result is None:
+                candidate_w, candidate_obj, candidate_reason = (
+                    None, None, "NO_VALID_CANDIDATE"
+                )
+            else:
+                candidate_w, candidate_obj, candidate_reason = candidate_result
             self.ctx.last_relock_debug = self.build_relock_debug(
                 top_rows, selected_window=candidate_w, selected_branch=candidate_reason
             )
