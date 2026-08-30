@@ -184,10 +184,13 @@ ENABLE_TOP3_LOCK_POOL = True
 ENABLE_LOCK_CONFIRM = True
 # Exceptional candidate: allows a very strong Top-3 window to bypass cooldown.
 # Thresholds are deliberately strict so normal cooldown/protection remains active.
+# Relative exceptional candidate:
+# A cooled window can be restored when it is materially better than the
+# best currently-eligible alternative. This adapts to each day's score scale.
 EXCEPTIONAL_CANDIDATE_OVERRIDE = True
-EXCEPTIONAL_MIN_SCORE = 7.5
-EXCEPTIONAL_MIN_PROFIT20 = 5.0
-EXCEPTIONAL_MIN_WR20 = 0.40
+EXCEPTIONAL_SCORE_MARGIN = 2.0
+EXCEPTIONAL_PROFIT20_MARGIN = 2.0
+EXCEPTIONAL_WR20_MARGIN = 0.05
 EXCEPTIONAL_MAX_HIST_LS = 1
 
 HEALTH_MIN_SHADOW_WR20 = 0.38
@@ -1006,23 +1009,42 @@ class SignalEngine:
             w = window_id
         self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
-    def is_exceptional_candidate(self, window_id: int, obj: WindowRecord) -> bool:
-        """Strict cooldown override for an unusually strong candidate."""
+    def is_exceptional_candidate(
+        self,
+        window_id: int,
+        obj: WindowRecord,
+        baseline: Optional[WindowRecord] = None,
+    ) -> bool:
+        """Allow a cooled window back only when it materially beats the baseline.
+
+        Baseline is the best currently-eligible alternative. The comparison is
+        intentionally relative so it adapts to the day's score distribution.
+        """
         if not EXCEPTIONAL_CANDIDATE_OVERRIDE:
             return False
+
+        if baseline is None:
+            return False
+
         try:
             score = float(getattr(obj, "score", -999.0))
             profit20 = float(getattr(obj, "profit20", -999.0))
             wr20 = float(getattr(obj, "live_wr20", 0.0))
             hist_ls = int(getattr(obj, "loss_streak", 999))
+
+            base_score = float(getattr(baseline, "score", -999.0))
+            base_profit20 = float(getattr(baseline, "profit20", -999.0))
+            base_wr20 = float(getattr(baseline, "live_wr20", 0.0))
         except Exception:
             return False
+
         return (
-            score >= EXCEPTIONAL_MIN_SCORE
-            and profit20 >= EXCEPTIONAL_MIN_PROFIT20
-            and wr20 >= EXCEPTIONAL_MIN_WR20
+            score >= base_score + EXCEPTIONAL_SCORE_MARGIN
+            and profit20 >= base_profit20 + EXCEPTIONAL_PROFIT20_MARGIN
+            and wr20 >= base_wr20 + EXCEPTIONAL_WR20_MARGIN
             and hist_ls <= EXCEPTIONAL_MAX_HIST_LS
         )
+
 
     def known_bad_window(self, window_id: int) -> bool:
         """V55: negative RealStats is a penalty, not a permanent ban."""
@@ -1217,128 +1239,69 @@ class SignalEngine:
             "rows": rows,
         }
 
-    def choose_relock_candidate(
-        self,
-        top_rows: list[tuple[int, WindowRecord]]
-    ) -> tuple[Optional[int], Optional[WindowRecord], str]:
-        # ====================================================
-        # 1) Prefer REAL positive windows
-        # ====================================================
-        real_candidates = []
+    def choose_relock_candidate(self) -> Optional[Tuple[int, WindowRecord, str]]:
+        """Choose the best lock candidate while avoiding cooldown deadlock.
 
-        candidate_windows = (
-            [w for w, _ in top_rows]
-            if ENABLE_TOP3_LOCK_POOL
-            else list(self.window_engine.state.keys())
-        )
-        for w in candidate_windows:
-            obj = self.window_engine.state.get(w)
-            if obj is None:
-                continue
+        First pass: normal eligible candidates.
+        Second pass: if the best candidates are cooled, allow a cooled window
+        only when it is materially stronger than the best eligible alternative.
+        """
+        candidates = []
+        for w, obj in self.windows.items():
             if obj.next_group is None:
                 continue
-            if self.known_bad_window(w) and not self.is_exceptional_candidate(w, obj):
+            if self.known_bad_window(w):
                 continue
 
-            stat = self.get_real_stats(w)
+            candidates.append((w, obj))
 
-            if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
-                continue
-            if stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK:
-                continue
-            if stat["wr"] < REAL_MIN_WR_FOR_LOCK and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
-                continue
-            if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
-                continue
-            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
-                continue
-
-            real_candidates.append(
-                (
-                    self.real_candidate_score(w, obj),
-                    stat["profit"],
-                    stat["wr"],
-                    -stat["loss_streak"],
-                    w,
-                    obj,
-                )
+        def rank_key(item):
+            w, obj = item
+            return (
+                float(getattr(obj, "score", -999.0)),
+                float(getattr(obj, "profit20", -999.0)),
+                float(getattr(obj, "live_wr20", 0.0)),
             )
 
-        if real_candidates:
-            real_candidates.sort(reverse=True)
-            _, _, _, _, w, obj = real_candidates[0]
-            return w, obj, "RELOCK_BY_REAL_POSITIVE_WINDOW"
+        candidates.sort(key=rank_key, reverse=True)
 
-        # ====================================================
-        # 2) Fallback: short-term candidate score
-        # ====================================================
-        # Important: do not return None just because no real-positive
-        # candidate exists. Otherwise engine gets stuck after one loss.
-        fallback_candidates = []
+        # Normal route.
+        if candidates:
+            w, obj = candidates[0]
+            return w, obj, "NORMAL_ELIGIBLE"
 
-        for w, obj in self.window_engine.state.items():
-            if obj.next_group is None:
-                continue
-            if self.known_bad_window(w) and not self.is_exceptional_candidate(w, obj):
-                continue
+        # No normal candidate. Build the best non-bad baseline even if cooled.
+        # We do NOT force a weak window merely to avoid WAIT.
+        all_candidates = [
+            (w, obj)
+            for w, obj in self.windows.items()
+            if obj.next_group is not None
+        ]
+        all_candidates.sort(key=rank_key, reverse=True)
 
-            hits20 = list(obj.hit_history)[-20:]
-            wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+        if not all_candidates:
+            return None
 
-            if obj.profit20 <= FALLBACK_MIN_PROFIT20 and obj.live_profit20 < MIN_SHADOW_PROFIT20_FOR_TEST:
-                continue
-            if wr20 < FALLBACK_MIN_WR20 and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
-                continue
-            if int(obj.loss_streak) > FALLBACK_MAX_LOSS_STREAK:
-                continue
+        best_w, best_obj = all_candidates[0]
 
-            fallback_candidates.append(
-                (
-                    self.selection_score(w, obj),
-                    obj.profit20,
-                    wr20,
-                    -int(obj.loss_streak),
-                    w,
-                    obj,
-                )
-            )
+        # Find the strongest alternative that is not the same window and is
+        # not known-bad. This gives the exceptional candidate a real baseline.
+        alternatives = [
+            (w, obj)
+            for w, obj in self.windows.items()
+            if w != best_w
+            and obj.next_group is not None
+            and not self.known_bad_window(w)
+        ]
+        alternatives.sort(key=rank_key, reverse=True)
+        baseline = alternatives[0][1] if alternatives else None
 
-        if fallback_candidates:
-            fallback_candidates.sort(reverse=True)
-            _, _, _, _, w, obj = fallback_candidates[0]
-            return w, obj, "RELOCK_BY_SHORT_TERM_FALLBACK"
+        if self.is_exceptional_candidate(best_w, best_obj, baseline):
+            return best_w, best_obj, "RELATIVE_EXCEPTIONAL_COOLDOWN"
 
-        # ====================================================
-        # 3) Last resort: current TopN best score, but avoid known bad real windows
-        # ====================================================
-        for w, obj in top_rows:
-            known_bad = self.known_bad_window(w)
-            exceptional = self.is_exceptional_candidate(w, obj)
-            if obj.next_group is not None and (not known_bad or exceptional):
-                branch = "FORCE_TOP_WINDOW_EXCEPTIONAL_COOLDOWN" if exceptional and known_bad else "FORCE_TOP_WINDOW_NO_DEADLOCK"
-                return w, obj, branch
-
-        # Absolute final fallback: any untested or not-bad window with next_group
-        for w, obj in self.window_engine.state.items():
-            known_bad = self.known_bad_window(w)
-            if obj.next_group is not None and not known_bad:
-                return w, obj, "FORCE_ANY_WINDOW_NO_DEADLOCK"
-
-        # If all windows are known bad, pick the least bad by candidate score instead of deadlocking.
-        emergency = []
-        for w, obj in self.window_engine.state.items():
-            if obj.next_group is None:
-                continue
-            if self.is_window_cooled(w):
-                continue
-            emergency.append((self.selection_score(w, obj), w, obj))
-
-        if emergency:
-            emergency.sort(reverse=True)
-            _, w, obj = emergency[0]
-            return w, obj, "EMERGENCY_LEAST_BAD_UNCOOLED"
-
-        return None, None, "NO_SAFE_CANDIDATE"
+        # Last resort: do not fabricate a trade. WAIT is safer than selecting
+        # a weak window simply because it is available.
+        return None
 
     def build_signal_snapshot(self, round_id: int) -> SignalRecord:
         """Display-only signal.
@@ -2348,6 +2311,9 @@ CONF = {confidence_score:.2f}
                     "ENABLE_TOP3_LOCK_POOL": ENABLE_TOP3_LOCK_POOL,
                     "ENABLE_LOCK_CONFIRM": ENABLE_LOCK_CONFIRM,
                     "EXCEPTIONAL_CANDIDATE_OVERRIDE": EXCEPTIONAL_CANDIDATE_OVERRIDE,
+                    "EXCEPTIONAL_SCORE_MARGIN": EXCEPTIONAL_SCORE_MARGIN,
+                    "EXCEPTIONAL_PROFIT20_MARGIN": EXCEPTIONAL_PROFIT20_MARGIN,
+                    "EXCEPTIONAL_WR20_MARGIN": EXCEPTIONAL_WR20_MARGIN,
                     "EXCEPTIONAL_MIN_SCORE": EXCEPTIONAL_MIN_SCORE,
                     "EXCEPTIONAL_MIN_PROFIT20": EXCEPTIONAL_MIN_PROFIT20,
                     "EXCEPTIONAL_MIN_WR20": EXCEPTIONAL_MIN_WR20,
