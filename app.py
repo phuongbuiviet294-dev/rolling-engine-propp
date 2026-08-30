@@ -155,6 +155,41 @@ WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
 MIN_TRADES_FOR_PROTECTION = 6
 
+# ============================================================
+# TEST D - SMART DAILY GUARD
+# ============================================================
+# Window baseline remains Test C: cooldown 8 / blacklist 12.
+# These guards only prevent NEW trades; pending trades still settle.
+TEST_D_SMART_DAILY_GUARD = True
+DAY_SOFT_STOP = -2.0
+DAY_HARD_STOP = -3.0
+MAX_DAILY_TRADES_WHEN_NEGATIVE = 4
+MAX_DAILY_LOSSES = 3
+DAILY_TRAIL_START = 4.0
+DAILY_TRAIL_GIVEBACK = 2.0
+EARLY_BAD_DAY_CHECK_TRADES = 3
+EARLY_BAD_DAY_MAX_LOSSES = 2
+EARLY_BAD_DAY_PROFIT_LIMIT = -2.0
+LOCK_CONFIRM_ROUNDS = 3
+
+# ============================================================
+# TEST E - FULL OPTIMIZED / 7-GUARD PROFILE
+# ============================================================
+ENABLE_HEALTH_FILTER = True
+ENABLE_NEGATIVE_QUOTA = True
+ENABLE_PROFIT_TRAIL = True
+ENABLE_EARLY_BAD_DAY = True
+ENABLE_DAILY_STOP = True
+ENABLE_TOP3_LOCK_POOL = True
+ENABLE_LOCK_CONFIRM = True
+
+HEALTH_MIN_SHADOW_WR20 = 0.38
+HEALTH_MIN_SHADOW_PROFIT20 = 0.0
+HEALTH_MAX_FLIPRATE = 0.65
+HEALTH_MIN_STABILITY = 0.50
+HEALTH_MIN_CONSENSUS = 0.667
+LOCK_CONFIRM_ROUNDS = 3
+
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
 DAILY_STOP_LOSS = -5.0
@@ -239,6 +274,10 @@ class SignalRecord:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
+    daily_peak_profit: float = 0.0
+    daily_lock_confirm_window: Optional[int] = None
+    daily_lock_confirm_count: int = 0
+    daily_guard_reason: str = ""
     daily_stop_active: bool = False
     daily_stop_reason: str = ""
 
@@ -358,6 +397,14 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.last_risk_trigger_trade_count = -1
     if not hasattr(ctx, "blacklisted_windows") or ctx.blacklisted_windows is None:
         ctx.blacklisted_windows = {}
+    if not hasattr(ctx, "daily_peak_profit"):
+        ctx.daily_peak_profit = 0.0
+    if not hasattr(ctx, "daily_lock_confirm_window"):
+        ctx.daily_lock_confirm_window = None
+    if not hasattr(ctx, "daily_lock_confirm_count"):
+        ctx.daily_lock_confirm_count = 0
+    if not hasattr(ctx, "daily_guard_reason"):
+        ctx.daily_guard_reason = ""
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
     if not hasattr(ctx, "daily_stop_active"):
@@ -1156,7 +1203,15 @@ class SignalEngine:
         # ====================================================
         real_candidates = []
 
-        for w, obj in self.window_engine.state.items():
+        candidate_windows = (
+            [w for w, _ in top_rows]
+            if ENABLE_TOP3_LOCK_POOL
+            else list(self.window_engine.state.keys())
+        )
+        for w in candidate_windows:
+            obj = self.window_engine.state.get(w)
+            if obj is None:
+                continue
             if obj.next_group is None:
                 continue
             if self.known_bad_window(w):
@@ -1559,11 +1614,92 @@ class TradeEngine:
         equity += profit
         self.ctx.equity_curve.append(round(equity, 2))
 
+
+    def health_filter(self, signal: SignalRecord) -> tuple[bool, str]:
+        if not ENABLE_HEALTH_FILTER:
+            return True, ""
+
+        stability = float(getattr(signal, "stability", 0.0))
+        consensus = float(getattr(signal, "consensus", 0.0))
+        top_profit20 = float(getattr(signal, "top_profit20", 0.0))
+
+        if stability < HEALTH_MIN_STABILITY:
+            return False, "HEALTH_LOW_STABILITY"
+        if consensus < HEALTH_MIN_CONSENSUS:
+            return False, "HEALTH_LOW_CONSENSUS"
+        if top_profit20 < HEALTH_MIN_SHADOW_PROFIT20:
+            return False, "HEALTH_NEGATIVE_TOP_PROFIT20"
+
+        flips = list(getattr(self.ctx, "signal_flip_history", []))
+        if flips:
+            flip_rate = sum(1 for x in flips if int(x) == 1) / len(flips)
+            if flip_rate > HEALTH_MAX_FLIPRATE:
+                return False, "HEALTH_HIGH_FLIPRATE"
+
+        return True, ""
+
     def open_trade(self, signal: SignalRecord, round_id: int, confidence_score: float = 0.0) -> None:
         self.ctx.open_reason = ""
 
+        if ENABLE_LOCK_CONFIRM:
+            candidate_lock = getattr(signal, "locked_window", None)
+            current_lock = getattr(self.ctx, "locked_window", None)
+            if candidate_lock is not None and candidate_lock != current_lock:
+                if getattr(self.ctx, "daily_lock_confirm_window", None) == candidate_lock:
+                    self.ctx.daily_lock_confirm_count = int(getattr(self.ctx, "daily_lock_confirm_count", 0)) + 1
+                else:
+                    self.ctx.daily_lock_confirm_window = candidate_lock
+                    self.ctx.daily_lock_confirm_count = 1
+
+                if self.ctx.daily_lock_confirm_count < LOCK_CONFIRM_ROUNDS:
+                    self.ctx.protection_reason = "LOCK_CONFIRM_PENDING"
+                    self.ctx.open_reason = "SIGNAL_WAIT"
+                    return
+
+                self.ctx.daily_lock_confirm_window = None
+                self.ctx.daily_lock_confirm_count = 0
+
         if round_id < LIVE_START_ROUND:
             self.ctx.open_reason = "BEFORE_LIVE_START"
+            return
+
+        # TEST D: smart daily protection. Only NEW trade is blocked.
+        blocked, guard_reason = self.smart_daily_guard()
+        if blocked:
+            self.ctx.daily_guard_reason = guard_reason
+            self.ctx.protection_reason = guard_reason
+            self.ctx.open_reason = guard_reason
+            return
+        self.ctx.daily_guard_reason = ""
+
+        # Test E health filter: only reject a NEW trade; pending trades settle elsewhere.
+        if ENABLE_HEALTH_FILTER:
+            if float(getattr(signal, "stability", 0.0)) < HEALTH_MIN_STABILITY:
+                self.ctx.protection_reason = "HEALTH_LOW_STABILITY"
+                self.ctx.open_reason = "HEALTH_LOW_STABILITY"
+                return
+            if float(getattr(signal, "consensus", 0.0)) < HEALTH_MIN_CONSENSUS:
+                self.ctx.protection_reason = "HEALTH_LOW_CONSENSUS"
+                self.ctx.open_reason = "HEALTH_LOW_CONSENSUS"
+                return
+            if float(getattr(signal, "top_profit20", 0.0)) < HEALTH_MIN_SHADOW_PROFIT20:
+                self.ctx.protection_reason = "HEALTH_NEGATIVE_TOP_PROFIT20"
+                self.ctx.open_reason = "HEALTH_NEGATIVE_TOP_PROFIT20"
+                return
+            flips = list(getattr(self.ctx, "signal_flip_history", []))
+            if flips:
+                flip_rate = sum(1 for x in flips if int(x) == 1) / len(flips)
+                if flip_rate > HEALTH_MAX_FLIPRATE:
+                    self.ctx.protection_reason = "HEALTH_HIGH_FLIPRATE"
+                    self.ctx.open_reason = "HEALTH_HIGH_FLIPRATE"
+                    return
+        health_ok, health_reason = self.health_filter(
+            self.signal_engine.build_signal_snapshot(self.ctx.last_length)
+        )
+        if not health_ok:
+            self.ctx.daily_guard_reason = health_reason
+            self.ctx.protection_reason = health_reason
+            self.ctx.open_reason = health_reason
             return
 
         # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
@@ -2137,6 +2273,24 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
+                    "TEST_D_SMART_DAILY_GUARD": TEST_D_SMART_DAILY_GUARD,
+                    "DAY_SOFT_STOP": DAY_SOFT_STOP,
+                    "DAY_HARD_STOP": DAY_HARD_STOP,
+                    "MAX_DAILY_TRADES_WHEN_NEGATIVE": MAX_DAILY_TRADES_WHEN_NEGATIVE,
+                    "MAX_DAILY_LOSSES": MAX_DAILY_LOSSES,
+                    "DAILY_TRAIL_START": DAILY_TRAIL_START,
+                    "DAILY_TRAIL_GIVEBACK": DAILY_TRAIL_GIVEBACK,
+                    "EARLY_BAD_DAY_CHECK_TRADES": EARLY_BAD_DAY_CHECK_TRADES,
+                    "EARLY_BAD_DAY_MAX_LOSSES": EARLY_BAD_DAY_MAX_LOSSES,
+                    "EARLY_BAD_DAY_PROFIT_LIMIT": EARLY_BAD_DAY_PROFIT_LIMIT,
+                    "LOCK_CONFIRM_ROUNDS": LOCK_CONFIRM_ROUNDS,
+                    "ENABLE_HEALTH_FILTER": ENABLE_HEALTH_FILTER,
+                    "ENABLE_NEGATIVE_QUOTA": ENABLE_NEGATIVE_QUOTA,
+                    "ENABLE_PROFIT_TRAIL": ENABLE_PROFIT_TRAIL,
+                    "ENABLE_EARLY_BAD_DAY": ENABLE_EARLY_BAD_DAY,
+                    "ENABLE_DAILY_STOP": ENABLE_DAILY_STOP,
+                    "ENABLE_TOP3_LOCK_POOL": ENABLE_TOP3_LOCK_POOL,
+                    "ENABLE_LOCK_CONFIRM": ENABLE_LOCK_CONFIRM,
                     "DAILY_STOP_LOSS": DAILY_STOP_LOSS,
                     "DAILY_MAX_LOSS_STREAK": DAILY_MAX_LOSS_STREAK,
                     "DAILY_MAX_DRAWDOWN": DAILY_MAX_DRAWDOWN,
@@ -2675,6 +2829,10 @@ def save_live_state(ctx: EngineContext) -> None:
         "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
+        "daily_peak_profit": getattr(ctx, "daily_peak_profit", 0.0),
+        "daily_lock_confirm_window": getattr(ctx, "daily_lock_confirm_window", None),
+        "daily_lock_confirm_count": getattr(ctx, "daily_lock_confirm_count", 0),
+        "daily_guard_reason": getattr(ctx, "daily_guard_reason", ""),
         "daily_stop_active": getattr(ctx, "daily_stop_active", False),
         "daily_stop_reason": getattr(ctx, "daily_stop_reason", ""),
 
@@ -2767,6 +2925,10 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
+    ctx.daily_peak_profit = float(data.get("daily_peak_profit", 0.0))
+    ctx.daily_lock_confirm_window = data.get("daily_lock_confirm_window", None)
+    ctx.daily_lock_confirm_count = int(data.get("daily_lock_confirm_count", 0))
+    ctx.daily_guard_reason = str(data.get("daily_guard_reason", ""))
     ctx.daily_stop_active = bool(data.get("daily_stop_active", False))
     ctx.daily_stop_reason = str(data.get("daily_stop_reason", ""))
 
@@ -3111,6 +3273,7 @@ class EngineManager:
         st.caption(
             f"""
 V56 TRUE LIVE DETERMINISTIC
+Test D Smart Daily Guard
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
