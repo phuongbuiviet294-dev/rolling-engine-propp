@@ -118,7 +118,7 @@ WINDOW_COOLDOWN_ROUNDS = 6
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -3.0
-WR20_STOP = 0.38
+WR20_STOP = 0.30
 DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
@@ -136,8 +136,17 @@ REAL_SHADOW_BLEND_FULL_TRADES = 30
 MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
 MIN_SHADOW_WR20_FOR_TEST = 0.34
 MAX_REAL_NEGATIVE_SOFT = -2.0
-WINDOW_SELECTION_MODE = "ucb"
-UCB_EXPLORATION_C = 0.45
+WINDOW_SELECTION_MODE = "robust"
+UCB_EXPLORATION_C = 0.0
+
+# V58.3 robust selection: fixed, sample-aware, no per-dataset tuning.
+ROBUST_MIN_SHADOW_SAMPLES = 8
+ROBUST_MIN_SHADOW_SAMPLES_FOR_LOCK = 12
+ROBUST_MAX_LOCK_DRAWDOWN_SCORE = -0.50
+ROBUST_RELOCK_LOSS_STREAK = 2
+ROBUST_REAL_MIN_TRADES = 5
+ROBUST_READY_FLOOR = -0.25
+ROBUST_Z = 0.84  # one-sided ~80% Wilson lower bound
 
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 4
@@ -152,7 +161,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_1_CLEAN_NO_OVERFIT"
+STATE_VERSION = "V58_4_ROBUST_ANTI_OVERFIT"
 
 
 # ============================================================
@@ -198,7 +207,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_1_CLEAN_NO_OVERFIT"
+    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -279,7 +288,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_2_ROBUST_WALK_FORWARD"
+    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -331,7 +340,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V58_2_ROBUST_WALK_FORWARD"
+    ctx.state_version = "V58_4_ROBUST_ANTI_OVERFIT"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -349,6 +358,12 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.blacklisted_windows = {}
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
+
+    previous_version = getattr(ctx, "state_version", "")
+    if previous_version and previous_version != STATE_VERSION:
+        ctx.algorithm_migration_pending = True
+    if not hasattr(ctx, "algorithm_migration_pending"):
+        ctx.algorithm_migration_pending = False
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -629,16 +644,22 @@ class WindowEngine:
                 if stt.next_group is not None
             ]
 
-            rows = sorted(
-                rows_source,
-                key=lambda x: (
-                    x[1].live_score,
-                    x[1].live_profit20,
-                    x[1].live_wr20,
-                    x[1].score,
-                ),
-                reverse=True
-            )
+            def robust_rank(item: tuple[int, WindowRecord]) -> tuple[float, float, float, float]:
+                _, stt = item
+                h20 = list(stt.live_hit_history)[-20:]
+                h50 = list(stt.live_hit_history)[-50:]
+                if not h20:
+                    return (-9.0, -9.0, -9.0, -9.0)
+                p20 = (sum(h20) + 2.0) / (len(h20) + 4.0)
+                p50 = (sum(h50) + 2.0) / (len(h50) + 4.0) if len(h50) >= 8 else p20
+                ev20 = 3.5 * p20 - 1.0
+                ev50 = 3.5 * p50 - 1.0
+                consistency = min(ev20, ev50)
+                disagreement = abs(ev20 - ev50)
+                robust = consistency - 0.15 * disagreement - 0.12 * min(int(stt.live_loss_streak), 3)
+                return (round(robust, 4), round(consistency, 4), round(p20, 4), round(p50, 4))
+
+            rows = sorted(rows_source, key=robust_rank, reverse=True)
 
             return rows[:top_n]
 
@@ -839,80 +860,71 @@ class SignalEngine:
 
         return False
 
-    def shadow_candidate_score(self, obj: WindowRecord) -> float:
-        """Conservative expected-value score; shrinks short samples toward 0.5."""
+    @staticmethod
+    def _wilson_lower(wins: int, n: int, z: float = ROBUST_Z) -> float:
+        if n <= 0:
+            return 0.0
+        p = wins / float(n)
+        z2 = z * z
+        denom = 1.0 + z2 / n
+        centre = p + z2 / (2.0 * n)
+        margin = z * math.sqrt((p * (1.0 - p) / n) + (z2 / (4.0 * n * n)))
+        return max(0.0, min(1.0, (centre - margin) / denom))
+
+    def _robust_ev(self, hits: list[int]) -> float:
+        n = len(hits)
+        if n <= 0:
+            return -1.0
+        wins = int(sum(hits))
+        p_post = (wins + 2.0) / (n + 4.0)
+        p_lb = self._wilson_lower(wins, n)
+        p_robust = 0.65 * p_lb + 0.35 * p_post
+        return 3.5 * p_robust - 1.0
+
+    def robust_shadow_score(self, obj: WindowRecord) -> float:
+        # Fixed walk-forward score. A 20-round spike cannot dominate a poor
+        # 50-round result; consistency is explicitly rewarded.
         h20 = list(obj.live_hit_history)[-20:]
         h50 = list(obj.live_hit_history)[-50:]
-        p20 = (sum(h20) + 4.0) / (len(h20) + 8.0) if h20 else 0.5
-        p50 = (sum(h50) + 4.0) / (len(h50) + 8.0) if h50 else 0.5
-        ev20 = 3.5 * p20 - 1.0
-        ev50 = 3.5 * p50 - 1.0
+        if not h20:
+            return -1.0
 
-        # Real trades are blended only after enough observations exist.
-        # This avoids one lucky/unlucky real trade dominating selection.
-        return round(
-            0.70 * ev20
-            + 0.30 * ev50
-            - 0.20 * min(int(obj.live_loss_streak), 3)
-            - 0.10 * min(int(obj.loss_streak), 3),
-            3
-        )
+        ev20 = self._robust_ev(h20)
+        ev50 = self._robust_ev(h50) if len(h50) >= ROBUST_MIN_SHADOW_SAMPLES else ev20
+        consistency = min(ev20, ev50)
+        avg_ev = 0.60 * ev20 + 0.40 * ev50
+        disagreement = abs(ev20 - ev50)
+        loss_penalty = 0.12 * min(int(obj.live_loss_streak), 3)
+        return round(0.70 * consistency + 0.30 * avg_ev - 0.15 * disagreement - loss_penalty, 3)
 
+    def shadow_candidate_score(self, obj: WindowRecord) -> float:
+        return self.robust_shadow_score(obj)
 
     def hybrid_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
         stat = self.get_real_stats(window_id)
-        trades = int(stat["trade_count"])
+        trades = int(stat.get("trade_count", 0))
+        shadow = self.robust_shadow_score(obj)
+        if trades < ROBUST_REAL_MIN_TRADES:
+            return shadow
 
-        real_score = (
-            4.00 * stat["profit"]
-            + 6.00 * stat["wr"]
-            - 3.00 * stat["loss_streak"]
-            + 0.05 * trades
-        )
-        shadow_score = self.shadow_candidate_score(obj)
-
-        if trades <= 0:
-            real_weight = 0.0
-        elif trades < REAL_SHADOW_BLEND_MIN_TRADES:
-            real_weight = 0.35
-        elif trades < REAL_SHADOW_BLEND_FULL_TRADES:
-            real_weight = 0.60
-        else:
-            real_weight = 0.85
-
-        score = real_weight * real_score + (1.0 - real_weight) * shadow_score
-
-        if trades > 0 and stat["profit"] < 0:
-            score -= min(3.0, abs(stat["profit"]) * 0.8)
-
-        return round(score, 3)
+        wins = int(stat.get("win", 0))
+        p_post = (wins + 2.0) / (trades + 4.0)
+        p_lb = self._wilson_lower(wins, trades)
+        real_ev = 3.5 * (0.65 * p_lb + 0.35 * p_post) - 1.0
+        return round(0.60 * shadow + 0.40 * real_ev - 0.10 * min(int(stat.get("loss_streak", 0)), 3), 3)
 
     def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
-        return self.ucb_candidate_score(window_id, obj)
-
+        return self.hybrid_candidate_score(window_id, obj)
 
     def candidate_score(self, obj: WindowRecord) -> float:
-        return self.shadow_candidate_score(obj)
+        return self.robust_shadow_score(obj)
 
     def ucb_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
-        """Compatibility label: V58.2 uses conservative walk-forward EV, not UCB optimism."""
-        stat = self.get_real_stats(window_id)
-        base = self.shadow_candidate_score(obj)
-        trades = int(stat.get("trade_count", 0))
-        if trades >= 3:
-            wins = int(stat.get("win", 0))
-            # Jeffreys/Laplace-style shrinkage toward 0.5.
-            p_real = (wins + 2.0) / (trades + 4.0)
-            ev_real = 3.5 * p_real - 1.0
-            weight = min(0.50, trades / 10.0)
-            base = (1.0 - weight) * base + weight * ev_real
-        return round(base, 3)
-
+        # Compatibility method only; exploration bonus is intentionally disabled.
+        return self.hybrid_candidate_score(window_id, obj)
 
     def selection_score(self, window_id: int, obj: WindowRecord) -> float:
-        if WINDOW_SELECTION_MODE.lower() == "ucb":
-            return self.ucb_candidate_score(window_id, obj)
-        return self.candidate_score(obj)
+        return self.hybrid_candidate_score(window_id, obj)
 
     def choose_relock_candidate(
         self,
@@ -971,12 +983,14 @@ class SignalEngine:
             if self.known_bad_window(w):
                 continue
 
+            shadow_samples = len(obj.live_hit_history)
+            robust_score = self.robust_shadow_score(obj)
             hits20 = list(obj.hit_history)[-20:]
             wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
 
-            if obj.profit20 <= FALLBACK_MIN_PROFIT20 and obj.live_profit20 < MIN_SHADOW_PROFIT20_FOR_TEST:
+            if shadow_samples < ROBUST_MIN_SHADOW_SAMPLES:
                 continue
-            if wr20 < FALLBACK_MIN_WR20 and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
+            if robust_score < ROBUST_READY_FLOOR:
                 continue
             if int(obj.loss_streak) > FALLBACK_MAX_LOSS_STREAK:
                 continue
@@ -984,7 +998,7 @@ class SignalEngine:
             fallback_candidates.append(
                 (
                     self.selection_score(w, obj),
-                    obj.profit20,
+                    robust_score,
                     wr20,
                     -int(obj.loss_streak),
                     w,
@@ -995,7 +1009,7 @@ class SignalEngine:
         if fallback_candidates:
             fallback_candidates.sort(reverse=True)
             _, _, _, _, w, obj = fallback_candidates[0]
-            return w, obj, "RELOCK_BY_SHORT_TERM_FALLBACK"
+            return w, obj, "RELOCK_BY_ROBUST_FALLBACK"
 
         # ====================================================
         # 3) Last resort: current TopN best score, but avoid known bad real windows
@@ -1149,32 +1163,23 @@ class SignalEngine:
         if locked_obj is None:
             relock_needed = True
             lock_reason = "NO_LOCK"
-        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20:
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_WINDOW_PROFIT20_BAD"
-        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20:
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_WINDOW_WR20_BAD"
-        elif int(locked_obj.live_loss_streak) > LOCK_MAX_LOSS_STREAK:
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_WINDOW_LOSS_STREAK_BAD"
-        elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
-            relock_needed = True
-            lock_reason = "LOCK_HIST_PROFIT20_BAD"
-        elif int(locked_obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
-            relock_needed = True
-            lock_reason = "LOCK_HIST_LOSS_STREAK_BAD"
         elif locked_obj.next_group is None:
             relock_needed = True
             lock_reason = "LOCK_NO_NEXT"
         else:
             real_stat = self.get_real_stats(locked_window)
-            if (
-                real_stat["trade_count"] >= REAL_MIN_TRADE_COUNT_FOR_LOCK
-                and (
-                    real_stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK
-                    or real_stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK
-                )
+            shadow_samples = len(locked_obj.live_hit_history)
+            robust_score = self.robust_shadow_score(locked_obj)
+            if int(locked_obj.live_loss_streak) >= ROBUST_RELOCK_LOSS_STREAK:
+                relock_needed = True
+                lock_reason = "LOCK_TWO_CONSECUTIVE_SHADOW_LOSSES"
+            elif shadow_samples >= ROBUST_MIN_SHADOW_SAMPLES_FOR_LOCK and robust_score < ROBUST_MAX_LOCK_DRAWDOWN_SCORE:
+                relock_needed = True
+                lock_reason = "LOCK_ROBUST_SCORE_BAD"
+            elif (
+                real_stat["trade_count"] >= ROBUST_REAL_MIN_TRADES
+                and real_stat["profit"] < 0
+                and real_stat["loss_streak"] >= 2
             ):
                 relock_needed = True
                 lock_reason = "LOCK_REAL_PERFORMANCE_BAD"
@@ -1235,36 +1240,20 @@ class SignalEngine:
             regime = "NORMAL"
 
         state = "WAIT"
-        if round_id < LIVE_START_ROUND:
-            state = "WAIT"
-        elif locked_obj is None:
-            state = "WAIT"
-        elif next_group is None:
-            state = "WAIT"
-        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20:
-            state = "WAIT"
-        elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20:
-            state = "WAIT"
-        elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
-            state = "WAIT"
-        elif leader_wr20 < FALLBACK_MIN_WR20:
-            state = "WAIT"
-        elif leader_loss_streak > LOCK_MAX_LOSS_STREAK:
-            state = "WAIT"
-        elif stability < STABILITY_READY:
-            state = "WAIT"
-        else:
-            # Profit optimized:
-            # If real performance of locked window is positive, allow READY even
-            # when TopN consensus is not high. Consensus is only a market filter.
+        if round_id >= LIVE_START_ROUND and locked_obj is not None and next_group is not None:
+            robust_score = self.robust_shadow_score(locked_obj)
             real_ok = (
-                real_locked_stat["trade_count"] >= 1
+                real_locked_stat["trade_count"] >= ROBUST_REAL_MIN_TRADES
                 and real_locked_stat["profit"] > 0
-                and real_locked_stat["wr"] >= REAL_MIN_WR_FOR_LOCK
-                and real_locked_stat["loss_streak"] <= REAL_MAX_LOSS_STREAK_FOR_LOCK
+                and real_locked_stat["loss_streak"] <= 1
             )
-
-            if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
+            strong_confirmation = consensus >= required_consensus or leader_wr20 >= 0.50
+            if (
+                stability >= STABILITY_READY
+                and leader_loss_streak < ROBUST_RELOCK_LOSS_STREAK
+                and robust_score >= ROBUST_READY_FLOOR
+                and (real_ok or strong_confirmation)
+            ):
                 state = "READY"
 
         signal = SignalRecord(
@@ -2360,6 +2349,7 @@ def save_live_state(ctx: EngineContext) -> None:
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
         "data_signature": getattr(ctx, "data_signature", ""),
+        "algorithm_migration_pending": getattr(ctx, "algorithm_migration_pending", False),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2449,6 +2439,8 @@ def load_live_state() -> EngineContext:
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
     ctx.data_signature = str(data.get("data_signature", "") or "")
+    ctx.state_version = str(data.get("state_version", "") or "")
+    ctx.algorithm_migration_pending = bool(data.get("algorithm_migration_pending", False))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2598,6 +2590,19 @@ class EngineManager:
             self.ctx.risk_pause_counter = 0
             self.ctx.last_risk_trigger_trade_count = -1
 
+        if getattr(self.ctx, "algorithm_migration_pending", False) and getattr(self.ctx, "hybrid_initialized", False):
+            # Preserve settled history and an exact pending target, but remove
+            # stale lock/cooldown/blacklist decisions from the previous algorithm.
+            self.ctx.locked_window = None
+            self.ctx.lock_reason = "ALGORITHM_UPGRADE_RESELECT"
+            self.ctx.cooled_windows = {}
+            self.ctx.blacklisted_windows = {}
+            self.ctx.locked_live_profit = 0.0
+            self.ctx.locked_live_loss_streak = 0
+            self.ctx.locked_live_win = 0
+            self.ctx.locked_live_loss = 0
+            self.ctx.algorithm_migration_pending = False
+            save_live_state(self.ctx)
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
@@ -2775,7 +2780,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V58.2 ROBUST WALK-FORWARD LIVE
+V58.3 ROBUST ANTI-OVERFIT LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
