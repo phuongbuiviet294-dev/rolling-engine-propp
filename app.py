@@ -211,6 +211,16 @@ V6_MIN_PROFIT20 = 0.0
 V6_MIN_WR20 = 0.35
 V6_MAX_HIST_LS = 2
 
+# ============================================================
+# V7 - ADAPTIVE RANK DOMINANCE RECOVERY
+# ============================================================
+V7_ADAPTIVE_RANK_RECOVERY = True
+V7_MIN_SCORE_GAP = 0.75
+V7_SCORE_GAP_RATIO = 0.10
+V7_MIN_PROFIT20 = 0.0
+V7_MIN_WR20 = 0.35
+V7_MAX_HIST_LS = 2
+
 HEALTH_MIN_SHADOW_WR20 = 0.38
 HEALTH_MIN_SHADOW_PROFIT20 = 0.0
 HEALTH_MAX_FLIPRATE = 0.65
@@ -1255,12 +1265,11 @@ class SignalEngine:
     def choose_relock_candidate(
         self, top_rows=None
     ) -> Optional[Tuple[int, WindowRecord, str]]:
-        """V6: choose among Top-3 and recover a dominant cooled leader.
+        """V7: adaptive Top-1 recovery from cooldown.
 
-        Normal selection is always preferred. If the strongest Top-3 window is
-        cooled/blocked, compare it directly against the best currently usable
-        alternative. A cooled leader may recover only when its Score dominates
-        by V6_SCORE_MARGIN and recent safety floors are satisfied.
+        Normal eligible Top-3 candidates are preferred. If Top-1 is cooled,
+        it may recover when it clearly dominates the best usable alternative
+        by an adaptive score gap, while recent safety floors remain satisfied.
         """
         state = self.window_engine.state
 
@@ -1282,7 +1291,6 @@ class SignalEngine:
                 float(getattr(obj, "live_wr20", 0.0)),
             )
 
-        # Top-3 is the primary pool. If unavailable, use all windows.
         pool_ids = preferred if preferred else list(state.keys())
         pool = [
             (w, state.get(w))
@@ -1295,65 +1303,71 @@ class SignalEngine:
         if not pool:
             return None, None, "NO_VALID_CANDIDATE"
 
-        # Normal candidates first.
         normal = [
-            (w, obj)
-            for w, obj in pool
+            (w, obj) for w, obj in pool
             if not self.known_bad_window(w)
         ]
         normal.sort(key=key, reverse=True)
 
-        if normal:
-            best_normal_w, best_normal_obj = normal[0]
-
-            # If Top-1 is cooled but a weaker normal candidate is being used,
-            # give Top-1 a direct relative-recovery check.
-            top_w, top_obj = pool[0]
-            if (
-                V6_TOP3_RELATIVE_RECOVERY
-                and top_w != best_normal_w
-                and self.known_bad_window(top_w)
-            ):
-                score_gap = (
-                    float(getattr(top_obj, "score", -999.0))
-                    - float(getattr(best_normal_obj, "score", -999.0))
-                )
-                profit20 = float(getattr(top_obj, "profit20", -999.0))
-                wr20 = float(getattr(top_obj, "live_wr20", 0.0))
-                hist_ls = int(getattr(top_obj, "loss_streak", 999))
-
-                if (
-                    score_gap >= V6_SCORE_MARGIN
-                    and profit20 >= V6_MIN_PROFIT20
-                    and wr20 >= V6_MIN_WR20
-                    and hist_ls <= V6_MAX_HIST_LS
-                ):
-                    return top_w, top_obj, "V6_TOP1_RELATIVE_RECOVERY"
-
-            return best_normal_w, best_normal_obj, "NORMAL_TOP3"
-
-        # No normal Top-3 candidate. Compare Top-1 against the best alternative
-        # directly; never fabricate a trade if it fails the safety floors.
         top_w, top_obj = pool[0]
-        alternatives = pool[1:]
 
-        if V6_TOP3_RELATIVE_RECOVERY and alternatives:
-            base_w, base_obj = alternatives[0]
-            score_gap = (
-                float(getattr(top_obj, "score", -999.0))
-                - float(getattr(base_obj, "score", -999.0))
+        # If Top-1 is cooled and there is a usable alternative, compare Top-1
+        # directly with that alternative. The gap adapts to the score scale.
+        if (
+            V7_ADAPTIVE_RANK_RECOVERY
+            and self.known_bad_window(top_w)
+            and normal
+        ):
+            base_w, base_obj = normal[0]
+
+            top_score = float(getattr(top_obj, "score", -999.0))
+            base_score = float(getattr(base_obj, "score", -999.0))
+            gap = top_score - base_score
+            adaptive_gap = max(
+                V7_MIN_SCORE_GAP,
+                abs(base_score) * V7_SCORE_GAP_RATIO,
             )
+
             profit20 = float(getattr(top_obj, "profit20", -999.0))
             wr20 = float(getattr(top_obj, "live_wr20", 0.0))
             hist_ls = int(getattr(top_obj, "loss_streak", 999))
 
             if (
-                score_gap >= V6_SCORE_MARGIN
-                and profit20 >= V6_MIN_PROFIT20
-                and wr20 >= V6_MIN_WR20
-                and hist_ls <= V6_MAX_HIST_LS
+                gap >= adaptive_gap
+                and profit20 >= V7_MIN_PROFIT20
+                and wr20 >= V7_MIN_WR20
+                and hist_ls <= V7_MAX_HIST_LS
             ):
-                return top_w, top_obj, "V6_TOP1_RELATIVE_RECOVERY"
+                return top_w, top_obj, "V7_TOP1_ADAPTIVE_RECOVERY"
+
+        if normal:
+            w, obj = normal[0]
+            return w, obj, "NORMAL_TOP3"
+
+        # No normal candidate. Compare Top-1 to the best Top-2/Top-3 alternative.
+        alternatives = pool[1:]
+        if V7_ADAPTIVE_RANK_RECOVERY and alternatives:
+            base_w, base_obj = alternatives[0]
+
+            top_score = float(getattr(top_obj, "score", -999.0))
+            base_score = float(getattr(base_obj, "score", -999.0))
+            gap = top_score - base_score
+            adaptive_gap = max(
+                V7_MIN_SCORE_GAP,
+                abs(base_score) * V7_SCORE_GAP_RATIO,
+            )
+
+            profit20 = float(getattr(top_obj, "profit20", -999.0))
+            wr20 = float(getattr(top_obj, "live_wr20", 0.0))
+            hist_ls = int(getattr(top_obj, "loss_streak", 999))
+
+            if (
+                gap >= adaptive_gap
+                and profit20 >= V7_MIN_PROFIT20
+                and wr20 >= V7_MIN_WR20
+                and hist_ls <= V7_MAX_HIST_LS
+            ):
+                return top_w, top_obj, "V7_TOP1_ADAPTIVE_RECOVERY"
 
         return None, None, "NO_VALID_CANDIDATE"
 
@@ -2373,6 +2387,12 @@ CONF = {confidence_score:.2f}
                     "EXCEPTIONAL_CANDIDATE_OVERRIDE": EXCEPTIONAL_CANDIDATE_OVERRIDE,
                     "V5_SCORE_DOMINANCE_OVERRIDE": V5_SCORE_DOMINANCE_OVERRIDE,
                     "V6_TOP3_RELATIVE_RECOVERY": V6_TOP3_RELATIVE_RECOVERY,
+                    "V7_ADAPTIVE_RANK_RECOVERY": V7_ADAPTIVE_RANK_RECOVERY,
+                    "V7_MIN_SCORE_GAP": V7_MIN_SCORE_GAP,
+                    "V7_SCORE_GAP_RATIO": V7_SCORE_GAP_RATIO,
+                    "V7_MIN_PROFIT20": V7_MIN_PROFIT20,
+                    "V7_MIN_WR20": V7_MIN_WR20,
+                    "V7_MAX_HIST_LS": V7_MAX_HIST_LS,
                     "V6_SCORE_MARGIN": V6_SCORE_MARGIN,
                     "V6_MIN_PROFIT20": V6_MIN_PROFIT20,
                     "V6_MIN_WR20": V6_MIN_WR20,
