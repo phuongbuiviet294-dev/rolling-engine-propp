@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
 import json
 import os
 import math
-import hashlib
-import re
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
@@ -25,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 Profit Optimized Balanced",
+    page_title="V56 True Live Deterministic",
     layout="wide"
 )
 
@@ -39,7 +36,7 @@ SHEET_ID = "18gQsFPYPHB2EtkY_GLllBYKWcFPi_VP1vtGatflAuuY"
 WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
-WINDOWS = list(range(6, 23))
+WINDOWS = list(range(6, 26))
 TOPN = 3
 
 SIGNAL_HISTORY_LEN = 50
@@ -50,12 +47,6 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
-
-# PROFIT OPTIMIZED BALANCED 2026-07-04
-# - Keep relock after 1 real loss.
-# - Reduce UCB exploration to avoid testing weak windows too aggressively.
-# - Shorten cooldown/blacklist to reduce FORCE_ANY_WINDOW_NO_DEADLOCK.
-# - Moderate READY gates: still requires quality, but less WAIT starvation.
 
 # PROFIT OPTIMIZED CONFIG V51
 # Goal:
@@ -98,7 +89,7 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.36
+LEADER_MIN_LIVE_WR20 = 0.38
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_WR20 = 0.38
@@ -109,35 +100,35 @@ CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
-REAL_MIN_WR_FOR_LOCK = 0.34
+REAL_MIN_WR_FOR_LOCK = 0.35
 
 # V4 fallback/anti-deadlock.
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.36
+FALLBACK_MIN_WR20 = 0.38
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
-LOW_WR_CONSENSUS_READY = 0.60
+LOW_WR_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 8
+WINDOW_COOLDOWN_ROUNDS = 12
 BLACKLIST_REAL_NEGATIVE = True
 
-PROFIT10_STOP = -2.0
-WR20_STOP = 0.35
-DRAWDOWN_STOP = -5.0
+PROFIT10_STOP = -3.0
+WR20_STOP = 0.38
+DRAWDOWN_STOP = -6.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.60
-STABILITY_READY = 0.45
+CONSENSUS_READY = 0.667
+STABILITY_READY = 0.50
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.42
-SAFE_DRAWDOWN_FROM_PEAK = -4.0
-SAFE_MODE_ROUNDS = 2
+MIN_CONFIDENCE_READY = 0.43
+SAFE_DRAWDOWN_FROM_PEAK = -3.0
+SAFE_MODE_ROUNDS = 3
 
 # V56 True Live Deterministic: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
@@ -146,94 +137,14 @@ MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
 MIN_SHADOW_WR20_FOR_TEST = 0.38
 MAX_REAL_NEGATIVE_SOFT = -2.0
 WINDOW_SELECTION_MODE = "hybrid"
-UCB_EXPLORATION_C = 0.22
+UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 12
+RISK_PAUSE_ROUNDS = 4
+BLACKLIST_DURATION_ROUNDS = 20
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
-UCB_EXPLORATION_C = 0.22
-MIN_TRADES_FOR_PROTECTION = 6
-
-# ============================================================
-# TEST D - SMART DAILY GUARD
-# ============================================================
-# Window baseline remains Test C: cooldown 8 / blacklist 12.
-# These guards only prevent NEW trades; pending trades still settle.
-TEST_D_SMART_DAILY_GUARD = True
-DAY_SOFT_STOP = -2.0
-DAY_HARD_STOP = -3.0
-MAX_DAILY_TRADES_WHEN_NEGATIVE = 4
-MAX_DAILY_LOSSES = 3
-DAILY_TRAIL_START = 4.0
-DAILY_TRAIL_GIVEBACK = 2.0
-EARLY_BAD_DAY_CHECK_TRADES = 3
-EARLY_BAD_DAY_MAX_LOSSES = 2
-EARLY_BAD_DAY_PROFIT_LIMIT = -2.0
-LOCK_CONFIRM_ROUNDS = 3
-
-# ============================================================
-# TEST E - FULL OPTIMIZED / 7-GUARD PROFILE
-# ============================================================
-ENABLE_HEALTH_FILTER = True
-ENABLE_NEGATIVE_QUOTA = True
-ENABLE_PROFIT_TRAIL = True
-ENABLE_EARLY_BAD_DAY = True
-ENABLE_DAILY_STOP = True
-ENABLE_TOP3_LOCK_POOL = True
-ENABLE_LOCK_CONFIRM = True
-# Exceptional candidate: allows a very strong Top-3 window to bypass cooldown.
-# Thresholds are deliberately strict so normal cooldown/protection remains active.
-# Relative exceptional candidate:
-# A cooled window can be restored when it is materially better than the
-# best currently-eligible alternative. This adapts to each day's score scale.
-EXCEPTIONAL_CANDIDATE_OVERRIDE = True
-EXCEPTIONAL_SCORE_MARGIN = 2.0
-EXCEPTIONAL_PROFIT20_MARGIN = 2.0
-EXCEPTIONAL_WR20_MARGIN = 0.05
-EXCEPTIONAL_MAX_HIST_LS = 1
-
-# ============================================================
-# V5 - SCORE DOMINANCE COOLDOWN RECOVERY
-# ============================================================
-V5_SCORE_DOMINANCE_OVERRIDE = True
-V5_SCORE_DOMINANCE_MARGIN = 2.0
-V5_MIN_PROFIT20 = 0.0
-V5_MIN_WR20 = 0.35
-V5_MAX_HIST_LS = 2
-
-# ============================================================
-# V6 - TOP3 RELATIVE RECOVERY
-# ============================================================
-V6_TOP3_RELATIVE_RECOVERY = True
-V6_SCORE_MARGIN = 2.0
-V6_MIN_PROFIT20 = 0.0
-V6_MIN_WR20 = 0.35
-V6_MAX_HIST_LS = 2
-
-# ============================================================
-# V7 - ADAPTIVE RANK DOMINANCE RECOVERY
-# ============================================================
-V7_ADAPTIVE_RANK_RECOVERY = True
-V7_MIN_SCORE_GAP = 0.75
-V7_SCORE_GAP_RATIO = 0.10
-V7_MIN_PROFIT20 = 0.0
-V7_MIN_WR20 = 0.35
-V7_MAX_HIST_LS = 2
-
-HEALTH_MIN_SHADOW_WR20 = 0.38
-HEALTH_MIN_SHADOW_PROFIT20 = 0.0
-HEALTH_MAX_FLIPRATE = 0.65
-HEALTH_MIN_STABILITY = 0.50
-HEALTH_MIN_CONSENSUS = 0.667
-LOCK_CONFIRM_ROUNDS = 3
-
-# Daily Stop Guard - protect against deep negative days.
-# These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -5.0
-DAILY_MAX_LOSS_STREAK = 4
-DAILY_MAX_DRAWDOWN = -5.0
-DAILY_PROFIT_LOCK = 30.5
+UCB_EXPLORATION_C = 0.45
+MIN_TRADES_FOR_PROTECTION = 8
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
 INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
@@ -312,12 +223,6 @@ class SignalRecord:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
-    daily_peak_profit: float = 0.0
-    daily_lock_confirm_window: Optional[int] = None
-    daily_lock_confirm_count: int = 0
-    daily_guard_reason: str = ""
-    daily_stop_active: bool = False
-    daily_stop_reason: str = ""
 
 
 
@@ -435,20 +340,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.last_risk_trigger_trade_count = -1
     if not hasattr(ctx, "blacklisted_windows") or ctx.blacklisted_windows is None:
         ctx.blacklisted_windows = {}
-    if not hasattr(ctx, "daily_peak_profit"):
-        ctx.daily_peak_profit = 0.0
-    if not hasattr(ctx, "daily_lock_confirm_window"):
-        ctx.daily_lock_confirm_window = None
-    if not hasattr(ctx, "daily_lock_confirm_count"):
-        ctx.daily_lock_confirm_count = 0
-    if not hasattr(ctx, "daily_guard_reason"):
-        ctx.daily_guard_reason = ""
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
-    if not hasattr(ctx, "daily_stop_active"):
-        ctx.daily_stop_active = False
-    if not hasattr(ctx, "daily_stop_reason"):
-        ctx.daily_stop_reason = ""
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -516,6 +409,7 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
+@st.cache_data(ttl=30)
 def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
@@ -527,7 +421,7 @@ def load_numbers() -> list[int]:
         url = (
             f"https://docs.google.com/spreadsheets/d/"
             f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time_ns()}"
+            f"&cache={time.time()}"
         )
 
         try:
@@ -559,114 +453,6 @@ def load_numbers() -> list[int]:
     ]
 
 
-
-# ============================================================
-# DISPLAY-ONLY ROUND TIME HELPERS
-# IMPORTANT:
-# - These functions are UI-only.
-# - They do NOT modify numbers, groups, round_id, replay, state,
-#   window selection, signal, trade history, or profit.
-# ============================================================
-
-def load_round_labels_display_only() -> list[str]:
-    """Read the Sheet 'round' column only for UI display."""
-    if INPUT_CSV_PATH:
-        try:
-            df = pd.read_csv(INPUT_CSV_PATH)
-        except Exception:
-            return []
-    else:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/"
-            f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time_ns()}"
-        )
-        try:
-            df = pd.read_csv(url)
-        except Exception:
-            return []
-
-    df.columns = [str(x).lower().strip() for x in df.columns]
-
-    if "round" not in df.columns or "number" not in df.columns:
-        return []
-
-    number_series = pd.to_numeric(df["number"], errors="coerce")
-    valid_mask = number_series.between(1, 12, inclusive="both")
-
-    labels = df.loc[valid_mask, "round"].tolist()
-    return [_format_round_time_display_only(x) for x in labels]
-
-
-def _format_round_time_display_only(value: Any) -> str:
-    """Format a Sheet time value as HH:MM for UI only."""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "--:--"
-
-    try:
-        if hasattr(value, "strftime"):
-            return value.strftime("%H:%M")
-    except Exception:
-        pass
-
-    s = str(value).strip()
-    if not s or s.lower() in {"nan", "nat", "none"}:
-        return "--:--"
-
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\s*$", s)
-    if m:
-        hh = int(m.group(1)) % 24
-        mm = int(m.group(2)) % 60
-        return f"{hh:02d}:{mm:02d}"
-
-    try:
-        v = float(s)
-        if 0.0 <= v < 1.0:
-            total_minutes = int(round(v * 24 * 60)) % (24 * 60)
-            return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
-    except Exception:
-        pass
-
-    try:
-        dt = pd.to_datetime(s, errors="coerce")
-        if not pd.isna(dt):
-            return dt.strftime("%H:%M")
-    except Exception:
-        pass
-
-    return s
-
-
-def _add_minutes_display_only(hhmm: str, minutes: int = 5) -> str:
-    """Add minutes to HH:MM for UI only."""
-    m = re.match(r"^(\d{2}):(\d{2})$", str(hhmm))
-    if not m:
-        return "--:--"
-    total = (int(m.group(1)) * 60 + int(m.group(2)) + minutes) % (24 * 60)
-    return f"{total // 60:02d}:{total % 60:02d}"
-
-
-def get_current_target_time_display_only(current_round: int) -> tuple[str, str]:
-    """Return current and target times without touching engine state."""
-    try:
-        labels = load_round_labels_display_only()
-    except Exception:
-        return "--:--", "--:--"
-
-    idx = int(current_round) - 1
-    if idx < 0 or idx >= len(labels):
-        return "--:--", "--:--"
-
-    current_time = labels[idx]
-
-    if idx + 1 < len(labels) and labels[idx + 1] != "--:--":
-        target_time = labels[idx + 1]
-    else:
-        target_time = _add_minutes_display_only(current_time, 5)
-
-    return current_time, target_time
-
-
 def group_of(n: int) -> int:
     if n <= 3:
         return 1
@@ -682,20 +468,6 @@ def build_groups(numbers: list[int]) -> list[int]:
         group_of(x)
         for x in numbers
     ]
-
-
-
-
-def make_numbers_signature(numbers: list[int], length: Optional[int] = None) -> str:
-    """Signature of number sequence prefix.
-
-    Used only to detect Sheet reset/replacement. It does NOT affect prediction.
-    """
-    if length is None:
-        length = len(numbers)
-    length = max(0, min(int(length), len(numbers)))
-    payload = ",".join(str(int(x)) for x in numbers[:length])
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
@@ -1037,38 +809,6 @@ class SignalEngine:
             w = window_id
         self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
-    def is_exceptional_candidate(
-        self,
-        window_id: int,
-        obj: WindowRecord,
-        baseline: Optional[WindowRecord] = None,
-    ) -> bool:
-        """V5: allow a cooled window back when score dominance is clear.
-
-        Score is the primary ranking signal. Profit20/WR20/loss-streak are
-        safety floors so a high score alone cannot force a bad window back.
-        """
-        if not V5_SCORE_DOMINANCE_OVERRIDE or baseline is None:
-            return False
-
-        try:
-            score = float(getattr(obj, "score", -999.0))
-            profit20 = float(getattr(obj, "profit20", -999.0))
-            wr20 = float(getattr(obj, "live_wr20", 0.0))
-            hist_ls = int(getattr(obj, "loss_streak", 999))
-
-            base_score = float(getattr(baseline, "score", -999.0))
-        except Exception:
-            return False
-
-        return (
-            score >= base_score + V5_SCORE_DOMINANCE_MARGIN
-            and profit20 >= V5_MIN_PROFIT20
-            and wr20 >= V5_MIN_WR20
-            and hist_ls <= V5_MAX_HIST_LS
-        )
-
-
     def known_bad_window(self, window_id: int) -> bool:
         """V55: negative RealStats is a penalty, not a permanent ban."""
         stat = self.get_real_stats(window_id)
@@ -1158,216 +898,118 @@ class SignalEngine:
             return self.ucb_candidate_score(window_id, obj)
         return self.candidate_score(obj)
 
-    def build_relock_debug(self, top_rows: list[tuple[int, WindowRecord]], selected_window: Optional[int] = None, selected_branch: str = "") -> dict:
-        """Read-only diagnostic for the exact RELOCK candidate pipeline.
-
-        This mirrors choose_relock_candidate() without changing engine state.
-        It is intentionally verbose so the dashboard can explain why a window
-        such as W20 can be selected even when it is not in the visible TopN.
-        """
-        top_rank = {int(w): i for i, (w, _) in enumerate(top_rows, start=1)}
-        rows = []
-        real_eligible = []
-        fallback_eligible = []
+    def choose_relock_candidate(
+        self,
+        top_rows: list[tuple[int, WindowRecord]]
+    ) -> tuple[Optional[int], Optional[WindowRecord], str]:
+        # ====================================================
+        # 1) Prefer REAL positive windows
+        # ====================================================
+        real_candidates = []
 
         for w, obj in self.window_engine.state.items():
+            if obj.next_group is None:
+                continue
+            if self.known_bad_window(w):
+                continue
+
             stat = self.get_real_stats(w)
+
+            if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
+                continue
+            if stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK:
+                continue
+            if stat["wr"] < REAL_MIN_WR_FOR_LOCK and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
+                continue
+            if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
+                continue
+            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+                continue
+
+            real_candidates.append(
+                (
+                    self.real_candidate_score(w, obj),
+                    stat["profit"],
+                    stat["wr"],
+                    -stat["loss_streak"],
+                    w,
+                    obj,
+                )
+            )
+
+        if real_candidates:
+            real_candidates.sort(reverse=True)
+            _, _, _, _, w, obj = real_candidates[0]
+            return w, obj, "RELOCK_BY_REAL_POSITIVE_WINDOW"
+
+        # ====================================================
+        # 2) Fallback: short-term candidate score
+        # ====================================================
+        # Important: do not return None just because no real-positive
+        # candidate exists. Otherwise engine gets stuck after one loss.
+        fallback_candidates = []
+
+        for w, obj in self.window_engine.state.items():
+            if obj.next_group is None:
+                continue
+            if self.known_bad_window(w):
+                continue
+
             hits20 = list(obj.hit_history)[-20:]
             wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
-            cooled = self.is_window_cooled(w)
-            blacklisted = self.is_window_blacklisted(w)
-            known_bad = self.known_bad_window(w)
 
-            real_reasons = []
-            if obj.next_group is None:
-                real_reasons.append("NO_NEXT")
-            if known_bad:
-                if cooled:
-                    real_reasons.append("COOLED")
-                if blacklisted:
-                    real_reasons.append("BLACKLISTED")
-                if stat["trade_count"] >= 3 and stat["profit"] <= MAX_REAL_NEGATIVE_SOFT and stat["loss_streak"] >= 2:
-                    real_reasons.append("KNOWN_BAD_REAL")
-            if stat["trade_count"] < REAL_MIN_TRADE_COUNT_FOR_LOCK:
-                real_reasons.append(f"REAL_TRADES<{REAL_MIN_TRADE_COUNT_FOR_LOCK}")
-            if stat["profit"] < REAL_MIN_PROFIT_FOR_LOCK:
-                real_reasons.append(f"REAL_PROFIT<{REAL_MIN_PROFIT_FOR_LOCK}")
-            if stat["wr"] < REAL_MIN_WR_FOR_LOCK and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
-                real_reasons.append("REAL_WR_AND_SHADOW_WR_LOW")
-            if stat["loss_streak"] > REAL_MAX_LOSS_STREAK_FOR_LOCK:
-                real_reasons.append(f"REAL_LS>{REAL_MAX_LOSS_STREAK_FOR_LOCK}")
-            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
-                real_reasons.append(f"HIST_LS>{LOCK_MAX_LOSS_STREAK}")
-
-            real_ok = len(real_reasons) == 0
-            if real_ok:
-                real_eligible.append((self.real_candidate_score(w, obj), stat["profit"], stat["wr"], -stat["loss_streak"], w))
-
-            fallback_reasons = []
-            if obj.next_group is None:
-                fallback_reasons.append("NO_NEXT")
-            if known_bad:
-                if cooled:
-                    fallback_reasons.append("COOLED")
-                if blacklisted:
-                    fallback_reasons.append("BLACKLISTED")
-                if stat["trade_count"] >= 3 and stat["profit"] <= MAX_REAL_NEGATIVE_SOFT and stat["loss_streak"] >= 2:
-                    fallback_reasons.append("KNOWN_BAD_REAL")
             if obj.profit20 <= FALLBACK_MIN_PROFIT20 and obj.live_profit20 < MIN_SHADOW_PROFIT20_FOR_TEST:
-                fallback_reasons.append("PROFIT20_AND_LIVE_PROFIT20_LOW")
+                continue
             if wr20 < FALLBACK_MIN_WR20 and obj.live_wr20 < MIN_SHADOW_WR20_FOR_TEST:
-                fallback_reasons.append("WR20_AND_LIVE_WR20_LOW")
+                continue
             if int(obj.loss_streak) > FALLBACK_MAX_LOSS_STREAK:
-                fallback_reasons.append(f"HIST_LS>{FALLBACK_MAX_LOSS_STREAK}")
+                continue
 
-            fallback_ok = len(fallback_reasons) == 0
-            if fallback_ok:
-                fallback_eligible.append((self.selection_score(w, obj), obj.profit20, wr20, -int(obj.loss_streak), w))
-
-            rows.append({
-                "Window": int(w),
-                "TopRank": top_rank.get(int(w), "-"),
-                "Score": round(float(obj.score), 3),
-                "RealScore": self.real_candidate_score(w, obj),
-                "UCBScore": self.ucb_candidate_score(w, obj),
-                "RealTrades": int(stat["trade_count"]),
-                "RealProfit": round(float(stat["profit"]), 3),
-                "RealWR": round(float(stat["wr"]), 3),
-                "RealLS": int(stat["loss_streak"]),
-                "Profit20": round(float(obj.profit20), 3),
-                "LiveP20": round(float(obj.live_profit20), 3),
-                "LiveWR20": round(float(obj.live_wr20), 3),
-                "HistLS": int(obj.loss_streak),
-                "Cooled": cooled,
-                "Blacklisted": blacklisted,
-                "RealEligible": real_ok,
-                "RealReject": ", ".join(real_reasons) if real_reasons else "-",
-                "FallbackEligible": fallback_ok,
-                "FallbackReject": ", ".join(fallback_reasons) if fallback_reasons else "-",
-                "Selected": int(selected_window is not None and int(w) == int(selected_window)),
-            })
-
-        real_eligible.sort(reverse=True)
-        fallback_eligible.sort(reverse=True)
-        real_best = int(real_eligible[0][4]) if real_eligible else None
-        fallback_best = int(fallback_eligible[0][4]) if fallback_eligible else None
-
-        return {
-            "current_locked_window": self.ctx.locked_window,
-            "selected_window": selected_window,
-            "selected_branch": selected_branch,
-            "real_best": real_best,
-            "fallback_best": fallback_best,
-            "selection_mode": WINDOW_SELECTION_MODE,
-            "rows": rows,
-        }
-
-    def choose_relock_candidate(
-        self, top_rows=None
-    ) -> Optional[Tuple[int, WindowRecord, str]]:
-        """V7: adaptive Top-1 recovery from cooldown.
-
-        Normal eligible Top-3 candidates are preferred. If Top-1 is cooled,
-        it may recover when it clearly dominates the best usable alternative
-        by an adaptive score gap, while recent safety floors remain satisfied.
-        """
-        state = self.window_engine.state
-
-        preferred = []
-        if top_rows:
-            for row in top_rows:
-                try:
-                    w = int(row[0])
-                except Exception:
-                    continue
-                if w not in preferred:
-                    preferred.append(w)
-
-        def key(item):
-            _, obj = item
-            return (
-                float(getattr(obj, "score", -999.0)),
-                float(getattr(obj, "profit20", -999.0)),
-                float(getattr(obj, "live_wr20", 0.0)),
+            fallback_candidates.append(
+                (
+                    self.selection_score(w, obj),
+                    obj.profit20,
+                    wr20,
+                    -int(obj.loss_streak),
+                    w,
+                    obj,
+                )
             )
 
-        pool_ids = preferred if preferred else list(state.keys())
-        pool = [
-            (w, state.get(w))
-            for w in pool_ids
-            if state.get(w) is not None
-            and state[w].next_group is not None
-        ]
-        pool.sort(key=key, reverse=True)
+        if fallback_candidates:
+            fallback_candidates.sort(reverse=True)
+            _, _, _, _, w, obj = fallback_candidates[0]
+            return w, obj, "RELOCK_BY_SHORT_TERM_FALLBACK"
 
-        if not pool:
-            return None, None, "NO_VALID_CANDIDATE"
+        # ====================================================
+        # 3) Last resort: current TopN best score, but avoid known bad real windows
+        # ====================================================
+        for w, obj in top_rows:
+            known_bad = self.known_bad_window(w)
+            if obj.next_group is not None and not known_bad:
+                return w, obj, "FORCE_TOP_WINDOW_NO_DEADLOCK"
 
-        normal = [
-            (w, obj) for w, obj in pool
-            if not self.known_bad_window(w)
-        ]
-        normal.sort(key=key, reverse=True)
+        # Absolute final fallback: any untested or not-bad window with next_group
+        for w, obj in self.window_engine.state.items():
+            known_bad = self.known_bad_window(w)
+            if obj.next_group is not None and not known_bad:
+                return w, obj, "FORCE_ANY_WINDOW_NO_DEADLOCK"
 
-        top_w, top_obj = pool[0]
+        # If all windows are known bad, pick the least bad by candidate score instead of deadlocking.
+        emergency = []
+        for w, obj in self.window_engine.state.items():
+            if obj.next_group is None:
+                continue
+            if self.is_window_cooled(w):
+                continue
+            emergency.append((self.selection_score(w, obj), w, obj))
 
-        # If Top-1 is cooled and there is a usable alternative, compare Top-1
-        # directly with that alternative. The gap adapts to the score scale.
-        if (
-            V7_ADAPTIVE_RANK_RECOVERY
-            and self.known_bad_window(top_w)
-            and normal
-        ):
-            base_w, base_obj = normal[0]
+        if emergency:
+            emergency.sort(reverse=True)
+            _, w, obj = emergency[0]
+            return w, obj, "EMERGENCY_LEAST_BAD_UNCOOLED"
 
-            top_score = float(getattr(top_obj, "score", -999.0))
-            base_score = float(getattr(base_obj, "score", -999.0))
-            gap = top_score - base_score
-            adaptive_gap = max(
-                V7_MIN_SCORE_GAP,
-                abs(base_score) * V7_SCORE_GAP_RATIO,
-            )
-
-            profit20 = float(getattr(top_obj, "profit20", -999.0))
-            wr20 = float(getattr(top_obj, "live_wr20", 0.0))
-            hist_ls = int(getattr(top_obj, "loss_streak", 999))
-
-            if (
-                gap >= adaptive_gap
-                and profit20 >= V7_MIN_PROFIT20
-                and wr20 >= V7_MIN_WR20
-                and hist_ls <= V7_MAX_HIST_LS
-            ):
-                return top_w, top_obj, "V7_TOP1_ADAPTIVE_RECOVERY"
-
-        if normal:
-            w, obj = normal[0]
-            return w, obj, "NORMAL_TOP3"
-
-        # No normal candidate. Compare Top-1 to the best Top-2/Top-3 alternative.
-        alternatives = pool[1:]
-        if V7_ADAPTIVE_RANK_RECOVERY and alternatives:
-            base_w, base_obj = alternatives[0]
-
-            top_score = float(getattr(top_obj, "score", -999.0))
-            base_score = float(getattr(base_obj, "score", -999.0))
-            gap = top_score - base_score
-            adaptive_gap = max(
-                V7_MIN_SCORE_GAP,
-                abs(base_score) * V7_SCORE_GAP_RATIO,
-            )
-
-            profit20 = float(getattr(top_obj, "profit20", -999.0))
-            wr20 = float(getattr(top_obj, "live_wr20", 0.0))
-            hist_ls = int(getattr(top_obj, "loss_streak", 999))
-
-            if (
-                gap >= adaptive_gap
-                and profit20 >= V7_MIN_PROFIT20
-                and wr20 >= V7_MIN_WR20
-                and hist_ls <= V7_MAX_HIST_LS
-            ):
-                return top_w, top_obj, "V7_TOP1_ADAPTIVE_RECOVERY"
+        return None, None, "NO_SAFE_CANDIDATE"
 
         return None, None, "NO_VALID_CANDIDATE"
 
@@ -1528,19 +1170,7 @@ class SignalEngine:
             self.cool_window(locked_window, lock_reason)
 
         if relock_needed:
-            # Capture the candidate decision inputs after the old lock has been cooled,
-            # because choose_relock_candidate() runs after cool_window().
-            self.ctx.last_relock_debug = self.build_relock_debug(top_rows)
-            candidate_result = self.choose_relock_candidate(top_rows)
-            if candidate_result is None:
-                candidate_w, candidate_obj, candidate_reason = (
-                    None, None, "NO_VALID_CANDIDATE"
-                )
-            else:
-                candidate_w, candidate_obj, candidate_reason = candidate_result
-            self.ctx.last_relock_debug = self.build_relock_debug(
-                top_rows, selected_window=candidate_w, selected_branch=candidate_reason
-            )
+            candidate_w, candidate_obj, candidate_reason = self.choose_relock_candidate(top_rows)
 
             if candidate_obj is not None:
                 locked_window, locked_obj = candidate_w, candidate_obj
@@ -1559,11 +1189,6 @@ class SignalEngine:
                 lock_reason = candidate_reason
 
         self.ctx.lock_reason = lock_reason
-
-        if not relock_needed:
-            self.ctx.last_relock_debug = self.build_relock_debug(
-                top_rows, selected_window=locked_window, selected_branch="KEEP_LOCK"
-            )
 
         next_group = locked_obj.next_group if locked_obj is not None else None
         top_profit20 = (
@@ -1676,82 +1301,6 @@ class TradeEngine:
         equity += profit
         self.ctx.equity_curve.append(round(equity, 2))
 
-    def smart_daily_guard(self) -> tuple[bool, str]:
-        """Return whether opening a NEW trade should be blocked."""
-        if not TEST_D_SMART_DAILY_GUARD:
-            return False, ""
-
-        total_profit = float(self.get_total_profit())
-        loss_streak = int(self.get_loss_streak())
-        settled = [x for x in self.ctx.trade_history if x.hit is not None]
-        trade_count = len(settled)
-
-        peak = max(
-            [0.0] + [float(x) for x in getattr(self.ctx, "equity_curve", [])]
-        )
-        pullback = total_profit - peak
-
-        if ENABLE_DAILY_STOP and total_profit <= DAY_HARD_STOP:
-            return True, "DAY_HARD_STOP"
-
-        if ENABLE_DAILY_STOP and loss_streak >= MAX_DAILY_LOSSES:
-            return True, "MAX_DAILY_LOSSES"
-
-        if (
-            ENABLE_EARLY_BAD_DAY
-            and trade_count >= EARLY_BAD_DAY_CHECK_TRADES
-            and loss_streak >= EARLY_BAD_DAY_MAX_LOSSES
-            and total_profit <= EARLY_BAD_DAY_PROFIT_LIMIT
-        ):
-            return True, "EARLY_BAD_DAY"
-
-        if (
-            ENABLE_DAILY_STOP
-            and trade_count >= EARLY_BAD_DAY_CHECK_TRADES
-            and total_profit <= DAY_SOFT_STOP
-        ):
-            return True, "DAY_SOFT_STOP"
-
-        if (
-            ENABLE_NEGATIVE_QUOTA
-            and total_profit < 0
-            and trade_count >= MAX_DAILY_TRADES_WHEN_NEGATIVE
-        ):
-            return True, "NEGATIVE_DAY_TRADE_QUOTA"
-
-        if (
-            ENABLE_PROFIT_TRAIL
-            and peak >= DAILY_TRAIL_START
-            and pullback <= -DAILY_TRAIL_GIVEBACK
-        ):
-            return True, "DAILY_PROFIT_TRAIL"
-
-        return False, ""
-
-
-    def health_filter(self, signal: SignalRecord) -> tuple[bool, str]:
-        if not ENABLE_HEALTH_FILTER:
-            return True, ""
-
-        stability = float(getattr(signal, "stability", 0.0))
-        consensus = float(getattr(signal, "consensus", 0.0))
-        top_profit20 = float(getattr(signal, "top_profit20", 0.0))
-
-        if stability < HEALTH_MIN_STABILITY:
-            return False, "HEALTH_LOW_STABILITY"
-        if consensus < HEALTH_MIN_CONSENSUS:
-            return False, "HEALTH_LOW_CONSENSUS"
-        if top_profit20 < HEALTH_MIN_SHADOW_PROFIT20:
-            return False, "HEALTH_NEGATIVE_TOP_PROFIT20"
-
-        flips = list(getattr(self.ctx, "signal_flip_history", []))
-        if flips:
-            flip_rate = sum(1 for x in flips if int(x) == 1) / len(flips)
-            if flip_rate > HEALTH_MAX_FLIPRATE:
-                return False, "HEALTH_HIGH_FLIPRATE"
-
-        return True, ""
-
     def open_trade(self, signal: SignalRecord, round_id: int, confidence_score: float = 0.0) -> None:
         self.ctx.open_reason = ""
 
@@ -1759,24 +1308,6 @@ class TradeEngine:
             self.ctx.open_reason = "BEFORE_LIVE_START"
             return
 
-
-
-
-            if float(getattr(signal, "consensus", 0.0)) < HEALTH_MIN_CONSENSUS:
-                self.ctx.protection_reason = "HEALTH_LOW_CONSENSUS"
-                self.ctx.open_reason = "HEALTH_LOW_CONSENSUS"
-                return
-            if float(getattr(signal, "top_profit20", 0.0)) < HEALTH_MIN_SHADOW_PROFIT20:
-                self.ctx.protection_reason = "HEALTH_NEGATIVE_TOP_PROFIT20"
-                self.ctx.open_reason = "HEALTH_NEGATIVE_TOP_PROFIT20"
-                return
-            flips = list(getattr(self.ctx, "signal_flip_history", []))
-            if flips:
-                flip_rate = sum(1 for x in flips if int(x) == 1) / len(flips)
-                if flip_rate > HEALTH_MAX_FLIPRATE:
-                    self.ctx.protection_reason = "HEALTH_HIGH_FLIPRATE"
-                    self.ctx.open_reason = "HEALTH_HIGH_FLIPRATE"
-                    return
         # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
         # before opening a new one.
         if (
@@ -1971,48 +1502,6 @@ class TradeEngine:
 
         return round(drawdown, 2)
 
-
-    def get_daily_equity_current(self) -> float:
-        if not self.ctx.equity_curve:
-            return 0.0
-        return round(float(self.ctx.equity_curve[-1]), 2)
-
-    def get_daily_equity_peak(self) -> float:
-        if not self.ctx.equity_curve:
-            return 0.0
-        return round(max([0.0] + [float(x) for x in self.ctx.equity_curve]), 2)
-
-    def get_daily_pullback_from_peak(self) -> float:
-        current = self.get_daily_equity_current()
-        peak = self.get_daily_equity_peak()
-        return round(current - peak, 2)
-
-    def daily_stop_status(self) -> tuple[bool, str]:
-        """Return whether new trades should be blocked for the current day.
-
-        This guard is designed for a daily sheet reset workflow. It uses the
-        current day's trade_history/equity_curve only. It does NOT block pending
-        settlement; it only blocks opening the next trade.
-        """
-        total_profit = self.get_total_profit()
-        loss_streak = self.get_loss_streak()
-        drawdown = self.get_drawdown()
-        pullback = self.get_daily_pullback_from_peak()
-
-        if total_profit <= DAILY_STOP_LOSS:
-            return True, "DAILY_STOP_LOSS"
-
-        if loss_streak >= DAILY_MAX_LOSS_STREAK:
-            return True, "DAILY_MAX_LOSS_STREAK"
-
-        if drawdown <= DAILY_MAX_DRAWDOWN or pullback <= DAILY_MAX_DRAWDOWN:
-            return True, "DAILY_MAX_DRAWDOWN"
-
-        if total_profit >= DAILY_PROFIT_LOCK:
-            return True, "DAILY_PROFIT_LOCK"
-
-        return False, ""
-
     def snapshot(self) -> dict[str, Any]:
         return {
             "trade_state": self.ctx.trade_state,
@@ -2024,8 +1513,6 @@ class TradeEngine:
             "drawdown": self.get_drawdown(),
             "pending_trade": self.ctx.pending_trade,
             "trade_count": len([x for x in self.ctx.trade_history if x.hit is not None]),
-            "daily_stop_active": getattr(self.ctx, "daily_stop_active", False),
-            "daily_stop_reason": getattr(self.ctx, "daily_stop_reason", ""),
         }
 
 
@@ -2138,33 +1625,6 @@ class ProtectionEngine:
             return "WAIT"
 
         ensure_ctx_fields(self.ctx)
-
-        # TEST_E_GUARD_GATE:
-        # All NEW-trade guards are evaluated BEFORE the signal is marked READY.
-        # This guarantees UI signal == actual trade state. Pending trades are
-        # settled separately before this method is reached on the next round.
-        if TEST_D_SMART_DAILY_GUARD:
-            blocked, guard_reason = self.trade_engine.smart_daily_guard()
-            if blocked:
-                self.ctx.daily_guard_reason = guard_reason
-                self.ctx.protection_reason = guard_reason
-                return "WAIT"
-
-        if ENABLE_HEALTH_FILTER:
-            health_ok, health_reason = self.trade_engine.health_filter(signal)
-            if not health_ok:
-                self.ctx.daily_guard_reason = health_reason
-                self.ctx.protection_reason = health_reason
-                return "WAIT"
-        daily_stop, daily_reason = self.trade_engine.daily_stop_status()
-        if daily_stop:
-            self.ctx.daily_stop_active = True
-            self.ctx.daily_stop_reason = daily_reason
-            self.ctx.protection_reason = daily_reason
-            return "WAIT"
-        self.ctx.daily_stop_active = False
-        self.ctx.daily_stop_reason = ""
-
         if self.ctx.risk_pause_counter > 0:
             self.ctx.risk_pause_counter -= 1
             self.ctx.protection_reason = "RISK_PAUSE"
@@ -2209,16 +1669,13 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V56 Profit Optimized Balanced")
+        st.title("🚀 V56 True Live Deterministic")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-
-        # UI-only time labels. These values never enter the trading engine.
-        current_time, target_time = get_current_target_time_display_only(current_round)
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -2241,7 +1698,6 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
@@ -2267,13 +1723,11 @@ CONF = {confidence_score:.2f}
     def render_profit(self) -> None:
         snap = self.trade_engine.snapshot()
 
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Profit", snap["total_profit"])
         c2.metric("Profit20", snap["profit20"])
         c3.metric("WR20", snap["wr20"])
         c4.metric("Drawdown", snap["drawdown"])
-        c5.metric("Daily Stop", "ON" if snap.get("daily_stop_active") else "OFF")
-        c6.metric("Stop Reason", snap.get("daily_stop_reason", ""))
 
     def render_risk(self) -> None:
         c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
@@ -2366,49 +1820,6 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
-                    "TEST_D_SMART_DAILY_GUARD": TEST_D_SMART_DAILY_GUARD,
-                    "DAY_SOFT_STOP": DAY_SOFT_STOP,
-                    "DAY_HARD_STOP": DAY_HARD_STOP,
-                    "MAX_DAILY_TRADES_WHEN_NEGATIVE": MAX_DAILY_TRADES_WHEN_NEGATIVE,
-                    "MAX_DAILY_LOSSES": MAX_DAILY_LOSSES,
-                    "DAILY_TRAIL_START": DAILY_TRAIL_START,
-                    "DAILY_TRAIL_GIVEBACK": DAILY_TRAIL_GIVEBACK,
-                    "EARLY_BAD_DAY_CHECK_TRADES": EARLY_BAD_DAY_CHECK_TRADES,
-                    "EARLY_BAD_DAY_MAX_LOSSES": EARLY_BAD_DAY_MAX_LOSSES,
-                    "EARLY_BAD_DAY_PROFIT_LIMIT": EARLY_BAD_DAY_PROFIT_LIMIT,
-                    "LOCK_CONFIRM_ROUNDS": LOCK_CONFIRM_ROUNDS,
-                    "ENABLE_HEALTH_FILTER": ENABLE_HEALTH_FILTER,
-                    "ENABLE_NEGATIVE_QUOTA": ENABLE_NEGATIVE_QUOTA,
-                    "ENABLE_PROFIT_TRAIL": ENABLE_PROFIT_TRAIL,
-                    "ENABLE_EARLY_BAD_DAY": ENABLE_EARLY_BAD_DAY,
-                    "ENABLE_DAILY_STOP": ENABLE_DAILY_STOP,
-                    "ENABLE_TOP3_LOCK_POOL": ENABLE_TOP3_LOCK_POOL,
-                    "ENABLE_LOCK_CONFIRM": ENABLE_LOCK_CONFIRM,
-                    "EXCEPTIONAL_CANDIDATE_OVERRIDE": EXCEPTIONAL_CANDIDATE_OVERRIDE,
-                    "V5_SCORE_DOMINANCE_OVERRIDE": V5_SCORE_DOMINANCE_OVERRIDE,
-                    "V6_TOP3_RELATIVE_RECOVERY": V6_TOP3_RELATIVE_RECOVERY,
-                    "V7_ADAPTIVE_RANK_RECOVERY": V7_ADAPTIVE_RANK_RECOVERY,
-                    "V7_MIN_SCORE_GAP": V7_MIN_SCORE_GAP,
-                    "V7_SCORE_GAP_RATIO": V7_SCORE_GAP_RATIO,
-                    "V7_MIN_PROFIT20": V7_MIN_PROFIT20,
-                    "V7_MIN_WR20": V7_MIN_WR20,
-                    "V7_MAX_HIST_LS": V7_MAX_HIST_LS,
-                    "V6_SCORE_MARGIN": V6_SCORE_MARGIN,
-                    "V6_MIN_PROFIT20": V6_MIN_PROFIT20,
-                    "V6_MIN_WR20": V6_MIN_WR20,
-                    "V6_MAX_HIST_LS": V6_MAX_HIST_LS,
-                    "V5_SCORE_DOMINANCE_MARGIN": V5_SCORE_DOMINANCE_MARGIN,
-                    "V5_MIN_PROFIT20": V5_MIN_PROFIT20,
-                    "V5_MIN_WR20": V5_MIN_WR20,
-                    "V5_MAX_HIST_LS": V5_MAX_HIST_LS,
-                    "EXCEPTIONAL_SCORE_MARGIN": EXCEPTIONAL_SCORE_MARGIN,
-                    "EXCEPTIONAL_PROFIT20_MARGIN": EXCEPTIONAL_PROFIT20_MARGIN,
-                    "EXCEPTIONAL_WR20_MARGIN": EXCEPTIONAL_WR20_MARGIN,
-                    "EXCEPTIONAL_MAX_HIST_LS": EXCEPTIONAL_MAX_HIST_LS,
-                    "DAILY_STOP_LOSS": DAILY_STOP_LOSS,
-                    "DAILY_MAX_LOSS_STREAK": DAILY_MAX_LOSS_STREAK,
-                    "DAILY_MAX_DRAWDOWN": DAILY_MAX_DRAWDOWN,
-                    "DAILY_PROFIT_LOCK": DAILY_PROFIT_LOCK,
                 }
             )
 
@@ -2492,50 +1903,11 @@ CONF = {confidence_score:.2f}
             ]
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    def render_relock_decision_debug(self) -> None:
-        with st.expander("RELOCK Decision Debug - Why This Window Was Selected"):
-            dbg = getattr(self.ctx, "last_relock_debug", None)
-            if not dbg:
-                st.info("No RELOCK decision has been captured yet.")
-                return
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Current Lock", dbg.get("current_locked_window"))
-            c2.metric("Selected", dbg.get("selected_window"))
-            c3.metric("Branch", dbg.get("selected_branch", ""))
-            c4.metric("Real Best", dbg.get("real_best"))
-            c5.metric("Fallback Best", dbg.get("fallback_best"))
-
-            st.caption(
-                f"Selection mode: {dbg.get('selection_mode', '')}. "
-                "This table mirrors the candidate filters used by choose_relock_candidate()."
-            )
-
-            df = pd.DataFrame(dbg.get("rows", []))
-            if df.empty:
-                st.info("No window diagnostics available.")
-                return
-
-            preferred = [
-                "Window", "TopRank", "Selected", "RealEligible", "RealReject",
-                "FallbackEligible", "FallbackReject", "RealScore", "UCBScore",
-                "RealTrades", "RealProfit", "RealWR", "RealLS",
-                "Score", "Profit20", "LiveP20", "LiveWR20", "HistLS",
-                "Cooled", "Blacklisted"
-            ]
-            df = df[[c for c in preferred if c in df.columns]]
-            if "Selected" in df.columns:
-                df = df.sort_values(["Selected", "RealEligible", "FallbackEligible", "RealScore"],
-                                    ascending=[False, False, False, False])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
     def render_state_debug(self) -> None:
         with st.expander("State Debug"):
             st.json(
                 {
                     "last_length": self.ctx.last_length,
-                    "data_length": getattr(self.ctx, "data_length", 0),
-                    "data_signature_short": str(getattr(self.ctx, "data_signature", ""))[:12],
                     "pending_trade": self.ctx.pending_trade,
                     "pending_round": self.ctx.pending_round,
                     "pending_locked_window": self.ctx.pending_locked_window,
@@ -2553,8 +1925,6 @@ CONF = {confidence_score:.2f}
                     "last_safe_trigger_peak": getattr(self.ctx, "last_safe_trigger_peak", 0.0),
                     "blacklisted_windows": getattr(self.ctx, "blacklisted_windows", {}),
                     "last_decision_confidence": getattr(self.ctx, "last_decision_confidence", 0.0),
-                    "daily_stop_active": getattr(self.ctx, "daily_stop_active", False),
-                    "daily_stop_reason": getattr(self.ctx, "daily_stop_reason", ""),
                 }
             )
 
@@ -2925,6 +2295,7 @@ def save_live_state(ctx: EngineContext) -> None:
         "pending_round": ctx.pending_round,
         "pending_index": ctx.pending_index,
         "pending_locked_window": ctx.pending_locked_window,
+        "pending_confidence": ctx.pending_confidence,
         "pending_confidence": getattr(ctx, "pending_confidence", 0.0),
         "pending_target_round": getattr(ctx, "pending_target_round", 0),
         "trade_state": ctx.trade_state,
@@ -2943,12 +2314,6 @@ def save_live_state(ctx: EngineContext) -> None:
         "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
-        "daily_peak_profit": getattr(ctx, "daily_peak_profit", 0.0),
-        "daily_lock_confirm_window": getattr(ctx, "daily_lock_confirm_window", None),
-        "daily_lock_confirm_count": getattr(ctx, "daily_lock_confirm_count", 0),
-        "daily_guard_reason": getattr(ctx, "daily_guard_reason", ""),
-        "daily_stop_active": getattr(ctx, "daily_stop_active", False),
-        "daily_stop_reason": getattr(ctx, "daily_stop_reason", ""),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2975,8 +2340,6 @@ def save_live_state(ctx: EngineContext) -> None:
         },
         "state_version": getattr(ctx, "state_version", "V56_TRUE_LIVE_DETERMINISTIC"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
-        "data_signature": getattr(ctx, "data_signature", ""),
-        "data_length": getattr(ctx, "data_length", 0),
     }
 
     # Try Google Sheet backend first. If unavailable, fallback to local JSON.
@@ -3039,12 +2402,6 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
-    ctx.daily_peak_profit = float(data.get("daily_peak_profit", 0.0))
-    ctx.daily_lock_confirm_window = data.get("daily_lock_confirm_window", None)
-    ctx.daily_lock_confirm_count = int(data.get("daily_lock_confirm_count", 0))
-    ctx.daily_guard_reason = str(data.get("daily_guard_reason", ""))
-    ctx.daily_stop_active = bool(data.get("daily_stop_active", False))
-    ctx.daily_stop_reason = str(data.get("daily_stop_reason", ""))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -3089,8 +2446,6 @@ def load_live_state() -> EngineContext:
         ctx.blacklisted_windows[kk] = int(v)
 
     ctx.hybrid_initialized = bool(data.get("hybrid_initialized", False))
-    ctx.data_signature = str(data.get("data_signature", ""))
-    ctx.data_length = int(data.get("data_length", ctx.last_length))
 
     return ensure_ctx_fields(ctx)
 
@@ -3149,10 +2504,6 @@ class EngineManager:
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
-        # IMPORTANT: detect/reset the daily dataset BEFORE creating any engine.
-        # All engines must receive the same fresh ctx/window_state object.
-        self.maybe_auto_reset_for_new_dataset()
-
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
         self.signal_engine = SignalEngine(self.ctx, self.window_engine)
@@ -3168,78 +2519,6 @@ class EngineManager:
 
         if getattr(self.ctx, "hybrid_initialized", False):
             self.rebuild_windows_to_last_length()
-
-
-    def reset_context_for_new_dataset(self, reason: str) -> None:
-        """Reset the live state for a newly replaced daily Sheet dataset.
-
-        This is intentionally done in-place during EngineManager.__init__, before
-        WindowEngine/TradeEngine/SignalEngine are created. It avoids the previous
-        bug where engines still referenced the old ctx/window_state after reset,
-        and avoids rerun loops if a Google state backend cannot be cleared.
-        The fresh state is persisted normally after replay.
-        """
-        old_ctx = self.ctx
-
-        self.ctx = ensure_ctx_fields(EngineContext())
-        self.ctx.protection_reason = f"AUTO_RESET_{reason}"
-        self.ctx.open_reason = "DAILY_DATASET_RESET"
-
-        self.window_state = {
-            w: WindowRecord()
-            for w in WINDOWS
-        }
-
-        st.session_state.v50_true_live_ctx = self.ctx
-        st.session_state.v50_true_live_window_state = self.window_state
-
-        # Best-effort cleanup of old persistent state. The current in-memory
-        # state is authoritative for this run even if the backend cleanup fails.
-        try:
-            delete_state_from_gsheet()
-        except Exception:
-            pass
-
-        try:
-            if os.path.exists(STATE_FILE):
-                os.remove(STATE_FILE)
-        except Exception:
-            pass
-
-    def maybe_auto_reset_for_new_dataset(self) -> None:
-        """Detect daily Sheet reset/replacement before any replay/live step.
-
-        Rules:
-        1) If current Sheet has fewer valid numbers than saved last_length -> reset.
-        2) If the prefix up to saved last_length changed -> reset.
-           This catches replacing/copying a new day with the same or larger row count.
-        3) If no saved signature exists for an already initialized state, create it.
-        """
-        current_length = len(self.numbers)
-        saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
-        saved_signature = str(getattr(self.ctx, "data_signature", "") or "")
-
-        if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
-            return
-
-        if current_length < saved_length:
-            self.reset_context_for_new_dataset(
-                f"SHEET_LENGTH_DROPPED_{saved_length}_TO_{current_length}"
-            )
-            return
-
-        current_prefix_signature = make_numbers_signature(self.numbers, saved_length)
-
-        if saved_signature:
-            if current_prefix_signature != saved_signature:
-                self.reset_context_for_new_dataset("SHEET_PREFIX_CHANGED")
-                return
-        else:
-            # Backward compatibility for old state files.
-            self.ctx.data_signature = current_prefix_signature
-            self.ctx.data_length = saved_length
-            save_live_state(self.ctx)
-
 
     def rebuild_windows_to_last_length(self) -> None:
         # Window state is derived from number history, so rebuild it safely on every app start.
@@ -3293,8 +2572,6 @@ class EngineManager:
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
-        self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
-        self.ctx.data_length = self.ctx.last_length
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
@@ -3379,19 +2656,13 @@ class EngineManager:
         self.dashboard.render_profit_config()
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
-        self.dashboard.render_relock_decision_debug()
         self.dashboard.render_real_stats_summary()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
 
-        st.caption(f"LIVE FRAGMENT REFRESH = {datetime.now().strftime("%H:%M:%S")} | SHEET ROUND = {self.round_id}")
-
-        st.info("NEW-TRADE GUARDS RUN BEFORE READY — pending trades always settle on the next new round.")
-
         st.caption(
             f"""
 V56 TRUE LIVE DETERMINISTIC
-Test D Smart Daily Guard
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
@@ -3421,31 +2692,22 @@ Regime : {signal.regime}
 
 
 # ============================================================
-# MAIN - TRUE LIVE FRAGMENT
+# MAIN
 # ============================================================
 
-# Native Streamlit fragment is used instead of browser iframe JS.
-# This guarantees the Python live engine executes again and reloads the
-# Google Sheet without keeping a server-side sleep loop alive.
-#
-# If the deployed Streamlit version is too old for st.fragment, the app
-# shows a clear error instead of silently appearing frozen.
+manager = EngineManager()
 
-if not hasattr(st, "fragment"):
-    st.error(
-        "This V56 Live build requires a recent Streamlit version with "
-        "st.fragment. Please upgrade Streamlit."
-    )
-else:
-    @st.fragment(run_every=5)
-    def live_engine_loop():
-        manager = EngineManager()
-        try:
-            manager.run()
-        except Exception as e:
-            st.error(f"Engine Error: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+try:
+    manager.run()
+except Exception as e:
+    st.error(f"Engine Error: {e}")
+    import traceback
+    st.code(traceback.format_exc())
 
-    live_engine_loop()
 
+# ============================================================
+# AUTO REFRESH
+# ============================================================
+
+time.sleep(5)
+st.rerun()
