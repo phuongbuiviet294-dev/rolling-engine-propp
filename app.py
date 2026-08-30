@@ -22,7 +22,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 True Live Deterministic",
+    page_title="V58.2 Robust Walk-Forward Live",
     layout="wide"
 )
 
@@ -89,15 +89,15 @@ LIVE_RELOCK_LOSS_STREAK = 1
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
-LEADER_MIN_LIVE_WR20 = 0.38
+LEADER_MIN_LIVE_WR20 = 0.34
 LEADER_MIN_LIVE_PROFIT20 = 0.0
 CANDIDATE_MIN_LIVE_PROFIT20 = 0.0
-CANDIDATE_MIN_LIVE_WR20 = 0.38
+CANDIDATE_MIN_LIVE_WR20 = 0.34
 CANDIDATE_MAX_LIVE_LOSS_STREAK = 1
 
 # Real trade-aware relock.
 # After a window has real trades, relock uses REAL performance first.
-REAL_MIN_TRADE_COUNT_FOR_LOCK = 1
+REAL_MIN_TRADE_COUNT_FOR_LOCK = 3
 REAL_MIN_PROFIT_FOR_LOCK = 0.0
 REAL_MAX_LOSS_STREAK_FOR_LOCK = 0
 REAL_MIN_WR_FOR_LOCK = 0.35
@@ -106,7 +106,7 @@ REAL_MIN_WR_FOR_LOCK = 0.35
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.38
+FALLBACK_MIN_WR20 = 0.34
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.667
@@ -114,7 +114,7 @@ LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 12
+WINDOW_COOLDOWN_ROUNDS = 6
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -3.0
@@ -134,14 +134,14 @@ SAFE_MODE_ROUNDS = 3
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
 MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
-MIN_SHADOW_WR20_FOR_TEST = 0.38
+MIN_SHADOW_WR20_FOR_TEST = 0.34
 MAX_REAL_NEGATIVE_SOFT = -2.0
 WINDOW_SELECTION_MODE = "ucb"
 UCB_EXPLORATION_C = 0.45
 
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 4
-BLACKLIST_DURATION_ROUNDS = 20
+BLACKLIST_DURATION_ROUNDS = 8
 MIN_TRADES_FOR_PROTECTION = 8
 
 # Optional local CSV replay input. If set, load_numbers() reads this file instead of Google Sheet.
@@ -228,6 +228,7 @@ class SignalRecord:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
+    data_signature: str = ""
 
 
 
@@ -278,7 +279,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V56_TRUE_LIVE_DETERMINISTIC"
+    state_version: str = "V58_2_ROBUST_WALK_FORWARD"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -300,6 +301,7 @@ class EngineContext:
     last_risk_trigger_trade_count: int = -1
     blacklisted_windows: dict = field(default_factory=dict)
     last_decision_confidence: float = 0.0
+    data_signature: str = ""
 
 
 
@@ -329,7 +331,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V58_STABLE_WALK_FORWARD"
+    ctx.state_version = "V58_2_ROBUST_WALK_FORWARD"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -473,6 +475,14 @@ def build_groups(numbers: list[int]) -> list[int]:
         group_of(x)
         for x in numbers
     ]
+
+
+def make_numbers_signature(numbers: list[int], limit: Optional[int] = None) -> str:
+    """Stable signature of the current dataset prefix for daily Sheet resets."""
+    import hashlib
+    sample = numbers if limit is None else numbers[:max(0, int(limit))]
+    payload = f"{len(sample)}|" + ",".join(str(int(x)) for x in sample)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
@@ -830,17 +840,24 @@ class SignalEngine:
         return False
 
     def shadow_candidate_score(self, obj: WindowRecord) -> float:
-        hits20 = list(obj.hit_history)[-20:]
-        wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+        """Conservative expected-value score; shrinks short samples toward 0.5."""
+        h20 = list(obj.live_hit_history)[-20:]
+        h50 = list(obj.live_hit_history)[-50:]
+        p20 = (sum(h20) + 4.0) / (len(h20) + 8.0) if h20 else 0.5
+        p50 = (sum(h50) + 4.0) / (len(h50) + 8.0) if h50 else 0.5
+        ev20 = 3.5 * p20 - 1.0
+        ev50 = 3.5 * p50 - 1.0
+
+        # Real trades are blended only after enough observations exist.
+        # This avoids one lucky/unlucky real trade dominating selection.
         return round(
-            1.20 * obj.live_profit20
-            + 8.00 * obj.live_wr20
-            + 0.80 * obj.profit20
-            + 3.00 * wr20
-            - 2.00 * int(obj.live_loss_streak)
-            - 1.50 * int(obj.loss_streak),
+            0.70 * ev20
+            + 0.30 * ev50
+            - 0.20 * min(int(obj.live_loss_streak), 3)
+            - 0.10 * min(int(obj.loss_streak), 3),
             3
         )
+
 
     def hybrid_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
         stat = self.get_real_stats(window_id)
@@ -871,32 +888,26 @@ class SignalEngine:
         return round(score, 3)
 
     def real_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
-        stat = self.get_real_stats(window_id)
-        score = (
-            4.00 * stat["profit"]
-            + 6.00 * stat["wr"]
-            - 3.00 * stat["loss_streak"]
-            + 0.30 * obj.live_profit20
-            + 0.10 * obj.profit20
-        )
-        return round(score, 3)
+        return self.ucb_candidate_score(window_id, obj)
+
 
     def candidate_score(self, obj: WindowRecord) -> float:
         return self.shadow_candidate_score(obj)
 
     def ucb_candidate_score(self, window_id: int, obj: WindowRecord) -> float:
+        """Compatibility label: V58.2 uses conservative walk-forward EV, not UCB optimism."""
         stat = self.get_real_stats(window_id)
-        total_real_trades = sum(int(s.get("trade_count", 0)) for s in self.ctx.window_real_stats.values())
-        n = max(1, int(stat.get("trade_count", 0)))
+        base = self.shadow_candidate_score(obj)
+        trades = int(stat.get("trade_count", 0))
+        if trades >= 3:
+            wins = int(stat.get("win", 0))
+            # Jeffreys/Laplace-style shrinkage toward 0.5.
+            p_real = (wins + 2.0) / (trades + 4.0)
+            ev_real = 3.5 * p_real - 1.0
+            weight = min(0.50, trades / 10.0)
+            base = (1.0 - weight) * base + weight * ev_real
+        return round(base, 3)
 
-        real_mean = float(stat.get("profit", 0.0)) / n if stat.get("trade_count", 0) else 0.0
-        shadow_hits = list(obj.live_hit_history)[-20:]
-        shadow_wr = round(sum(shadow_hits) / len(shadow_hits), 3) if shadow_hits else obj.live_wr20
-        shadow_mean = (shadow_wr * WIN_GROUP) - ((1.0 - shadow_wr) * abs(LOSS_GROUP))
-
-        optimism = UCB_EXPLORATION_C * math.sqrt(math.log(max(total_real_trades + len(WINDOWS), 2)) / n)
-        penalty = 0.25 * int(obj.live_loss_streak) + 0.15 * int(obj.loss_streak)
-        return round(0.70 * real_mean + 0.30 * shadow_mean + optimism - penalty, 3)
 
     def selection_score(self, window_id: int, obj: WindowRecord) -> float:
         if WINDOW_SELECTION_MODE.lower() == "ucb":
@@ -1852,8 +1863,6 @@ CONF = {confidence_score:.2f}
                     "SAFE_DRAWDOWN_FROM_PEAK": SAFE_DRAWDOWN_FROM_PEAK,
                     "SAFE_MODE_ROUNDS": SAFE_MODE_ROUNDS,
                     "RISK_PAUSE_ROUNDS": RISK_PAUSE_ROUNDS,
-                    "BLACKLIST_DURATION_ROUNDS": BLACKLIST_DURATION_ROUNDS,
-                    "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
                 }
@@ -2350,6 +2359,7 @@ def save_live_state(ctx: EngineContext) -> None:
         "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
         "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
+        "data_signature": getattr(ctx, "data_signature", ""),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2438,6 +2448,7 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
+    ctx.data_signature = str(data.get("data_signature", "") or "")
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2546,9 +2557,15 @@ class EngineManager:
         # The Sheet is intentionally reset for a new day. If its row count
         # becomes smaller than the persisted cursor, the old cursor cannot be
         # used for live incremental processing.
+        saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
+        current_signature = make_numbers_signature(self.numbers, saved_length) if saved_length > 0 else ""
+        saved_signature = str(getattr(self.ctx, "data_signature", "") or "")
+        length_dropped = len(self.groups) < int(getattr(self.ctx, "last_length", 0))
+        prefix_changed = bool(saved_signature) and current_signature != saved_signature
+
         self.dataset_reset_detected = (
             getattr(self.ctx, "hybrid_initialized", False)
-            and len(self.groups) < int(getattr(self.ctx, "last_length", 0))
+            and (length_dropped or prefix_changed)
         )
         if self.dataset_reset_detected:
             # A pending trade from the previous dataset has no valid target
@@ -2566,7 +2583,20 @@ class EngineManager:
             self.ctx.last_window_round = -1
             self.ctx.last_signal_round = -1
             self.ctx.locked_window = None
-            self.ctx.lock_reason = "DATASET_RESET_NEW_DAY"
+            self.ctx.lock_reason = "DATASET_RESET_NEW_DATASET"
+            self.ctx.trade_history = []
+            self.ctx.equity_curve = []
+            self.ctx.signal_history.clear()
+            self.ctx.signal_flip_history.clear()
+            self.ctx.leader_history.clear()
+            self.ctx.window_real_stats = {}
+            self.ctx.cooled_windows = {}
+            self.ctx.blacklisted_windows = {}
+            self.ctx.peak_equity = 0.0
+            self.ctx.last_safe_trigger_peak = 0.0
+            self.ctx.safe_mode_counter = 0
+            self.ctx.risk_pause_counter = 0
+            self.ctx.last_risk_trigger_trade_count = -1
 
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
@@ -2641,6 +2671,7 @@ class EngineManager:
             self.trade_engine.open_trade(signal, idx, confidence)
 
         self.ctx.last_length = len(self.groups)
+        self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
         self.ctx.hybrid_initialized = True
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
@@ -2683,6 +2714,7 @@ class EngineManager:
 
             self.trade_engine.open_trade(signal, idx, confidence)
 
+            self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -2743,7 +2775,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V56 TRUE LIVE DETERMINISTIC
+V58.2 ROBUST WALK-FORWARD LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
