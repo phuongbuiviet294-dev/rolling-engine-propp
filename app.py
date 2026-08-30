@@ -1255,9 +1255,9 @@ class SignalEngine:
                 preferred = None
 
         source_items = (
-            [(w, self.windows.get(w)) for w in preferred]
+            [(w, self.window_engine.state.get(w)) for w in preferred]
             if preferred
-            else list(self.windows.items())
+            else list(self.window_engine.state.items())
         )
 
         for w, obj in source_items:
@@ -1286,7 +1286,7 @@ class SignalEngine:
         # We do NOT force a weak window merely to avoid WAIT.
         all_candidates = [
             (w, obj)
-            for w, obj in self.windows.items()
+            for w, obj in self.window_engine.state.items()
             if obj.next_group is not None
         ]
         if preferred:
@@ -1305,7 +1305,7 @@ class SignalEngine:
         # not known-bad. This gives the exceptional candidate a real baseline.
         alternatives = [
             (w, obj)
-            for w, obj in self.windows.items()
+            for w, obj in self.window_engine.state.items()
             if w != best_w
             and obj.next_group is not None
             and not self.known_bad_window(w)
