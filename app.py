@@ -1614,6 +1614,58 @@ class TradeEngine:
         equity += profit
         self.ctx.equity_curve.append(round(equity, 2))
 
+    def smart_daily_guard(self) -> tuple[bool, str]:
+        """Return whether opening a NEW trade should be blocked."""
+        if not TEST_D_SMART_DAILY_GUARD:
+            return False, ""
+
+        total_profit = float(self.get_total_profit())
+        loss_streak = int(self.get_loss_streak())
+        settled = [x for x in self.ctx.trade_history if x.hit is not None]
+        trade_count = len(settled)
+
+        peak = max(
+            [0.0] + [float(x) for x in getattr(self.ctx, "equity_curve", [])]
+        )
+        pullback = total_profit - peak
+
+        if ENABLE_DAILY_STOP and total_profit <= DAY_HARD_STOP:
+            return True, "DAY_HARD_STOP"
+
+        if ENABLE_DAILY_STOP and loss_streak >= MAX_DAILY_LOSSES:
+            return True, "MAX_DAILY_LOSSES"
+
+        if (
+            ENABLE_EARLY_BAD_DAY
+            and trade_count >= EARLY_BAD_DAY_CHECK_TRADES
+            and loss_streak >= EARLY_BAD_DAY_MAX_LOSSES
+            and total_profit <= EARLY_BAD_DAY_PROFIT_LIMIT
+        ):
+            return True, "EARLY_BAD_DAY"
+
+        if (
+            ENABLE_DAILY_STOP
+            and trade_count >= EARLY_BAD_DAY_CHECK_TRADES
+            and total_profit <= DAY_SOFT_STOP
+        ):
+            return True, "DAY_SOFT_STOP"
+
+        if (
+            ENABLE_NEGATIVE_QUOTA
+            and total_profit < 0
+            and trade_count >= MAX_DAILY_TRADES_WHEN_NEGATIVE
+        ):
+            return True, "NEGATIVE_DAY_TRADE_QUOTA"
+
+        if (
+            ENABLE_PROFIT_TRAIL
+            and peak >= DAILY_TRAIL_START
+            and pullback <= -DAILY_TRAIL_GIVEBACK
+        ):
+            return True, "DAILY_PROFIT_TRAIL"
+
+        return False, ""
+
 
     def health_filter(self, signal: SignalRecord) -> tuple[bool, str]:
         if not ENABLE_HEALTH_FILTER:
@@ -1672,6 +1724,14 @@ class TradeEngine:
             return
         self.ctx.daily_guard_reason = ""
 
+        health_ok, health_reason = self.health_filter(signal)
+        if not health_ok:
+            self.ctx.daily_guard_reason = health_reason
+            self.ctx.protection_reason = health_reason
+            self.ctx.open_reason = health_reason
+            return
+
+
         # Test E health filter: only reject a NEW trade; pending trades settle elsewhere.
         if ENABLE_HEALTH_FILTER:
             if float(getattr(signal, "stability", 0.0)) < HEALTH_MIN_STABILITY:
@@ -1693,15 +1753,6 @@ class TradeEngine:
                     self.ctx.protection_reason = "HEALTH_HIGH_FLIPRATE"
                     self.ctx.open_reason = "HEALTH_HIGH_FLIPRATE"
                     return
-        health_ok, health_reason = self.health_filter(
-            self.signal_engine.build_signal_snapshot(self.ctx.last_length)
-        )
-        if not health_ok:
-            self.ctx.daily_guard_reason = health_reason
-            self.ctx.protection_reason = health_reason
-            self.ctx.open_reason = health_reason
-            return
-
         # Avoid over-trading: after a settled trade, wait TRADE_GAP_ROUNDS
         # before opening a new one.
         if (
