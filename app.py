@@ -1239,7 +1239,7 @@ class SignalEngine:
             "rows": rows,
         }
 
-    def choose_relock_candidate(self) -> Optional[Tuple[int, WindowRecord, str]]:
+    def choose_relock_candidate(self, top_rows=None) -> Optional[Tuple[int, WindowRecord, str]]:
         """Choose the best lock candidate while avoiding cooldown deadlock.
 
         First pass: normal eligible candidates.
@@ -1247,12 +1247,24 @@ class SignalEngine:
         only when it is materially stronger than the best eligible alternative.
         """
         candidates = []
-        for w, obj in self.windows.items():
-            if obj.next_group is None:
+        preferred = None
+        if top_rows:
+            try:
+                preferred = [int(row[0]) for row in top_rows]
+            except Exception:
+                preferred = None
+
+        source_items = (
+            [(w, self.windows.get(w)) for w in preferred]
+            if preferred
+            else list(self.windows.items())
+        )
+
+        for w, obj in source_items:
+            if obj is None or obj.next_group is None:
                 continue
             if self.known_bad_window(w):
                 continue
-
             candidates.append((w, obj))
 
         def rank_key(item):
@@ -1277,6 +1289,11 @@ class SignalEngine:
             for w, obj in self.windows.items()
             if obj.next_group is not None
         ]
+        if preferred:
+            preferred_set = set(preferred)
+            all_candidates.sort(
+                key=lambda x: (0 if x[0] in preferred_set else 1, -float(getattr(x[1], "score", -999.0)))
+            )
         all_candidates.sort(key=rank_key, reverse=True)
 
         if not all_candidates:
