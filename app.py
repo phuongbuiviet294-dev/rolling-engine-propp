@@ -202,6 +202,15 @@ V5_MIN_PROFIT20 = 0.0
 V5_MIN_WR20 = 0.35
 V5_MAX_HIST_LS = 2
 
+# ============================================================
+# V6 - TOP3 RELATIVE RECOVERY
+# ============================================================
+V6_TOP3_RELATIVE_RECOVERY = True
+V6_SCORE_MARGIN = 2.0
+V6_MIN_PROFIT20 = 0.0
+V6_MIN_WR20 = 0.35
+V6_MAX_HIST_LS = 2
+
 HEALTH_MIN_SHADOW_WR20 = 0.38
 HEALTH_MIN_SHADOW_PROFIT20 = 0.0
 HEALTH_MAX_FLIPRATE = 0.65
@@ -1243,85 +1252,109 @@ class SignalEngine:
             "rows": rows,
         }
 
-    def choose_relock_candidate(self, top_rows=None) -> Optional[Tuple[int, WindowRecord, str]]:
-        """Choose the best lock candidate while avoiding cooldown deadlock.
+    def choose_relock_candidate(
+        self, top_rows=None
+    ) -> Optional[Tuple[int, WindowRecord, str]]:
+        """V6: choose among Top-3 and recover a dominant cooled leader.
 
-        First pass: normal eligible candidates.
-        Second pass: if the best candidates are cooled, allow a cooled window
-        only when it is materially stronger than the best eligible alternative.
+        Normal selection is always preferred. If the strongest Top-3 window is
+        cooled/blocked, compare it directly against the best currently usable
+        alternative. A cooled leader may recover only when its Score dominates
+        by V6_SCORE_MARGIN and recent safety floors are satisfied.
         """
-        candidates = []
-        preferred = None
+        state = self.window_engine.state
+
+        preferred = []
         if top_rows:
-            try:
-                preferred = [int(row[0]) for row in top_rows]
-            except Exception:
-                preferred = None
+            for row in top_rows:
+                try:
+                    w = int(row[0])
+                except Exception:
+                    continue
+                if w not in preferred:
+                    preferred.append(w)
 
-        source_items = (
-            [(w, self.window_engine.state.get(w)) for w in preferred]
-            if preferred
-            else list(self.window_engine.state.items())
-        )
-
-        for w, obj in source_items:
-            if obj is None or obj.next_group is None:
-                continue
-            if self.known_bad_window(w):
-                continue
-            candidates.append((w, obj))
-
-        def rank_key(item):
-            w, obj = item
+        def key(item):
+            _, obj = item
             return (
                 float(getattr(obj, "score", -999.0)),
                 float(getattr(obj, "profit20", -999.0)),
                 float(getattr(obj, "live_wr20", 0.0)),
             )
 
-        candidates.sort(key=rank_key, reverse=True)
-
-        # Normal route.
-        if candidates:
-            w, obj = candidates[0]
-            return w, obj, "NORMAL_ELIGIBLE"
-
-        # No normal candidate. Build the best non-bad baseline even if cooled.
-        # We do NOT force a weak window merely to avoid WAIT.
-        all_candidates = [
-            (w, obj)
-            for w, obj in self.window_engine.state.items()
-            if obj.next_group is not None
+        # Top-3 is the primary pool. If unavailable, use all windows.
+        pool_ids = preferred if preferred else list(state.keys())
+        pool = [
+            (w, state.get(w))
+            for w in pool_ids
+            if state.get(w) is not None
+            and state[w].next_group is not None
         ]
-        if preferred:
-            preferred_set = set(preferred)
-            all_candidates.sort(
-                key=lambda x: (0 if x[0] in preferred_set else 1, -float(getattr(x[1], "score", -999.0)))
-            )
-        all_candidates.sort(key=rank_key, reverse=True)
+        pool.sort(key=key, reverse=True)
 
-        if not all_candidates:
+        if not pool:
             return None, None, "NO_VALID_CANDIDATE"
 
-        best_w, best_obj = all_candidates[0]
-
-        # Find the strongest alternative that is not the same window and is
-        # not known-bad. This gives the exceptional candidate a real baseline.
-        alternatives = [
+        # Normal candidates first.
+        normal = [
             (w, obj)
-            for w, obj in self.window_engine.state.items()
-            if w != best_w
-            and obj.next_group is not None
-            and not self.known_bad_window(w)
+            for w, obj in pool
+            if not self.known_bad_window(w)
         ]
-        alternatives.sort(key=rank_key, reverse=True)
-        baseline = alternatives[0][1] if alternatives else None
+        normal.sort(key=key, reverse=True)
 
-        if self.is_exceptional_candidate(best_w, best_obj, baseline):
-            return best_w, best_obj, "RELATIVE_EXCEPTIONAL_COOLDOWN"
+        if normal:
+            best_normal_w, best_normal_obj = normal[0]
 
-        # Last resort: do not fabricate a trade. WAIT is safer than selecting
-        # a weak window simply because it is available.
+            # If Top-1 is cooled but a weaker normal candidate is being used,
+            # give Top-1 a direct relative-recovery check.
+            top_w, top_obj = pool[0]
+            if (
+                V6_TOP3_RELATIVE_RECOVERY
+                and top_w != best_normal_w
+                and self.known_bad_window(top_w)
+            ):
+                score_gap = (
+                    float(getattr(top_obj, "score", -999.0))
+                    - float(getattr(best_normal_obj, "score", -999.0))
+                )
+                profit20 = float(getattr(top_obj, "profit20", -999.0))
+                wr20 = float(getattr(top_obj, "live_wr20", 0.0))
+                hist_ls = int(getattr(top_obj, "loss_streak", 999))
+
+                if (
+                    score_gap >= V6_SCORE_MARGIN
+                    and profit20 >= V6_MIN_PROFIT20
+                    and wr20 >= V6_MIN_WR20
+                    and hist_ls <= V6_MAX_HIST_LS
+                ):
+                    return top_w, top_obj, "V6_TOP1_RELATIVE_RECOVERY"
+
+            return best_normal_w, best_normal_obj, "NORMAL_TOP3"
+
+        # No normal Top-3 candidate. Compare Top-1 against the best alternative
+        # directly; never fabricate a trade if it fails the safety floors.
+        top_w, top_obj = pool[0]
+        alternatives = pool[1:]
+
+        if V6_TOP3_RELATIVE_RECOVERY and alternatives:
+            base_w, base_obj = alternatives[0]
+            score_gap = (
+                float(getattr(top_obj, "score", -999.0))
+                - float(getattr(base_obj, "score", -999.0))
+            )
+            profit20 = float(getattr(top_obj, "profit20", -999.0))
+            wr20 = float(getattr(top_obj, "live_wr20", 0.0))
+            hist_ls = int(getattr(top_obj, "loss_streak", 999))
+
+            if (
+                score_gap >= V6_SCORE_MARGIN
+                and profit20 >= V6_MIN_PROFIT20
+                and wr20 >= V6_MIN_WR20
+                and hist_ls <= V6_MAX_HIST_LS
+            ):
+                return top_w, top_obj, "V6_TOP1_RELATIVE_RECOVERY"
+
         return None, None, "NO_VALID_CANDIDATE"
 
     def build_signal_snapshot(self, round_id: int) -> SignalRecord:
@@ -2339,6 +2372,11 @@ CONF = {confidence_score:.2f}
                     "ENABLE_LOCK_CONFIRM": ENABLE_LOCK_CONFIRM,
                     "EXCEPTIONAL_CANDIDATE_OVERRIDE": EXCEPTIONAL_CANDIDATE_OVERRIDE,
                     "V5_SCORE_DOMINANCE_OVERRIDE": V5_SCORE_DOMINANCE_OVERRIDE,
+                    "V6_TOP3_RELATIVE_RECOVERY": V6_TOP3_RELATIVE_RECOVERY,
+                    "V6_SCORE_MARGIN": V6_SCORE_MARGIN,
+                    "V6_MIN_PROFIT20": V6_MIN_PROFIT20,
+                    "V6_MIN_WR20": V6_MIN_WR20,
+                    "V6_MAX_HIST_LS": V6_MAX_HIST_LS,
                     "V5_SCORE_DOMINANCE_MARGIN": V5_SCORE_DOMINANCE_MARGIN,
                     "V5_MIN_PROFIT20": V5_MIN_PROFIT20,
                     "V5_MIN_WR20": V5_MIN_WR20,
