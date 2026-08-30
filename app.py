@@ -193,6 +193,15 @@ EXCEPTIONAL_PROFIT20_MARGIN = 2.0
 EXCEPTIONAL_WR20_MARGIN = 0.05
 EXCEPTIONAL_MAX_HIST_LS = 1
 
+# ============================================================
+# V5 - SCORE DOMINANCE COOLDOWN RECOVERY
+# ============================================================
+V5_SCORE_DOMINANCE_OVERRIDE = True
+V5_SCORE_DOMINANCE_MARGIN = 2.0
+V5_MIN_PROFIT20 = 0.0
+V5_MIN_WR20 = 0.35
+V5_MAX_HIST_LS = 2
+
 HEALTH_MIN_SHADOW_WR20 = 0.38
 HEALTH_MIN_SHADOW_PROFIT20 = 0.0
 HEALTH_MAX_FLIPRATE = 0.65
@@ -1015,15 +1024,12 @@ class SignalEngine:
         obj: WindowRecord,
         baseline: Optional[WindowRecord] = None,
     ) -> bool:
-        """Allow a cooled window back only when it materially beats the baseline.
+        """V5: allow a cooled window back when score dominance is clear.
 
-        Baseline is the best currently-eligible alternative. The comparison is
-        intentionally relative so it adapts to the day's score distribution.
+        Score is the primary ranking signal. Profit20/WR20/loss-streak are
+        safety floors so a high score alone cannot force a bad window back.
         """
-        if not EXCEPTIONAL_CANDIDATE_OVERRIDE:
-            return False
-
-        if baseline is None:
+        if not V5_SCORE_DOMINANCE_OVERRIDE or baseline is None:
             return False
 
         try:
@@ -1033,16 +1039,14 @@ class SignalEngine:
             hist_ls = int(getattr(obj, "loss_streak", 999))
 
             base_score = float(getattr(baseline, "score", -999.0))
-            base_profit20 = float(getattr(baseline, "profit20", -999.0))
-            base_wr20 = float(getattr(baseline, "live_wr20", 0.0))
         except Exception:
             return False
 
         return (
-            score >= base_score + EXCEPTIONAL_SCORE_MARGIN
-            and profit20 >= base_profit20 + EXCEPTIONAL_PROFIT20_MARGIN
-            and wr20 >= base_wr20 + EXCEPTIONAL_WR20_MARGIN
-            and hist_ls <= EXCEPTIONAL_MAX_HIST_LS
+            score >= base_score + V5_SCORE_DOMINANCE_MARGIN
+            and profit20 >= V5_MIN_PROFIT20
+            and wr20 >= V5_MIN_WR20
+            and hist_ls <= V5_MAX_HIST_LS
         )
 
 
@@ -2334,6 +2338,11 @@ CONF = {confidence_score:.2f}
                     "ENABLE_TOP3_LOCK_POOL": ENABLE_TOP3_LOCK_POOL,
                     "ENABLE_LOCK_CONFIRM": ENABLE_LOCK_CONFIRM,
                     "EXCEPTIONAL_CANDIDATE_OVERRIDE": EXCEPTIONAL_CANDIDATE_OVERRIDE,
+                    "V5_SCORE_DOMINANCE_OVERRIDE": V5_SCORE_DOMINANCE_OVERRIDE,
+                    "V5_SCORE_DOMINANCE_MARGIN": V5_SCORE_DOMINANCE_MARGIN,
+                    "V5_MIN_PROFIT20": V5_MIN_PROFIT20,
+                    "V5_MIN_WR20": V5_MIN_WR20,
+                    "V5_MAX_HIST_LS": V5_MAX_HIST_LS,
                     "EXCEPTIONAL_SCORE_MARGIN": EXCEPTIONAL_SCORE_MARGIN,
                     "EXCEPTIONAL_PROFIT20_MARGIN": EXCEPTIONAL_PROFIT20_MARGIN,
                     "EXCEPTIONAL_WR20_MARGIN": EXCEPTIONAL_WR20_MARGIN,
