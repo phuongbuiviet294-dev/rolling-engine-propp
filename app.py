@@ -1693,51 +1693,13 @@ class TradeEngine:
     def open_trade(self, signal: SignalRecord, round_id: int, confidence_score: float = 0.0) -> None:
         self.ctx.open_reason = ""
 
-        if ENABLE_LOCK_CONFIRM:
-            candidate_lock = getattr(signal, "locked_window", None)
-            current_lock = getattr(self.ctx, "locked_window", None)
-            if candidate_lock is not None and candidate_lock != current_lock:
-                if getattr(self.ctx, "daily_lock_confirm_window", None) == candidate_lock:
-                    self.ctx.daily_lock_confirm_count = int(getattr(self.ctx, "daily_lock_confirm_count", 0)) + 1
-                else:
-                    self.ctx.daily_lock_confirm_window = candidate_lock
-                    self.ctx.daily_lock_confirm_count = 1
-
-                if self.ctx.daily_lock_confirm_count < LOCK_CONFIRM_ROUNDS:
-                    self.ctx.protection_reason = "LOCK_CONFIRM_PENDING"
-                    self.ctx.open_reason = "SIGNAL_WAIT"
-                    return
-
-                self.ctx.daily_lock_confirm_window = None
-                self.ctx.daily_lock_confirm_count = 0
-
         if round_id < LIVE_START_ROUND:
             self.ctx.open_reason = "BEFORE_LIVE_START"
             return
 
-        # TEST D: smart daily protection. Only NEW trade is blocked.
-        blocked, guard_reason = self.smart_daily_guard()
-        if blocked:
-            self.ctx.daily_guard_reason = guard_reason
-            self.ctx.protection_reason = guard_reason
-            self.ctx.open_reason = guard_reason
-            return
-        self.ctx.daily_guard_reason = ""
-
-        health_ok, health_reason = self.health_filter(signal)
-        if not health_ok:
-            self.ctx.daily_guard_reason = health_reason
-            self.ctx.protection_reason = health_reason
-            self.ctx.open_reason = health_reason
-            return
 
 
-        # Test E health filter: only reject a NEW trade; pending trades settle elsewhere.
-        if ENABLE_HEALTH_FILTER:
-            if float(getattr(signal, "stability", 0.0)) < HEALTH_MIN_STABILITY:
-                self.ctx.protection_reason = "HEALTH_LOW_STABILITY"
-                self.ctx.open_reason = "HEALTH_LOW_STABILITY"
-                return
+
             if float(getattr(signal, "consensus", 0.0)) < HEALTH_MIN_CONSENSUS:
                 self.ctx.protection_reason = "HEALTH_LOW_CONSENSUS"
                 self.ctx.open_reason = "HEALTH_LOW_CONSENSUS"
@@ -2114,6 +2076,24 @@ class ProtectionEngine:
             return "WAIT"
 
         ensure_ctx_fields(self.ctx)
+
+        # TEST_E_GUARD_GATE:
+        # All NEW-trade guards are evaluated BEFORE the signal is marked READY.
+        # This guarantees UI signal == actual trade state. Pending trades are
+        # settled separately before this method is reached on the next round.
+        if TEST_D_SMART_DAILY_GUARD:
+            blocked, guard_reason = self.trade_engine.smart_daily_guard()
+            if blocked:
+                self.ctx.daily_guard_reason = guard_reason
+                self.ctx.protection_reason = guard_reason
+                return "WAIT"
+
+        if ENABLE_HEALTH_FILTER:
+            health_ok, health_reason = self.trade_engine.health_filter(signal)
+            if not health_ok:
+                self.ctx.daily_guard_reason = health_reason
+                self.ctx.protection_reason = health_reason
+                return "WAIT"
         daily_stop, daily_reason = self.trade_engine.daily_stop_status()
         if daily_stop:
             self.ctx.daily_stop_active = True
@@ -3320,6 +3300,8 @@ class EngineManager:
         self.dashboard.render_real_stats_summary()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
+
+        st.info("NEW-TRADE GUARDS RUN BEFORE READY — pending trades always settle on the next new round.")
 
         st.caption(
             f"""
