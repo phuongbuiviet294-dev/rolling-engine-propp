@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 import json
 import os
 import math
@@ -17,7 +18,6 @@ from typing import Optional, Any
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 # ============================================================
@@ -478,7 +478,6 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=30)
 def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
@@ -490,7 +489,7 @@ def load_numbers() -> list[int]:
         url = (
             f"https://docs.google.com/spreadsheets/d/"
             f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time()}"
+            f"&cache={time.time_ns()}"
         )
 
         try:
@@ -531,7 +530,6 @@ def load_numbers() -> list[int]:
 #   window selection, signal, trade history, or profit.
 # ============================================================
 
-@st.cache_data(ttl=30)
 def load_round_labels_display_only() -> list[str]:
     """Read the Sheet 'round' column only for UI display."""
     if INPUT_CSV_PATH:
@@ -543,7 +541,7 @@ def load_round_labels_display_only() -> list[str]:
         url = (
             f"https://docs.google.com/spreadsheets/d/"
             f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time()}"
+            f"&cache={time.time_ns()}"
         )
         try:
             df = pd.read_csv(url)
@@ -3301,6 +3299,8 @@ class EngineManager:
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
 
+        st.caption(f"LIVE FRAGMENT REFRESH = {datetime.now().strftime("%H:%M:%S")} | SHEET ROUND = {self.round_id}")
+
         st.info("NEW-TRADE GUARDS RUN BEFORE READY — pending trades always settle on the next new round.")
 
         st.caption(
@@ -3336,50 +3336,31 @@ Regime : {signal.regime}
 
 
 # ============================================================
-# MAIN
+# MAIN - TRUE LIVE FRAGMENT
 # ============================================================
 
-manager = EngineManager()
-
-try:
-    manager.run()
-except Exception as e:
-    st.error(f"Engine Error: {e}")
-    import traceback
-    st.code(traceback.format_exc())
-
-
-# ============================================================
-# AUTO REFRESH - BROWSER SIDE ONLY
-# ============================================================
-# Do NOT use:
-#     time.sleep(5)
-#     st.rerun()
-# on Streamlit Cloud. It keeps the server script thread alive and can crash
-# the app when mobile/browser sessions reconnect repeatedly.
+# Native Streamlit fragment is used instead of browser iframe JS.
+# This guarantees the Python live engine executes again and reloads the
+# Google Sheet without keeping a server-side sleep loop alive.
 #
-# This JS refresh runs in the browser, releases the Python script after render,
-# and is much more stable for Streamlit Community Cloud.
+# If the deployed Streamlit version is too old for st.fragment, the app
+# shows a clear error instead of silently appearing frozen.
 
-with st.sidebar:
-    st.divider()
-    auto_refresh_enabled = st.checkbox("Auto refresh", value=True)
-    refresh_seconds = st.number_input(
-        "Refresh seconds",
-        min_value=5,
-        max_value=60,
-        value=10,
-        step=5,
+if not hasattr(st, "fragment"):
+    st.error(
+        "This V56 Live build requires a recent Streamlit version with "
+        "st.fragment. Please upgrade Streamlit."
     )
+else:
+    @st.fragment(run_every=5)
+    def live_engine_loop():
+        manager = EngineManager()
+        try:
+            manager.run()
+        except Exception as e:
+            st.error(f"Engine Error: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
-if auto_refresh_enabled:
-    components.html(
-        f"""
-        <script>
-        setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {int(refresh_seconds) * 1000});
-        </script>
-        """,
-        height=0,
-    )
+    live_engine_loop()
+
