@@ -182,6 +182,13 @@ ENABLE_EARLY_BAD_DAY = True
 ENABLE_DAILY_STOP = True
 ENABLE_TOP3_LOCK_POOL = True
 ENABLE_LOCK_CONFIRM = True
+# Exceptional candidate: allows a very strong Top-3 window to bypass cooldown.
+# Thresholds are deliberately strict so normal cooldown/protection remains active.
+EXCEPTIONAL_CANDIDATE_OVERRIDE = True
+EXCEPTIONAL_MIN_SCORE = 7.5
+EXCEPTIONAL_MIN_PROFIT20 = 5.0
+EXCEPTIONAL_MIN_WR20 = 0.40
+EXCEPTIONAL_MAX_HIST_LS = 1
 
 HEALTH_MIN_SHADOW_WR20 = 0.38
 HEALTH_MIN_SHADOW_PROFIT20 = 0.0
@@ -999,6 +1006,24 @@ class SignalEngine:
             w = window_id
         self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
+    def is_exceptional_candidate(self, window_id: int, obj: WindowRecord) -> bool:
+        """Strict cooldown override for an unusually strong candidate."""
+        if not EXCEPTIONAL_CANDIDATE_OVERRIDE:
+            return False
+        try:
+            score = float(getattr(obj, "score", -999.0))
+            profit20 = float(getattr(obj, "profit20", -999.0))
+            wr20 = float(getattr(obj, "live_wr20", 0.0))
+            hist_ls = int(getattr(obj, "loss_streak", 999))
+        except Exception:
+            return False
+        return (
+            score >= EXCEPTIONAL_MIN_SCORE
+            and profit20 >= EXCEPTIONAL_MIN_PROFIT20
+            and wr20 >= EXCEPTIONAL_MIN_WR20
+            and hist_ls <= EXCEPTIONAL_MAX_HIST_LS
+        )
+
     def known_bad_window(self, window_id: int) -> bool:
         """V55: negative RealStats is a penalty, not a permanent ban."""
         stat = self.get_real_stats(window_id)
@@ -1212,7 +1237,7 @@ class SignalEngine:
                 continue
             if obj.next_group is None:
                 continue
-            if self.known_bad_window(w):
+            if self.known_bad_window(w) and not self.is_exceptional_candidate(w, obj):
                 continue
 
             stat = self.get_real_stats(w)
@@ -1254,7 +1279,7 @@ class SignalEngine:
         for w, obj in self.window_engine.state.items():
             if obj.next_group is None:
                 continue
-            if self.known_bad_window(w):
+            if self.known_bad_window(w) and not self.is_exceptional_candidate(w, obj):
                 continue
 
             hits20 = list(obj.hit_history)[-20:]
@@ -1288,8 +1313,10 @@ class SignalEngine:
         # ====================================================
         for w, obj in top_rows:
             known_bad = self.known_bad_window(w)
-            if obj.next_group is not None and not known_bad:
-                return w, obj, "FORCE_TOP_WINDOW_NO_DEADLOCK"
+            exceptional = self.is_exceptional_candidate(w, obj)
+            if obj.next_group is not None and (not known_bad or exceptional):
+                branch = "FORCE_TOP_WINDOW_EXCEPTIONAL_COOLDOWN" if exceptional and known_bad else "FORCE_TOP_WINDOW_NO_DEADLOCK"
+                return w, obj, branch
 
         # Absolute final fallback: any untested or not-bad window with next_group
         for w, obj in self.window_engine.state.items():
@@ -2320,6 +2347,11 @@ CONF = {confidence_score:.2f}
                     "ENABLE_DAILY_STOP": ENABLE_DAILY_STOP,
                     "ENABLE_TOP3_LOCK_POOL": ENABLE_TOP3_LOCK_POOL,
                     "ENABLE_LOCK_CONFIRM": ENABLE_LOCK_CONFIRM,
+                    "EXCEPTIONAL_CANDIDATE_OVERRIDE": EXCEPTIONAL_CANDIDATE_OVERRIDE,
+                    "EXCEPTIONAL_MIN_SCORE": EXCEPTIONAL_MIN_SCORE,
+                    "EXCEPTIONAL_MIN_PROFIT20": EXCEPTIONAL_MIN_PROFIT20,
+                    "EXCEPTIONAL_MIN_WR20": EXCEPTIONAL_MIN_WR20,
+                    "EXCEPTIONAL_MAX_HIST_LS": EXCEPTIONAL_MAX_HIST_LS,
                     "DAILY_STOP_LOSS": DAILY_STOP_LOSS,
                     "DAILY_MAX_LOSS_STREAK": DAILY_MAX_LOSS_STREAK,
                     "DAILY_MAX_DRAWDOWN": DAILY_MAX_DRAWDOWN,
