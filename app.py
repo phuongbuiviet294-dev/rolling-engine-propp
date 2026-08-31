@@ -162,7 +162,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_FINAL_SINGLE_FILE_ROBUST_LIVE"
+STATE_VERSION = "V58_LIVE_RESET_SAFE_2LOSS"
 
 
 # ============================================================
@@ -1437,24 +1437,25 @@ class TradeEngine:
         # Keep real stats/equity aligned with trade_history as source of truth.
         rebuild_real_stats_from_history(self.ctx)
 
-        # V52: cool losing trade window immediately to avoid repeated losses.
+        # Anti-chasing: one LOSS is only recorded. Exactly two consecutive
+        # LOSSES on the SAME locked window trigger protection/relock.
         if hit == 0 and record.locked_window is not None:
             try:
                 w = int(record.locked_window)
             except Exception:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
-            self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
-
-            # V55.1:
-            # A single loss only cools the window.
-            # Blacklist is temporary and only for stronger losers.
-            if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
-                self.ctx.blacklisted_windows = {}
-
             stat = get_history_real_stats(self.ctx, w)
-            if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
-                self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
+
+            if stat["loss_streak"] >= 2:
+                self.ctx.cooled_windows[w] = int(
+                    current_round + WINDOW_COOLDOWN_ROUNDS
+                )
+                if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
+                    self.ctx.blacklisted_windows = {}
+                self.ctx.blacklisted_windows[w] = int(
+                    current_round + BLACKLIST_DURATION_ROUNDS
+                )
 
     def get_total_profit(self) -> float:
         return round(
@@ -2716,45 +2717,45 @@ class EngineManager:
         self.ctx.last_window_round = target
 
     def hybrid_replay_once(self) -> None:
-        # HYBRID LIVE:
-        # First run only:
-        # - rounds < LIVE_START_ROUND: warm-up windows only
-        # - rounds >= LIVE_START_ROUND: replay trade once to build initial history
-        # After that, state is kept in st.session_state and new rounds are processed live only.
+        """Initialize current dataset without fabricating historical real trades."""
         if getattr(self.ctx, "hybrid_initialized", False):
             if self.ctx.pending_trade is not None:
                 self.trade_engine.reconcile_pending_from_sheet(
-                    self.groups,
-                    len(self.groups)
+                    self.groups, len(self.groups)
                 )
             return
 
-        for idx, actual_group in enumerate(self.groups, start=1):
-            self.ctx.last_length = idx
-            if idx < LIVE_START_ROUND:
-                self.window_engine.update_one_round(actual_group, idx)
-                continue
+        total = len(self.groups)
+        if total <= 0:
+            return
 
+        # Build feature/window history only. No TradeRecord is created here.
+        for idx in range(1, total + 1):
             self.ctx.last_length = idx
-            self.trade_engine.settle_trade(actual_group, idx)
-            self.window_engine.update_one_round(actual_group, idx)
+            self.window_engine.update_one_round(self.groups[idx - 1], idx)
 
-            signal = self.signal_engine.build_signal(idx)
+        # Establish the first lock/signal at LIVE_START using only data already
+        # known at that point. It is NOT converted into a historical trade.
+        if total >= LIVE_START_ROUND:
+            anchor_round = LIVE_START_ROUND
+            self.ctx.last_length = anchor_round
+            signal = self.signal_engine.build_signal(anchor_round)
             confidence = self.signal_engine.get_confidence_score(signal)
             self.ctx.last_decision_confidence = confidence
             setattr(signal, "decision_confidence", confidence)
-
             signal.state = self.protection_engine.adaptive_ready_wait(
-                signal,
-                confidence
+                signal, confidence
             )
+            self.ctx.last_signal_round = anchor_round
+            self.ctx.open_reason = "INITIALIZED_AT_LIVE_START"
+            self.ctx.trade_state = "IDLE"
 
-            self.trade_engine.open_trade(signal, idx, confidence)
-
-        self.ctx.last_length = len(self.groups)
-        self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
+        # Existing rows are historical/current data already observed at reset.
+        # They must not be replayed as fresh live rounds.
+        self.ctx.last_length = total
+        self.ctx.data_signature = make_numbers_signature(self.numbers, total)
         self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(self.numbers)
-        self.ctx.processed_numbers = list(self.numbers[:self.ctx.last_length])
+        self.ctx.processed_numbers = list(self.numbers[:total])
         self.ctx.hybrid_initialized = True
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
