@@ -163,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_CONTIGUOUS_FRONTIER"
+STATE_VERSION = "V58_STABLE_LIVE_LONG_TERM_FULL"
 
 
 # ============================================================
@@ -517,6 +517,16 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
                 f"(e.g. row {later_filled[0]}). "
                 "Engine stops at the first blank and will not compress rows."
             )
+
+    # Optional explicit dataset identity.  If absent, keep backward compatibility.
+    day_id = ""
+    for col in ("day_id", "date_id", "session_id"):
+        if col in df.columns:
+            non_empty = df[col].dropna()
+            if len(non_empty):
+                day_id = str(non_empty.iloc[0]).strip()
+                break
+    st.session_state["v58_dataset_day_id"] = day_id
 
     return numbers
 
@@ -2756,6 +2766,7 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
+            st.session_state.pop("v58_dataset_day_id", None)
             if "v50_true_live_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
             if "v50_true_live_window_state" in st.session_state:
@@ -3037,60 +3048,140 @@ class EngineManager:
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
+    def _reset_for_new_dataset(self, reason: str = "NEW_DAY") -> None:
+        """Hard-reset every mutable engine component.
+
+        This is intentionally stronger than clearing Trade History.  Window
+        statistics, signal state, protection/cooldown, pending trade and
+        dashboard references all belong to the dataset and must be reset
+        together.
+        """
+        self.ctx = EngineContext()
+        self.ctx.dataset_day_id = ""
+        self.ctx.open_reason = reason
+        self.ctx.protection_reason = reason
+
+        self.window_state = {w: WindowRecord() for w in WINDOWS}
+
+        # Rebind every component to the new context/state.
+        self.window_engine.ctx = self.ctx
+        self.window_engine.window_state = self.window_state
+
+        self.signal_engine.ctx = self.ctx
+        self.signal_engine.window_engine = self.window_engine
+
+        self.trade_engine.ctx = self.ctx
+        self.protection_engine.ctx = self.ctx
+
+        self.dashboard.ctx = self.ctx
+        self.dashboard.window_engine = self.window_engine
+        self.dashboard.signal_engine = self.signal_engine
+        self.dashboard.trade_engine = self.trade_engine
+        self.dashboard.protection_engine = self.protection_engine
+
+        st.session_state.v50_ctx = self.ctx
+        save_live_state(self.ctx)
+
+    def _accept_dataset_day_id(self) -> None:
+        """Read an optional explicit DAY_ID from the source Sheet.
+
+        The loader remains backward-compatible: if no DAY_ID column exists,
+        an empty identity is used and the normal contiguous-prefix logic
+        remains authoritative.
+        """
+        # load_numbers stores the source metadata in session state so the
+        # engine can use it without a second network fetch.
+        day_id = str(st.session_state.get("v58_dataset_day_id", "") or "").strip()
+        if day_id:
+            self.ctx.dataset_day_id = day_id
+
+    def _handle_shrink_or_new_day(self, current_length: int) -> bool:
+        """Return True when processing must stop after handling a shrink.
+
+        A one-off shorter fetch is NOT enough to reset.  The same shorter
+        prefix must be observed twice, and if DAY_ID changes we reset
+        immediately because the source explicitly declares a new dataset.
+        """
+        old_length = int(getattr(self.ctx, "last_length", 0) or 0)
+        if current_length >= old_length:
+            self.ctx.pending_shrink_length = -1
+            self.ctx.pending_shrink_count = 0
+            return False
+
+        current_day_id = str(
+            st.session_state.get("v58_dataset_day_id", "") or ""
+        ).strip()
+        old_day_id = str(getattr(self.ctx, "dataset_day_id", "") or "").strip()
+
+        # Explicit DAY_ID change is authoritative.
+        if current_day_id and old_day_id and current_day_id != old_day_id:
+            self._reset_for_new_dataset("NEW_DAY_ID")
+            self.ctx.dataset_day_id = current_day_id
+            save_live_state(self.ctx)
+            self.hybrid_replay_once()
+            return True
+
+        # Empty sheet after a reset/new day: require two identical reads only
+        # if there is still old state. This protects against transient fetches.
+        if current_length == 0:
+            if self.ctx.pending_shrink_length == 0:
+                self.ctx.pending_shrink_count += 1
+            else:
+                self.ctx.pending_shrink_length = 0
+                self.ctx.pending_shrink_count = 1
+
+            if self.ctx.pending_shrink_count < 2:
+                save_live_state(self.ctx)
+                return True
+
+            self._reset_for_new_dataset("EMPTY_SHEET_NEW_DAY")
+            save_live_state(self.ctx)
+            return True
+
+        # Non-empty shrink: verify the new prefix differs from the old dataset.
+        old_numbers = list(getattr(self.ctx, "processed_numbers", []) or [])
+        prefix = list(self.numbers[:current_length])
+        comparable = old_numbers[:current_length]
+        prefix_changed = bool(old_numbers) and prefix != comparable
+
+        if self.ctx.pending_shrink_length == current_length:
+            self.ctx.pending_shrink_count += 1
+        else:
+            self.ctx.pending_shrink_length = current_length
+            self.ctx.pending_shrink_count = 1
+
+        if self.ctx.pending_shrink_count < 2:
+            save_live_state(self.ctx)
+            return True
+
+        # A shorter dataset with a changed prefix is treated as a new day.
+        if prefix_changed:
+            self._reset_for_new_dataset("NEW_DAY_PREFIX_CHANGED")
+            self.ctx.dataset_day_id = current_day_id or old_day_id
+            save_live_state(self.ctx)
+            self.hybrid_replay_once()
+            return True
+
+        # Same prefix but shorter is a destructive correction. Pause instead
+        # of silently rewriting history.
+        self.ctx.correction_pause = True
+        self.ctx.open_reason = "DATA_TRUNCATION_DETECTED"
+        self.ctx.protection_reason = "DATA_TRUNCATION_DETECTED"
+        save_live_state(self.ctx)
+        return True
+
+
     def process_new_rounds(self) -> None:
         # Process only rows added after the first hybrid replay.
         current_length = len(self.groups)
 
-        # If the visible Sheet prefix became shorter than the persisted engine,
-        # treat it as a dataset reset/new day instead of continuing from the old
-        # round counter. This prevents "Sheet 232 / Engine 258" drift.
-        if current_length < int(getattr(self.ctx, "last_length", 0) or 0):
-            prefix_changed = False
-            old_numbers = list(getattr(self.ctx, "processed_numbers", []) or [])
-            if old_numbers:
-                prefix_changed = (
-                    self.numbers[:min(len(self.numbers), len(old_numbers))]
-                    != old_numbers[:min(len(self.numbers), len(old_numbers))]
-                )
-
-            if current_length == 0 or prefix_changed:
-                # Automatic NEW DAY / EMPTY-SHEET reset. The Sheet is the source
-                # of truth; no manual JSON deletion is required.
-                self.ctx = EngineContext()
-                st.session_state.v50_ctx = self.ctx
-                self.window_state = {
-                    w: WindowRecord() for w in WINDOWS
-                }
-                self.window_engine.ctx = self.ctx
-                self.window_engine.window_state = self.window_state
-                self.signal_engine.ctx = self.ctx
-                self.signal_engine.window_engine = self.window_engine
-                self.trade_engine.ctx = self.ctx
-                self.protection_engine.ctx = self.ctx
-
-                # Rebind dashboard to the new clean context.
-                self.dashboard.ctx = self.ctx
-                self.dashboard.window_engine = self.window_engine
-                self.dashboard.signal_engine = self.signal_engine
-                self.dashboard.trade_engine = self.trade_engine
-                self.dashboard.protection_engine = self.protection_engine
-
-                self.ctx.last_length = 0
-                self.ctx.processed_numbers = []
-                self.ctx.hybrid_initialized = False
-                save_live_state(self.ctx)
-
-                # Continue through normal initialization for the new dataset.
-                self.hybrid_replay_once()
-                return
-
-            # Same prefix but shorter: this is a correction/deletion.
-            self.ctx.correction_pause = True
-            self.ctx.open_reason = "DATA_TRUNCATION_DETECTED"
-            self.ctx.protection_reason = "DATA_TRUNCATION_DETECTED"
+        # Sheet is the source of truth. Never allow a shorter/transient fetch
+        # to make the persisted engine jump backwards or mix datasets.
+        if self._handle_shrink_or_new_day(current_length):
             return
 
         if getattr(self.ctx, "correction_pause", False):
+
             self.ctx.open_reason = "DATA_CORRECTION_PAUSED"
             self.ctx.protection_reason = "DATA_CORRECTION_PAUSED"
             return
