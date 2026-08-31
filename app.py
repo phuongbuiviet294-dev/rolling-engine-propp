@@ -16,6 +16,7 @@ from typing import Optional, Any
 
 import pandas as pd
 import streamlit as st
+import re
 
 
 # ============================================================
@@ -162,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_FINAL_SINGLE_FILE_ROBUST_LIVE"
+STATE_VERSION = "V58_1_LIVE_DETERMINISTIC_2LOSS"
 
 
 # ============================================================
@@ -208,7 +209,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
+    state_version: str = "V58_STABLE_LIVE_FINAL"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +290,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
+    state_version: str = "V58_STABLE_LIVE_FINAL"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -347,7 +348,9 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V58_4_ROBUST_ANTI_OVERFIT"
+
+    previous_version = getattr(ctx, "state_version", "")
+    ctx.state_version = STATE_VERSION
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -366,7 +369,6 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
 
-    previous_version = getattr(ctx, "state_version", "")
     if previous_version and previous_version != STATE_VERSION:
         ctx.algorithm_migration_pending = True
     if not hasattr(ctx, "algorithm_migration_pending"):
@@ -480,6 +482,137 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
         for x in nums
         if 1 <= x <= 12
     ]
+
+
+
+@st.cache_data(ttl=8)
+def load_round_times(refresh_bucket: int = 0) -> list[str]:
+    """Load round times using the SAME filtered rows as load_numbers().
+
+    The old implementation depended on one exact header named ``time``.
+    Real Sheets often use Time, Round Time, timestamp, Giờ, or even an
+    unnamed column containing HH:MM values.  This loader therefore:
+      1) reads the same source,
+      2) identifies the number column,
+      3) keeps exactly the rows whose number is 1..12,
+      4) detects the most likely time column by both header and values,
+      5) preserves row-for-row alignment with engine round numbers.
+    """
+    if INPUT_CSV_PATH:
+        df = pd.read_csv(INPUT_CSV_PATH)
+    else:
+        url = (
+            f"https://docs.google.com/spreadsheets/d/"
+            f"{SHEET_ID}/export?format=csv"
+            f"&cache={time.time()}"
+        )
+        df = pd.read_csv(url)
+
+    original_cols = list(df.columns)
+    df.columns = [str(x).lower().strip() for x in df.columns]
+
+    if "number" not in df.columns:
+        return []
+
+    number_series = pd.to_numeric(df["number"], errors="coerce")
+    valid_mask = number_series.between(1, 12, inclusive="both")
+
+    # Header aliases, including common Vietnamese/Google-Sheet variants.
+    explicit = (
+        "time", "round_time", "roundtime", "timestamp", "datetime",
+        "date_time", "giờ", "gio", "thời gian", "thoi gian",
+        "time_stamp", "round time"
+    )
+
+    def time_value_score(series) -> float:
+        vals = series.dropna().astype(str).str.strip()
+        if len(vals) == 0:
+            return 0.0
+        # Strong signal for HH:MM / HH:MM:SS.
+        hhmm = vals.str.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", na=False).mean()
+        # Datetime strings containing a time portion.
+        dtlike = vals.str.contains(r"\d{1,2}:\d{2}", regex=True, na=False).mean()
+        return max(float(hhmm), float(dtlike) * 0.9)
+
+    # First use an explicit time-like header if it contains useful values.
+    candidates = []
+    for c in df.columns:
+        if c == "number":
+            continue
+        header_bonus = 1.0 if c in explicit else (
+            0.7 if any(k in c for k in ("time", "gio", "giờ", "thoi", "thời"))
+            else 0.0
+        )
+        score = header_bonus + time_value_score(df[c])
+        candidates.append((score, c))
+
+    candidates.sort(reverse=True)
+    if not candidates or candidates[0][0] <= 0.0:
+        return []
+
+    time_col = candidates[0][1]
+
+    out = []
+    for i, raw_n in enumerate(number_series):
+        if pd.isna(raw_n) or not valid_mask.iloc[i]:
+            continue
+
+        raw_t = df.iloc[i][time_col]
+        if pd.isna(raw_t):
+            out.append("")
+            continue
+
+        text = str(raw_t).strip()
+        try:
+            # For true datetime / date+time cells, extract HH:MM.
+            dt = pd.to_datetime(raw_t, errors="raise")
+            if not re.match(r"^\d{1,2}:\d{2}", text):
+                text = dt.strftime("%H:%M")
+            else:
+                m = re.match(r"^(\d{1,2}:\d{2})", text)
+                text = m.group(1) if m else text[:5]
+        except Exception:
+            m = re.search(r"(\d{1,2}:\d{2})", text)
+            text = m.group(1) if m else text[:19]
+
+        out.append(text)
+
+    return out
+
+def get_round_time(round_id: int, round_times: list[str]) -> str:
+    """Return exact Sheet time for a round, or blank if unavailable."""
+    try:
+        r = int(round_id)
+    except Exception:
+        return ""
+    if r <= 0 or r > len(round_times):
+        return ""
+    return str(round_times[r - 1] or "")
+
+
+def infer_next_round_time(round_id: int, round_times: list[str]) -> tuple[str, bool]:
+    """Infer next slot only when the Sheet provides a regular time sequence."""
+    exact = get_round_time(round_id, round_times)
+    if exact:
+        return exact, False
+    if len(round_times) < 2:
+        return "", False
+
+    try:
+        vals = []
+        for t in round_times[-5:]:
+            if not t:
+                continue
+            vals.append(pd.to_datetime(t))
+        if len(vals) < 2:
+            return "", False
+        deltas = [(vals[i] - vals[i-1]).total_seconds() for i in range(1, len(vals))]
+        delta = sorted(deltas)[len(deltas)//2]
+        if delta <= 0 or delta > 3600:
+            return "", False
+        return (vals[-1] + pd.to_timedelta(delta, unit="s")).strftime("%H:%M"), True
+    except Exception:
+        return "", False
 
 
 def group_of(n: int) -> int:
@@ -1091,8 +1224,12 @@ class SignalEngine:
             leader_window=locked_window,
             leader_wr20=leader_wr20,
             leader_loss_streak=leader_loss_streak,
-            locked_window=self.ctx.locked_window,
-            lock_reason=self.ctx.lock_reason,
+            locked_window=locked_window,
+            lock_reason=(
+                self.ctx.lock_reason
+                if self.ctx.locked_window is not None
+                else "DISPLAY_TOP_WINDOW_FALLBACK"
+            ),
             locked_live_profit=self.ctx.locked_live_profit,
             locked_live_loss_streak=self.ctx.locked_live_loss_streak,
             shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
@@ -1437,23 +1574,21 @@ class TradeEngine:
         # Keep real stats/equity aligned with trade_history as source of truth.
         rebuild_real_stats_from_history(self.ctx)
 
-        # V52: cool losing trade window immediately to avoid repeated losses.
+        # Two-loss protection only: a single LOSS is recorded but does not
+        # trigger cooldown/blacklist. Protection activates after exactly two
+        # consecutive losses for the same locked window.
         if hit == 0 and record.locked_window is not None:
             try:
                 w = int(record.locked_window)
             except Exception:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
-            self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
-
-            # V55.1:
-            # A single loss only cools the window.
-            # Blacklist is temporary and only for stronger losers.
-            if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
-                self.ctx.blacklisted_windows = {}
-
             stat = get_history_real_stats(self.ctx, w)
-            if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
+
+            if int(stat.get("loss_streak", 0)) >= 2:
+                self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
+                if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
+                    self.ctx.blacklisted_windows = {}
                 self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
     def get_total_profit(self) -> float:
@@ -1667,6 +1802,10 @@ class Dashboard:
         self.signal_engine = signal_engine
         self.trade_engine = trade_engine
         self.protection_engine = protection_engine
+        self.round_times: list[str] = []
+
+    def set_round_times(self, round_times: list[str]) -> None:
+        self.round_times = list(round_times or [])
 
     def render_header(self) -> None:
         st.title("🚀 V58 Stable Walk-Forward Live")
@@ -1676,6 +1815,12 @@ class Dashboard:
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
+        current_time = get_round_time(current_round, self.round_times) or "TIME_NOT_FOUND"
+        target_time, target_is_estimated = infer_next_round_time(target_round, self.round_times)
+        target_time = target_time or "—"
+        target_time_label = (
+            f"{target_time} (estimated)" if target_is_estimated else target_time
+        )
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -1698,12 +1843,18 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
+CURRENT TIME = {current_time} → TARGET TIME = {target_time_label}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
 """,
             unsafe_allow_html=True
         )
+        if current_time == "TIME_NOT_FOUND":
+            st.warning(
+                "TIME COLUMN NOT DETECTED OR NOT ALIGNED WITH NUMBER ROWS. "
+                "Signal logic is unchanged; check the Sheet time column/header."
+            )
 
     def render_market(self, signal: SignalRecord) -> None:
         c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(12)
@@ -1771,6 +1922,13 @@ CONF = {confidence_score:.2f}
             return
 
         target_round = self.ctx.pending_round + 1
+        open_time = get_round_time(self.ctx.pending_round, self.round_times) or "—"
+        target_time, target_estimated = infer_next_round_time(
+            target_round, self.round_times
+        )
+        target_time = target_time or "—"
+        if target_estimated:
+            target_time += " (estimated)"
 
         display_pending_window = self.ctx.pending_locked_window
         if display_pending_window is None and self.ctx.pending_index is not None:
@@ -1780,8 +1938,8 @@ CONF = {confidence_score:.2f}
                 display_pending_window = self.ctx.locked_window
 
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Open Round", self.ctx.pending_round)
-        c2.metric("Target Round", target_round)
+        c1.metric("Open Round", f"{self.ctx.pending_round} | {open_time}")
+        c2.metric("Target Round", f"{target_round} | {target_time}")
         c3.metric("Locked Window", display_pending_window)
         c4.metric("Bet Group", self.ctx.pending_trade)
         c5.metric("Open CONF", round(float(getattr(self.ctx, "pending_confidence", 0.0)), 3))
@@ -1962,7 +2120,12 @@ CONF = {confidence_score:.2f}
             [
                 {
                     "open_round": x.round_id,
+                    "open_time": get_round_time(x.round_id, self.round_times) or "—",
                     "settle_round": x.settle_round,
+                    "settle_time": (
+                        get_round_time(x.settle_round, self.round_times)
+                        if x.settle_round is not None else "—"
+                    ) or "—",
                     "locked_window": x.locked_window,
                     "predict": x.predict,
                     "actual": x.actual,
@@ -2580,6 +2743,7 @@ class EngineManager:
         self.window_state = get_live_window_state()
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
+        self.round_times = load_round_times(refresh_bucket=int(time.time() // 5))
 
         # ============================================================
         # DATA INTEGRITY / DAILY RESET
@@ -2596,6 +2760,21 @@ class EngineManager:
             self.ctx.correction_pause = True
             self.ctx.open_reason = "DATASET_ANCHOR_CHANGED_RESET_REQUIRED"
             self.ctx.protection_reason = "DATASET_ANCHOR_CHANGED_RESET_REQUIRED"
+
+        # Ignore an invalid stale correction marker such as round=0, None -> None.
+        # It can only be a corrupted/legacy state marker, not a real edited number.
+        if (
+            getattr(self.ctx, "correction_pause", False)
+            and int(getattr(self.ctx, "correction_round", 0) or 0) <= 0
+            and getattr(self.ctx, "correction_old_value", None) is None
+            and getattr(self.ctx, "correction_new_value", None) is None
+        ):
+            self.ctx.correction_pause = False
+            self.ctx.correction_round = 0
+            self.ctx.correction_old_value = None
+            self.ctx.correction_new_value = None
+            self.ctx.open_reason = ""
+            self.ctx.protection_reason = ""
 
         saved_processed = list(getattr(self.ctx, "processed_numbers", []) or [])
 
@@ -2692,6 +2871,7 @@ class EngineManager:
             self.trade_engine,
             self.protection_engine
         )
+        self.dashboard.set_round_times(self.round_times)
 
         if getattr(self.ctx, "hybrid_initialized", False):
             self.rebuild_windows_to_last_length()
@@ -2716,11 +2896,19 @@ class EngineManager:
         self.ctx.last_window_round = target
 
     def hybrid_replay_once(self) -> None:
-        # HYBRID LIVE:
-        # First run only:
-        # - rounds < LIVE_START_ROUND: warm-up windows only
-        # - rounds >= LIVE_START_ROUND: replay trade once to build initial history
-        # After that, state is kept in st.session_state and new rounds are processed live only.
+        """Fresh-state bootstrap with NO historical trade fabrication.
+
+        Reset semantics:
+        - The Google Sheet numbers are the source of truth and are never deleted.
+        - All currently present numbers are used to rebuild window/turn statistics.
+        - Existing rows are historical at the moment of reset; they are NOT treated
+          as newly-arriving live rounds and therefore cannot create Trade History
+          or Profit.
+        - The current last sheet round becomes the live anchor. The first real
+          trade can only be created when a NEW row is appended after this reset.
+        - LIVE_START_ROUND remains the minimum amount of history required before
+          live decisions are allowed; it is not a command to manufacture old trades.
+        """
         if getattr(self.ctx, "hybrid_initialized", False):
             if self.ctx.pending_trade is not None:
                 self.trade_engine.reconcile_pending_from_sheet(
@@ -2729,32 +2917,71 @@ class EngineManager:
                 )
             return
 
-        for idx, actual_group in enumerate(self.groups, start=1):
+        total = len(self.groups)
+        if total <= 0:
+            return
+
+        # Rebuild all derived window statistics from the complete current dataset.
+        # This is deterministic and contains NO trade open/settle side effects.
+        for idx in range(1, total + 1):
             self.ctx.last_length = idx
-            if idx < LIVE_START_ROUND:
-                self.window_engine.update_one_round(actual_group, idx)
-                continue
+            self.window_engine.update_one_round(self.groups[idx - 1], idx)
 
-            self.ctx.last_length = idx
-            self.trade_engine.settle_trade(actual_group, idx)
-            self.window_engine.update_one_round(actual_group, idx)
+        # We need at least LIVE_START_ROUND rounds before enabling live mode.
+        # At the current anchor, calculate the signal/lock for the NEXT unseen
+        # round, but deliberately do not open a historical trade.
+        if total >= LIVE_START_ROUND:
+            anchor_round = total
 
-            signal = self.signal_engine.build_signal(idx)
-            confidence = self.signal_engine.get_confidence_score(signal)
-            self.ctx.last_decision_confidence = confidence
-            setattr(signal, "decision_confidence", confidence)
-
-            signal.state = self.protection_engine.adaptive_ready_wait(
-                signal,
-                confidence
+            # Select the initial lock deterministically from the canonical
+            # ranking. No historical trade is opened here.
+            top_rows = self.window_engine.get_top_windows(len(WINDOWS))
+            candidate_w, candidate_obj, candidate_reason = (
+                self.signal_engine.choose_relock_candidate(top_rows)
             )
 
-            self.trade_engine.open_trade(signal, idx, confidence)
+            # Safety fallback: the dashboard must never be left with a blank
+            # Locked Window when there is a ranked window with a prediction.
+            if candidate_obj is None:
+                for w, obj in top_rows:
+                    if obj.next_group is not None:
+                        candidate_w, candidate_obj = w, obj
+                        candidate_reason = "TOP_WINDOW_INITIAL_FALLBACK"
+                        break
 
-        self.ctx.last_length = len(self.groups)
-        self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
+            if candidate_obj is not None:
+                self.ctx.locked_window = int(candidate_w)
+                self.ctx.lock_reason = (
+                    f"INITIAL_LOCK_{candidate_reason}"
+                )
+
+                # Build a signal only after the lock is persisted.
+                signal = self.signal_engine.build_signal_snapshot(anchor_round)
+                confidence = self.signal_engine.get_confidence_score(signal)
+                self.ctx.last_decision_confidence = confidence
+                setattr(signal, "decision_confidence", confidence)
+
+                signal.state = self.protection_engine.adaptive_ready_wait(
+                    signal,
+                    confidence
+                )
+                self.ctx.last_signal_round = anchor_round
+                self.ctx.open_reason = "RESET_ANCHOR_READY_FOR_NEXT_NEW_ROUND"
+                self.ctx.trade_state = "IDLE"
+            else:
+                self.ctx.locked_window = None
+                self.ctx.lock_reason = "NO_PREDICTABLE_WINDOW"
+                self.ctx.last_decision_confidence = 0.0
+                self.ctx.last_signal_round = anchor_round
+                self.ctx.open_reason = "NO_PREDICTABLE_WINDOW"
+                self.ctx.trade_state = "IDLE"
+
+        # Everything currently in the Sheet is already observed at reset.
+        # Therefore the next live round is total + 1.
+        self.ctx.last_length = total
+        self.ctx.data_signature = make_numbers_signature(self.numbers, total)
         self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(self.numbers)
-        self.ctx.processed_numbers = list(self.numbers[:self.ctx.last_length])
+        self.ctx.processed_numbers = list(self.numbers[:total])
         self.ctx.hybrid_initialized = True
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
@@ -2876,6 +3103,7 @@ Trade state is saved to Google Sheet if configured, otherwise local JSON fallbac
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
 Current Sheet Round : {self.round_id}
+Current Sheet Time  : {get_round_time(self.round_id, self.round_times) or "—"}
 
 Engine Last Round : {self.ctx.last_length}
 
