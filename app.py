@@ -208,7 +208,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
+    state_version: str = "V58_STABLE_LIVE_FINAL"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
+    state_version: str = "V58_STABLE_LIVE_FINAL"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -486,10 +486,16 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
 
 @st.cache_data(ttl=8)
 def load_round_times(refresh_bucket: int = 0) -> list[str]:
-    """Load the Sheet time column aligned with valid number rows.
+    """Load round times using the SAME filtered rows as load_numbers().
 
-    Supported column names: time, round_time, timestamp, datetime.
-    Invalid/blank number rows are skipped exactly like load_numbers().
+    The old implementation depended on one exact header named ``time``.
+    Real Sheets often use Time, Round Time, timestamp, Giờ, or even an
+    unnamed column containing HH:MM values.  This loader therefore:
+      1) reads the same source,
+      2) identifies the number column,
+      3) keeps exactly the rows whose number is 1..12,
+      4) detects the most likely time column by both header and values,
+      5) preserves row-for-row alignment with engine round numbers.
     """
     if INPUT_CSV_PATH:
         df = pd.read_csv(INPUT_CSV_PATH)
@@ -501,40 +507,76 @@ def load_round_times(refresh_bucket: int = 0) -> list[str]:
         )
         df = pd.read_csv(url)
 
+    original_cols = list(df.columns)
     df.columns = [str(x).lower().strip() for x in df.columns]
-    time_col = next(
-        (c for c in ("time", "round_time", "timestamp", "datetime", "date_time")
-         if c in df.columns),
-        None
-    )
-    if time_col is None:
+
+    if "number" not in df.columns:
         return []
 
     number_series = pd.to_numeric(df["number"], errors="coerce")
+    valid_mask = number_series.between(1, 12, inclusive="both")
+
+    # Header aliases, including common Vietnamese/Google-Sheet variants.
+    explicit = (
+        "time", "round_time", "roundtime", "timestamp", "datetime",
+        "date_time", "giờ", "gio", "thời gian", "thoi gian",
+        "time_stamp", "round time"
+    )
+
+    def time_value_score(series) -> float:
+        vals = series.dropna().astype(str).str.strip()
+        if len(vals) == 0:
+            return 0.0
+        # Strong signal for HH:MM / HH:MM:SS.
+        hhmm = vals.str.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", na=False).mean()
+        # Datetime strings containing a time portion.
+        dtlike = vals.str.contains(r"\d{1,2}:\d{2}", regex=True, na=False).mean()
+        return max(float(hhmm), float(dtlike) * 0.9)
+
+    # First use an explicit time-like header if it contains useful values.
+    candidates = []
+    for c in df.columns:
+        if c == "number":
+            continue
+        header_bonus = 1.0 if c in explicit else (
+            0.7 if any(k in c for k in ("time", "gio", "giờ", "thoi", "thời"))
+            else 0.0
+        )
+        score = header_bonus + time_value_score(df[c])
+        candidates.append((score, c))
+
+    candidates.sort(reverse=True)
+    if not candidates or candidates[0][0] <= 0.0:
+        return []
+
+    time_col = candidates[0][1]
+
     out = []
     for i, raw_n in enumerate(number_series):
-        if pd.isna(raw_n):
+        if pd.isna(raw_n) or not valid_mask.iloc[i]:
             continue
-        n = int(raw_n)
-        if not (1 <= n <= 12):
-            continue
+
         raw_t = df.iloc[i][time_col]
         if pd.isna(raw_t):
             out.append("")
-        else:
-            text = str(raw_t).strip()
-            # Normalize spreadsheet datetime values to a compact display.
-            try:
-                dt = pd.to_datetime(raw_t, errors="raise")
-                if not isinstance(raw_t, str) or any(ch in text for ch in ("/", "-")):
-                    text = dt.strftime("%H:%M")
-                elif re.match(r"^\d{1,2}:\d{2}", text):
-                    text = text[:5]
-            except Exception:
-                text = text[:19]
-            out.append(text)
-    return out
+            continue
 
+        text = str(raw_t).strip()
+        try:
+            # For true datetime / date+time cells, extract HH:MM.
+            dt = pd.to_datetime(raw_t, errors="raise")
+            if not re.match(r"^\d{1,2}:\d{2}", text):
+                text = dt.strftime("%H:%M")
+            else:
+                m = re.match(r"^(\d{1,2}:\d{2})", text)
+                text = m.group(1) if m else text[:5]
+        except Exception:
+            m = re.search(r"(\d{1,2}:\d{2})", text)
+            text = m.group(1) if m else text[:19]
+
+        out.append(text)
+
+    return out
 
 def get_round_time(round_id: int, round_times: list[str]) -> str:
     """Return exact Sheet time for a round, or blank if unavailable."""
@@ -1772,7 +1814,7 @@ class Dashboard:
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-        current_time = get_round_time(current_round, self.round_times) or "—"
+        current_time = get_round_time(current_round, self.round_times) or "TIME_NOT_FOUND"
         target_time, target_is_estimated = infer_next_round_time(target_round, self.round_times)
         target_time = target_time or "—"
         target_time_label = (
@@ -1807,6 +1849,11 @@ CONF = {confidence_score:.2f}
 """,
             unsafe_allow_html=True
         )
+        if current_time == "TIME_NOT_FOUND":
+            st.warning(
+                "TIME COLUMN NOT DETECTED OR NOT ALIGNED WITH NUMBER ROWS. "
+                "Signal logic is unchanged; check the Sheet time column/header."
+            )
 
     def render_market(self, signal: SignalRecord) -> None:
         c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(12)
@@ -2072,7 +2119,12 @@ CONF = {confidence_score:.2f}
             [
                 {
                     "open_round": x.round_id,
+                    "open_time": get_round_time(x.round_id, self.round_times) or "—",
                     "settle_round": x.settle_round,
+                    "settle_time": (
+                        get_round_time(x.settle_round, self.round_times)
+                        if x.settle_round is not None else "—"
+                    ) or "—",
                     "locked_window": x.locked_window,
                     "predict": x.predict,
                     "actual": x.actual,
