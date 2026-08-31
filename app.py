@@ -9,6 +9,7 @@ import time
 import json
 import os
 import math
+import hashlib
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
@@ -2752,6 +2753,7 @@ class EngineManager:
 
         self.ctx.last_length = len(self.groups)
         self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
+        self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(self.numbers)
         self.ctx.processed_numbers = list(self.numbers[:self.ctx.last_length])
         self.ctx.hybrid_initialized = True
         rebuild_real_stats_from_history(self.ctx)
@@ -2863,7 +2865,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V58.3 ROBUST ANTI-OVERFIT LIVE
+V58 FINAL SINGLE-FILE ROBUST LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
@@ -2904,8 +2906,8 @@ if not hasattr(st, "fragment"):
 else:
     @st.fragment(run_every=5)
     def live_engine_loop():
-        manager = EngineManager()
         try:
+            manager = EngineManager()
             manager.run()
         except Exception as e:
             st.error(f"Engine Error: {e}")
