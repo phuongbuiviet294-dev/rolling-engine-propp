@@ -483,95 +483,6 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
     ]
 
 
-
-@st.cache_data(ttl=8)
-def load_round_times(refresh_bucket: int = 0) -> list[str]:
-    """Load the Sheet time column aligned with valid number rows.
-
-    Supported column names: time, round_time, timestamp, datetime.
-    Invalid/blank number rows are skipped exactly like load_numbers().
-    """
-    if INPUT_CSV_PATH:
-        df = pd.read_csv(INPUT_CSV_PATH)
-    else:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/"
-            f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time()}"
-        )
-        df = pd.read_csv(url)
-
-    df.columns = [str(x).lower().strip() for x in df.columns]
-    time_col = next(
-        (c for c in ("time", "round_time", "timestamp", "datetime", "date_time")
-         if c in df.columns),
-        None
-    )
-    if time_col is None:
-        return []
-
-    number_series = pd.to_numeric(df["number"], errors="coerce")
-    out = []
-    for i, raw_n in enumerate(number_series):
-        if pd.isna(raw_n):
-            continue
-        n = int(raw_n)
-        if not (1 <= n <= 12):
-            continue
-        raw_t = df.iloc[i][time_col]
-        if pd.isna(raw_t):
-            out.append("")
-        else:
-            text = str(raw_t).strip()
-            # Normalize spreadsheet datetime values to a compact display.
-            try:
-                dt = pd.to_datetime(raw_t, errors="raise")
-                if not isinstance(raw_t, str) or any(ch in text for ch in ("/", "-")):
-                    text = dt.strftime("%H:%M")
-                elif re.match(r"^\d{1,2}:\d{2}", text):
-                    text = text[:5]
-            except Exception:
-                text = text[:19]
-            out.append(text)
-    return out
-
-
-def get_round_time(round_id: int, round_times: list[str]) -> str:
-    """Return exact Sheet time for a round, or blank if unavailable."""
-    try:
-        r = int(round_id)
-    except Exception:
-        return ""
-    if r <= 0 or r > len(round_times):
-        return ""
-    return str(round_times[r - 1] or "")
-
-
-def infer_next_round_time(round_id: int, round_times: list[str]) -> tuple[str, bool]:
-    """Infer next slot only when the Sheet provides a regular time sequence."""
-    exact = get_round_time(round_id, round_times)
-    if exact:
-        return exact, False
-    if len(round_times) < 2:
-        return "", False
-
-    try:
-        vals = []
-        for t in round_times[-5:]:
-            if not t:
-                continue
-            vals.append(pd.to_datetime(t))
-        if len(vals) < 2:
-            return "", False
-        deltas = [(vals[i] - vals[i-1]).total_seconds() for i in range(1, len(vals))]
-        delta = sorted(deltas)[len(deltas)//2]
-        if delta <= 0 or delta > 3600:
-            return "", False
-        return (vals[-1] + pd.to_timedelta(delta, unit="s")).strftime("%H:%M"), True
-    except Exception:
-        return "", False
-
-
 def group_of(n: int) -> int:
     if n <= 3:
         return 1
@@ -1755,10 +1666,6 @@ class Dashboard:
         self.signal_engine = signal_engine
         self.trade_engine = trade_engine
         self.protection_engine = protection_engine
-        self.round_times: list[str] = []
-
-    def set_round_times(self, round_times: list[str]) -> None:
-        self.round_times = list(round_times or [])
 
     def render_header(self) -> None:
         st.title("🚀 V58 Stable Walk-Forward Live")
@@ -1768,12 +1675,6 @@ class Dashboard:
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-        current_time = get_round_time(current_round, self.round_times) or "—"
-        target_time, target_is_estimated = infer_next_round_time(target_round, self.round_times)
-        target_time = target_time or "—"
-        target_time_label = (
-            f"{target_time} (estimated)" if target_is_estimated else target_time
-        )
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -1796,7 +1697,6 @@ font-weight:bold;
 {title}<br>
 STATE = {signal.state}<br>
 CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-CURRENT TIME = {current_time} → TARGET TIME = {target_time_label}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
@@ -1870,13 +1770,6 @@ CONF = {confidence_score:.2f}
             return
 
         target_round = self.ctx.pending_round + 1
-        open_time = get_round_time(self.ctx.pending_round, self.round_times) or "—"
-        target_time, target_estimated = infer_next_round_time(
-            target_round, self.round_times
-        )
-        target_time = target_time or "—"
-        if target_estimated:
-            target_time += " (estimated)"
 
         display_pending_window = self.ctx.pending_locked_window
         if display_pending_window is None and self.ctx.pending_index is not None:
@@ -1886,8 +1779,8 @@ CONF = {confidence_score:.2f}
                 display_pending_window = self.ctx.locked_window
 
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Open Round", f"{self.ctx.pending_round} | {open_time}")
-        c2.metric("Target Round", f"{target_round} | {target_time}")
+        c1.metric("Open Round", self.ctx.pending_round)
+        c2.metric("Target Round", target_round)
         c3.metric("Locked Window", display_pending_window)
         c4.metric("Bet Group", self.ctx.pending_trade)
         c5.metric("Open CONF", round(float(getattr(self.ctx, "pending_confidence", 0.0)), 3))
@@ -2686,7 +2579,6 @@ class EngineManager:
         self.window_state = get_live_window_state()
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
-        self.round_times = load_round_times(refresh_bucket=int(time.time() // 5))
 
         # ============================================================
         # DATA INTEGRITY / DAILY RESET
@@ -2814,7 +2706,6 @@ class EngineManager:
             self.trade_engine,
             self.protection_engine
         )
-        self.dashboard.set_round_times(self.round_times)
 
         if getattr(self.ctx, "hybrid_initialized", False):
             self.rebuild_windows_to_last_length()
@@ -3022,7 +2913,6 @@ Trade state is saved to Google Sheet if configured, otherwise local JSON fallbac
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
 Current Sheet Round : {self.round_id}
-Current Sheet Time  : {get_round_time(self.round_id, self.round_times) or "—"}
 
 Engine Last Round : {self.ctx.last_length}
 
