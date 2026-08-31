@@ -1123,11 +1123,10 @@ class SignalEngine:
             regime = "NORMAL"
 
         # Display-only turn timing check. No state mutation.
-        snapshot_turn_stable = locked_window is not None and self.ctx.locked_window == locked_window
-        snapshot_turn_ok, snapshot_turn_count = self.get_turn_timing(
+        snapshot_turn_ok, snapshot_turn_count, snapshot_turn_stable = self.get_turn_timing(
             round_id,
             next_group,
-            snapshot_turn_stable
+            locked_window
         )
 
         state = "WAIT"
