@@ -163,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_BACKFILL_180"
+STATE_VERSION = "V58_STABLE_LIVE_FINAL_NEW_DAY_EMPTY_RESET"
 
 
 # ============================================================
@@ -487,16 +487,16 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
 
 @st.cache_data(ttl=8)
 def load_round_times(refresh_bucket: int = 0) -> list[str]:
-    """Load round times using the SAME filtered rows as load_numbers().
+    """Load Sheet times by physical data-row position, not by valid-number count.
 
-    The old implementation depended on one exact header named ``time``.
-    Real Sheets often use Time, Round Time, timestamp, Giờ, or even an
-    unnamed column containing HH:MM values.  This loader therefore:
-      1) reads the same source,
-      2) identifies the number column,
-      3) keeps exactly the rows whose number is 1..12,
-      4) detects the most likely time column by both header and values,
-      5) preserves row-for-row alignment with engine round numbers.
+    The Sheet has a header on row 1. Therefore:
+        engine round 1  -> Sheet row 2
+        engine round 231 -> Sheet row 232
+        engine round 232 -> Sheet row 233
+
+    Time is a schedule column and must NOT disappear merely because the
+    corresponding future number cell is still blank. This prevents the old
+    off-by-one/estimated-time display.
     """
     if INPUT_CSV_PATH:
         df = pd.read_csv(INPUT_CSV_PATH)
@@ -508,16 +508,10 @@ def load_round_times(refresh_bucket: int = 0) -> list[str]:
         )
         df = pd.read_csv(url)
 
-    original_cols = list(df.columns)
     df.columns = [str(x).lower().strip() for x in df.columns]
-
-    if "number" not in df.columns:
+    if len(df) == 0:
         return []
 
-    number_series = pd.to_numeric(df["number"], errors="coerce")
-    valid_mask = number_series.between(1, 12, inclusive="both")
-
-    # Header aliases, including common Vietnamese/Google-Sheet variants.
     explicit = (
         "time", "round_time", "roundtime", "timestamp", "datetime",
         "date_time", "giờ", "gio", "thời gian", "thoi gian",
@@ -528,49 +522,42 @@ def load_round_times(refresh_bucket: int = 0) -> list[str]:
         vals = series.dropna().astype(str).str.strip()
         if len(vals) == 0:
             return 0.0
-        # Strong signal for HH:MM / HH:MM:SS.
-        hhmm = vals.str.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", na=False).mean()
-        # Datetime strings containing a time portion.
-        dtlike = vals.str.contains(r"\d{1,2}:\d{2}", regex=True, na=False).mean()
+        hhmm = vals.str.match(
+            r"^\d{1,2}:\d{2}(?::\d{2})?$", na=False
+        ).mean()
+        dtlike = vals.str.contains(
+            r"\d{1,2}:\d{2}", regex=True, na=False
+        ).mean()
         return max(float(hhmm), float(dtlike) * 0.9)
 
-    # First use an explicit time-like header if it contains useful values.
     candidates = []
     for c in df.columns:
-        if c == "number":
-            continue
         header_bonus = 1.0 if c in explicit else (
-            0.7 if any(k in c for k in ("time", "gio", "giờ", "thoi", "thời"))
+            0.7 if any(k in c for k in
+                       ("time", "gio", "giờ", "thoi", "thời"))
             else 0.0
         )
-        score = header_bonus + time_value_score(df[c])
-        candidates.append((score, c))
+        candidates.append((header_bonus + time_value_score(df[c]), c))
 
     candidates.sort(reverse=True)
-    if not candidates or candidates[0][0] <= 0.0:
+    if not candidates or candidates[0][0] <= 0:
         return []
 
     time_col = candidates[0][1]
 
+    # IMPORTANT: retain every physical data row. Do not filter by number.
+    # load_numbers() is responsible for number validity; time is independent.
     out = []
-    for i, raw_n in enumerate(number_series):
-        if pd.isna(raw_n) or not valid_mask.iloc[i]:
-            continue
-
-        raw_t = df.iloc[i][time_col]
+    for raw_t in df[time_col]:
         if pd.isna(raw_t):
             out.append("")
             continue
 
         text = str(raw_t).strip()
         try:
-            # For true datetime / date+time cells, extract HH:MM.
             dt = pd.to_datetime(raw_t, errors="raise")
-            if not re.match(r"^\d{1,2}:\d{2}", text):
-                text = dt.strftime("%H:%M")
-            else:
-                m = re.match(r"^(\d{1,2}:\d{2})", text)
-                text = m.group(1) if m else text[:5]
+            m = re.match(r"^\d{1,2}:\d{2}", text)
+            text = m.group(0) if m else dt.strftime("%H:%M")
         except Exception:
             m = re.search(r"(\d{1,2}:\d{2})", text)
             text = m.group(1) if m else text[:19]
@@ -578,6 +565,17 @@ def load_round_times(refresh_bucket: int = 0) -> list[str]:
         out.append(text)
 
     return out
+
+
+def get_sheet_row_for_round(round_id: int) -> int:
+    """Return the visible Google Sheet row for a 1-based engine round."""
+    try:
+        r = int(round_id)
+    except Exception:
+        return 0
+    return r + 1  # row 1 is the header
+
+
 
 def get_round_time(round_id: int, round_times: list[str]) -> str:
     """Return exact Sheet time for a round, or blank if unavailable."""
@@ -661,16 +659,15 @@ def make_numbers_signature(numbers: list[int], limit: Optional[int] = None) -> s
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
+    """Load the current Sheet even when it is empty/partially filled.
+
+    Empty/partial data is valid during the daily reset + warm-up phase.
+    The EngineManager decides whether to warm up, go live, or stop the UI.
+    """
     numbers = load_numbers(refresh_bucket=int(time.time() // 5))
-
-    if len(numbers) < MIN_DATA_LEN:
-        st.warning("Waiting data...")
-        st.stop()
-
     groups = build_groups(numbers)
-    actual_group = groups[-1]
+    actual_group = groups[-1] if groups else 0
     round_id = len(numbers)
-
     return numbers, groups, actual_group, round_id
 
 
@@ -1842,7 +1839,7 @@ font-weight:bold;
 ">
 {title}<br>
 STATE = {signal.state}<br>
-CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
+CURRENT ROUND = {current_round} (SHEET ROW {get_sheet_row_for_round(current_round)}) → TARGET ROUND = {target_round} (SHEET ROW {get_sheet_row_for_round(target_round)})<br>
 CURRENT TIME = {current_time} → TARGET TIME = {target_time_label}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
@@ -2721,7 +2718,7 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
-        if st.button("Reset Live State"):
+        if st.button("Reset Live State / New Day"):
             if "v50_true_live_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
             if "v50_true_live_window_state" in st.session_state:
@@ -2844,8 +2841,104 @@ class EngineManager:
             self.ctx.correction_old_value = None
             self.ctx.correction_new_value = None
             self.ctx.hybrid_initialized = False
+            self.ctx.dataset_anchor_signature = ""
             save_live_state(self.ctx)
 
+        # ============================================================
+        # NEW DAY / EMPTY SHEET / WARM-UP
+        # ============================================================
+        # The daily workflow is intentionally:
+        #   1) delete all Number cells
+        #   2) press Reset Live State / New Day
+        #   3) enter the new day's numbers from round 1
+        #
+        # Empty or < LIVE_START_ROUND data is not an error.  It is the normal
+        # warm-up state and must never inherit yesterday's trade state.
+        if len(self.groups) == 0:
+            self.ctx.pending_trade = None
+            self.ctx.pending_round = 0
+            self.ctx.pending_index = None
+            self.ctx.pending_locked_window = None
+            self.ctx.pending_target_round = 0
+            self.ctx.pending_confidence = 0.0
+            self.ctx.trade_state = "IDLE"
+            self.ctx.last_length = 0
+            self.ctx.last_open_round = -1
+            self.ctx.last_settle_round = -1
+            self.ctx.last_window_round = -1
+            self.ctx.last_signal_round = -1
+            self.ctx.locked_window = None
+            self.ctx.lock_reason = "NEW_DAY_EMPTY_SHEET"
+            self.ctx.trade_history = []
+            self.ctx.equity_curve = []
+            self.ctx.signal_history.clear()
+            self.ctx.signal_flip_history.clear()
+            self.ctx.leader_history.clear()
+            self.ctx.window_real_stats = {}
+            self.ctx.cooled_windows = {}
+            self.ctx.blacklisted_windows = {}
+            self.ctx.peak_equity = 0.0
+            self.ctx.last_safe_trigger_peak = 0.0
+            self.ctx.safe_mode_counter = 0
+            self.ctx.risk_pause_counter = 0
+            self.ctx.last_risk_trigger_trade_count = -1
+            self.ctx.data_signature = ""
+            self.ctx.dataset_anchor_signature = ""
+            self.ctx.processed_numbers = []
+            self.ctx.correction_pause = False
+            self.ctx.correction_round = 0
+            self.ctx.correction_old_value = None
+            self.ctx.correction_new_value = None
+            self.ctx.hybrid_initialized = False
+            save_live_state(self.ctx)
+
+            st.info(
+                "NEW DAY READY — Sheet is empty. "
+                "Enter numbers from round 1. "
+                f"Rounds 1–{LIVE_START_ROUND - 1} are warm-up; "
+                f"live decisions begin at round {LIVE_START_ROUND}."
+            )
+            st.stop()
+
+        if len(self.groups) < LIVE_START_ROUND:
+            # Keep the new dataset isolated from any previous day.
+            # Do not fabricate trades before LIVE_START_ROUND.
+            if not getattr(self.ctx, "hybrid_initialized", False):
+                self.ctx.pending_trade = None
+                self.ctx.pending_round = 0
+                self.ctx.pending_index = None
+                self.ctx.pending_locked_window = None
+                self.ctx.pending_target_round = 0
+                self.ctx.pending_confidence = 0.0
+                self.ctx.trade_state = "IDLE"
+                self.ctx.last_length = len(self.groups)
+                self.ctx.last_open_round = -1
+                self.ctx.last_settle_round = -1
+                self.ctx.last_window_round = len(self.groups)
+                self.ctx.last_signal_round = -1
+                self.ctx.locked_window = None
+                self.ctx.lock_reason = "WARMUP"
+                self.ctx.trade_history = []
+                self.ctx.equity_curve = []
+                self.ctx.data_signature = make_numbers_signature(
+                    self.numbers, len(self.numbers)
+                )
+                self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(
+                    self.numbers
+                )
+                self.ctx.processed_numbers = list(self.numbers)
+                self.ctx.correction_pause = False
+                self.ctx.correction_round = 0
+                self.ctx.correction_old_value = None
+                self.ctx.correction_new_value = None
+                save_live_state(self.ctx)
+
+            st.info(
+                f"WARM-UP — {len(self.groups)} / {LIVE_START_ROUND} rounds. "
+                f"No trades before round {LIVE_START_ROUND}. "
+                f"Enter the next number in the Sheet."
+            )
+            st.stop()
 
         if getattr(self.ctx, "algorithm_migration_pending", False) and getattr(self.ctx, "hybrid_initialized", False):
             # Preserve settled history and an exact pending target, but remove
@@ -3126,7 +3219,7 @@ class EngineManager:
             f"""
 V58 FINAL SINGLE-FILE ROBUST LIVE
 
-First run: rebuild history/windows from the current Sheet without fabricating trades.
+New day: delete Number cells → Reset Live State / New Day → enter from round 1. Warm-up runs before live trading; existing data is backfilled deterministically.
 
 After that: only process new Google Sheet rows.
 V56 rule: UI refresh is read-only; only new rounds can change trade state.
@@ -3135,6 +3228,7 @@ Trade state is saved to Google Sheet if configured, otherwise local JSON fallbac
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
 Current Sheet Round : {self.round_id}
+Current Sheet Row   : {get_sheet_row_for_round(self.round_id)}
 Current Sheet Time  : {get_round_time(self.round_id, self.round_times) or "—"}
 
 Engine Last Round : {self.ctx.last_length}
