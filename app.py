@@ -163,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_2LOSS_HISTORY_FIXED"
+STATE_VERSION = "V58_STABLE_LIVE_BACKFILL_180"
 
 
 # ============================================================
@@ -2898,67 +2898,72 @@ class EngineManager:
         self.ctx.last_window_round = target
 
     def hybrid_replay_once(self) -> None:
-        """Fresh-state bootstrap with NO historical trade fabrication.
+        """Deterministic first-run/backfill, then true incremental live.
 
-        Reset semantics:
-        - The Google Sheet numbers are the source of truth and are never deleted.
-        - All currently present numbers are used to rebuild window/turn statistics.
-        - Existing rows are historical at the moment of reset; they are NOT treated
-          as newly-arriving live rounds and therefore cannot create Trade History
-          or Profit.
-        - The current last sheet round becomes the live anchor. The first real
-          trade can only be created when a NEW row is appended after this reset.
-        - LIVE_START_ROUND remains the minimum amount of history required before
-          live decisions are allowed; it is not a command to manufacture old trades.
+        IMPORTANT:
+        - Rows 1..LIVE_START_ROUND-1 are warm-up only.
+        - Starting at LIVE_START_ROUND, the exact live state machine is replayed
+          one round at a time: settle -> update windows -> signal -> open.
+        - This creates an auditable historical Trade History from the existing
+          Sheet data without look-ahead: a decision at round N only sees data
+          through N and can only target N+1.
+        - Once initialization reaches the current Sheet length, all existing
+          rows are marked processed. Future refreshes process only appended rows.
         """
         if getattr(self.ctx, "hybrid_initialized", False):
+            # Recovery path only. Do not recompute/replay on UI refresh.
             if self.ctx.pending_trade is not None:
-                self.trade_engine.reconcile_pending_from_sheet(
+                settled = self.trade_engine.reconcile_pending_from_sheet(
                     self.groups,
                     len(self.groups)
                 )
+                if settled:
+                    self.ctx.data_signature = make_numbers_signature(
+                        self.numbers, len(self.numbers)
+                    )
+                    self.ctx.processed_numbers = list(
+                        self.numbers[:len(self.numbers)]
+                    )
+                    save_live_state(self.ctx)
             return
 
         total = len(self.groups)
         if total <= 0:
             return
 
-        # Rebuild all derived window statistics from the complete current dataset.
-        # This is deterministic and contains NO trade open/settle side effects.
-        for idx in range(1, total + 1):
+        # ------------------------------------------------------------
+        # PHASE 1: pure warm-up. No trades before LIVE_START_ROUND.
+        # ------------------------------------------------------------
+        warmup_end = min(total, max(0, LIVE_START_ROUND - 1))
+        for idx in range(1, warmup_end + 1):
             self.ctx.last_length = idx
-            self.window_engine.update_one_round(self.groups[idx - 1], idx)
-
-        # We need at least LIVE_START_ROUND rounds before enabling live mode.
-        # At the current anchor, calculate the signal/lock for the NEXT unseen
-        # round, but deliberately do not open a historical trade.
-        if total >= LIVE_START_ROUND:
-            anchor_round = total
-
-            # Select the initial lock deterministically from the canonical
-            # ranking. No historical trade is opened here.
-            top_rows = self.window_engine.get_top_windows(len(WINDOWS))
-            candidate_w, candidate_obj, candidate_reason = (
-                self.signal_engine.choose_relock_candidate(top_rows)
+            self.window_engine.update_one_round(
+                self.groups[idx - 1],
+                idx
             )
 
-            # Safety fallback: the dashboard must never be left with a blank
-            # Locked Window when there is a ranked window with a prediction.
-            if candidate_obj is None:
-                for w, obj in top_rows:
-                    if obj.next_group is not None:
-                        candidate_w, candidate_obj = w, obj
-                        candidate_reason = "TOP_WINDOW_INITIAL_FALLBACK"
-                        break
+        # ------------------------------------------------------------
+        # PHASE 2: deterministic walk-forward backfill.
+        #
+        # This deliberately reuses the SAME live operations as
+        # process_new_rounds(). No future rows are used to make a decision.
+        # ------------------------------------------------------------
+        if total >= LIVE_START_ROUND:
+            for idx in range(LIVE_START_ROUND, total + 1):
+                self.ctx.last_length = idx
+                actual_group = self.groups[idx - 1]
 
-            if candidate_obj is not None:
-                self.ctx.locked_window = int(candidate_w)
-                self.ctx.lock_reason = (
-                    f"INITIAL_LOCK_{candidate_reason}"
+                # At idx=N, settle only a trade that was opened at N-1.
+                self.trade_engine.settle_trade(actual_group, idx)
+
+                # Now N becomes available to all window calculations.
+                self.window_engine.update_one_round(
+                    actual_group,
+                    idx
                 )
 
-                # Build a signal only after the lock is persisted.
-                signal = self.signal_engine.build_signal_snapshot(anchor_round)
+                # Build the signal using information available through N only.
+                signal = self.signal_engine.build_signal(idx)
                 confidence = self.signal_engine.get_confidence_score(signal)
                 self.ctx.last_decision_confidence = confidence
                 setattr(signal, "decision_confidence", confidence)
@@ -2967,24 +2972,34 @@ class EngineManager:
                     signal,
                     confidence
                 )
-                self.ctx.last_signal_round = anchor_round
-                self.ctx.open_reason = "RESET_ANCHOR_READY_FOR_NEXT_NEW_ROUND"
-                self.ctx.trade_state = "IDLE"
-            else:
-                self.ctx.locked_window = None
-                self.ctx.lock_reason = "NO_PREDICTABLE_WINDOW"
-                self.ctx.last_decision_confidence = 0.0
-                self.ctx.last_signal_round = anchor_round
-                self.ctx.open_reason = "NO_PREDICTABLE_WINDOW"
-                self.ctx.trade_state = "IDLE"
 
-        # Everything currently in the Sheet is already observed at reset.
-        # Therefore the next live round is total + 1.
+                # Open a trade for target N+1 only when the signal is READY.
+                # If N == total, this is a legitimate PENDING trade whose
+                # target row has not arrived yet.
+                self.trade_engine.open_trade(
+                    signal,
+                    idx,
+                    confidence
+                )
+
+                self.ctx.last_signal_round = idx
+
+        # ------------------------------------------------------------
+        # FINALIZE INITIALIZATION.
+        # Existing Sheet rows are now fully accounted for. The next row
+        # appended to the Sheet is the only new live event.
+        # ------------------------------------------------------------
         self.ctx.last_length = total
-        self.ctx.data_signature = make_numbers_signature(self.numbers, total)
-        self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(self.numbers)
+        self.ctx.data_signature = make_numbers_signature(
+            self.numbers,
+            total
+        )
+        self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(
+            self.numbers
+        )
         self.ctx.processed_numbers = list(self.numbers[:total])
         self.ctx.hybrid_initialized = True
+
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
