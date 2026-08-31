@@ -146,20 +146,6 @@ ROBUST_MIN_SHADOW_SAMPLES_FOR_LOCK = 12
 ROBUST_MAX_LOCK_DRAWDOWN_SCORE = -0.50
 ROBUST_RELOCK_LOSS_STREAK = 2
 ROBUST_REAL_MIN_TRADES = 5
-# ============================================================
-# V58 TURN TIMING GATE
-# Conservative entry timing layer. It does NOT alter Window
-# scoring/ranking. It only allows a READY trade when the locked
-# prediction has appeared at least twice in the previous 5
-# observed rounds and the existing lock was stable (no relock
-# on the current decision).
-#
-# This is a timing filter, not a probability guarantee.
-# ============================================================
-TURN_TIMING_ENABLED = True
-TURN_LOOKBACK_ROUNDS = 5
-TURN_MIN_RECENT_COUNT = 2
-
 ROBUST_READY_FLOOR = -0.25
 ROBUST_Z = 0.84  # one-sided ~80% Wilson lower bound
 
@@ -813,39 +799,6 @@ class SignalEngine:
     def __init__(self, ctx: EngineContext, window_engine: WindowEngine):
         self.ctx = ctx
         self.window_engine = window_engine
-        # Set by EngineManager after the daily dataset is loaded.
-        # This is read-only for turn detection.
-        self.groups = []
-
-    def set_groups(self, groups: list[int]) -> None:
-        self.groups = list(groups or [])
-
-    def get_turn_timing(self, round_id: int, prediction: Optional[int], stable_lock: bool) -> tuple[bool, int]:
-        """Return (turn_ok, recent_count).
-
-        A turn candidate is intentionally simple:
-        - prediction must be present;
-        - same predicted group appears >= 2 times in the previous 5
-          observed groups;
-        - locked window must be stable for this decision.
-
-        The current round is excluded, so there is no look-ahead.
-        """
-        if not TURN_TIMING_ENABLED or prediction is None:
-            return (not TURN_TIMING_ENABLED), 0
-
-        if not stable_lock:
-            return False, 0
-
-        try:
-            end = max(0, int(round_id))
-            start = max(0, end - TURN_LOOKBACK_ROUNDS)
-            recent = self.groups[start:end]
-        except Exception:
-            return False, 0
-
-        count = sum(1 for g in recent if g == prediction)
-        return count >= TURN_MIN_RECENT_COUNT, count
 
     def get_momentum(self, top_rows: list[tuple[int, WindowRecord]]) -> float:
         if not top_rows:
@@ -1104,14 +1057,6 @@ class SignalEngine:
         else:
             regime = "NORMAL"
 
-        # Display-only turn timing check. No state mutation.
-        snapshot_turn_stable = locked_window is not None and self.ctx.locked_window == locked_window
-        snapshot_turn_ok, snapshot_turn_count = self.get_turn_timing(
-            round_id,
-            next_group,
-            snapshot_turn_stable
-        )
-
         state = "WAIT"
         if round_id >= LIVE_START_ROUND and locked_obj is not None and next_group is not None:
             if (
@@ -1128,7 +1073,7 @@ class SignalEngine:
                     and real_locked_stat["wr"] >= REAL_MIN_WR_FOR_LOCK
                     and real_locked_stat["loss_streak"] <= REAL_MAX_LOSS_STREAK_FOR_LOCK
                 )
-                if (real_ok or consensus >= required_consensus or leader_wr20 >= 0.50) and snapshot_turn_ok:
+                if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
                     state = "READY"
 
         return SignalRecord(
@@ -1172,7 +1117,6 @@ class SignalEngine:
         # LOCK / RELOCK LEADER WINDOW
         # ====================================================
         locked_window = self.ctx.locked_window
-        initial_locked_window = locked_window
         locked_obj = None
         relock_needed = False
         lock_reason = "KEEP_LOCK"
@@ -1259,22 +1203,6 @@ class SignalEngine:
         else:
             regime = "NORMAL"
 
-        # TURN TIMING:
-        # The lock must survive the current decision (no relock), and its
-        # predicted group must have appeared at least twice in the previous
-        # five observed groups. The current round is excluded.
-        stable_lock = (
-            initial_locked_window is not None
-            and locked_window is not None
-            and locked_window == initial_locked_window
-            and not relock_needed
-        )
-        turn_ok, turn_recent_count = self.get_turn_timing(
-            round_id,
-            next_group,
-            stable_lock
-        )
-
         state = "WAIT"
         if round_id >= LIVE_START_ROUND and locked_obj is not None and next_group is not None:
             robust_score = self.window_engine._canonical_rank_score(locked_window, locked_obj)
@@ -1289,7 +1217,6 @@ class SignalEngine:
                 and leader_loss_streak < ROBUST_RELOCK_LOSS_STREAK
                 and robust_score >= ROBUST_READY_FLOOR
                 and (real_ok or strong_confirmation)
-                and turn_ok
             ):
                 state = "READY"
 
@@ -1319,11 +1246,6 @@ class SignalEngine:
             real_window_trade_count=real_locked_stat["trade_count"],
             real_window_loss_streak=real_locked_stat["loss_streak"],
         )
-
-        # Diagnostic-only fields. They are not used by UI refreshes to mutate state.
-        setattr(signal, "turn_timing_ok", bool(turn_ok))
-        setattr(signal, "turn_recent_count", int(turn_recent_count))
-        setattr(signal, "turn_stable_lock", bool(stable_lock))
 
         if round_id != self.ctx.last_signal_round and next_group is not None:
             self.ctx.signal_history.append(next_group)
@@ -2761,7 +2683,6 @@ class EngineManager:
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
         self.signal_engine = SignalEngine(self.ctx, self.window_engine)
-        self.signal_engine.set_groups(self.groups)
         self.protection_engine = ProtectionEngine(self.ctx, self.trade_engine)
 
         self.dashboard = Dashboard(
@@ -2944,8 +2865,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V58 TURN TIMING LIVE FINAL
-Turn gate: locked prediction must repeat >= 2 times in previous 5 observed rounds and lock must remain stable. Otherwise WAIT.
+V58 FINAL SINGLE-FILE ROBUST LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
