@@ -163,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_FINAL_NEW_DAY_EMPTY_RESET"
+STATE_VERSION = "V58_STABLE_LIVE_CONTIGUOUS_FRONTIER"
 
 
 # ============================================================
@@ -442,6 +442,18 @@ window_state = get_window_state()
 
 @st.cache_data(ttl=8)
 def load_numbers(refresh_bucket: int = 0) -> list[int]:
+    """Read numbers as a contiguous round sequence.
+
+    A blank Number cell means that round has not arrived yet.  We MUST NOT
+    drop blanks and compress later rows, because that changes engine round N
+    into a different physical Sheet row/time.
+
+    Policy:
+      - rows before the first blank must contain valid 1..12 numbers;
+      - the first blank is the live frontier;
+      - later rows are schedule/template rows and are ignored for the engine;
+      - a non-empty value after a blank is not silently compressed.
+    """
     if INPUT_CSV_PATH:
         try:
             df = pd.read_csv(INPUT_CSV_PATH)
@@ -454,35 +466,59 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
             f"{SHEET_ID}/export?format=csv"
             f"&cache={time.time()}"
         )
-
         try:
             df = pd.read_csv(url)
         except Exception as e:
             st.error(f"Load sheet error: {e}")
             st.stop()
 
-    df.columns = [
-        str(x).lower().strip()
-        for x in df.columns
-    ]
-
+    df.columns = [str(x).lower().strip() for x in df.columns]
     if "number" not in df.columns:
         st.error("Sheet must contain column 'number'")
         st.stop()
 
-    nums = (
-        pd.to_numeric(df["number"], errors="coerce")
-        .dropna()
-        .astype(int)
-        .tolist()
-    )
+    values = df["number"].tolist()
+    numbers: list[int] = []
+    first_blank = None
 
-    return [
-        x
-        for x in nums
-        if 1 <= x <= 12
-    ]
+    for physical_idx, raw in enumerate(values):
+        if pd.isna(raw) or str(raw).strip() == "":
+            first_blank = physical_idx
+            break
 
+        try:
+            n = int(float(str(raw).strip()))
+        except Exception:
+            st.error(
+                f"Invalid Number at Sheet row {physical_idx + 2}: {raw!r}"
+            )
+            st.stop()
+
+        if not 1 <= n <= 12:
+            st.error(
+                f"Number must be 1..12 at Sheet row {physical_idx + 2}: {raw!r}"
+            )
+            st.stop()
+
+        numbers.append(n)
+
+    # A later filled cell after the first blank is a Sheet data-gap/correction.
+    # Do not compress it into the live sequence.
+    if first_blank is not None:
+        later_filled = []
+        for j in range(first_blank + 1, len(values)):
+            raw = values[j]
+            if not (pd.isna(raw) or str(raw).strip() == ""):
+                later_filled.append(j + 2)  # visible Sheet row
+        if later_filled:
+            st.warning(
+                "DATA GAP: Number is blank at Sheet row "
+                f"{first_blank + 2}, but later Number cells are filled "
+                f"(e.g. row {later_filled[0]}). "
+                "Engine stops at the first blank and will not compress rows."
+            )
+
+    return numbers
 
 
 @st.cache_data(ttl=8)
@@ -659,15 +695,16 @@ def make_numbers_signature(numbers: list[int], limit: Optional[int] = None) -> s
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
-    """Load the current Sheet even when it is empty/partially filled.
-
-    Empty/partial data is valid during the daily reset + warm-up phase.
-    The EngineManager decides whether to warm up, go live, or stop the UI.
-    """
     numbers = load_numbers(refresh_bucket=int(time.time() // 5))
+
+    if len(numbers) < MIN_DATA_LEN:
+        st.warning("Waiting data...")
+        st.stop()
+
     groups = build_groups(numbers)
-    actual_group = groups[-1] if groups else 0
+    actual_group = groups[-1]
     round_id = len(numbers)
+
     return numbers, groups, actual_group, round_id
 
 
@@ -2718,7 +2755,7 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
-        if st.button("Reset Live State / New Day"):
+        if st.button("Reset Live State"):
             if "v50_true_live_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
             if "v50_true_live_window_state" in st.session_state:
@@ -2841,104 +2878,8 @@ class EngineManager:
             self.ctx.correction_old_value = None
             self.ctx.correction_new_value = None
             self.ctx.hybrid_initialized = False
-            self.ctx.dataset_anchor_signature = ""
             save_live_state(self.ctx)
 
-        # ============================================================
-        # NEW DAY / EMPTY SHEET / WARM-UP
-        # ============================================================
-        # The daily workflow is intentionally:
-        #   1) delete all Number cells
-        #   2) press Reset Live State / New Day
-        #   3) enter the new day's numbers from round 1
-        #
-        # Empty or < LIVE_START_ROUND data is not an error.  It is the normal
-        # warm-up state and must never inherit yesterday's trade state.
-        if len(self.groups) == 0:
-            self.ctx.pending_trade = None
-            self.ctx.pending_round = 0
-            self.ctx.pending_index = None
-            self.ctx.pending_locked_window = None
-            self.ctx.pending_target_round = 0
-            self.ctx.pending_confidence = 0.0
-            self.ctx.trade_state = "IDLE"
-            self.ctx.last_length = 0
-            self.ctx.last_open_round = -1
-            self.ctx.last_settle_round = -1
-            self.ctx.last_window_round = -1
-            self.ctx.last_signal_round = -1
-            self.ctx.locked_window = None
-            self.ctx.lock_reason = "NEW_DAY_EMPTY_SHEET"
-            self.ctx.trade_history = []
-            self.ctx.equity_curve = []
-            self.ctx.signal_history.clear()
-            self.ctx.signal_flip_history.clear()
-            self.ctx.leader_history.clear()
-            self.ctx.window_real_stats = {}
-            self.ctx.cooled_windows = {}
-            self.ctx.blacklisted_windows = {}
-            self.ctx.peak_equity = 0.0
-            self.ctx.last_safe_trigger_peak = 0.0
-            self.ctx.safe_mode_counter = 0
-            self.ctx.risk_pause_counter = 0
-            self.ctx.last_risk_trigger_trade_count = -1
-            self.ctx.data_signature = ""
-            self.ctx.dataset_anchor_signature = ""
-            self.ctx.processed_numbers = []
-            self.ctx.correction_pause = False
-            self.ctx.correction_round = 0
-            self.ctx.correction_old_value = None
-            self.ctx.correction_new_value = None
-            self.ctx.hybrid_initialized = False
-            save_live_state(self.ctx)
-
-            st.info(
-                "NEW DAY READY — Sheet is empty. "
-                "Enter numbers from round 1. "
-                f"Rounds 1–{LIVE_START_ROUND - 1} are warm-up; "
-                f"live decisions begin at round {LIVE_START_ROUND}."
-            )
-            st.stop()
-
-        if len(self.groups) < LIVE_START_ROUND:
-            # Keep the new dataset isolated from any previous day.
-            # Do not fabricate trades before LIVE_START_ROUND.
-            if not getattr(self.ctx, "hybrid_initialized", False):
-                self.ctx.pending_trade = None
-                self.ctx.pending_round = 0
-                self.ctx.pending_index = None
-                self.ctx.pending_locked_window = None
-                self.ctx.pending_target_round = 0
-                self.ctx.pending_confidence = 0.0
-                self.ctx.trade_state = "IDLE"
-                self.ctx.last_length = len(self.groups)
-                self.ctx.last_open_round = -1
-                self.ctx.last_settle_round = -1
-                self.ctx.last_window_round = len(self.groups)
-                self.ctx.last_signal_round = -1
-                self.ctx.locked_window = None
-                self.ctx.lock_reason = "WARMUP"
-                self.ctx.trade_history = []
-                self.ctx.equity_curve = []
-                self.ctx.data_signature = make_numbers_signature(
-                    self.numbers, len(self.numbers)
-                )
-                self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(
-                    self.numbers
-                )
-                self.ctx.processed_numbers = list(self.numbers)
-                self.ctx.correction_pause = False
-                self.ctx.correction_round = 0
-                self.ctx.correction_old_value = None
-                self.ctx.correction_new_value = None
-                save_live_state(self.ctx)
-
-            st.info(
-                f"WARM-UP — {len(self.groups)} / {LIVE_START_ROUND} rounds. "
-                f"No trades before round {LIVE_START_ROUND}. "
-                f"Enter the next number in the Sheet."
-            )
-            st.stop()
 
         if getattr(self.ctx, "algorithm_migration_pending", False) and getattr(self.ctx, "hybrid_initialized", False):
             # Preserve settled history and an exact pending target, but remove
@@ -3099,6 +3040,56 @@ class EngineManager:
     def process_new_rounds(self) -> None:
         # Process only rows added after the first hybrid replay.
         current_length = len(self.groups)
+
+        # If the visible Sheet prefix became shorter than the persisted engine,
+        # treat it as a dataset reset/new day instead of continuing from the old
+        # round counter. This prevents "Sheet 232 / Engine 258" drift.
+        if current_length < int(getattr(self.ctx, "last_length", 0) or 0):
+            prefix_changed = False
+            old_numbers = list(getattr(self.ctx, "processed_numbers", []) or [])
+            if old_numbers:
+                prefix_changed = (
+                    self.numbers[:min(len(self.numbers), len(old_numbers))]
+                    != old_numbers[:min(len(self.numbers), len(old_numbers))]
+                )
+
+            if current_length == 0 or prefix_changed:
+                # Automatic NEW DAY / EMPTY-SHEET reset. The Sheet is the source
+                # of truth; no manual JSON deletion is required.
+                self.ctx = EngineContext()
+                st.session_state.v50_ctx = self.ctx
+                self.window_state = {
+                    w: WindowRecord() for w in WINDOWS
+                }
+                self.window_engine.ctx = self.ctx
+                self.window_engine.window_state = self.window_state
+                self.signal_engine.ctx = self.ctx
+                self.signal_engine.window_engine = self.window_engine
+                self.trade_engine.ctx = self.ctx
+                self.protection_engine.ctx = self.ctx
+
+                # Rebind dashboard to the new clean context.
+                self.dashboard.ctx = self.ctx
+                self.dashboard.window_engine = self.window_engine
+                self.dashboard.signal_engine = self.signal_engine
+                self.dashboard.trade_engine = self.trade_engine
+                self.dashboard.protection_engine = self.protection_engine
+
+                self.ctx.last_length = 0
+                self.ctx.processed_numbers = []
+                self.ctx.hybrid_initialized = False
+                save_live_state(self.ctx)
+
+                # Continue through normal initialization for the new dataset.
+                self.hybrid_replay_once()
+                return
+
+            # Same prefix but shorter: this is a correction/deletion.
+            self.ctx.correction_pause = True
+            self.ctx.open_reason = "DATA_TRUNCATION_DETECTED"
+            self.ctx.protection_reason = "DATA_TRUNCATION_DETECTED"
+            return
+
         if getattr(self.ctx, "correction_pause", False):
             self.ctx.open_reason = "DATA_CORRECTION_PAUSED"
             self.ctx.protection_reason = "DATA_CORRECTION_PAUSED"
@@ -3219,7 +3210,7 @@ class EngineManager:
             f"""
 V58 FINAL SINGLE-FILE ROBUST LIVE
 
-New day: delete Number cells → Reset Live State / New Day → enter from round 1. Warm-up runs before live trading; existing data is backfilled deterministically.
+First run: rebuild history/windows from the current Sheet without fabricating trades.
 
 After that: only process new Google Sheet rows.
 V56 rule: UI refresh is read-only; only new rounds can change trade state.
@@ -3227,7 +3218,7 @@ Open/settle decisions happen only when a new round appears, not every rerun.
 Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
-Current Sheet Round : {self.round_id}
+Current Sheet Round : {self.round_id} (contiguous Number frontier)
 Current Sheet Row   : {get_sheet_row_for_round(self.round_id)}
 Current Sheet Time  : {get_round_time(self.round_id, self.round_times) or "—"}
 
