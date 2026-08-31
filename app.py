@@ -163,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_1_LIVE_DETERMINISTIC_2LOSS"
+STATE_VERSION = "V58_STABLE_LIVE_2LOSS_HISTORY_FIXED"
 
 
 # ============================================================
@@ -1711,10 +1711,10 @@ class ProtectionEngine:
         if loss_streak == 0:
             self.ctx.cooldown_loss_streak_marker = -1
 
-        # Chặn sớm khi loss streak >= 3.
-        # Chỉ kích hoạt 1 lần cho mỗi mức streak để không bị WAIT mãi.
+        # Agreed rule: exactly 2 consecutive losses trigger protection.
+        # One loss is only recorded. A WIN resets the streak.
         if (
-            loss_streak >= 3
+            loss_streak >= 2
             and self.ctx.cooldown_counter == 0
             and self.ctx.cooldown_loss_streak_marker != loss_streak
         ):
@@ -2137,6 +2137,8 @@ CONF = {confidence_score:.2f}
             ]
         )
 
+        if not df.empty:
+            df = df.sort_values(["open_round", "settle_round"], na_position="last")
         st.dataframe(df.tail(50), use_container_width=True)
 
     def render_equity(self) -> None:
@@ -2997,11 +2999,19 @@ class EngineManager:
 
         # Settlement recovery MUST happen before any new signal decision.
         # This fixes persisted pending trades after app restarts / downtime.
+        # Recover/settle a persisted pending trade first. If settlement happened,
+        # persist it immediately so Trade History survives reruns/restarts.
         if current_length > 0 and self.ctx.pending_trade is not None:
-            self.trade_engine.reconcile_pending_from_sheet(
+            settled = self.trade_engine.reconcile_pending_from_sheet(
                 self.groups,
                 current_length
             )
+            if settled:
+                self.ctx.data_signature = make_numbers_signature(
+                    self.numbers, current_length
+                )
+                self.ctx.processed_numbers = list(self.numbers[:current_length])
+                save_live_state(self.ctx)
 
         if current_length <= self.ctx.last_length:
             return
@@ -3014,7 +3024,14 @@ class EngineManager:
             actual_group = self.groups[idx - 1]
 
             self.ctx.last_length = idx
+            had_pending = self.ctx.pending_trade is not None
             self.trade_engine.settle_trade(actual_group, idx)
+            if had_pending and self.ctx.last_settle_round == idx:
+                # Trade History is already mutated by settle_trade(); save it now.
+                self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
+                self.ctx.processed_numbers = list(self.numbers[:idx])
+                save_live_state(self.ctx)
+
             self.window_engine.update_one_round(actual_group, idx)
 
             signal = self.signal_engine.build_signal(idx)
@@ -3094,7 +3111,7 @@ class EngineManager:
             f"""
 V58 FINAL SINGLE-FILE ROBUST LIVE
 
-First run: replay from round {LIVE_START_ROUND} to current once.
+First run: rebuild history/windows from the current Sheet without fabricating trades.
 
 After that: only process new Google Sheet rows.
 V56 rule: UI refresh is read-only; only new rounds can change trade state.
