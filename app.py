@@ -112,7 +112,6 @@ FALLBACK_MIN_WR20 = 0.34
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 1
 LOW_WR_CONSENSUS_READY = 0.667
-TEST_CONSENSUS_READY = 0.667
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
@@ -127,11 +126,9 @@ FLIPRATE_STOP = 0.65
 
 CONSENSUS_READY = 0.667
 STABILITY_READY = 0.50
-TEST_STABILITY_READY = 0.45
 
 # V53 defensive gates
 MIN_CONFIDENCE_READY = 0.43
-TEST_MIN_CONFIDENCE_READY = 0.43
 SAFE_DRAWDOWN_FROM_PEAK = -3.0
 SAFE_MODE_ROUNDS = 3
 
@@ -166,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_BALANCED_READY"
+STATE_VERSION = "V58_STABLE_LIVE_LONG_TERM_FINAL"
 
 
 # ============================================================
@@ -3063,7 +3060,6 @@ class EngineManager:
         together.
         """
         self.ctx = EngineContext()
-        self.ctx.last_test_trade_round = 0
         self.ctx.dataset_day_id = ""
         self.ctx.pending_shrink_length = -1
         self.ctx.pending_shrink_count = 0
@@ -3248,33 +3244,6 @@ class EngineManager:
                 confidence
             )
 
-            signal.signal_tier = self.signal_engine.classify_ready_tier(signal)
-
-            # TEST tier is allowed only when the protection layer has already
-            # allowed the signal and only once per 5 rounds. It never overrides
-            # protection, cooldown, or a hard WAIT.
-            if (
-                signal.signal_tier == "TEST"
-                and signal.state == "WAIT"
-            ):
-                if (
-                    float(getattr(signal, "stability", 0.0) or 0.0)
-                    >= TEST_STABILITY_READY
-                    and float(getattr(signal, "consensus", 0.0) or 0.0)
-                    >= TEST_CONSENSUS_READY
-                    and confidence >= TEST_MIN_CONFIDENCE_READY
-                    and self.ctx.cooldown_counter == 0
-                    and self.ctx.pending_trade is None
-                ):
-                    last_test = int(
-                        getattr(self.ctx, "last_test_trade_round", 0) or 0
-                    )
-                    if idx - last_test >= 5:
-                        signal.state = "READY"
-                        signal.reason = "TEST_READY"
-                        signal.signal_tier = "TEST"
-                        self.ctx.last_test_trade_round = idx
-
             self.trade_engine.open_trade(signal, idx, confidence)
 
             # Commit this round only after settlement, window update, signal and
@@ -3401,32 +3370,4 @@ else:
             st.code(traceback.format_exc())
 
     live_engine_loop()
-
-    def classify_ready_tier(self, signal) -> str:
-        """Classify an already-built signal without changing its prediction."""
-        try:
-            stability = float(getattr(signal, "stability", 0.0) or 0.0)
-            consensus = float(getattr(signal, "consensus", 0.0) or 0.0)
-            confidence = float(
-                getattr(signal, "decision_confidence", 0.0)
-                or getattr(self.ctx, "last_decision_confidence", 0.0)
-                or 0.0
-            )
-        except Exception:
-            return "WAIT"
-
-        if getattr(signal, "state", "") == "READY":
-            return "STRONG"
-
-        # TEST tier is intentionally conservative: same consensus/confidence
-        # floor, only stability is softened from .50 to .45.
-        if (
-            consensus >= TEST_CONSENSUS_READY
-            and confidence >= TEST_MIN_CONFIDENCE_READY
-            and stability >= TEST_STABILITY_READY
-        ):
-            return "TEST"
-
-        return "WAIT"
-
 
