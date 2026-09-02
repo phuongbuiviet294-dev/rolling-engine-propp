@@ -16,7 +16,6 @@ from typing import Optional, Any
 
 import pandas as pd
 import streamlit as st
-import re
 
 
 # ============================================================
@@ -163,7 +162,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_LONG_TERM_FULL"
+STATE_VERSION = "V58_FINAL_SINGLE_FILE_ROBUST_LIVE"
 
 
 # ============================================================
@@ -209,7 +208,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_STABLE_LIVE_FINAL"
+    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -290,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_STABLE_LIVE_FINAL"
+    state_version: str = "V58_4_ROBUST_ANTI_OVERFIT"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -348,9 +347,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-
-    previous_version = getattr(ctx, "state_version", "")
-    ctx.state_version = STATE_VERSION
+    ctx.state_version = "V58_4_ROBUST_ANTI_OVERFIT"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -369,6 +366,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
 
+    previous_version = getattr(ctx, "state_version", "")
     if previous_version and previous_version != STATE_VERSION:
         ctx.algorithm_migration_pending = True
     if not hasattr(ctx, "algorithm_migration_pending"):
@@ -442,18 +440,6 @@ window_state = get_window_state()
 
 @st.cache_data(ttl=8)
 def load_numbers(refresh_bucket: int = 0) -> list[int]:
-    """Read numbers as a contiguous round sequence.
-
-    A blank Number cell means that round has not arrived yet.  We MUST NOT
-    drop blanks and compress later rows, because that changes engine round N
-    into a different physical Sheet row/time.
-
-    Policy:
-      - rows before the first blank must contain valid 1..12 numbers;
-      - the first blank is the live frontier;
-      - later rows are schedule/template rows and are ignored for the engine;
-      - a non-empty value after a blank is not silently compressed.
-    """
     if INPUT_CSV_PATH:
         try:
             df = pd.read_csv(INPUT_CSV_PATH)
@@ -466,197 +452,34 @@ def load_numbers(refresh_bucket: int = 0) -> list[int]:
             f"{SHEET_ID}/export?format=csv"
             f"&cache={time.time()}"
         )
+
         try:
             df = pd.read_csv(url)
         except Exception as e:
             st.error(f"Load sheet error: {e}")
             st.stop()
 
-    df.columns = [str(x).lower().strip() for x in df.columns]
+    df.columns = [
+        str(x).lower().strip()
+        for x in df.columns
+    ]
+
     if "number" not in df.columns:
         st.error("Sheet must contain column 'number'")
         st.stop()
 
-    values = df["number"].tolist()
-    numbers: list[int] = []
-    first_blank = None
-
-    for physical_idx, raw in enumerate(values):
-        if pd.isna(raw) or str(raw).strip() == "":
-            first_blank = physical_idx
-            break
-
-        try:
-            n = int(float(str(raw).strip()))
-        except Exception:
-            st.error(
-                f"Invalid Number at Sheet row {physical_idx + 2}: {raw!r}"
-            )
-            st.stop()
-
-        if not 1 <= n <= 12:
-            st.error(
-                f"Number must be 1..12 at Sheet row {physical_idx + 2}: {raw!r}"
-            )
-            st.stop()
-
-        numbers.append(n)
-
-    # A later filled cell after the first blank is a Sheet data-gap/correction.
-    # Do not compress it into the live sequence.
-    if first_blank is not None:
-        later_filled = []
-        for j in range(first_blank + 1, len(values)):
-            raw = values[j]
-            if not (pd.isna(raw) or str(raw).strip() == ""):
-                later_filled.append(j + 2)  # visible Sheet row
-        if later_filled:
-            st.warning(
-                "DATA GAP: Number is blank at Sheet row "
-                f"{first_blank + 2}, but later Number cells are filled "
-                f"(e.g. row {later_filled[0]}). "
-                "Engine stops at the first blank and will not compress rows."
-            )
-
-    # Optional explicit dataset identity.  If absent, keep backward compatibility.
-    day_id = ""
-    for col in ("day_id", "date_id", "session_id"):
-        if col in df.columns:
-            non_empty = df[col].dropna()
-            if len(non_empty):
-                day_id = str(non_empty.iloc[0]).strip()
-                break
-    st.session_state["v58_dataset_day_id"] = day_id
-
-    return numbers
-
-
-@st.cache_data(ttl=8)
-def load_round_times(refresh_bucket: int = 0) -> list[str]:
-    """Load Sheet times by physical data-row position, not by valid-number count.
-
-    The Sheet has a header on row 1. Therefore:
-        engine round 1  -> Sheet row 2
-        engine round 231 -> Sheet row 232
-        engine round 232 -> Sheet row 233
-
-    Time is a schedule column and must NOT disappear merely because the
-    corresponding future number cell is still blank. This prevents the old
-    off-by-one/estimated-time display.
-    """
-    if INPUT_CSV_PATH:
-        df = pd.read_csv(INPUT_CSV_PATH)
-    else:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/"
-            f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time()}"
-        )
-        df = pd.read_csv(url)
-
-    df.columns = [str(x).lower().strip() for x in df.columns]
-    if len(df) == 0:
-        return []
-
-    explicit = (
-        "time", "round_time", "roundtime", "timestamp", "datetime",
-        "date_time", "giờ", "gio", "thời gian", "thoi gian",
-        "time_stamp", "round time"
+    nums = (
+        pd.to_numeric(df["number"], errors="coerce")
+        .dropna()
+        .astype(int)
+        .tolist()
     )
 
-    def time_value_score(series) -> float:
-        vals = series.dropna().astype(str).str.strip()
-        if len(vals) == 0:
-            return 0.0
-        hhmm = vals.str.match(
-            r"^\d{1,2}:\d{2}(?::\d{2})?$", na=False
-        ).mean()
-        dtlike = vals.str.contains(
-            r"\d{1,2}:\d{2}", regex=True, na=False
-        ).mean()
-        return max(float(hhmm), float(dtlike) * 0.9)
-
-    candidates = []
-    for c in df.columns:
-        header_bonus = 1.0 if c in explicit else (
-            0.7 if any(k in c for k in
-                       ("time", "gio", "giờ", "thoi", "thời"))
-            else 0.0
-        )
-        candidates.append((header_bonus + time_value_score(df[c]), c))
-
-    candidates.sort(reverse=True)
-    if not candidates or candidates[0][0] <= 0:
-        return []
-
-    time_col = candidates[0][1]
-
-    # IMPORTANT: retain every physical data row. Do not filter by number.
-    # load_numbers() is responsible for number validity; time is independent.
-    out = []
-    for raw_t in df[time_col]:
-        if pd.isna(raw_t):
-            out.append("")
-            continue
-
-        text = str(raw_t).strip()
-        try:
-            dt = pd.to_datetime(raw_t, errors="raise")
-            m = re.match(r"^\d{1,2}:\d{2}", text)
-            text = m.group(0) if m else dt.strftime("%H:%M")
-        except Exception:
-            m = re.search(r"(\d{1,2}:\d{2})", text)
-            text = m.group(1) if m else text[:19]
-
-        out.append(text)
-
-    return out
-
-
-def get_sheet_row_for_round(round_id: int) -> int:
-    """Return the visible Google Sheet row for a 1-based engine round."""
-    try:
-        r = int(round_id)
-    except Exception:
-        return 0
-    return r + 1  # row 1 is the header
-
-
-
-def get_round_time(round_id: int, round_times: list[str]) -> str:
-    """Return exact Sheet time for a round, or blank if unavailable."""
-    try:
-        r = int(round_id)
-    except Exception:
-        return ""
-    if r <= 0 or r > len(round_times):
-        return ""
-    return str(round_times[r - 1] or "")
-
-
-def infer_next_round_time(round_id: int, round_times: list[str]) -> tuple[str, bool]:
-    """Infer next slot only when the Sheet provides a regular time sequence."""
-    exact = get_round_time(round_id, round_times)
-    if exact:
-        return exact, False
-    if len(round_times) < 2:
-        return "", False
-
-    try:
-        vals = []
-        for t in round_times[-5:]:
-            if not t:
-                continue
-            vals.append(pd.to_datetime(t))
-        if len(vals) < 2:
-            return "", False
-        deltas = [(vals[i] - vals[i-1]).total_seconds() for i in range(1, len(vals))]
-        delta = sorted(deltas)[len(deltas)//2]
-        if delta <= 0 or delta > 3600:
-            return "", False
-        return (vals[-1] + pd.to_timedelta(delta, unit="s")).strftime("%H:%M"), True
-    except Exception:
-        return "", False
+    return [
+        x
+        for x in nums
+        if 1 <= x <= 12
+    ]
 
 
 def group_of(n: int) -> int:
@@ -1268,12 +1091,8 @@ class SignalEngine:
             leader_window=locked_window,
             leader_wr20=leader_wr20,
             leader_loss_streak=leader_loss_streak,
-            locked_window=locked_window,
-            lock_reason=(
-                self.ctx.lock_reason
-                if self.ctx.locked_window is not None
-                else "DISPLAY_TOP_WINDOW_FALLBACK"
-            ),
+            locked_window=self.ctx.locked_window,
+            lock_reason=self.ctx.lock_reason,
             locked_live_profit=self.ctx.locked_live_profit,
             locked_live_loss_streak=self.ctx.locked_live_loss_streak,
             shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
@@ -1618,21 +1437,23 @@ class TradeEngine:
         # Keep real stats/equity aligned with trade_history as source of truth.
         rebuild_real_stats_from_history(self.ctx)
 
-        # Two-loss protection only: a single LOSS is recorded but does not
-        # trigger cooldown/blacklist. Protection activates after exactly two
-        # consecutive losses for the same locked window.
+        # V52: cool losing trade window immediately to avoid repeated losses.
         if hit == 0 and record.locked_window is not None:
             try:
                 w = int(record.locked_window)
             except Exception:
                 w = record.locked_window
             ensure_ctx_fields(self.ctx)
-            stat = get_history_real_stats(self.ctx, w)
+            self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
 
-            if int(stat.get("loss_streak", 0)) >= 2:
-                self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
-                if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
-                    self.ctx.blacklisted_windows = {}
+            # V55.1:
+            # A single loss only cools the window.
+            # Blacklist is temporary and only for stronger losers.
+            if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
+                self.ctx.blacklisted_windows = {}
+
+            stat = get_history_real_stats(self.ctx, w)
+            if stat["profit"] <= -2.0 or stat["loss_streak"] >= 2:
                 self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
 
     def get_total_profit(self) -> float:
@@ -1755,10 +1576,10 @@ class ProtectionEngine:
         if loss_streak == 0:
             self.ctx.cooldown_loss_streak_marker = -1
 
-        # Agreed rule: exactly 2 consecutive losses trigger protection.
-        # One loss is only recorded. A WIN resets the streak.
+        # Chặn sớm khi loss streak >= 3.
+        # Chỉ kích hoạt 1 lần cho mỗi mức streak để không bị WAIT mãi.
         if (
-            loss_streak >= 2
+            loss_streak >= 3
             and self.ctx.cooldown_counter == 0
             and self.ctx.cooldown_loss_streak_marker != loss_streak
         ):
@@ -1846,10 +1667,6 @@ class Dashboard:
         self.signal_engine = signal_engine
         self.trade_engine = trade_engine
         self.protection_engine = protection_engine
-        self.round_times: list[str] = []
-
-    def set_round_times(self, round_times: list[str]) -> None:
-        self.round_times = list(round_times or [])
 
     def render_header(self) -> None:
         st.title("🚀 V58 Stable Walk-Forward Live")
@@ -1859,12 +1676,6 @@ class Dashboard:
 
         current_round = self.ctx.last_length
         target_round = current_round + 1
-        current_time = get_round_time(current_round, self.round_times) or "TIME_NOT_FOUND"
-        target_time, target_is_estimated = infer_next_round_time(target_round, self.round_times)
-        target_time = target_time or "—"
-        target_time_label = (
-            f"{target_time} (estimated)" if target_is_estimated else target_time
-        )
 
         title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
         action = (
@@ -1886,19 +1697,13 @@ font-weight:bold;
 ">
 {title}<br>
 STATE = {signal.state}<br>
-CURRENT ROUND = {current_round} (SHEET ROW {get_sheet_row_for_round(current_round)}) → TARGET ROUND = {target_round} (SHEET ROW {get_sheet_row_for_round(target_round)})<br>
-CURRENT TIME = {current_time} → TARGET TIME = {target_time_label}<br>
+CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
 """,
             unsafe_allow_html=True
         )
-        if current_time == "TIME_NOT_FOUND":
-            st.warning(
-                "TIME COLUMN NOT DETECTED OR NOT ALIGNED WITH NUMBER ROWS. "
-                "Signal logic is unchanged; check the Sheet time column/header."
-            )
 
     def render_market(self, signal: SignalRecord) -> None:
         c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = st.columns(12)
@@ -1966,13 +1771,6 @@ CONF = {confidence_score:.2f}
             return
 
         target_round = self.ctx.pending_round + 1
-        open_time = get_round_time(self.ctx.pending_round, self.round_times) or "—"
-        target_time, target_estimated = infer_next_round_time(
-            target_round, self.round_times
-        )
-        target_time = target_time or "—"
-        if target_estimated:
-            target_time += " (estimated)"
 
         display_pending_window = self.ctx.pending_locked_window
         if display_pending_window is None and self.ctx.pending_index is not None:
@@ -1982,8 +1780,8 @@ CONF = {confidence_score:.2f}
                 display_pending_window = self.ctx.locked_window
 
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Open Round", f"{self.ctx.pending_round} | {open_time}")
-        c2.metric("Target Round", f"{target_round} | {target_time}")
+        c1.metric("Open Round", self.ctx.pending_round)
+        c2.metric("Target Round", target_round)
         c3.metric("Locked Window", display_pending_window)
         c4.metric("Bet Group", self.ctx.pending_trade)
         c5.metric("Open CONF", round(float(getattr(self.ctx, "pending_confidence", 0.0)), 3))
@@ -2164,12 +1962,7 @@ CONF = {confidence_score:.2f}
             [
                 {
                     "open_round": x.round_id,
-                    "open_time": get_round_time(x.round_id, self.round_times) or "—",
                     "settle_round": x.settle_round,
-                    "settle_time": (
-                        get_round_time(x.settle_round, self.round_times)
-                        if x.settle_round is not None else "—"
-                    ) or "—",
                     "locked_window": x.locked_window,
                     "predict": x.predict,
                     "actual": x.actual,
@@ -2181,8 +1974,6 @@ CONF = {confidence_score:.2f}
             ]
         )
 
-        if not df.empty:
-            df = df.sort_values(["open_round", "settle_round"], na_position="last")
         st.dataframe(df.tail(50), use_container_width=True)
 
     def render_equity(self) -> None:
@@ -2766,7 +2557,6 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            st.session_state.pop("v58_dataset_day_id", None)
             if "v50_true_live_ctx" in st.session_state:
                 del st.session_state.v50_true_live_ctx
             if "v50_true_live_window_state" in st.session_state:
@@ -2790,7 +2580,6 @@ class EngineManager:
         self.window_state = get_live_window_state()
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
-        self.round_times = load_round_times(refresh_bucket=int(time.time() // 5))
 
         # ============================================================
         # DATA INTEGRITY / DAILY RESET
@@ -2807,21 +2596,6 @@ class EngineManager:
             self.ctx.correction_pause = True
             self.ctx.open_reason = "DATASET_ANCHOR_CHANGED_RESET_REQUIRED"
             self.ctx.protection_reason = "DATASET_ANCHOR_CHANGED_RESET_REQUIRED"
-
-        # Ignore an invalid stale correction marker such as round=0, None -> None.
-        # It can only be a corrupted/legacy state marker, not a real edited number.
-        if (
-            getattr(self.ctx, "correction_pause", False)
-            and int(getattr(self.ctx, "correction_round", 0) or 0) <= 0
-            and getattr(self.ctx, "correction_old_value", None) is None
-            and getattr(self.ctx, "correction_new_value", None) is None
-        ):
-            self.ctx.correction_pause = False
-            self.ctx.correction_round = 0
-            self.ctx.correction_old_value = None
-            self.ctx.correction_new_value = None
-            self.ctx.open_reason = ""
-            self.ctx.protection_reason = ""
 
         saved_processed = list(getattr(self.ctx, "processed_numbers", []) or [])
 
@@ -2918,7 +2692,6 @@ class EngineManager:
             self.trade_engine,
             self.protection_engine
         )
-        self.dashboard.set_round_times(self.round_times)
 
         if getattr(self.ctx, "hybrid_initialized", False):
             self.rebuild_windows_to_last_length()
@@ -2943,245 +2716,53 @@ class EngineManager:
         self.ctx.last_window_round = target
 
     def hybrid_replay_once(self) -> None:
-        """Deterministic first-run/backfill, then true incremental live.
-
-        IMPORTANT:
-        - Rows 1..LIVE_START_ROUND-1 are warm-up only.
-        - Starting at LIVE_START_ROUND, the exact live state machine is replayed
-          one round at a time: settle -> update windows -> signal -> open.
-        - This creates an auditable historical Trade History from the existing
-          Sheet data without look-ahead: a decision at round N only sees data
-          through N and can only target N+1.
-        - Once initialization reaches the current Sheet length, all existing
-          rows are marked processed. Future refreshes process only appended rows.
-        """
+        # HYBRID LIVE:
+        # First run only:
+        # - rounds < LIVE_START_ROUND: warm-up windows only
+        # - rounds >= LIVE_START_ROUND: replay trade once to build initial history
+        # After that, state is kept in st.session_state and new rounds are processed live only.
         if getattr(self.ctx, "hybrid_initialized", False):
-            # Recovery path only. Do not recompute/replay on UI refresh.
             if self.ctx.pending_trade is not None:
-                settled = self.trade_engine.reconcile_pending_from_sheet(
+                self.trade_engine.reconcile_pending_from_sheet(
                     self.groups,
                     len(self.groups)
                 )
-                if settled:
-                    self.ctx.data_signature = make_numbers_signature(
-                        self.numbers, len(self.numbers)
-                    )
-                    self.ctx.processed_numbers = list(
-                        self.numbers[:len(self.numbers)]
-                    )
-                    save_live_state(self.ctx)
             return
 
-        total = len(self.groups)
-        if total <= 0:
-            return
-
-        # ------------------------------------------------------------
-        # PHASE 1: pure warm-up. No trades before LIVE_START_ROUND.
-        # ------------------------------------------------------------
-        warmup_end = min(total, max(0, LIVE_START_ROUND - 1))
-        for idx in range(1, warmup_end + 1):
+        for idx, actual_group in enumerate(self.groups, start=1):
             self.ctx.last_length = idx
-            self.window_engine.update_one_round(
-                self.groups[idx - 1],
-                idx
+            if idx < LIVE_START_ROUND:
+                self.window_engine.update_one_round(actual_group, idx)
+                continue
+
+            self.ctx.last_length = idx
+            self.trade_engine.settle_trade(actual_group, idx)
+            self.window_engine.update_one_round(actual_group, idx)
+
+            signal = self.signal_engine.build_signal(idx)
+            confidence = self.signal_engine.get_confidence_score(signal)
+            self.ctx.last_decision_confidence = confidence
+            setattr(signal, "decision_confidence", confidence)
+
+            signal.state = self.protection_engine.adaptive_ready_wait(
+                signal,
+                confidence
             )
 
-        # ------------------------------------------------------------
-        # PHASE 2: deterministic walk-forward backfill.
-        #
-        # This deliberately reuses the SAME live operations as
-        # process_new_rounds(). No future rows are used to make a decision.
-        # ------------------------------------------------------------
-        if total >= LIVE_START_ROUND:
-            for idx in range(LIVE_START_ROUND, total + 1):
-                self.ctx.last_length = idx
-                actual_group = self.groups[idx - 1]
+            self.trade_engine.open_trade(signal, idx, confidence)
 
-                # At idx=N, settle only a trade that was opened at N-1.
-                self.trade_engine.settle_trade(actual_group, idx)
-
-                # Now N becomes available to all window calculations.
-                self.window_engine.update_one_round(
-                    actual_group,
-                    idx
-                )
-
-                # Build the signal using information available through N only.
-                signal = self.signal_engine.build_signal(idx)
-                confidence = self.signal_engine.get_confidence_score(signal)
-                self.ctx.last_decision_confidence = confidence
-                setattr(signal, "decision_confidence", confidence)
-
-                signal.state = self.protection_engine.adaptive_ready_wait(
-                    signal,
-                    confidence
-                )
-
-                # Open a trade for target N+1 only when the signal is READY.
-                # If N == total, this is a legitimate PENDING trade whose
-                # target row has not arrived yet.
-                self.trade_engine.open_trade(
-                    signal,
-                    idx,
-                    confidence
-                )
-
-                self.ctx.last_signal_round = idx
-
-        # ------------------------------------------------------------
-        # FINALIZE INITIALIZATION.
-        # Existing Sheet rows are now fully accounted for. The next row
-        # appended to the Sheet is the only new live event.
-        # ------------------------------------------------------------
-        self.ctx.last_length = total
-        self.ctx.data_signature = make_numbers_signature(
-            self.numbers,
-            total
-        )
-        self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(
-            self.numbers
-        )
-        self.ctx.processed_numbers = list(self.numbers[:total])
+        self.ctx.last_length = len(self.groups)
+        self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
+        self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(self.numbers)
+        self.ctx.processed_numbers = list(self.numbers[:self.ctx.last_length])
         self.ctx.hybrid_initialized = True
-
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
-
-    def _reset_for_new_dataset(self, reason: str = "NEW_DAY") -> None:
-        """Hard-reset every mutable engine component.
-
-        This is intentionally stronger than clearing Trade History.  Window
-        statistics, signal state, protection/cooldown, pending trade and
-        dashboard references all belong to the dataset and must be reset
-        together.
-        """
-        self.ctx = EngineContext()
-        self.ctx.dataset_day_id = ""
-        self.ctx.open_reason = reason
-        self.ctx.protection_reason = reason
-
-        self.window_state = {w: WindowRecord() for w in WINDOWS}
-
-        # Rebind every component to the new context/state.
-        self.window_engine.ctx = self.ctx
-        self.window_engine.window_state = self.window_state
-
-        self.signal_engine.ctx = self.ctx
-        self.signal_engine.window_engine = self.window_engine
-
-        self.trade_engine.ctx = self.ctx
-        self.protection_engine.ctx = self.ctx
-
-        self.dashboard.ctx = self.ctx
-        self.dashboard.window_engine = self.window_engine
-        self.dashboard.signal_engine = self.signal_engine
-        self.dashboard.trade_engine = self.trade_engine
-        self.dashboard.protection_engine = self.protection_engine
-
-        st.session_state.v50_ctx = self.ctx
-        save_live_state(self.ctx)
-
-    def _accept_dataset_day_id(self) -> None:
-        """Read an optional explicit DAY_ID from the source Sheet.
-
-        The loader remains backward-compatible: if no DAY_ID column exists,
-        an empty identity is used and the normal contiguous-prefix logic
-        remains authoritative.
-        """
-        # load_numbers stores the source metadata in session state so the
-        # engine can use it without a second network fetch.
-        day_id = str(st.session_state.get("v58_dataset_day_id", "") or "").strip()
-        if day_id:
-            self.ctx.dataset_day_id = day_id
-
-    def _handle_shrink_or_new_day(self, current_length: int) -> bool:
-        """Return True when processing must stop after handling a shrink.
-
-        A one-off shorter fetch is NOT enough to reset.  The same shorter
-        prefix must be observed twice, and if DAY_ID changes we reset
-        immediately because the source explicitly declares a new dataset.
-        """
-        old_length = int(getattr(self.ctx, "last_length", 0) or 0)
-        if current_length >= old_length:
-            self.ctx.pending_shrink_length = -1
-            self.ctx.pending_shrink_count = 0
-            return False
-
-        current_day_id = str(
-            st.session_state.get("v58_dataset_day_id", "") or ""
-        ).strip()
-        old_day_id = str(getattr(self.ctx, "dataset_day_id", "") or "").strip()
-
-        # Explicit DAY_ID change is authoritative.
-        if current_day_id and old_day_id and current_day_id != old_day_id:
-            self._reset_for_new_dataset("NEW_DAY_ID")
-            self.ctx.dataset_day_id = current_day_id
-            save_live_state(self.ctx)
-            self.hybrid_replay_once()
-            return True
-
-        # Empty sheet after a reset/new day: require two identical reads only
-        # if there is still old state. This protects against transient fetches.
-        if current_length == 0:
-            if self.ctx.pending_shrink_length == 0:
-                self.ctx.pending_shrink_count += 1
-            else:
-                self.ctx.pending_shrink_length = 0
-                self.ctx.pending_shrink_count = 1
-
-            if self.ctx.pending_shrink_count < 2:
-                save_live_state(self.ctx)
-                return True
-
-            self._reset_for_new_dataset("EMPTY_SHEET_NEW_DAY")
-            save_live_state(self.ctx)
-            return True
-
-        # Non-empty shrink: verify the new prefix differs from the old dataset.
-        old_numbers = list(getattr(self.ctx, "processed_numbers", []) or [])
-        prefix = list(self.numbers[:current_length])
-        comparable = old_numbers[:current_length]
-        prefix_changed = bool(old_numbers) and prefix != comparable
-
-        if self.ctx.pending_shrink_length == current_length:
-            self.ctx.pending_shrink_count += 1
-        else:
-            self.ctx.pending_shrink_length = current_length
-            self.ctx.pending_shrink_count = 1
-
-        if self.ctx.pending_shrink_count < 2:
-            save_live_state(self.ctx)
-            return True
-
-        # A shorter dataset with a changed prefix is treated as a new day.
-        if prefix_changed:
-            self._reset_for_new_dataset("NEW_DAY_PREFIX_CHANGED")
-            self.ctx.dataset_day_id = current_day_id or old_day_id
-            save_live_state(self.ctx)
-            self.hybrid_replay_once()
-            return True
-
-        # Same prefix but shorter is a destructive correction. Pause instead
-        # of silently rewriting history.
-        self.ctx.correction_pause = True
-        self.ctx.open_reason = "DATA_TRUNCATION_DETECTED"
-        self.ctx.protection_reason = "DATA_TRUNCATION_DETECTED"
-        save_live_state(self.ctx)
-        return True
-
 
     def process_new_rounds(self) -> None:
         # Process only rows added after the first hybrid replay.
         current_length = len(self.groups)
-
-        # Sheet is the source of truth. Never allow a shorter/transient fetch
-        # to make the persisted engine jump backwards or mix datasets.
-        if self._handle_shrink_or_new_day(current_length):
-            return
-
         if getattr(self.ctx, "correction_pause", False):
-
             self.ctx.open_reason = "DATA_CORRECTION_PAUSED"
             self.ctx.protection_reason = "DATA_CORRECTION_PAUSED"
             return
@@ -3189,19 +2770,11 @@ class EngineManager:
 
         # Settlement recovery MUST happen before any new signal decision.
         # This fixes persisted pending trades after app restarts / downtime.
-        # Recover/settle a persisted pending trade first. If settlement happened,
-        # persist it immediately so Trade History survives reruns/restarts.
         if current_length > 0 and self.ctx.pending_trade is not None:
-            settled = self.trade_engine.reconcile_pending_from_sheet(
+            self.trade_engine.reconcile_pending_from_sheet(
                 self.groups,
                 current_length
             )
-            if settled:
-                self.ctx.data_signature = make_numbers_signature(
-                    self.numbers, current_length
-                )
-                self.ctx.processed_numbers = list(self.numbers[:current_length])
-                save_live_state(self.ctx)
 
         if current_length <= self.ctx.last_length:
             return
@@ -3214,14 +2787,7 @@ class EngineManager:
             actual_group = self.groups[idx - 1]
 
             self.ctx.last_length = idx
-            had_pending = self.ctx.pending_trade is not None
             self.trade_engine.settle_trade(actual_group, idx)
-            if had_pending and self.ctx.last_settle_round == idx:
-                # Trade History is already mutated by settle_trade(); save it now.
-                self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
-                self.ctx.processed_numbers = list(self.numbers[:idx])
-                save_live_state(self.ctx)
-
             self.window_engine.update_one_round(actual_group, idx)
 
             signal = self.signal_engine.build_signal(idx)
@@ -3301,7 +2867,7 @@ class EngineManager:
             f"""
 V58 FINAL SINGLE-FILE ROBUST LIVE
 
-First run: rebuild history/windows from the current Sheet without fabricating trades.
+First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
 V56 rule: UI refresh is read-only; only new rounds can change trade state.
@@ -3309,9 +2875,7 @@ Open/settle decisions happen only when a new round appears, not every rerun.
 Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
-Current Sheet Round : {self.round_id} (contiguous Number frontier)
-Current Sheet Row   : {get_sheet_row_for_round(self.round_id)}
-Current Sheet Time  : {get_round_time(self.round_id, self.round_times) or "—"}
+Current Sheet Round : {self.round_id}
 
 Engine Last Round : {self.ctx.last_length}
 
