@@ -87,7 +87,7 @@ LIVE_LOSS_COOLDOWN_ROUNDS = 5
 LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 1
 LIVE_RELOCK_PROFIT_STOP = 0.0
-LIVE_RELOCK_LOSS_STREAK = 1
+LIVE_RELOCK_LOSS_STREAK = 2
 
 # Shadow live scoring per window from LIVE_START_ROUND.
 # Window selection will prefer live performance, not only historical profit.
@@ -163,7 +163,7 @@ INPUT_CSV_PATH = os.environ.get("V54_INPUT_CSV", "").strip()
 # This profile intentionally does NOT add per-dataset score thresholds,
 # exceptional-window recovery, or outcome-dependent parameter changes.
 # Parameters remain fixed while the Sheet data advances.
-STATE_VERSION = "V58_STABLE_LIVE_LONG_TERM_FULL"
+STATE_VERSION = "V58_STABLE_LIVE_LONG_TERM_FINAL"
 
 
 # ============================================================
@@ -315,6 +315,15 @@ class EngineContext:
     data_signature: str = ""
     dataset_anchor_signature: str = ""
     processed_numbers: list[int] = field(default_factory=list)
+
+    # Dataset/session integrity.
+    dataset_day_id: str = ""
+    pending_shrink_length: int = -1
+    pending_shrink_count: int = 0
+    last_fetch_fingerprint: str = ""
+    algorithm_migration_pending: bool = False
+    hybrid_initialized: bool = False
+
     correction_pause: bool = False
     correction_round: int = 0
     correction_old_value: Optional[int] = None
@@ -348,6 +357,15 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
+
+    if not hasattr(ctx, "dataset_day_id"):
+        ctx.dataset_day_id = ""
+    if not hasattr(ctx, "pending_shrink_length"):
+        ctx.pending_shrink_length = -1
+    if not hasattr(ctx, "pending_shrink_count"):
+        ctx.pending_shrink_count = 0
+    if not hasattr(ctx, "last_fetch_fingerprint"):
+        ctx.last_fetch_fingerprint = ""
 
     previous_version = getattr(ctx, "state_version", "")
     ctx.state_version = STATE_VERSION
@@ -1762,8 +1780,11 @@ class ProtectionEngine:
             and self.ctx.cooldown_counter == 0
             and self.ctx.cooldown_loss_streak_marker != loss_streak
         ):
+            # The trigger round itself is protected; decrement starts on the
+            # next new round.
             self.ctx.cooldown_counter = LIVE_LOSS_COOLDOWN_ROUNDS
             self.ctx.cooldown_loss_streak_marker = loss_streak
+            return True
 
         if self.ctx.cooldown_counter > 0:
             self.ctx.cooldown_counter -= 1
@@ -2508,7 +2529,6 @@ def save_live_state(ctx: EngineContext) -> None:
         "pending_round": ctx.pending_round,
         "pending_index": ctx.pending_index,
         "pending_locked_window": ctx.pending_locked_window,
-        "pending_confidence": ctx.pending_confidence,
         "pending_confidence": getattr(ctx, "pending_confidence", 0.0),
         "pending_target_round": getattr(ctx, "pending_target_round", 0),
         "trade_state": ctx.trade_state,
@@ -2530,6 +2550,10 @@ def save_live_state(ctx: EngineContext) -> None:
         "data_signature": getattr(ctx, "data_signature", ""),
         "dataset_anchor_signature": getattr(ctx, "dataset_anchor_signature", ""),
         "processed_numbers": list(getattr(ctx, "processed_numbers", [])),
+        "dataset_day_id": str(getattr(ctx, "dataset_day_id", "") or ""),
+        "pending_shrink_length": int(getattr(ctx, "pending_shrink_length", -1)),
+        "pending_shrink_count": int(getattr(ctx, "pending_shrink_count", 0)),
+        "last_fetch_fingerprint": str(getattr(ctx, "last_fetch_fingerprint", "") or ""),
         "correction_pause": bool(getattr(ctx, "correction_pause", False)),
         "correction_round": int(getattr(ctx, "correction_round", 0)),
         "correction_old_value": getattr(ctx, "correction_old_value", None),
@@ -2626,6 +2650,10 @@ def load_live_state() -> EngineContext:
     ctx.data_signature = str(data.get("data_signature", "") or "")
     ctx.dataset_anchor_signature = str(data.get("dataset_anchor_signature", "") or "")
     ctx.processed_numbers = [int(x) for x in data.get("processed_numbers", [])]
+    ctx.dataset_day_id = str(data.get("dataset_day_id", "") or "")
+    ctx.pending_shrink_length = int(data.get("pending_shrink_length", -1) or -1)
+    ctx.pending_shrink_count = int(data.get("pending_shrink_count", 0) or 0)
+    ctx.last_fetch_fingerprint = str(data.get("last_fetch_fingerprint", "") or "")
     ctx.correction_pause = bool(data.get("correction_pause", False))
     ctx.correction_round = int(data.get("correction_round", 0) or 0)
     ctx.correction_old_value = data.get("correction_old_value")
@@ -2754,6 +2782,16 @@ def data_correction_controls() -> None:
             ctx.correction_old_value = None
             ctx.correction_new_value = None
             ctx.hybrid_initialized = False
+            ctx.dataset_day_id = str(st.session_state.get("v58_dataset_day_id", "") or "")
+            ctx.pending_shrink_length = -1
+            ctx.pending_shrink_count = 0
+            ctx.last_fetch_fingerprint = ""
+
+            # Window state is derived data and must be rebuilt from the corrected
+            # dataset; never carry the previous dataset's windows into the new one.
+            st.session_state.v50_true_live_window_state = {
+                w: WindowRecord() for w in WINDOWS
+            }
             save_live_state(ctx)
             st.rerun()
 
@@ -2825,8 +2863,18 @@ class EngineManager:
 
         saved_processed = list(getattr(self.ctx, "processed_numbers", []) or [])
 
-        # A shorter Sheet is the explicit daily reset signal.
+        # A shorter Sheet is a possible NEW DAY, but do NOT reset immediately.
+        # Google Sheet reads can transiently return fewer rows. process_new_rounds()
+        # confirms the shrink on repeated reads before resetting the dataset.
         length_dropped = len(self.groups) < saved_length
+        self.dataset_reset_detected = False
+        self.data_shrink_pending = bool(length_dropped)
+
+        if length_dropped:
+            self.ctx.open_reason = "NEW_DAY_PENDING_CONFIRMATION"
+            self.ctx.protection_reason = "NEW_DAY_PENDING_CONFIRMATION"
+
+        saved_processed = list(getattr(self.ctx, "processed_numbers", []) or [])
 
         # A changed value inside an already processed prefix is NOT a new round.
         # Pause trading and require a deterministic rebuild.
@@ -2842,54 +2890,9 @@ class EngineManager:
             self.ctx.correction_new_value = new_v
             self.ctx.open_reason = "DATA_CORRECTION_DETECTED"
             self.ctx.protection_reason = "DATA_CORRECTION_DETECTED"
-            self.dataset_reset_detected = False
-            # Do not process any round until the user rebuilds.
             self.data_correction_detected = True
         else:
             self.data_correction_detected = False
-
-        self.dataset_reset_detected = (
-            getattr(self.ctx, "hybrid_initialized", False)
-            and length_dropped
-        )
-
-        if self.dataset_reset_detected:
-            # New day: discard only the previous day's runtime/trade state.
-            self.ctx.pending_trade = None
-            self.ctx.pending_round = 0
-            self.ctx.pending_index = None
-            self.ctx.pending_locked_window = None
-            self.ctx.pending_target_round = 0
-            self.ctx.pending_confidence = 0.0
-            self.ctx.trade_state = "IDLE"
-            self.ctx.last_open_round = -1
-            self.ctx.last_settle_round = -1
-            self.ctx.last_length = 0
-            self.ctx.last_window_round = -1
-            self.ctx.last_signal_round = -1
-            self.ctx.locked_window = None
-            self.ctx.lock_reason = "NEW_DAY_DATASET_RESET"
-            self.ctx.trade_history = []
-            self.ctx.equity_curve = []
-            self.ctx.signal_history.clear()
-            self.ctx.signal_flip_history.clear()
-            self.ctx.leader_history.clear()
-            self.ctx.window_real_stats = {}
-            self.ctx.cooled_windows = {}
-            self.ctx.blacklisted_windows = {}
-            self.ctx.peak_equity = 0.0
-            self.ctx.last_safe_trigger_peak = 0.0
-            self.ctx.safe_mode_counter = 0
-            self.ctx.risk_pause_counter = 0
-            self.ctx.last_risk_trigger_trade_count = -1
-            self.ctx.data_signature = ""
-            self.ctx.processed_numbers = []
-            self.ctx.correction_pause = False
-            self.ctx.correction_round = 0
-            self.ctx.correction_old_value = None
-            self.ctx.correction_new_value = None
-            self.ctx.hybrid_initialized = False
-            save_live_state(self.ctx)
 
 
         if getattr(self.ctx, "algorithm_migration_pending", False) and getattr(self.ctx, "hybrid_initialized", False):
@@ -2920,7 +2923,7 @@ class EngineManager:
         )
         self.dashboard.set_round_times(self.round_times)
 
-        if getattr(self.ctx, "hybrid_initialized", False):
+        if getattr(self.ctx, "hybrid_initialized", False) and not self.data_shrink_pending:
             self.rebuild_windows_to_last_length()
 
     def rebuild_windows_to_last_length(self) -> None:
@@ -3058,6 +3061,9 @@ class EngineManager:
         """
         self.ctx = EngineContext()
         self.ctx.dataset_day_id = ""
+        self.ctx.pending_shrink_length = -1
+        self.ctx.pending_shrink_count = 0
+        self.ctx.last_fetch_fingerprint = ""
         self.ctx.open_reason = reason
         self.ctx.protection_reason = reason
 
@@ -3119,6 +3125,7 @@ class EngineManager:
             self.ctx.dataset_day_id = current_day_id
             save_live_state(self.ctx)
             self.hybrid_replay_once()
+            self.data_shrink_pending = False
             return True
 
         # Empty sheet after a reset/new day: require two identical reads only
@@ -3160,6 +3167,7 @@ class EngineManager:
             self.ctx.dataset_day_id = current_day_id or old_day_id
             save_live_state(self.ctx)
             self.hybrid_replay_once()
+            self.data_shrink_pending = False
             return True
 
         # Same prefix but shorter is a destructive correction. Pause instead
@@ -3210,16 +3218,18 @@ class EngineManager:
         # For each newly appended row, settle an existing pending trade before
         # building any new signal. Guards never participate in settlement.
         for idx in range(self.ctx.last_length + 1, current_length + 1):
-            self.ctx.last_length = idx
+            # Keep last_length at the last fully committed round. This makes a
+            # crash between settlement and signal/open recoverable on restart.
             actual_group = self.groups[idx - 1]
 
-            self.ctx.last_length = idx
             had_pending = self.ctx.pending_trade is not None
             self.trade_engine.settle_trade(actual_group, idx)
             if had_pending and self.ctx.last_settle_round == idx:
-                # Trade History is already mutated by settle_trade(); save it now.
+                # Trade History is already mutated by settle_trade(); persist it
+                # without advancing last_length. If the process dies now, the
+                # next run repeats only the idempotent window/signal step.
                 self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
-                self.ctx.processed_numbers = list(self.numbers[:idx])
+                self.ctx.processed_numbers = list(self.numbers[:idx-1])
                 save_live_state(self.ctx)
 
             self.window_engine.update_one_round(actual_group, idx)
@@ -3236,12 +3246,21 @@ class EngineManager:
 
             self.trade_engine.open_trade(signal, idx, confidence)
 
-            self.ctx.data_signature = make_numbers_signature(self.numbers, len(self.numbers))
+            # Commit this round only after settlement, window update, signal and
+            # possible open have all completed.
+            self.ctx.last_length = idx
+            self.ctx.last_signal_round = idx
+            self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
             self.ctx.dataset_anchor_signature = make_dataset_anchor_signature(self.numbers)
-            self.ctx.processed_numbers = list(self.numbers[:self.ctx.last_length])
+            self.ctx.processed_numbers = list(self.numbers[:idx])
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
+        # During a suspected Sheet shrink, never display/use the old dataset as
+        # an actionable signal until the shrink is confirmed.
+        if getattr(self, "data_shrink_pending", False):
+            return SignalRecord(state="WAIT", lock_reason="NEW_DAY_PENDING_CONFIRMATION"), 0.0, "WAIT"
+
         # If a trade is pending, do not call build_signal(), because build_signal()
         # can relock and mutate state during a pure UI refresh.
         if self.ctx.pending_trade is not None:
