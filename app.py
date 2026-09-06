@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V56 Profit Optimized Balanced",
+    page_title="V57 Stable Live Profit",
     layout="wide"
 )
 
@@ -115,7 +115,7 @@ REAL_MIN_WR_FOR_LOCK = 0.34
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.36
+FALLBACK_MIN_WR20 = 0.40
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 0
 LOW_WR_CONSENSUS_READY = 0.60
@@ -123,7 +123,7 @@ LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 4
+WINDOW_COOLDOWN_ROUNDS = 2
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -2.0
@@ -135,7 +135,7 @@ CONSENSUS_READY = 0.60
 STABILITY_READY = 0.45
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.42
+MIN_CONFIDENCE_READY = 0.46
 SAFE_DRAWDOWN_FROM_PEAK = -4.0
 SAFE_MODE_ROUNDS = 2
 
@@ -148,7 +148,7 @@ MAX_REAL_NEGATIVE_SOFT = -2.0
 
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 2
-BLACKLIST_DURATION_ROUNDS = 8
+BLACKLIST_DURATION_ROUNDS = 6
 WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
 MIN_TRADES_FOR_PROTECTION = 6
@@ -207,7 +207,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
+    state_version: str = "V57_STABLE_LIVE_PROFIT"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
+    state_version: str = "V57_STABLE_LIVE_PROFIT"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -340,7 +340,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
+    ctx.state_version = "V57_STABLE_LIVE_PROFIT"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -2564,7 +2564,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V58_STABLE_LIVE_LONG_TERM_AUDITED"),
+        "state_version": getattr(ctx, "state_version", "V57_STABLE_LIVE_PROFIT"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
         "data_signature": getattr(ctx, "data_signature", ""),
         "data_length": getattr(ctx, "data_length", 0),
@@ -2890,11 +2890,10 @@ class EngineManager:
         if current_length <= self.ctx.last_length:
             return
 
-        for idx in range(self.ctx.last_length + 1, current_length + 1):
-            self.ctx.last_length = idx
+        processed_from = int(self.ctx.last_length)
+        for idx in range(processed_from + 1, current_length + 1):
             actual_group = self.groups[idx - 1]
 
-            self.ctx.last_length = idx
             self.trade_engine.settle_trade(actual_group, idx)
             self.window_engine.update_one_round(actual_group, idx)
 
@@ -2910,6 +2909,11 @@ class EngineManager:
 
             self.trade_engine.open_trade(signal, idx, confidence)
 
+            # Commit the processed frontier only after settlement, signal,
+            # opening, and state update for this round are complete.
+            self.ctx.last_length = idx
+            self.ctx.data_length = idx
+            self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
