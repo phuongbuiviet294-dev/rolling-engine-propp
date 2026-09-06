@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V57 Stable Live Profit",
+    page_title="V60 Long Term Stable Live Profit",
     layout="wide"
 )
 
@@ -40,7 +40,7 @@ WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
 WINDOWS = list(range(6, 23))
-TOPN = 3
+TOPN = 2  # tested baseline; do not auto-change live
 
 SIGNAL_HISTORY_LEN = 50
 LEADER_HISTORY_LEN = 50
@@ -90,7 +90,7 @@ STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
 STATE_WORKSHEET_DEFAULT = "state"
 
 # V50 profit protection tuning
-LIVE_LOSS_COOLDOWN_ROUNDS = 5
+LIVE_LOSS_COOLDOWN_ROUNDS = 2
 LOCK_MIN_PROFIT20 = 0.0
 LOCK_MAX_LOSS_STREAK = 1
 LIVE_RELOCK_PROFIT_STOP = 0.0
@@ -115,15 +115,15 @@ REAL_MIN_WR_FOR_LOCK = 0.34
 # If no real-positive window exists, use short-term candidate score
 # so the engine can continue testing instead of WAIT forever.
 FALLBACK_MIN_PROFIT20 = 0.0
-FALLBACK_MIN_WR20 = 0.40
+FALLBACK_MIN_WR20 = 0.36
 FALLBACK_MAX_LOSS_STREAK = 1
 TRADE_GAP_ROUNDS = 0
-LOW_WR_CONSENSUS_READY = 0.60
+LOW_WR_CONSENSUS_READY = 0.50
 LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 2
+WINDOW_COOLDOWN_ROUNDS = 4
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -2.0
@@ -131,15 +131,15 @@ WR20_STOP = 0.35
 DRAWDOWN_STOP = -5.0
 FLIPRATE_STOP = 0.65
 
-CONSENSUS_READY = 0.60
+CONSENSUS_READY = 0.50
 STABILITY_READY = 0.45
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.46
+MIN_CONFIDENCE_READY = 0.42
 SAFE_DRAWDOWN_FROM_PEAK = -4.0
 SAFE_MODE_ROUNDS = 2
 
-# V56 True Live Deterministic: avoid trade starvation.
+# V60 Long Term Stable Live: avoid trade starvation.
 REAL_SHADOW_BLEND_MIN_TRADES = 10
 REAL_SHADOW_BLEND_FULL_TRADES = 30
 MIN_SHADOW_PROFIT20_FOR_TEST = 1.0
@@ -207,7 +207,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V57_STABLE_LIVE_PROFIT"
+    state_version: str = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V57_STABLE_LIVE_PROFIT"
+    state_version: str = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -340,7 +340,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V57_STABLE_LIVE_PROFIT"
+    ctx.state_version = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -429,7 +429,7 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_numbers() -> list[int]:
     if INPUT_CSV_PATH:
         try:
@@ -485,7 +485,7 @@ def load_numbers() -> list[int]:
 #   window selection, signal, trade history, or profit.
 # ============================================================
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=5)
 def load_round_labels_display_only() -> list[str]:
     """Read the Sheet 'round' column only for UI display."""
     if INPUT_CSV_PATH:
@@ -2564,7 +2564,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V57_STABLE_LIVE_PROFIT"),
+        "state_version": getattr(ctx, "state_version", "V58_STABLE_LIVE_LONG_TERM_AUDITED"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
         "data_signature": getattr(ctx, "data_signature", ""),
         "data_length": getattr(ctx, "data_length", 0),
@@ -2890,8 +2890,11 @@ class EngineManager:
         if current_length <= self.ctx.last_length:
             return
 
-        processed_from = int(self.ctx.last_length)
-        for idx in range(processed_from + 1, current_length + 1):
+        for idx in range(self.ctx.last_length + 1, current_length + 1):
+            # Transactional round processing:
+            # last_length is committed ONLY after every state mutation for this
+            # round has completed and the state has been persisted. This prevents
+            # a crash/restart between steps from silently skipping a round.
             actual_group = self.groups[idx - 1]
 
             self.trade_engine.settle_trade(actual_group, idx)
@@ -2909,8 +2912,7 @@ class EngineManager:
 
             self.trade_engine.open_trade(signal, idx, confidence)
 
-            # Commit the processed frontier only after settlement, signal,
-            # opening, and state update for this round are complete.
+            # Commit the processed frontier only after all round work is done.
             self.ctx.last_length = idx
             self.ctx.data_length = idx
             self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
@@ -2974,12 +2976,12 @@ class EngineManager:
 
         st.caption(
             f"""
-V58 STABLE LIVE LONG-TERM AUDITED
+V60 LONG TERM STABLE LIVE LONG-TERM AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
 After that: only process new Google Sheet rows.
-V56 rule: UI refresh is read-only; only new rounds can change trade state.
+V58 rule: UI refresh is read-only; only new rounds can change trade state.
 Open/settle decisions happen only when a new round appears, not every rerun.
 Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
