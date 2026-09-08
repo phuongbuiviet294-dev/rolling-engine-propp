@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V60 Long Term Stable Live Profit",
+    page_title="V61 Audited Long Term Live",
     layout="wide"
 )
 
@@ -40,7 +40,7 @@ WIN_GROUP = 2.5
 LOSS_GROUP = -1.0
 
 WINDOWS = list(range(6, 23))
-TOPN = 2  # tested baseline; do not auto-change live
+TOPN = 3
 
 SIGNAL_HISTORY_LEN = 50
 LEADER_HISTORY_LEN = 50
@@ -123,7 +123,7 @@ LOW_WR_LEVEL = 0.50
 MAX_WINDOW_LOSS_STREAK_FOR_TOP = 5
 
 # V52 anti-zigzag: after a window loses / turns negative, do not select it again soon.
-WINDOW_COOLDOWN_ROUNDS = 4
+WINDOW_COOLDOWN_ROUNDS = 2
 BLACKLIST_REAL_NEGATIVE = True
 
 PROFIT10_STOP = -2.0
@@ -135,7 +135,7 @@ CONSENSUS_READY = 0.50
 STABILITY_READY = 0.45
 
 # V53 defensive gates
-MIN_CONFIDENCE_READY = 0.42
+MIN_CONFIDENCE_READY = 0.46
 SAFE_DRAWDOWN_FROM_PEAK = -4.0
 SAFE_MODE_ROUNDS = 2
 
@@ -207,7 +207,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
+    state_version: str = "V61_AUDITED_LONG_TERM_LIVE"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
+    state_version: str = "V61_AUDITED_LONG_TERM_LIVE"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -340,7 +340,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V58_STABLE_LIVE_LONG_TERM_AUDITED"
+    ctx.state_version = "V61_AUDITED_LONG_TERM_LIVE"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -2564,7 +2564,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V58_STABLE_LIVE_LONG_TERM_AUDITED"),
+        "state_version": getattr(ctx, "state_version", "V61_AUDITED_LONG_TERM_LIVE"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
         "data_signature": getattr(ctx, "data_signature", ""),
         "data_length": getattr(ctx, "data_length", 0),
@@ -2976,7 +2976,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V60 LONG TERM STABLE LIVE LONG-TERM AUDITED
+V61 AUDITED LONG TERM LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
