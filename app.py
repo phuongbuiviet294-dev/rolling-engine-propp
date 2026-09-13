@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V61 Audited Long Term Live",
+    page_title="V65 Stable Live 12D Audited",
     layout="wide"
 )
 
@@ -149,7 +149,7 @@ MAX_REAL_NEGATIVE_SOFT = -2.0
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 2
 BLACKLIST_DURATION_ROUNDS = 6
-WINDOW_SELECTION_MODE = "ucb"  # "ucb" or "score"
+WINDOW_SELECTION_MODE = "shadow"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
 MIN_TRADES_FOR_PROTECTION = 6
 
@@ -1284,26 +1284,9 @@ class SignalEngine:
         elif (
             len(locked_obj.live_hit_history) > 0
             and int(locked_obj.live_loss_streak) >= LIVE_RELOCK_LOSS_STREAK
-            and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20
         ):
             relock_needed = True
-            lock_reason = "LOCK_LIVE_WINDOW_PROFIT20_BAD_AFTER_2_LOSSES"
-        elif (
-            len(locked_obj.live_hit_history) > 0
-            and int(locked_obj.live_loss_streak) >= LIVE_RELOCK_LOSS_STREAK
-            and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20
-        ):
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_WINDOW_WR20_BAD_AFTER_2_LOSSES"
-        elif int(locked_obj.live_loss_streak) >= LIVE_RELOCK_LOSS_STREAK:
-            relock_needed = True
-            lock_reason = "LOCK_LIVE_WINDOW_2_LOSS_STREAK"
-        elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
-            relock_needed = True
-            lock_reason = "LOCK_HIST_PROFIT20_BAD"
-        elif int(locked_obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
-            relock_needed = True
-            lock_reason = "LOCK_HIST_LOSS_STREAK_BAD"
+            lock_reason = "REAL_2_LOSS_RELOCK"
         elif locked_obj.next_group is None:
             relock_needed = True
             lock_reason = "LOCK_NO_NEXT"
@@ -1603,8 +1586,8 @@ class TradeEngine:
             ensure_ctx_fields(self.ctx)
             self.ctx.cooled_windows[w] = int(current_round + WINDOW_COOLDOWN_ROUNDS)
 
-            # V55.1:
-            # A single loss only cools the window.
+            # V62 audited rule:
+            # A single REAL loss only cools the window; blacklist requires 2 consecutive REAL losses.
             # Blacklist is temporary and only for stronger losers.
             if not hasattr(self.ctx, "blacklisted_windows") or self.ctx.blacklisted_windows is None:
                 self.ctx.blacklisted_windows = {}
@@ -2976,7 +2959,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V61 AUDITED LONG TERM LIVE
+V63 SHADOW STABLE 12D AUDITED LIVE
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
