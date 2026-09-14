@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V65 Stable Live 12D Audited",
+    page_title="V66 Robust Live 13D Audited",
     layout="wide"
 )
 
@@ -147,7 +147,7 @@ MIN_SHADOW_WR20_FOR_TEST = 0.38
 MAX_REAL_NEGATIVE_SOFT = -2.0
 
 # V54 long-run controls
-RISK_PAUSE_ROUNDS = 2
+RISK_PAUSE_ROUNDS = 3
 BLACKLIST_DURATION_ROUNDS = 6
 WINDOW_SELECTION_MODE = "shadow"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
@@ -155,8 +155,8 @@ MIN_TRADES_FOR_PROTECTION = 6
 
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -15.0
-DAILY_MAX_LOSS_STREAK = 14
+DAILY_STOP_LOSS = -3.5
+DAILY_MAX_LOSS_STREAK = 4
 DAILY_MAX_DRAWDOWN = -15.0
 DAILY_PROFIT_LOCK = 30.5
 
@@ -207,7 +207,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V61_AUDITED_LONG_TERM_LIVE"
+    state_version: str = "V67_WIN_KEEP_5R_AUDITED"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V61_AUDITED_LONG_TERM_LIVE"
+    state_version: str = "V67_WIN_KEEP_5R_AUDITED"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -340,7 +340,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V61_AUDITED_LONG_TERM_LIVE"
+    ctx.state_version = "V67_WIN_KEEP_5R_AUDITED"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -1278,9 +1278,18 @@ class SignalEngine:
         if locked_window is not None:
             locked_obj = self.window_engine.state.get(locked_window)
 
+        keep_win_lock = (
+            int(getattr(self.ctx, "keep_win_lock_until", 0) or 0) >= int(round_id)
+            and locked_obj is not None
+            and locked_obj.next_group is not None
+        )
+
         if locked_obj is None:
             relock_needed = True
             lock_reason = "NO_LOCK"
+        elif keep_win_lock:
+            relock_needed = False
+            lock_reason = "KEEP_AFTER_WIN_5R"
         elif (
             len(locked_obj.live_hit_history) > 0
             and int(locked_obj.live_loss_streak) >= LIVE_RELOCK_LOSS_STREAK
@@ -1573,6 +1582,14 @@ class TradeEngine:
         self.ctx.pending_target_round = 0
         self.ctx.trade_state = "IDLE"
         self.ctx.last_settle_round = current_round
+
+        # V67: a real WIN confirms the locked window. Keep that same window
+        # for the next 5 decision rounds instead of allowing shadow statistics
+        # to immediately trigger a relock. LOSS keeps the existing protection.
+        if hit:
+            self.ctx.keep_win_lock_until = int(current_round + 5)
+        else:
+            self.ctx.keep_win_lock_until = 0
 
         # Keep real stats/equity aligned with trade_history as source of truth.
         rebuild_real_stats_from_history(self.ctx)
@@ -2547,7 +2564,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V61_AUDITED_LONG_TERM_LIVE"),
+        "state_version": getattr(ctx, "state_version", "V67_WIN_KEEP_5R_AUDITED"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
         "data_signature": getattr(ctx, "data_signature", ""),
         "data_length": getattr(ctx, "data_length", 0),
@@ -2959,7 +2976,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V63 SHADOW STABLE 12D AUDITED LIVE
+V67 WIN KEEP 5R AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
