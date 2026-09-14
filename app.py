@@ -155,8 +155,8 @@ MIN_TRADES_FOR_PROTECTION = 6
 
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -3.5
-DAILY_MAX_LOSS_STREAK = 4
+DAILY_STOP_LOSS = -10.5
+DAILY_MAX_LOSS_STREAK = 10
 DAILY_MAX_DRAWDOWN = -15.0
 DAILY_PROFIT_LOCK = 30.5
 
