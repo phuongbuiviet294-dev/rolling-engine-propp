@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V66 Robust Live 13D Audited",
+    page_title="V68.1 State Safe Keep5 Audited",
     layout="wide"
 )
 
@@ -155,8 +155,8 @@ MIN_TRADES_FOR_PROTECTION = 6
 
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -10.5
-DAILY_MAX_LOSS_STREAK = 10
+DAILY_STOP_LOSS = -8.5
+DAILY_MAX_LOSS_STREAK = 5
 DAILY_MAX_DRAWDOWN = -15.0
 DAILY_PROFIT_LOCK = 30.5
 
@@ -207,7 +207,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V67_WIN_KEEP_5R_AUDITED"
+    state_version: str = "V69_LIVE_STABLE_KEEP5_STREAK5"
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +289,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V67_WIN_KEEP_5R_AUDITED"
+    state_version: str = "V69_LIVE_STABLE_KEEP5_STREAK5"
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -340,7 +340,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V67_WIN_KEEP_5R_AUDITED"
+    ctx.state_version = "V69_LIVE_STABLE_KEEP5_STREAK5"
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -362,6 +362,10 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.daily_stop_active = False
     if not hasattr(ctx, "daily_stop_reason"):
         ctx.daily_stop_reason = ""
+    if not hasattr(ctx, "keep_win_lock_until"):
+        ctx.keep_win_lock_until = 0
+    if not hasattr(ctx, "dataset_anchor_signature"):
+        ctx.dataset_anchor_signature = ""
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -2540,6 +2544,8 @@ def save_live_state(ctx: EngineContext) -> None:
         "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
         "daily_stop_active": getattr(ctx, "daily_stop_active", False),
         "daily_stop_reason": getattr(ctx, "daily_stop_reason", ""),
+        "keep_win_lock_until": int(getattr(ctx, "keep_win_lock_until", 0) or 0),
+        "dataset_anchor_signature": getattr(ctx, "dataset_anchor_signature", ""),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2564,7 +2570,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V67_WIN_KEEP_5R_AUDITED"),
+        "state_version": getattr(ctx, "state_version", "V69_LIVE_STABLE_KEEP5_STREAK5"),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
         "data_signature": getattr(ctx, "data_signature", ""),
         "data_length": getattr(ctx, "data_length", 0),
@@ -2632,6 +2638,8 @@ def load_live_state() -> EngineContext:
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
     ctx.daily_stop_active = bool(data.get("daily_stop_active", False))
     ctx.daily_stop_reason = str(data.get("daily_stop_reason", ""))
+    ctx.keep_win_lock_until = int(data.get("keep_win_lock_until", 0) or 0)
+    ctx.dataset_anchor_signature = str(data.get("dataset_anchor_signature", "") or "")
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2792,38 +2800,47 @@ class EngineManager:
         st.rerun()
 
     def maybe_auto_reset_for_new_dataset(self) -> None:
-        """Detect daily Sheet reset/replacement before any replay/live step.
+        """Detect a genuinely new daily dataset without resetting on transient partial edits.
 
-        Rules:
-        1) If current Sheet has fewer valid numbers than saved last_length -> reset.
-        2) If the prefix up to saved last_length changed -> reset.
-           This catches replacing/copying a new day with the same or larger row count.
-        3) If no saved signature exists for an already initialized state, create it.
+        V68.1:
+        - Same-day refreshes keep the persisted state unchanged.
+        - A temporary length drop is NOT enough to reset.
+        - A new dataset is confirmed by a changed first-32-number anchor.
+        - Very short partial uploads (<32 numbers) wait rather than destroying state.
         """
         current_length = len(self.numbers)
         saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
-        saved_signature = str(getattr(self.ctx, "data_signature", "") or "")
+        saved_anchor = str(getattr(self.ctx, "dataset_anchor_signature", "") or "")
 
         if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
             return
 
-        if current_length < saved_length:
-            self.reset_context_for_new_dataset(
-                f"SHEET_LENGTH_DROPPED_{saved_length}_TO_{current_length}"
-            )
+        anchor_len = min(32, current_length)
+        current_anchor = make_numbers_signature(self.numbers, anchor_len) if anchor_len > 0 else ""
+
+        # Backward-compatible migration for V67/V68 states that lack the anchor.
+        if not saved_anchor and saved_length > 0:
+            # Do not reset merely because the anchor was not stored by the old version.
+            # Establish it from the current prefix and continue safely.
+            if current_length >= min(32, saved_length):
+                self.ctx.dataset_anchor_signature = current_anchor
+                self.ctx.data_length = saved_length
+                save_live_state(self.ctx)
             return
 
-        current_prefix_signature = make_numbers_signature(self.numbers, saved_length)
+        # If the Sheet is temporarily cleared/partially rewritten, wait.
+        if current_length < 32:
+            return
 
-        if saved_signature:
-            if current_prefix_signature != saved_signature:
-                self.reset_context_for_new_dataset("SHEET_PREFIX_CHANGED")
-                return
-        else:
-            # Backward compatibility for old state files.
-            self.ctx.data_signature = current_prefix_signature
-            self.ctx.data_length = saved_length
-            save_live_state(self.ctx)
+        # A changed first-32-number anchor means a new/replaced daily dataset.
+        if saved_anchor and current_anchor != saved_anchor:
+            self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
+            return
+
+        # Same dataset: length may increase/decrease while the Sheet is being edited.
+        # Never destroy the settled trade ledger just because the live frontier moved.
+        if current_length != saved_length:
+            return
 
 
     def rebuild_windows_to_last_length(self) -> None:
@@ -2879,6 +2896,7 @@ class EngineManager:
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
         self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
+        self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(32, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
@@ -2916,6 +2934,8 @@ class EngineManager:
             self.ctx.last_length = idx
             self.ctx.data_length = idx
             self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
+            if not getattr(self.ctx, "dataset_anchor_signature", "") and idx >= 32:
+                self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, 32)
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -2976,7 +2996,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V67 WIN KEEP 5R AUDITED
+V69 LIVE STABLE KEEP 5R + STREAK 5
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
