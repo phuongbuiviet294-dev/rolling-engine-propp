@@ -50,6 +50,8 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
+KEEP_WIN_ROUNDS = 5
+STATE_VERSION = "V69_LIVE_STABLE_STATE_SAFE"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -86,8 +88,8 @@ LIVE_START_ROUND = 180
 # token_uri = "https://oauth2.googleapis.com/token"
 # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 # client_x509_cert_url = "..."
-STATE_FILE = os.environ.get("V50_STATE_FILE", "v50_live_state.json")
-STATE_WORKSHEET_DEFAULT = "state"
+STATE_FILE = os.environ.get("V69_STATE_FILE", "v69_live_state.json")
+STATE_WORKSHEET_DEFAULT = "state_v69"
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 2
@@ -207,7 +209,7 @@ class SignalRecord:
     leader_loss_streak: int = 0
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V69_LIVE_STABLE_KEEP5_STREAK5"
+    state_version: str = STATE_VERSION
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
@@ -289,7 +291,7 @@ class EngineContext:
     open_reason: str = ""
     locked_window: Optional[int] = None
     lock_reason: str = ""
-    state_version: str = "V69_LIVE_STABLE_KEEP5_STREAK5"
+    state_version: str = STATE_VERSION
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -340,7 +342,7 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.locked_live_loss = 0
     if not hasattr(ctx, "safe_mode_counter"):
         ctx.safe_mode_counter = 0
-    ctx.state_version = "V69_LIVE_STABLE_KEEP5_STREAK5"
+    ctx.state_version = STATE_VERSION
 
     if not hasattr(ctx, "pending_confidence"):
         ctx.pending_confidence = 0.0
@@ -1591,7 +1593,7 @@ class TradeEngine:
         # for the next 5 decision rounds instead of allowing shadow statistics
         # to immediately trigger a relock. LOSS keeps the existing protection.
         if hit:
-            self.ctx.keep_win_lock_until = int(current_round + 5)
+            self.ctx.keep_win_lock_until = int(current_round + KEEP_WIN_ROUNDS)
         else:
             self.ctx.keep_win_lock_until = 0
 
@@ -2570,7 +2572,7 @@ def save_live_state(ctx: EngineContext) -> None:
             str(k): int(v)
             for k, v in getattr(ctx, "blacklisted_windows", {}).items()
         },
-        "state_version": getattr(ctx, "state_version", "V69_LIVE_STABLE_KEEP5_STREAK5"),
+        "state_version": getattr(ctx, "state_version", STATE_VERSION),
         "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
         "data_signature": getattr(ctx, "data_signature", ""),
         "data_length": getattr(ctx, "data_length", 0),
@@ -2601,6 +2603,12 @@ def load_live_state() -> EngineContext:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
+        return EngineContext()
+
+    # V69 is a deliberate clean live-state boundary. Never import V68/V67
+    # trade ledger, lock, pending trade, or daily protection into V69.
+    # This prevents cross-version/cross-day contamination.
+    if str(data.get("state_version", "")) != STATE_VERSION:
         return EngineContext()
 
     ctx = EngineContext()
@@ -2805,8 +2813,8 @@ class EngineManager:
         V68.1:
         - Same-day refreshes keep the persisted state unchanged.
         - A temporary length drop is NOT enough to reset.
-        - A new dataset is confirmed by a changed first-32-number anchor.
-        - Very short partial uploads (<32 numbers) wait rather than destroying state.
+        - A new dataset is confirmed by a changed first-64-number anchor.
+        - Very short partial uploads (<64 numbers) wait rather than destroying state.
         """
         current_length = len(self.numbers)
         saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
@@ -2815,24 +2823,24 @@ class EngineManager:
         if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
             return
 
-        anchor_len = min(32, current_length)
+        anchor_len = min(64, current_length)
         current_anchor = make_numbers_signature(self.numbers, anchor_len) if anchor_len > 0 else ""
 
         # Backward-compatible migration for V67/V68 states that lack the anchor.
         if not saved_anchor and saved_length > 0:
             # Do not reset merely because the anchor was not stored by the old version.
             # Establish it from the current prefix and continue safely.
-            if current_length >= min(32, saved_length):
+            if current_length >= min(64, saved_length):
                 self.ctx.dataset_anchor_signature = current_anchor
                 self.ctx.data_length = saved_length
                 save_live_state(self.ctx)
             return
 
         # If the Sheet is temporarily cleared/partially rewritten, wait.
-        if current_length < 32:
+        if current_length < 64:
             return
 
-        # A changed first-32-number anchor means a new/replaced daily dataset.
+        # A changed first-64-number anchor means a new/replaced daily dataset.
         if saved_anchor and current_anchor != saved_anchor:
             self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
             return
@@ -2896,7 +2904,7 @@ class EngineManager:
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
         self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
-        self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(32, self.ctx.last_length))
+        self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(64, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
@@ -2935,7 +2943,7 @@ class EngineManager:
             self.ctx.data_length = idx
             self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
             if not getattr(self.ctx, "dataset_anchor_signature", "") and idx >= 32:
-                self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, 32)
+                self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, 64)
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -2996,7 +3004,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V69 LIVE STABLE KEEP 5R + STREAK 5
+V68.1 STATE SAFE KEEP 5R AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
