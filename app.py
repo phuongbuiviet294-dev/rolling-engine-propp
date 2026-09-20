@@ -25,7 +25,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V68.1 State Safe Keep5 Audited",
+    page_title="V69.1 Profit Guard",
     layout="wide"
 )
 
@@ -51,7 +51,7 @@ COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 5
-STATE_VERSION = "V69_LIVE_STABLE_STATE_SAFE"
+STATE_VERSION = "V69_2_COHERENCE_PROFIT_GUARD_STATE"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -150,14 +150,21 @@ MAX_REAL_NEGATIVE_SOFT = -2.0
 
 # V54 long-run controls
 RISK_PAUSE_ROUNDS = 3
-BLACKLIST_DURATION_ROUNDS = 6
+BLACKLIST_DURATION_ROUNDS = 5
+
+# V69.2: sample-aware lock coherence guard.
+# When the locked window has fewer than 2 live observations and Top3 has
+# strong majority against the lock prediction, do not open a trade.
+COHERENCE_MIN_LIVE_SAMPLES = 2
+COHERENCE_MIN_CONSENSUS = 2.0 / 3.0
+
 WINDOW_SELECTION_MODE = "shadow"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
 MIN_TRADES_FOR_PROTECTION = 6
 
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -8.5
+DAILY_STOP_LOSS = -3.0
 DAILY_MAX_LOSS_STREAK = 5
 DAILY_MAX_DRAWDOWN = -15.0
 DAILY_PROFIT_LOCK = 30.5
@@ -1262,6 +1269,35 @@ class SignalEngine:
             real_window_trade_count=real_locked_stat["trade_count"],
             real_window_loss_streak=real_locked_stat["loss_streak"],
         )
+
+    def apply_sample_aware_coherence(self, signal: SignalRecord) -> SignalRecord:
+        """V69.2: block weak-lock trades when Top3 strongly disagrees.
+
+        The guard is intentionally narrow: it only applies while the locked
+        window has fewer than COHERENCE_MIN_LIVE_SAMPLES live observations.
+        Established locks are not overridden by consensus.
+        """
+        if signal.locked_window is None or signal.next_group is None:
+            return signal
+
+        obj = self.window_engine.state.get(signal.locked_window)
+        live_n = len(obj.live_hit_history) if obj is not None else 0
+        if live_n >= COHERENCE_MIN_LIVE_SAMPLES:
+            return signal
+
+        top_rows = self.window_engine.get_top_windows(TOPN)
+        consensus_group, consensus = self.window_engine.get_consensus(top_rows)
+
+        if (
+            consensus_group is not None
+            and consensus >= COHERENCE_MIN_CONSENSUS
+            and consensus_group != signal.next_group
+        ):
+            signal.state = "WAIT"
+            signal.next_group = None
+            self.ctx.protection_reason = "WEAK_LOCK_CONSENSUS_CONFLICT"
+
+        return signal
 
     def build_signal(self, round_id: int) -> SignalRecord:
         top_rows = self.window_engine.get_top_windows(TOPN)
@@ -2890,6 +2926,7 @@ class EngineManager:
             self.window_engine.update_one_round(actual_group, idx)
 
             signal = self.signal_engine.build_signal(idx)
+            signal = self.signal_engine.apply_sample_aware_coherence(signal)
             confidence = self.signal_engine.get_confidence_score(signal)
             self.ctx.last_decision_confidence = confidence
             setattr(signal, "decision_confidence", confidence)
@@ -2927,6 +2964,7 @@ class EngineManager:
             self.window_engine.update_one_round(actual_group, idx)
 
             signal = self.signal_engine.build_signal(idx)
+            signal = self.signal_engine.apply_sample_aware_coherence(signal)
             confidence = self.signal_engine.get_confidence_score(signal)
             self.ctx.last_decision_confidence = confidence
             setattr(signal, "decision_confidence", confidence)
