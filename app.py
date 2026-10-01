@@ -2888,14 +2888,29 @@ class EngineManager:
         Live daily reset:
         - Same-day refreshes keep the persisted state unchanged.
         - A temporary length change with the same prefix does NOT reset.
-        - A changed first-32-number anchor confirms a new/replaced daily dataset.
-        - Very short partial uploads (<32 numbers) wait rather than destroying state.
+        - Clearing the one-column daily Sheet resets immediately.
+        - Replacing it from round 1 resets immediately when the frontier drops to <=32.
+        - Otherwise a changed first-32-number anchor confirms a new/replaced dataset.
         """
         current_length = len(self.numbers)
         saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
         saved_anchor = str(getattr(self.ctx, "dataset_anchor_signature", "") or "")
 
         if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
+            return
+
+        # This deployment uses ONE current-day column. The operator clears the
+        # old day and then starts the new day again from round 1. If the live
+        # frontier suddenly drops to an early round, treat that as an explicit
+        # day replacement immediately. This is stronger and safer than waiting
+        # for 32 numbers, and prevents yesterday's state from blocking today's
+        # rounds 1..31.
+        if current_length == 0 and saved_length > 0:
+            self.reset_context_for_new_dataset("DAILY_SHEET_CLEARED")
+            return
+
+        if 0 < current_length < saved_length and current_length <= DATASET_RESET_ANCHOR_LEN:
+            self.reset_context_for_new_dataset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
             return
 
         # Live daily-sheet reset: compare a short immutable prefix rather than
