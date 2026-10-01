@@ -50,7 +50,8 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
-KEEP_WIN_ROUNDS = 5
+KEEP_WIN_ROUNDS = 4
+DATASET_RESET_ANCHOR_LEN = 32
 STATE_VERSION = "V69_2_COHERENCE_PROFIT_GUARD_STATE"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
@@ -164,7 +165,7 @@ MIN_TRADES_FOR_PROTECTION = 6
 
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
-DAILY_STOP_LOSS = -3.0
+DAILY_STOP_LOSS = -2.5
 DAILY_MAX_LOSS_STREAK = 5
 DAILY_MAX_DRAWDOWN = -15.0
 DAILY_PROFIT_LOCK = 30.5
@@ -2846,11 +2847,11 @@ class EngineManager:
     def maybe_auto_reset_for_new_dataset(self) -> None:
         """Detect a genuinely new daily dataset without resetting on transient partial edits.
 
-        V68.1:
+        Live daily reset:
         - Same-day refreshes keep the persisted state unchanged.
-        - A temporary length drop is NOT enough to reset.
-        - A new dataset is confirmed by a changed first-64-number anchor.
-        - Very short partial uploads (<64 numbers) wait rather than destroying state.
+        - A temporary length change with the same prefix does NOT reset.
+        - A changed first-32-number anchor confirms a new/replaced daily dataset.
+        - Very short partial uploads (<32 numbers) wait rather than destroying state.
         """
         current_length = len(self.numbers)
         saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
@@ -2859,24 +2860,24 @@ class EngineManager:
         if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
             return
 
-        anchor_len = min(64, current_length)
-        current_anchor = make_numbers_signature(self.numbers, anchor_len) if anchor_len > 0 else ""
+        # Live daily-sheet reset: compare a short immutable prefix rather than
+        # relying on length. This catches a new day even when the sheet has only
+        # partially refilled, while still ignoring a transient row-count change.
+        anchor_len = min(DATASET_RESET_ANCHOR_LEN, current_length)
+        if current_length < DATASET_RESET_ANCHOR_LEN:
+            return
+        current_anchor = make_numbers_signature(self.numbers, anchor_len)
 
-        # Backward-compatible migration for V67/V68 states that lack the anchor.
+        # Backward-compatible migration for old states that have no anchor.
         if not saved_anchor and saved_length > 0:
-            # Do not reset merely because the anchor was not stored by the old version.
-            # Establish it from the current prefix and continue safely.
-            if current_length >= min(64, saved_length):
-                self.ctx.dataset_anchor_signature = current_anchor
-                self.ctx.data_length = saved_length
-                save_live_state(self.ctx)
+            self.ctx.dataset_anchor_signature = current_anchor
+            self.ctx.data_length = saved_length
+            save_live_state(self.ctx)
             return
 
-        # If the Sheet is temporarily cleared/partially rewritten, wait.
-        if current_length < 64:
-            return
-
-        # A changed first-64-number anchor means a new/replaced daily dataset.
+        # Changed prefix = new/replaced daily dataset.
+        # This is intentionally independent of current_length, so clearing the
+        # Number column and refilling from round 1 cannot inherit yesterday's state.
         if saved_anchor and current_anchor != saved_anchor:
             self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
             return
