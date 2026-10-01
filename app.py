@@ -11,6 +11,8 @@ import os
 import math
 import hashlib
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
@@ -52,6 +54,7 @@ MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
+LIVE_TIMEZONE = "Asia/Phnom_Penh"
 STATE_VERSION = "V69_4_ADAPTIVE_COH5_FINAL_LIVE_STATE"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
@@ -303,6 +306,7 @@ class EngineContext:
     locked_window: Optional[int] = None
     lock_reason: str = ""
     state_version: str = STATE_VERSION
+    live_day_id: str = ""
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -379,6 +383,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.keep_win_lock_until = 0
     if not hasattr(ctx, "dataset_anchor_signature"):
         ctx.dataset_anchor_signature = ""
+    if not hasattr(ctx, "live_day_id"):
+        ctx.live_day_id = ""
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -631,6 +637,14 @@ def make_numbers_signature(numbers: list[int], length: Optional[int] = None) -> 
     length = max(0, min(int(length), len(numbers)))
     payload = ",".join(str(int(x)) for x in numbers[:length])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def current_live_day_id() -> str:
+    """Calendar day used only for live daily-sheet state isolation."""
+    try:
+        return datetime.now(ZoneInfo(LIVE_TIMEZONE)).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
@@ -2623,6 +2637,7 @@ def save_live_state(ctx: EngineContext) -> None:
         "daily_stop_reason": getattr(ctx, "daily_stop_reason", ""),
         "keep_win_lock_until": int(getattr(ctx, "keep_win_lock_until", 0) or 0),
         "dataset_anchor_signature": getattr(ctx, "dataset_anchor_signature", ""),
+        "live_day_id": getattr(ctx, "live_day_id", ""),
 
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
@@ -2723,6 +2738,7 @@ def load_live_state() -> EngineContext:
     ctx.daily_stop_reason = str(data.get("daily_stop_reason", ""))
     ctx.keep_win_lock_until = int(data.get("keep_win_lock_until", 0) or 0)
     ctx.dataset_anchor_signature = str(data.get("dataset_anchor_signature", "") or "")
+    ctx.live_day_id = str(data.get("live_day_id", "") or "")
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2825,6 +2841,12 @@ class EngineManager:
         self.ctx = ensure_ctx_fields(get_live_ctx())
         self.window_state = get_live_window_state()
 
+        # IMPORTANT: inspect the raw daily Sheet BEFORE load_data().
+        # load_data() intentionally stops on an empty Sheet, but an empty Sheet
+        # is itself a valid operator action that means "new day".
+        raw_numbers = load_numbers()
+        self.maybe_auto_reset_for_new_day(raw_numbers)
+
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
@@ -2846,6 +2868,30 @@ class EngineManager:
             self.rebuild_windows_to_last_length()
 
 
+    def maybe_auto_reset_for_new_day(self, raw_numbers: list[int]) -> None:
+        """Hard daily boundary for the one-column current-day Google Sheet.
+
+        The Sheet contains only today's numbers. Therefore a persisted state is
+        valid only for the calendar day on which it was created. This check runs
+        before load_data() so even a temporarily empty Sheet can trigger reset.
+        """
+        today = current_live_day_id()
+        saved_day = str(getattr(self.ctx, "live_day_id", "") or "")
+        initialized = bool(getattr(self.ctx, "hybrid_initialized", False))
+
+        if initialized and saved_day and saved_day != today:
+            self.reset_context_for_new_dataset("DAY_ID_CHANGED")
+            return
+
+        # State files created before DAY_ID existed cannot safely be associated
+        # with today's single-column dataset. Start a clean live boundary.
+        if initialized and not saved_day:
+            self.reset_context_for_new_dataset("DAY_ID_MISSING")
+            return
+
+        if not initialized and not saved_day:
+            self.ctx.live_day_id = today
+
     def reset_context_for_new_dataset(self, reason: str) -> None:
         """Auto reset persisted live state when Sheet data is reset/replaced.
 
@@ -2865,6 +2911,7 @@ class EngineManager:
             pass
 
         self.ctx = ensure_ctx_fields(EngineContext())
+        self.ctx.live_day_id = current_live_day_id()
         self.ctx.protection_reason = f"AUTO_RESET_{reason}"
         st.session_state.v50_true_live_ctx = self.ctx
 
@@ -2994,6 +3041,7 @@ class EngineManager:
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
+        self.ctx.live_day_id = current_live_day_id()
         self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
         self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(DATASET_RESET_ANCHOR_LEN, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
@@ -3032,6 +3080,7 @@ class EngineManager:
 
             # Commit the processed frontier only after all round work is done.
             self.ctx.last_length = idx
+            self.ctx.live_day_id = current_live_day_id()
             self.ctx.data_length = idx
             self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
             if not getattr(self.ctx, "dataset_anchor_signature", "") and idx >= 32:
