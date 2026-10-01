@@ -2892,6 +2892,30 @@ class EngineManager:
         if not initialized and not saved_day:
             self.ctx.live_day_id = today
 
+        # IMPORTANT for the user's one-column-per-day workflow:
+        # the operator may clear the Number column while staying on the SAME
+        # calendar day. Calendar DAY_ID alone cannot detect that. Detect the
+        # empty/rewound live frontier BEFORE load_data(), because load_data()
+        # intentionally stops on an empty sheet.
+        saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
+        raw_length = len(raw_numbers)
+        if initialized and saved_length > 0:
+            if raw_length == 0:
+                self.reset_context_for_new_dataset("DAILY_SHEET_CLEARED")
+                return
+            if 0 < raw_length < saved_length and raw_length <= DATASET_RESET_ANCHOR_LEN:
+                self.reset_context_for_new_dataset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
+                return
+
+            # If the new day was pasted quickly and the sheet never exposed
+            # zero rows, compare the available prefix directly.
+            saved_anchor = str(getattr(self.ctx, "dataset_anchor_signature", "") or "")
+            if saved_anchor and raw_length >= DATASET_RESET_ANCHOR_LEN:
+                raw_anchor = make_numbers_signature(raw_numbers, DATASET_RESET_ANCHOR_LEN)
+                if raw_anchor != saved_anchor:
+                    self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
+                    return
+
     def reset_context_for_new_dataset(self, reason: str) -> None:
         """Auto reset persisted live state when Sheet data is reset/replaced.
 
