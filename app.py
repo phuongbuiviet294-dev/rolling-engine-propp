@@ -52,7 +52,7 @@ MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
-STATE_VERSION = "V69_2_COHERENCE_PROFIT_GUARD_STATE"
+STATE_VERSION = "V69_3_ADAPTIVE_COHERENCE_PROFIT_GUARD_STATE"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -157,6 +157,9 @@ BLACKLIST_DURATION_ROUNDS = 5
 # When the locked window has fewer than 2 live observations and Top3 has
 # strong majority against the lock prediction, do not open a trade.
 COHERENCE_MIN_LIVE_SAMPLES = 2
+COHERENCE_DEFENSIVE_LIVE_SAMPLES = 6
+COHERENCE_DEFENSIVE_HEALTH20_MAX = 0.50
+COHERENCE_DEFENSIVE_STABILITY_MIN = 0.65
 COHERENCE_MIN_CONSENSUS = 2.0 / 3.0
 
 WINDOW_SELECTION_MODE = "shadow"  # "ucb" or "score"
@@ -1271,19 +1274,50 @@ class SignalEngine:
             real_window_loss_streak=real_locked_stat["loss_streak"],
         )
 
-    def apply_sample_aware_coherence(self, signal: SignalRecord) -> SignalRecord:
-        """V69.2: block weak-lock trades when Top3 strongly disagrees.
+    def get_dynamic_coherence_samples(self, signal: SignalRecord) -> int:
+        """V69.3: choose COH2/COH6 from current observed regime only.
 
-        The guard is intentionally narrow: it only applies while the locked
-        window has fewer than COHERENCE_MIN_LIVE_SAMPLES live observations.
-        Established locks are not overridden by consensus.
+        COH2 remains the default.  COH6 is enabled only when the current
+        window landscape is low-health but stable.  All inputs are calculated
+        from data already settled/current at the decision round; no future
+        round is referenced.
+        """
+        health20 = float(getattr(signal, "health20", 0.0) or 0.0)
+        stability = float(getattr(signal, "stability", 0.0) or 0.0)
+
+        if (
+            health20 < COHERENCE_DEFENSIVE_HEALTH20_MAX
+            and stability >= COHERENCE_DEFENSIVE_STABILITY_MIN
+        ):
+            return COHERENCE_DEFENSIVE_LIVE_SAMPLES
+
+        return COHERENCE_MIN_LIVE_SAMPLES
+
+    def apply_sample_aware_coherence(
+        self,
+        signal: SignalRecord,
+        min_live_samples: Optional[int] = None
+    ) -> SignalRecord:
+        """V69.3: sample-aware coherence with adaptive COH2/COH6.
+
+        COH2 is the normal default.  In the defensive low-health/stable
+        regime, COH6 is used while the locked window has fewer than 6
+        shadow/live observations.  Established locks are unchanged.
         """
         if signal.locked_window is None or signal.next_group is None:
             return signal
 
+        if min_live_samples is None:
+            min_live_samples = self.get_dynamic_coherence_samples(signal)
+
+        min_live_samples = max(
+            COHERENCE_MIN_LIVE_SAMPLES,
+            int(min_live_samples)
+        )
+
         obj = self.window_engine.state.get(signal.locked_window)
         live_n = len(obj.live_hit_history) if obj is not None else 0
-        if live_n >= COHERENCE_MIN_LIVE_SAMPLES:
+        if live_n >= min_live_samples:
             return signal
 
         top_rows = self.window_engine.get_top_windows(TOPN)
@@ -2080,6 +2114,10 @@ CONF = {confidence_score:.2f}
                     "WINDOW_SELECTION_MODE": WINDOW_SELECTION_MODE,
                     "UCB_EXPLORATION_C": UCB_EXPLORATION_C,
                     "MIN_TRADES_FOR_PROTECTION": MIN_TRADES_FOR_PROTECTION,
+                    "COHERENCE_MIN_LIVE_SAMPLES": COHERENCE_MIN_LIVE_SAMPLES,
+                    "COHERENCE_DEFENSIVE_LIVE_SAMPLES": COHERENCE_DEFENSIVE_LIVE_SAMPLES,
+                    "COHERENCE_DEFENSIVE_HEALTH20_MAX": COHERENCE_DEFENSIVE_HEALTH20_MAX,
+                    "COHERENCE_DEFENSIVE_STABILITY_MIN": COHERENCE_DEFENSIVE_STABILITY_MIN,
                     "DAILY_STOP_LOSS": DAILY_STOP_LOSS,
                     "DAILY_MAX_LOSS_STREAK": DAILY_MAX_LOSS_STREAK,
                     "DAILY_MAX_DRAWDOWN": DAILY_MAX_DRAWDOWN,
