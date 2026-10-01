@@ -52,7 +52,7 @@ MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
-STATE_VERSION = "V69_3_ADAPTIVE_COHERENCE_PROFIT_GUARD_STATE"
+STATE_VERSION = "V69_4_ADAPTIVE_COH5_FINAL_LIVE_STATE"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -157,7 +157,7 @@ BLACKLIST_DURATION_ROUNDS = 5
 # When the locked window has fewer than 2 live observations and Top3 has
 # strong majority against the lock prediction, do not open a trade.
 COHERENCE_MIN_LIVE_SAMPLES = 2
-COHERENCE_DEFENSIVE_LIVE_SAMPLES = 6
+COHERENCE_DEFENSIVE_LIVE_SAMPLES = 5
 COHERENCE_DEFENSIVE_HEALTH20_MAX = 0.50
 COHERENCE_DEFENSIVE_STABILITY_MIN = 0.65
 COHERENCE_MIN_CONSENSUS = 2.0 / 3.0
@@ -2980,7 +2980,7 @@ class EngineManager:
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
         self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
-        self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(64, self.ctx.last_length))
+        self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(DATASET_RESET_ANCHOR_LEN, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
@@ -3020,7 +3020,7 @@ class EngineManager:
             self.ctx.data_length = idx
             self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
             if not getattr(self.ctx, "dataset_anchor_signature", "") and idx >= 32:
-                self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, 64)
+                self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, DATASET_RESET_ANCHOR_LEN)
             save_live_state(self.ctx)
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
