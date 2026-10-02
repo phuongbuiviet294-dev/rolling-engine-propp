@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH5_FINAL_LIVE_STATE"
+STATE_VERSION = "V69_4_ADAPTIVE_COH5_FINAL_LIVE_STATE_V3_1"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -2428,12 +2428,66 @@ def load_state_from_gsheet() -> dict | None:
 
         raw = ws.acell("A1").value
         if not raw:
-            return None
+            return {}
 
         return json.loads(raw)
     except Exception as e:
-        st.warning(f"Load Google state error, fallback local: {e}")
-        return None
+        # Google State is authoritative when configured. Never fall back to a
+        # potentially stale local state file, because that can resurrect an
+        # older day/version after a remote outage.
+        st.error(f"Google state load error: {e}")
+        return {}
+
+
+def serialize_live_state(ctx: EngineContext) -> dict:
+    """Serialize EngineContext into the single persistent V3 state payload."""
+    return {
+        "trade_history": [trade_record_to_dict(x) for x in ctx.trade_history],
+        "equity_curve": list(ctx.equity_curve),
+        "signal_history": list(ctx.signal_history),
+        "signal_flip_history": list(ctx.signal_flip_history),
+        "leader_history": list(ctx.leader_history),
+        "pending_trade": ctx.pending_trade,
+        "pending_round": ctx.pending_round,
+        "pending_index": ctx.pending_index,
+        "pending_locked_window": ctx.pending_locked_window,
+        "pending_confidence": ctx.pending_confidence,
+        "pending_target_round": ctx.pending_target_round,
+        "trade_state": ctx.trade_state,
+        "last_length": ctx.last_length,
+        "last_open_round": ctx.last_open_round,
+        "last_settle_round": ctx.last_settle_round,
+        "last_window_round": ctx.last_window_round,
+        "last_signal_round": ctx.last_signal_round,
+        "cooldown_counter": ctx.cooldown_counter,
+        "cooldown_loss_streak_marker": ctx.cooldown_loss_streak_marker,
+        "safe_mode_counter": ctx.safe_mode_counter,
+        "peak_equity": ctx.peak_equity,
+        "last_safe_trigger_peak": ctx.last_safe_trigger_peak,
+        "risk_pause_counter": ctx.risk_pause_counter,
+        "last_risk_trigger_trade_count": ctx.last_risk_trigger_trade_count,
+        "last_decision_confidence": ctx.last_decision_confidence,
+        "daily_stop_active": ctx.daily_stop_active,
+        "daily_stop_reason": ctx.daily_stop_reason,
+        "keep_win_lock_until": ctx.keep_win_lock_until,
+        "dataset_anchor_signature": ctx.dataset_anchor_signature,
+        "protection_reason": ctx.protection_reason,
+        "open_reason": ctx.open_reason,
+        "locked_window": ctx.locked_window,
+        "lock_reason": ctx.lock_reason,
+        "locked_live_profit": ctx.locked_live_profit,
+        "locked_live_loss_streak": ctx.locked_live_loss_streak,
+        "locked_live_win": ctx.locked_live_win,
+        "locked_live_loss": ctx.locked_live_loss,
+        "window_real_stats": {str(k): v for k, v in ctx.window_real_stats.items()},
+        "cooled_windows": {str(k): int(v) for k, v in ctx.cooled_windows.items()},
+        "blacklisted_windows": {str(k): int(v) for k, v in getattr(ctx, "blacklisted_windows", {}).items()},
+        "state_version": getattr(ctx, "state_version", STATE_VERSION),
+        "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
+        "data_signature": getattr(ctx, "data_signature", ""),
+        "data_length": getattr(ctx, "data_length", 0),
+        "live_day_id": getattr(ctx, "live_day_id", ""),
+    }
 
 
 def save_state_to_gsheet(data: dict) -> bool:
@@ -2599,85 +2653,28 @@ def get_history_real_stats(ctx: EngineContext, window_id: Optional[int]) -> dict
 
 
 def save_live_state(ctx: EngineContext) -> None:
-    ensure_ctx_fields(ctx)
+    data = serialize_live_state(ctx)
+    cfg = get_state_backend_config()
 
-    data = {
-        "trade_history": [
-            trade_record_to_dict(x)
-            for x in ctx.trade_history
-        ],
-        "equity_curve": list(ctx.equity_curve),
-        "signal_history": list(ctx.signal_history),
-        "signal_flip_history": list(ctx.signal_flip_history),
-        "leader_history": list(ctx.leader_history),
-
-        "pending_trade": ctx.pending_trade,
-        "pending_round": ctx.pending_round,
-        "pending_index": ctx.pending_index,
-        "pending_locked_window": ctx.pending_locked_window,
-        "pending_confidence": getattr(ctx, "pending_confidence", 0.0),
-        "pending_target_round": getattr(ctx, "pending_target_round", 0),
-        "trade_state": ctx.trade_state,
-
-        "last_length": ctx.last_length,
-        "last_open_round": ctx.last_open_round,
-        "last_settle_round": ctx.last_settle_round,
-        "last_window_round": ctx.last_window_round,
-        "last_signal_round": ctx.last_signal_round,
-
-        "cooldown_counter": ctx.cooldown_counter,
-        "cooldown_loss_streak_marker": ctx.cooldown_loss_streak_marker,
-        "safe_mode_counter": ctx.safe_mode_counter,
-        "peak_equity": getattr(ctx, "peak_equity", 0.0),
-        "last_safe_trigger_peak": getattr(ctx, "last_safe_trigger_peak", 0.0),
-        "risk_pause_counter": getattr(ctx, "risk_pause_counter", 0),
-        "last_risk_trigger_trade_count": getattr(ctx, "last_risk_trigger_trade_count", -1),
-        "last_decision_confidence": getattr(ctx, "last_decision_confidence", 0.0),
-        "daily_stop_active": getattr(ctx, "daily_stop_active", False),
-        "daily_stop_reason": getattr(ctx, "daily_stop_reason", ""),
-        "keep_win_lock_until": int(getattr(ctx, "keep_win_lock_until", 0) or 0),
-        "dataset_anchor_signature": getattr(ctx, "dataset_anchor_signature", ""),
-        "live_day_id": getattr(ctx, "live_day_id", ""),
-
-        "protection_reason": ctx.protection_reason,
-        "open_reason": ctx.open_reason,
-
-        "locked_window": ctx.locked_window,
-        "lock_reason": ctx.lock_reason,
-
-        "locked_live_profit": ctx.locked_live_profit,
-        "locked_live_loss_streak": ctx.locked_live_loss_streak,
-        "locked_live_win": ctx.locked_live_win,
-        "locked_live_loss": ctx.locked_live_loss,
-
-        "window_real_stats": {
-            str(k): v
-            for k, v in ctx.window_real_stats.items()
-        },
-        "cooled_windows": {
-            str(k): int(v)
-            for k, v in ctx.cooled_windows.items()
-        },
-        "blacklisted_windows": {
-            str(k): int(v)
-            for k, v in getattr(ctx, "blacklisted_windows", {}).items()
-        },
-        "state_version": getattr(ctx, "state_version", STATE_VERSION),
-        "hybrid_initialized": getattr(ctx, "hybrid_initialized", False),
-        "data_signature": getattr(ctx, "data_signature", ""),
-        "data_length": getattr(ctx, "data_length", 0),
-    }
-
-    # Try Google Sheet backend first. If unavailable, fallback to local JSON.
-    if save_state_to_gsheet(data):
-        return
+    if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+        # Google State is authoritative when configured. A failed write must
+        # stop the live engine rather than silently writing a local copy that
+        # will be ignored on the next restart. This prevents state divergence
+        # and duplicate/replayed rounds.
+        if save_state_to_gsheet(data):
+            return
+        st.error(
+            "LIVE STATE SAVE FAILED: Google State is configured but could not "
+            "be written. Processing is stopped to prevent state divergence."
+        )
+        st.stop()
 
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.warning(f"Save local state error: {e}")
-
+        st.error(f"Save local state error: {e}")
+        st.stop()
 
 def load_live_state() -> EngineContext:
     data = load_state_from_gsheet()
@@ -2820,13 +2817,41 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
-            if "v50_true_live_ctx" in st.session_state:
-                del st.session_state.v50_true_live_ctx
-            if "v50_true_live_window_state" in st.session_state:
-                del st.session_state.v50_true_live_window_state
-            delete_state_from_gsheet()
-            if os.path.exists(STATE_FILE):
-                os.remove(STATE_FILE)
+            # Manual reset MUST use the same atomic-safe path as automatic
+            # daily reset. Never delete remotely and rerun blindly: if the
+            # Google State write fails, old state could be loaded again.
+            blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.live_day_id = current_live_day_id()
+            blank_ctx.protection_reason = "MANUAL_RESET"
+            blank_ctx.state_version = STATE_VERSION
+            blank_ctx.hybrid_initialized = False
+            blank_ctx.last_length = 0
+            blank_ctx.data_length = 0
+            blank_ctx.data_signature = ""
+            blank_ctx.dataset_anchor_signature = ""
+
+            cfg2 = get_state_backend_config()
+            if cfg2["backend"] == "gsheet" and cfg2["sheet_id"]:
+                if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
+                    st.error(
+                        "MANUAL RESET stopped: Google State could not be reset safely. "
+                        "Fix the Google connection and try again. Old state was not touched."
+                    )
+                    st.stop()
+            else:
+                try:
+                    if os.path.exists(STATE_FILE):
+                        os.remove(STATE_FILE)
+                except Exception as e:
+                    st.error(f"MANUAL RESET stopped: cannot remove local state: {e}")
+                    st.stop()
+
+            st.session_state.pop("v69_reset_required", None)
+            st.session_state.pop("v69_reset_reason", None)
+            st.session_state.v50_true_live_ctx = blank_ctx
+            st.session_state.v50_true_live_window_state = {
+                w: WindowRecord() for w in WINDOWS
+            }
             st.rerun()
 
 
@@ -2869,74 +2894,96 @@ class EngineManager:
 
 
     def maybe_auto_reset_for_new_day(self, raw_numbers: list[int]) -> None:
-        """Hard daily boundary for the one-column current-day Google Sheet.
+        """Detect a new daily dataset but NEVER reset it automatically.
 
-        The Sheet contains only today's numbers. Therefore a persisted state is
-        valid only for the calendar day on which it was created. This check runs
-        before load_data() so even a temporarily empty Sheet can trigger reset.
+        Deployment workflow:
+        1. Operator clears/replaces the single current-day Number column.
+        2. App detects the change and STOPS.
+        3. Operator presses Reset Live State.
+        4. App starts the new day from round 1.
+
+        This prevents an old sheet/new calendar-day combination from being
+        silently replayed as a new day.
         """
         today = current_live_day_id()
         saved_day = str(getattr(self.ctx, "live_day_id", "") or "")
         initialized = bool(getattr(self.ctx, "hybrid_initialized", False))
 
         if initialized and saved_day and saved_day != today:
-            self.reset_context_for_new_dataset("DAY_ID_CHANGED")
+            self.require_manual_reset("DAY_ID_CHANGED")
             return
 
-        # State files created before DAY_ID existed cannot safely be associated
-        # with today's single-column dataset. Start a clean live boundary.
         if initialized and not saved_day:
-            self.reset_context_for_new_dataset("DAY_ID_MISSING")
+            self.require_manual_reset("DAY_ID_MISSING")
             return
 
         if not initialized and not saved_day:
             self.ctx.live_day_id = today
 
-        # IMPORTANT for the user's one-column-per-day workflow:
-        # the operator may clear the Number column while staying on the SAME
-        # calendar day. Calendar DAY_ID alone cannot detect that. Detect the
-        # empty/rewound live frontier BEFORE load_data(), because load_data()
-        # intentionally stops on an empty sheet.
         saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
         raw_length = len(raw_numbers)
         if initialized and saved_length > 0:
             if raw_length == 0:
-                self.reset_context_for_new_dataset("DAILY_SHEET_CLEARED")
+                self.require_manual_reset("DAILY_SHEET_CLEARED")
                 return
             if 0 < raw_length < saved_length and raw_length <= DATASET_RESET_ANCHOR_LEN:
-                self.reset_context_for_new_dataset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
+                self.require_manual_reset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
                 return
 
-            # If the new day was pasted quickly and the sheet never exposed
-            # zero rows, compare the available prefix directly.
             saved_anchor = str(getattr(self.ctx, "dataset_anchor_signature", "") or "")
             if saved_anchor and raw_length >= DATASET_RESET_ANCHOR_LEN:
                 raw_anchor = make_numbers_signature(raw_numbers, DATASET_RESET_ANCHOR_LEN)
                 if raw_anchor != saved_anchor:
-                    self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
+                    self.require_manual_reset("DATASET_ANCHOR_CHANGED")
                     return
 
     def reset_context_for_new_dataset(self, reason: str) -> None:
-        """Auto reset persisted live state when Sheet data is reset/replaced.
+        """Reset live state atomically before rebuilding the current dataset.
 
-        This is required when every day the user clears/replaces the number column.
-        Without this, old last_length/trade_history/locked_window can survive and
-        new daily rows may not be processed.
+        The old implementation deleted Google state and immediately reran. If
+        the Google API was temporarily unavailable, the old state could still
+        exist remotely and be loaded again on the rerun. That is unsafe for a
+        one-column-per-day live deployment.
+
+        V3 rule:
+        - local backend: remove the local state file;
+        - Google backend: overwrite the state cell with a valid EMPTY V3 state;
+        - if the configured Google backend cannot be reset, STOP instead of
+          rerunning and risking yesterday's state being loaded again.
         """
-        try:
-            delete_state_from_gsheet()
-        except Exception:
-            pass
+        cfg = get_state_backend_config()
 
-        try:
-            if os.path.exists(STATE_FILE):
-                os.remove(STATE_FILE)
-        except Exception:
-            pass
+        # Build the exact blank state that is safe to reload after rerun.
+        blank_ctx = ensure_ctx_fields(EngineContext())
+        blank_ctx.live_day_id = current_live_day_id()
+        blank_ctx.protection_reason = f"AUTO_RESET_{reason}"
+        blank_ctx.state_version = STATE_VERSION
+        blank_ctx.hybrid_initialized = False
+        blank_ctx.last_length = 0
+        blank_ctx.data_length = 0
+        blank_ctx.data_signature = ""
+        blank_ctx.dataset_anchor_signature = ""
 
-        self.ctx = ensure_ctx_fields(EngineContext())
-        self.ctx.live_day_id = current_live_day_id()
-        self.ctx.protection_reason = f"AUTO_RESET_{reason}"
+        if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+            # Do NOT silently ignore a failed remote reset. A failed reset means
+            # old persistent state may still be present. Halt until it succeeds.
+            reset_payload = serialize_live_state(blank_ctx)
+            if not save_state_to_gsheet(reset_payload):
+                st.error(
+                    "AUTO RESET stopped: Google State could not be cleared safely. "
+                    "Fix the Google Sheet/service-account connection and rerun. "
+                    "Old live state was NOT allowed to continue."
+                )
+                st.stop()
+        else:
+            try:
+                if os.path.exists(STATE_FILE):
+                    os.remove(STATE_FILE)
+            except Exception as e:
+                st.error(f"AUTO RESET stopped: cannot remove local state: {e}")
+                st.stop()
+
+        self.ctx = blank_ctx
         st.session_state.v50_true_live_ctx = self.ctx
 
         self.window_state = {
@@ -2945,24 +2992,12 @@ class EngineManager:
         }
         st.session_state.v50_true_live_window_state = self.window_state
 
-        # Critical:
-        # After replacing ctx/window_state, existing WindowEngine/TradeEngine/
-        # SignalEngine/Dashboard objects still point to the old objects created
-        # earlier in this script run. Force a clean rerun so every engine is
-        # rebuilt from the new blank state and then hybrid_replay_once() runs
-        # correctly from the current Sheet.
+        # Existing engine objects still point at the old state objects. Force a
+        # clean rerun only AFTER persistent reset has succeeded.
         st.rerun()
 
     def maybe_auto_reset_for_new_dataset(self) -> None:
-        """Detect a genuinely new daily dataset without resetting on transient partial edits.
-
-        Live daily reset:
-        - Same-day refreshes keep the persisted state unchanged.
-        - A temporary length change with the same prefix does NOT reset.
-        - Clearing the one-column daily Sheet resets immediately.
-        - Replacing it from round 1 resets immediately when the frontier drops to <=32.
-        - Otherwise a changed first-32-number anchor confirms a new/replaced dataset.
-        """
+        """Detect replacement/rewind and require an explicit manual reset."""
         current_length = len(self.numbers)
         saved_length = int(getattr(self.ctx, "last_length", 0) or 0)
         saved_anchor = str(getattr(self.ctx, "dataset_anchor_signature", "") or "")
@@ -2970,47 +3005,27 @@ class EngineManager:
         if saved_length <= 0 or not getattr(self.ctx, "hybrid_initialized", False):
             return
 
-        # This deployment uses ONE current-day column. The operator clears the
-        # old day and then starts the new day again from round 1. If the live
-        # frontier suddenly drops to an early round, treat that as an explicit
-        # day replacement immediately. This is stronger and safer than waiting
-        # for 32 numbers, and prevents yesterday's state from blocking today's
-        # rounds 1..31.
         if current_length == 0 and saved_length > 0:
-            self.reset_context_for_new_dataset("DAILY_SHEET_CLEARED")
+            self.require_manual_reset("DAILY_SHEET_CLEARED")
             return
 
         if 0 < current_length < saved_length and current_length <= DATASET_RESET_ANCHOR_LEN:
-            self.reset_context_for_new_dataset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
+            self.require_manual_reset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
             return
 
-        # Live daily-sheet reset: compare a short immutable prefix rather than
-        # relying on length. This catches a new day even when the sheet has only
-        # partially refilled, while still ignoring a transient row-count change.
-        anchor_len = min(DATASET_RESET_ANCHOR_LEN, current_length)
         if current_length < DATASET_RESET_ANCHOR_LEN:
             return
-        current_anchor = make_numbers_signature(self.numbers, anchor_len)
 
-        # Backward-compatible migration for old states that have no anchor.
+        current_anchor = make_numbers_signature(self.numbers, DATASET_RESET_ANCHOR_LEN)
         if not saved_anchor and saved_length > 0:
             self.ctx.dataset_anchor_signature = current_anchor
             self.ctx.data_length = saved_length
             save_live_state(self.ctx)
             return
 
-        # Changed prefix = new/replaced daily dataset.
-        # This is intentionally independent of current_length, so clearing the
-        # Number column and refilling from round 1 cannot inherit yesterday's state.
         if saved_anchor and current_anchor != saved_anchor:
-            self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
+            self.require_manual_reset("DATASET_ANCHOR_CHANGED")
             return
-
-        # Same dataset: length may increase/decrease while the Sheet is being edited.
-        # Never destroy the settled trade ledger just because the live frontier moved.
-        if current_length != saved_length:
-            return
-
 
     def rebuild_windows_to_last_length(self) -> None:
         # Window state is derived from number history, so rebuild it safely on every app start.
@@ -3041,12 +3056,14 @@ class EngineManager:
             return
 
         for idx, actual_group in enumerate(self.groups, start=1):
-            self.ctx.last_length = idx
+            # IMPORTANT: this replay must be bit-for-bit equivalent to TRUE LIVE.
+            # Do NOT advance ctx.last_length before processing the current round.
+            # Live commits the frontier only after settle -> window -> signal -> protection -> trade.
             if idx < LIVE_START_ROUND:
                 self.window_engine.update_one_round(actual_group, idx)
+                self.ctx.last_length = idx
                 continue
 
-            self.ctx.last_length = idx
             self.trade_engine.settle_trade(actual_group, idx)
             self.window_engine.update_one_round(actual_group, idx)
 
@@ -3062,6 +3079,8 @@ class EngineManager:
             )
 
             self.trade_engine.open_trade(signal, idx, confidence)
+            # Commit frontier only after all current-round mutations are complete.
+            self.ctx.last_length = idx
 
         self.ctx.last_length = len(self.groups)
         self.ctx.hybrid_initialized = True
