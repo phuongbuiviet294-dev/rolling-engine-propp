@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_8"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_9"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -2290,7 +2290,8 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.4 V3.4.5 Stable Live — Audited")
+        st.title("🚀 V69.4 V3.4.9 LIVE LEDGER FIX — BUILD 2026-10-02")
+        st.caption("BUILD CHECK: V3.4.9 | STATE RESET BOUNDARY: 3.4.9 | LIVE INPUT: GOOGLE SHEET COLUMN B")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3760,7 +3761,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V3.4.5 LIVE B-COLUMN RESET + LEDGER SAFE / AUDITED
+V3.4.9 LIVE LEDGER FIX + B-COLUMN RESET + DECISION TRUTH / AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
