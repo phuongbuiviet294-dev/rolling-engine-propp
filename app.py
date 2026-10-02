@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_4"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -333,6 +333,16 @@ class EngineContext:
     live_day_id: str = ""
     daily_profit_history: list = field(default_factory=list)
 
+    # V3.4.4 persistent ledger integrity / revision checkpoint.
+    # A new state version intentionally forces a clean replay of the current
+    # live Number stream instead of trusting an older/stale V58/V3.x ledger.
+    state_revision: int = 0
+    ledger_trade_count: int = 0
+    ledger_settled_count: int = 0
+    ledger_profit: float = 0.0
+    ledger_checksum: str = ""
+    ledger_frontier_round: int = 0
+
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
     locked_live_win: int = 0
@@ -427,6 +437,18 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
     if not hasattr(ctx, "daily_profit_history") or ctx.daily_profit_history is None:
         ctx.daily_profit_history = []
     ctx.daily_profit_history = list(ctx.daily_profit_history)[-10:]
+    if not hasattr(ctx, "state_revision"):
+        ctx.state_revision = 0
+    if not hasattr(ctx, "ledger_trade_count"):
+        ctx.ledger_trade_count = 0
+    if not hasattr(ctx, "ledger_settled_count"):
+        ctx.ledger_settled_count = 0
+    if not hasattr(ctx, "ledger_profit"):
+        ctx.ledger_profit = 0.0
+    if not hasattr(ctx, "ledger_checksum"):
+        ctx.ledger_checksum = ""
+    if not hasattr(ctx, "ledger_frontier_round"):
+        ctx.ledger_frontier_round = 0
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -1996,6 +2018,7 @@ class TradeEngine:
 
         # Keep real stats/equity aligned with trade_history as source of truth.
         rebuild_real_stats_from_history(self.ctx)
+        refresh_ledger_checkpoint(self.ctx)
 
         # V52: cool losing trade window immediately to avoid repeated losses.
         if hit == 0 and record.locked_window is not None:
@@ -2594,6 +2617,16 @@ CONF = {confidence_score:.2f}
                 f"{self.ctx.last_result_status} | profit={self.ctx.last_result_profit:+.1f}"
             )
 
+        refresh_ledger_checkpoint(self.ctx)
+        integrity = ledger_integrity_report(self.ctx)
+        st.caption(
+            f"LEDGER | trades={integrity['trade_count']} | settled={integrity['settled_count']} | "
+            f"pending={integrity['pending_count']} | profit={integrity['profit']:+.1f} | "
+            f"frontier={self.ctx.last_length} | revision={getattr(self.ctx, 'state_revision', 0)}"
+        )
+        if not integrity["ok"]:
+            st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
+
         if not self.ctx.trade_history:
             st.info("No trades")
             return
@@ -2805,6 +2838,12 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "dataset_anchor_signature": ctx.dataset_anchor_signature,
         "live_day_id": ctx.live_day_id,
         "daily_profit_history": list(getattr(ctx, "daily_profit_history", [])),
+        "state_revision": int(getattr(ctx, "state_revision", 0)),
+        "ledger_trade_count": int(getattr(ctx, "ledger_trade_count", 0)),
+        "ledger_settled_count": int(getattr(ctx, "ledger_settled_count", 0)),
+        "ledger_profit": float(getattr(ctx, "ledger_profit", 0.0)),
+        "ledger_checksum": str(getattr(ctx, "ledger_checksum", "")),
+        "ledger_frontier_round": int(getattr(ctx, "ledger_frontier_round", 0)),
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
         "locked_window": ctx.locked_window,
@@ -2908,6 +2947,82 @@ def trade_record_from_dict(d: dict) -> TradeRecord:
     )
 
 
+def _ledger_checksum(ctx: EngineContext) -> str:
+    """Stable checksum of the persisted trade ledger, including PENDING."""
+    rows = []
+    for rec in list(getattr(ctx, "trade_history", []) or []):
+        rows.append({
+            "open_round": int(getattr(rec, "round_id", 0) or 0),
+            "settle_round": int(getattr(rec, "settle_round", 0) or 0),
+            "window": getattr(rec, "locked_window", None),
+            "predict": getattr(rec, "predict", None),
+            "actual": getattr(rec, "actual", None),
+            "hit": getattr(rec, "hit", None),
+            "profit": round(float(getattr(rec, "profit", 0.0) or 0.0), 2),
+            "status": str(getattr(rec, "status", "")),
+        })
+    payload = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def refresh_ledger_checkpoint(ctx: EngineContext) -> None:
+    """Recompute all derived Profit/ledger metadata from trade_history."""
+    ensure_ctx_fields(ctx)
+    settled = [x for x in ctx.trade_history if getattr(x, "hit", None) is not None]
+    ctx.ledger_trade_count = len(ctx.trade_history)
+    ctx.ledger_settled_count = len(settled)
+    ctx.ledger_profit = round(sum(float(x.profit) for x in settled), 2)
+    ctx.ledger_checksum = _ledger_checksum(ctx)
+    ctx.ledger_frontier_round = int(getattr(ctx, "last_length", 0) or 0)
+
+
+def ledger_integrity_report(ctx: EngineContext) -> dict:
+    """Validate ledger/state consistency without changing trading decisions."""
+    ensure_ctx_fields(ctx)
+    history = list(getattr(ctx, "trade_history", []) or [])
+    settled = [x for x in history if getattr(x, "hit", None) is not None]
+    pending = [x for x in history if getattr(x, "hit", None) is None]
+    errors = []
+    keys = set()
+    for rec in history:
+        key = (int(getattr(rec, "round_id", 0) or 0), int(getattr(rec, "settle_round", 0) or 0), str(getattr(rec, "status", "")))
+        if key in keys:
+            errors.append("DUPLICATE_LEDGER_RECORD")
+        keys.add(key)
+        if getattr(rec, "hit", None) is not None:
+            if getattr(rec, "settle_round", None) is None:
+                errors.append("SETTLED_WITHOUT_SETTLE_ROUND")
+            if str(getattr(rec, "status", "")) not in {"WIN", "LOSS"}:
+                errors.append("SETTLED_BAD_STATUS")
+            expected = WIN_GROUP if int(rec.hit) == 1 else LOSS_GROUP
+            if round(float(rec.profit), 2) != round(float(expected), 2):
+                errors.append("PROFIT_NOT_MATCHING_HIT")
+    expected_profit = round(sum(float(x.profit) for x in settled), 2)
+    if round(float(getattr(ctx, "ledger_profit", 0.0)), 2) != expected_profit:
+        errors.append("LEDGER_PROFIT_STALE")
+    if int(getattr(ctx, "ledger_settled_count", 0)) != len(settled):
+        errors.append("LEDGER_COUNT_STALE")
+    if int(getattr(ctx, "ledger_trade_count", 0)) != len(history):
+        errors.append("LEDGER_TRADE_COUNT_STALE")
+    if ctx.equity_curve:
+        if round(float(ctx.equity_curve[-1]), 2) != expected_profit:
+            errors.append("EQUITY_STALE")
+    elif settled:
+        errors.append("EQUITY_MISSING")
+    checksum = _ledger_checksum(ctx)
+    if getattr(ctx, "ledger_checksum", "") and ctx.ledger_checksum != checksum:
+        errors.append("LEDGER_CHECKSUM_MISMATCH")
+    return {
+        "ok": not errors,
+        "errors": sorted(set(errors)),
+        "trade_count": len(history),
+        "settled_count": len(settled),
+        "pending_count": len(pending),
+        "profit": expected_profit,
+        "last_settle_round": max([int(getattr(x, "settle_round", 0) or 0) for x in settled] + [-1]),
+    }
+
+
 def rebuild_real_stats_from_history(ctx: EngineContext) -> None:
     """Rebuild real performance from settled trade_history.
 
@@ -2987,6 +3102,9 @@ def get_history_real_stats(ctx: EngineContext, window_id: Optional[int]) -> dict
 
 
 def save_live_state(ctx: EngineContext) -> None:
+    ensure_ctx_fields(ctx)
+    refresh_ledger_checkpoint(ctx)
+    ctx.state_revision = int(getattr(ctx, "state_revision", 0) or 0) + 1
     data = serialize_live_state(ctx)
     cfg = get_state_backend_config()
 
@@ -3078,6 +3196,12 @@ def load_live_state() -> EngineContext:
     ctx.dataset_anchor_signature = str(data.get("dataset_anchor_signature", "") or "")
     ctx.live_day_id = str(data.get("live_day_id", "") or "")
     ctx.daily_profit_history = list(data.get("daily_profit_history", []))
+    ctx.state_revision = int(data.get("state_revision", 0) or 0)
+    ctx.ledger_trade_count = int(data.get("ledger_trade_count", 0) or 0)
+    ctx.ledger_settled_count = int(data.get("ledger_settled_count", 0) or 0)
+    ctx.ledger_profit = float(data.get("ledger_profit", 0.0) or 0.0)
+    ctx.ledger_checksum = str(data.get("ledger_checksum", "") or "")
+    ctx.ledger_frontier_round = int(data.get("ledger_frontier_round", 0) or 0)
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -3102,6 +3226,9 @@ def load_live_state() -> EngineContext:
     # Trade history is the source of truth for real stats/equity.
     # Rebuild every load to avoid stale/corrupt window_real_stats.
     rebuild_real_stats_from_history(ctx)
+    # Derived Profit/equity/window stats are rebuilt from the ledger. The ledger
+    # itself is never reconstructed from cached Profit fields.
+    refresh_ledger_checkpoint(ctx)
 
     raw_cooled_windows = data.get("cooled_windows", {})
     ctx.cooled_windows = {}
@@ -3133,10 +3260,13 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    if "v50_true_live_ctx" not in st.session_state:
+    existing = st.session_state.get("v50_true_live_ctx")
+    # V3.4.4: an in-memory context from an older deployment is NOT allowed to
+    # survive a code update. Force a fresh persistent load/replay boundary.
+    if existing is None or str(getattr(existing, "state_version", "")) != STATE_VERSION:
         st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
     else:
-        st.session_state.v50_true_live_ctx = ensure_ctx_fields(st.session_state.v50_true_live_ctx)
+        st.session_state.v50_true_live_ctx = ensure_ctx_fields(existing)
     # V3.4: refresh completed-day P/L from the same Google Sheet D:E table.
     # This survives daily Number replacement and app restarts.
     return _merge_sheet_daily_history_into_ctx(st.session_state.v50_true_live_ctx)
@@ -3627,7 +3757,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V68.1 STATE SAFE KEEP 5R AUDITED
+V3.4.4 LIVE LEDGER SAFE / AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
