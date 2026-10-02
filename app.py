@@ -672,8 +672,46 @@ def load_numbers() -> list[int]:
     df = _load_live_sheet_df()
     df.columns = [str(x).lower().strip() for x in df.columns]
 
-    # 1) Preferred legacy/live input: a physical column named `number`.
-    # Use it only when it actually contains a contiguous Number stream.
+    # ========================================================
+    # TRUE LIVE INPUT BOUNDARY
+    # ========================================================
+    # In the user's live Sheet layout: 
+    #   A = round
+    #   B = legacy `number` header (usually empty)
+    #   C = CURRENT LIVE NUMBER  <-- engine input
+    #   D = date
+    #   E = daily profit
+    #   H:AK... = historical Number matrix for audit only
+    #
+    # IMPORTANT: never fall back from an existing live C column to H:AK.
+    # If C is blank, that means the live frontier has not received the next
+    # Number yet. Reading a historical date column here would replay old data
+    # as if it were live data.
+
+    # 1) Preferred live source: physical column C (index 2).
+    # If C contains a contiguous stream, this is the ONLY stream used.
+    if df.shape[1] >= 3:
+        live_c = _read_contiguous_number_column(df, 2, skip_first_data_row=False)
+        if live_c:
+            return live_c
+
+        # C exists but is currently empty. If B contains a real legacy live
+        # stream, allow it for backward compatibility; otherwise STOP.
+        # Do not inspect H:AK as a live fallback.
+        if df.shape[1] >= 2:
+            legacy_b = _read_contiguous_number_column(df, 1, skip_first_data_row=False)
+            if legacy_b:
+                return legacy_b
+
+        today = current_live_day_id()
+        st.warning(
+            f"Live Number column C is empty for {today}. "
+            "Waiting for the current day's Number data; historical H:AK columns are ignored for live trading."
+        )
+        return []
+
+    # 2) Legacy/minimal layout with no physical C column.
+    # Only use a named `number` column when it is genuinely the live input.
     number_col = None
     for j, name in enumerate(df.columns):
         if name == "number":
@@ -684,19 +722,11 @@ def load_numbers() -> list[int]:
         if nums:
             return nums
 
-    # 2) New live layout: F:... are date columns. Pick today's exact date.
-    today = current_live_day_id()
-    col_idx = _find_horizontal_number_column(df, today)
-    if col_idx is not None:
-        nums = _read_contiguous_number_column(df, col_idx, skip_first_data_row=False)
-        if nums:
-            return nums
-
     st.error(
-        f"Cannot find live Number column for {today}. "
-        "Expected either a non-empty 'number' column or a horizontal date column."
+        "Cannot find a live Number stream. Expected physical column C "
+        "(current live Number) or a legacy live `number` column."
     )
-    st.stop()
+    return []
 
 
 
@@ -1840,16 +1870,16 @@ class TradeEngine:
         self.ctx.last_open_round = round_id
         self.ctx.open_reason = "OPENED"
 
-    def settle_trade(self, actual_group: int, current_round: int) -> None:
+    def settle_trade(self, actual_group: int, current_round: int) -> bool:
         if self.ctx.pending_trade is None:
-            return
+            return False
         target_round = int(getattr(self.ctx, "pending_target_round", 0) or (self.ctx.pending_round + 1))
         # Settle ONLY against the exact target round. Never settle an old
         # pending trade against a later round after downtime/multiple rows.
         if current_round != target_round:
-            return
+            return False
         if current_round == self.ctx.last_settle_round:
-            return
+            return False
 
         predict = self.ctx.pending_trade
         hit = int(predict == actual_group)
@@ -1953,6 +1983,10 @@ class TradeEngine:
             # Blacklist only after 2 consecutive losses for THIS traded window.
             if stat["loss_streak"] >= LIVE_RELOCK_LOSS_STREAK:
                 self.ctx.blacklisted_windows[w] = int(current_round + BLACKLIST_DURATION_ROUNDS)
+
+        # Settlement is a completed state transition. Return True so the live
+        # transaction layer can persist the updated Trade History immediately.
+        return True
 
     def get_total_profit(self) -> float:
         return round(
@@ -3395,7 +3429,12 @@ class EngineManager:
                 self.ctx.last_length = idx
                 continue
 
-            self.trade_engine.settle_trade(actual_group, idx)
+            settled_this_round = self.trade_engine.settle_trade(actual_group, idx)
+            if settled_this_round:
+                # Persist settlement BEFORE any new signal/trade decision.
+                # This guarantees Trade History/result survives a rerun/crash
+                # even if the remainder of the round fails.
+                save_live_state(self.ctx)
             self.window_engine.update_one_round(actual_group, idx)
 
             signal = self.signal_engine.build_signal(idx)
@@ -3440,7 +3479,12 @@ class EngineManager:
             # a crash/restart between steps from silently skipping a round.
             actual_group = self.groups[idx - 1]
 
-            self.trade_engine.settle_trade(actual_group, idx)
+            settled_this_round = self.trade_engine.settle_trade(actual_group, idx)
+            if settled_this_round:
+                # Persist settlement BEFORE any new signal/trade decision.
+                # This guarantees Trade History/result survives a rerun/crash
+                # even if the remainder of the round fails.
+                save_live_state(self.ctx)
             self.window_engine.update_one_round(actual_group, idx)
 
             signal = self.signal_engine.build_signal(idx)
