@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_4"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_5"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -516,7 +516,7 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=1)
 def _load_live_sheet_df() -> pd.DataFrame:
     if INPUT_CSV_PATH:
         try:
@@ -712,67 +712,38 @@ def _read_contiguous_number_column(df: pd.DataFrame, col_idx: int, skip_first_da
     return nums
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=1)
 def load_numbers() -> list[int]:
+    """Load ONLY the user's current live Number column B.
+
+    Live deployment contract:
+      A = round/time
+      B = CURRENT LIVE NUMBER (authoritative input)
+      C = auxiliary/old data; NEVER used as live fallback
+      D = date
+      E = daily profit
+      H:AK = historical streams for audit only
+
+    Critical reset rule:
+      If B is empty at the first blank row, the live dataset is EMPTY.
+      We must NOT fall back to C or historical H:AK, otherwise clearing B
+      would leave the old live state running.
+    """
     df = _load_live_sheet_df()
     df.columns = [str(x).lower().strip() for x in df.columns]
 
-    # ========================================================
-    # TRUE LIVE INPUT BOUNDARY
-    # ========================================================
-    # In the user's live Sheet layout: 
-    #   A = round
-    #   B = legacy `number` header (usually empty)
-    #   C = CURRENT LIVE NUMBER  <-- engine input
-    #   D = date
-    #   E = daily profit
-    #   H:AK... = historical Number matrix for audit only
-    #
-    # IMPORTANT: never fall back from an existing live C column to H:AK.
-    # If C is blank, that means the live frontier has not received the next
-    # Number yet. Reading a historical date column here would replay old data
-    # as if it were live data.
-
-    # 1) Preferred live source: physical column C (index 2).
-    # If C contains a contiguous stream, this is the ONLY stream used.
-    if df.shape[1] >= 3:
-        live_c = _read_contiguous_number_column(df, 2, skip_first_data_row=False)
-        if live_c:
-            return live_c
-
-        # C exists but is currently empty. If B contains a real legacy live
-        # stream, allow it for backward compatibility; otherwise STOP.
-        # Do not inspect H:AK as a live fallback.
-        if df.shape[1] >= 2:
-            legacy_b = _read_contiguous_number_column(df, 1, skip_first_data_row=False)
-            if legacy_b:
-                return legacy_b
-
-        today = current_live_day_id()
-        st.warning(
-            f"Live Number column C is empty for {today}. "
-            "Waiting for the current day's Number data; historical H:AK columns are ignored for live trading."
-        )
+    if df.shape[1] < 2:
+        st.error("Sheet must contain physical column B for live Number input.")
         return []
 
-    # 2) Legacy/minimal layout with no physical C column.
-    # Only use a named `number` column when it is genuinely the live input.
-    number_col = None
-    for j, name in enumerate(df.columns):
-        if name == "number":
-            number_col = j
-            break
-    if number_col is not None:
-        nums = _read_contiguous_number_column(df, number_col, skip_first_data_row=False)
-        if nums:
-            return nums
+    # Physical B is the authoritative live stream.
+    nums = _read_contiguous_number_column(df, 1, skip_first_data_row=False)
 
-    st.error(
-        "Cannot find a live Number stream. Expected physical column C "
-        "(current live Number) or a legacy live `number` column."
-    )
-    return []
+    # If B is empty, deliberately return [] even when C/H:AK contain data.
+    if not nums:
+        return []
 
+    return nums
 
 
 # ============================================================
@@ -2310,7 +2281,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V58 Stable Live Long-Term — Audited")
+        st.title("🚀 V69.4 V3.4.5 Stable Live — Audited")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3460,11 +3431,11 @@ class EngineManager:
         initialized = bool(getattr(self.ctx, "hybrid_initialized", False))
 
         if initialized and saved_day and saved_day != today:
-            self.require_manual_reset("DAY_ID_CHANGED")
+            self.reset_context_for_new_dataset("DAY_ID_CHANGED")
             return
 
         if initialized and not saved_day:
-            self.require_manual_reset("DAY_ID_MISSING")
+            self.reset_context_for_new_dataset("DAY_ID_MISSING")
             return
 
         if not initialized and not saved_day:
@@ -3474,17 +3445,17 @@ class EngineManager:
         raw_length = len(raw_numbers)
         if initialized and saved_length > 0:
             if raw_length == 0:
-                self.require_manual_reset("DAILY_SHEET_CLEARED")
+                self.reset_context_for_new_dataset("DAILY_SHEET_CLEARED")
                 return
             if 0 < raw_length < saved_length and raw_length <= DATASET_RESET_ANCHOR_LEN:
-                self.require_manual_reset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
+                self.reset_context_for_new_dataset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
                 return
 
             saved_anchor = str(getattr(self.ctx, "dataset_anchor_signature", "") or "")
             if saved_anchor and raw_length >= DATASET_RESET_ANCHOR_LEN:
                 raw_anchor = make_numbers_signature(raw_numbers, DATASET_RESET_ANCHOR_LEN)
                 if raw_anchor != saved_anchor:
-                    self.require_manual_reset("DATASET_ANCHOR_CHANGED")
+                    self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
                     return
 
     def reset_context_for_new_dataset(self, reason: str) -> None:
@@ -3557,11 +3528,11 @@ class EngineManager:
             return
 
         if current_length == 0 and saved_length > 0:
-            self.require_manual_reset("DAILY_SHEET_CLEARED")
+            self.reset_context_for_new_dataset("DAILY_SHEET_CLEARED")
             return
 
         if 0 < current_length < saved_length and current_length <= DATASET_RESET_ANCHOR_LEN:
-            self.require_manual_reset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
+            self.reset_context_for_new_dataset("DAILY_SHEET_REPLACED_FROM_ROUND_1")
             return
 
         if current_length < DATASET_RESET_ANCHOR_LEN:
@@ -3575,7 +3546,7 @@ class EngineManager:
             return
 
         if saved_anchor and current_anchor != saved_anchor:
-            self.require_manual_reset("DATASET_ANCHOR_CHANGED")
+            self.reset_context_for_new_dataset("DATASET_ANCHOR_CHANGED")
             return
 
     def rebuild_windows_to_last_length(self) -> None:
@@ -3757,7 +3728,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V3.4.4 LIVE LEDGER SAFE / AUDITED
+V3.4.5 LIVE B-COLUMN RESET + LEDGER SAFE / AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
