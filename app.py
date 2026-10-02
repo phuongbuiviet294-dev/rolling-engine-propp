@@ -307,6 +307,15 @@ class EngineContext:
     pending_locked_window: Optional[int] = None
     trade_state: str = "IDLE"
 
+    # Explicit persisted settlement checkpoint.
+    last_result_round: int = -1
+    last_result_open_round: int = -1
+    last_result_predict: Optional[int] = None
+    last_result_actual: Optional[int] = None
+    last_result_hit: Optional[int] = None
+    last_result_profit: float = 0.0
+    last_result_status: str = ""
+
     last_length: int = 0
     last_open_round: int = -1
     last_settle_round: int = -1
@@ -379,6 +388,20 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.pending_confidence = 0.0
     if not hasattr(ctx, "pending_target_round"):
         ctx.pending_target_round = 0
+    if not hasattr(ctx, "last_result_round"):
+        ctx.last_result_round = -1
+    if not hasattr(ctx, "last_result_open_round"):
+        ctx.last_result_open_round = -1
+    if not hasattr(ctx, "last_result_predict"):
+        ctx.last_result_predict = None
+    if not hasattr(ctx, "last_result_actual"):
+        ctx.last_result_actual = None
+    if not hasattr(ctx, "last_result_hit"):
+        ctx.last_result_hit = None
+    if not hasattr(ctx, "last_result_profit"):
+        ctx.last_result_profit = 0.0
+    if not hasattr(ctx, "last_result_status"):
+        ctx.last_result_status = ""
     if not hasattr(ctx, "peak_equity"):
         ctx.peak_equity = max([0.0] + list(getattr(ctx, "equity_curve", [])))
     if not hasattr(ctx, "last_safe_trigger_peak"):
@@ -1887,6 +1910,8 @@ class TradeEngine:
 
         if self.ctx.pending_index is not None and 0 <= self.ctx.pending_index < len(self.ctx.trade_history):
             record = self.ctx.trade_history[self.ctx.pending_index]
+            if str(getattr(record, "status", "PENDING")) != "PENDING" or getattr(record, "hit", None) is not None:
+                return False
             record.actual = actual_group
             record.hit = hit
             record.profit = profit
@@ -1942,6 +1967,14 @@ class TradeEngine:
             else:
                 self.ctx.locked_live_loss_streak += 1
                 self.ctx.locked_live_loss += 1
+
+        self.ctx.last_result_round = int(current_round)
+        self.ctx.last_result_open_round = int(record.round_id)
+        self.ctx.last_result_predict = int(record.predict)
+        self.ctx.last_result_actual = int(record.actual)
+        self.ctx.last_result_hit = int(record.hit)
+        self.ctx.last_result_profit = float(record.profit)
+        self.ctx.last_result_status = str(record.status)
 
         self.ctx.pending_trade = None
         self.ctx.pending_confidence = 0.0
@@ -2553,6 +2586,14 @@ CONF = {confidence_score:.2f}
     def render_trade_history(self) -> None:
         st.subheader("Trade History")
 
+        if getattr(self.ctx, "last_result_round", -1) >= 0:
+            st.caption(
+                f"LAST SETTLED | round={self.ctx.last_result_round} | "
+                f"open={self.ctx.last_result_open_round} | "
+                f"predict={self.ctx.last_result_predict} -> actual={self.ctx.last_result_actual} | "
+                f"{self.ctx.last_result_status} | profit={self.ctx.last_result_profit:+.1f}"
+            )
+
         if not self.ctx.trade_history:
             st.info("No trades")
             return
@@ -2568,6 +2609,7 @@ CONF = {confidence_score:.2f}
                     "hit": x.hit,
                     "profit": x.profit,
                     "status": x.status,
+                    "settled": bool(x.hit is not None and x.settle_round is not None),
                 }
                 for x in self.ctx.trade_history
             ]
@@ -2737,6 +2779,13 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "pending_confidence": ctx.pending_confidence,
         "pending_target_round": ctx.pending_target_round,
         "trade_state": ctx.trade_state,
+        "last_result_round": getattr(ctx, "last_result_round", -1),
+        "last_result_open_round": getattr(ctx, "last_result_open_round", -1),
+        "last_result_predict": getattr(ctx, "last_result_predict", None),
+        "last_result_actual": getattr(ctx, "last_result_actual", None),
+        "last_result_hit": getattr(ctx, "last_result_hit", None),
+        "last_result_profit": getattr(ctx, "last_result_profit", 0.0),
+        "last_result_status": getattr(ctx, "last_result_status", ""),
         "last_length": ctx.last_length,
         "last_open_round": ctx.last_open_round,
         "last_settle_round": ctx.last_settle_round,
@@ -3001,6 +3050,13 @@ def load_live_state() -> EngineContext:
     ctx.pending_confidence = float(data.get("pending_confidence", 0.0))
     ctx.pending_target_round = int(data.get("pending_target_round", 0))
     ctx.trade_state = data.get("trade_state", "IDLE")
+    ctx.last_result_round = int(data.get("last_result_round", -1))
+    ctx.last_result_open_round = int(data.get("last_result_open_round", -1))
+    ctx.last_result_predict = data.get("last_result_predict")
+    ctx.last_result_actual = data.get("last_result_actual")
+    ctx.last_result_hit = data.get("last_result_hit")
+    ctx.last_result_profit = float(data.get("last_result_profit", 0.0))
+    ctx.last_result_status = str(data.get("last_result_status", ""))
 
     ctx.last_length = int(data.get("last_length", 0))
     ctx.last_open_round = int(data.get("last_open_round", -1))
