@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH5_FINAL_LIVE_STATE_V3_1"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -172,6 +172,21 @@ MIN_TRADES_FOR_PROTECTION = 6
 # Daily Stop Guard - protect against deep negative days.
 # These guards only block opening NEW trades. Pending trades still settle normally.
 DAILY_STOP_LOSS = -2.5
+
+# V3.4: live daily-history + adaptive coherence.
+# Daily history is read from columns D:E of the same Google Sheet.
+# D = completed calendar date, E = daily profit (may be formatted as 3,5).
+# Number input supports both the legacy single `number` column and the
+# horizontal date-column matrix shown in the live Google Sheet.
+# V3.3: multi-day low-confidence filter. Only suppress low-confidence entries
+# after a sustained negative daily regime; settled history is used only.
+MULTI_DAY_CONF_FILTER = True
+MULTI_DAY_NEG_DAY_STREAK = 3
+MULTI_DAY_LOSS_COUNT = 2
+MULTI_DAY_CONF_MAX = 0.54
+ADAPTIVE_COH = True
+NORMAL_COH = 5
+BAD_REGIME_COH = 6
 DAILY_MAX_LOSS_STREAK = 5
 DAILY_MAX_DRAWDOWN = -15.0
 DAILY_PROFIT_LOCK = 30.5
@@ -307,6 +322,7 @@ class EngineContext:
     lock_reason: str = ""
     state_version: str = STATE_VERSION
     live_day_id: str = ""
+    daily_profit_history: list = field(default_factory=list)
 
     locked_live_profit: float = 0.0
     locked_live_loss_streak: int = 0
@@ -385,6 +401,9 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.dataset_anchor_signature = ""
     if not hasattr(ctx, "live_day_id"):
         ctx.live_day_id = ""
+    if not hasattr(ctx, "daily_profit_history") or ctx.daily_profit_history is None:
+        ctx.daily_profit_history = []
+    ctx.daily_profit_history = list(ctx.daily_profit_history)[-10:]
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -453,50 +472,231 @@ window_state = get_window_state()
 # ============================================================
 
 @st.cache_data(ttl=5)
-def load_numbers() -> list[int]:
+def _load_live_sheet_df() -> pd.DataFrame:
     if INPUT_CSV_PATH:
         try:
-            df = pd.read_csv(INPUT_CSV_PATH)
+            return pd.read_csv(INPUT_CSV_PATH)
         except Exception as e:
             st.error(f"Load local CSV error: {e}")
             st.stop()
-    else:
-        url = (
-            f"https://docs.google.com/spreadsheets/d/"
-            f"{SHEET_ID}/export?format=csv"
-            f"&cache={time.time()}"
-        )
-
-        try:
-            df = pd.read_csv(url)
-        except Exception as e:
-            st.error(f"Load sheet error: {e}")
-            st.stop()
-
-    df.columns = [
-        str(x).lower().strip()
-        for x in df.columns
-    ]
-
-    if "number" not in df.columns:
-        st.error("Sheet must contain column 'number'")
+    url = (
+        f"https://docs.google.com/spreadsheets/d/"
+        f"{SHEET_ID}/export?format=csv"
+        f"&cache={time.time()}"
+    )
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        st.error(f"Load sheet error: {e}")
         st.stop()
 
-    # TRUE LIVE FRONTIER: only the contiguous Number prefix is data.
-    # A blank Number ends the live sequence; later filled rows are ignored.
-    nums = []
-    for raw in df["number"].tolist():
-        if pd.isna(raw) or str(raw).strip() == "":
-            break
+
+def _parse_number_value(raw: Any) -> Optional[int]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    s = str(raw).strip()
+    if not s or s.lower() in {"nan", "nat", "none"}:
+        return None
+    try:
+        x = int(float(s.replace(",", ".")))
+    except Exception:
+        return None
+    return x if 1 <= x <= 12 else None
+
+
+def _parse_profit_value(raw: Any) -> Optional[float]:
+    """Parse Sheet profit safely; e.g. '3,5' must become 3.5."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    if isinstance(raw, (int, float)):
         try:
-            x = int(float(raw))
+            return float(raw)
         except Exception:
+            return None
+    s = str(raw).strip()
+    if not s or s.lower() in {"nan", "nat", "none"}:
+        return None
+    # Handle both Vietnamese decimal comma and normal decimal point.
+    if "," in s and "." not in s:
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _parse_date_value(raw: Any) -> Optional[datetime.date]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    try:
+        dt = pd.to_datetime(raw, errors="coerce", dayfirst=False)
+        if not pd.isna(dt):
+            return dt.date()
+    except Exception:
+        pass
+    return None
+
+
+def _get_daily_history_from_df(df: pd.DataFrame) -> list[dict]:
+    """Read D:E from the live sheet as completed daily history.
+
+    The screenshot/layout uses D for date and E for daily profit, while the
+    header labels may be numeric rather than named 'date'/'profit'. Therefore
+    this intentionally uses physical columns D/E (indexes 3/4), not names.
+    Duplicate dates are collapsed to the last non-empty profit value.
+    """
+    if df.shape[1] < 5:
+        return []
+    date_col = df.iloc[:, 3]
+    profit_col = df.iloc[:, 4]
+    by_day: dict[str, float] = {}
+    for d_raw, p_raw in zip(date_col.tolist(), profit_col.tolist()):
+        d = _parse_date_value(d_raw)
+        p = _parse_profit_value(p_raw)
+        if d is None or p is None:
+            continue
+        by_day[d.isoformat()] = round(float(p), 2)
+    return [
+        {"day_id": k, "profit": v}
+        for k, v in sorted(by_day.items())
+    ]
+
+
+def _find_horizontal_number_column(df: pd.DataFrame, target_day_id: str) -> Optional[int]:
+    """Find today's Number column in the horizontal date matrix.
+
+    Current Google-Sheet export layout:
+      A = round
+      B = number (legacy/current input column; often empty in the exported
+          historical matrix)
+      D = calendar date for each round row
+      E = daily profit
+      H:... = one Number column per calendar day
+
+    The horizontal header is displayed as day-of-month values such as
+    2,3,...,30,1.  F/G are blank spacer columns in the user's Sheet, so the
+    old implementation must NOT assume the matrix starts at column F.
+
+    Mapping is therefore based on the actual numeric header columns and the
+    ordered unique dates in physical column D.  A full-date header, when
+    present, always takes precedence.
+    """
+    if df.shape[1] <= 5:
+        return None
+
+    target = pd.to_datetime(target_day_id).date()
+
+    # 1) Prefer explicit/full-date headers if the Sheet uses them.
+    for j in range(5, df.shape[1]):
+        raw = df.columns[j]
+        d = _parse_date_value(raw)
+        if d == target:
+            return j
+
+    # 2) Current layout: numeric day-of-month headers.  Do not assume the
+    # first matrix column is F; skip blank spacer columns automatically.
+    numeric_header_cols: list[tuple[int, int]] = []
+    for j in range(5, df.shape[1]):
+        raw = df.columns[j]
+        try:
+            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+                continue
+            s = str(raw).strip()
+            if not s:
+                continue
+            # Only accept integer day headers 1..31; this excludes values such
+            # as the E1 profit summary/header (20.5) even if columns shift.
+            f = float(s.replace(",", "."))
+            day_num = int(f)
+            if abs(f - day_num) < 1e-9 and 1 <= day_num <= 31:
+                numeric_header_cols.append((j, day_num))
+        except Exception:
+            continue
+
+    if not numeric_header_cols:
+        return None
+
+    # Ordered unique calendar dates from D.  In this Sheet, the first N dates
+    # correspond one-to-one with the N horizontal Number columns.
+    dates: list[datetime.date] = []
+    if df.shape[1] > 3:
+        for raw in df.iloc[:, 3].tolist():
+            d = _parse_date_value(raw)
+            if d is not None and d not in dates:
+                dates.append(d)
+
+    max_pairs = min(len(numeric_header_cols), len(dates))
+    for offset in range(max_pairs):
+        col_idx, header_day = numeric_header_cols[offset]
+        mapped_date = dates[offset]
+        # Guard against a malformed/misaligned Sheet. Never accept a column
+        # if its displayed day does not agree with the date row it represents.
+        if mapped_date.day != header_day:
+            continue
+        if mapped_date == target:
+            return col_idx
+
+    # 3) Safe fallback for a rolling matrix when D contains more historical
+    # dates than the horizontal matrix: find a unique date with the same
+    # day-of-month and use the corresponding numeric header only when the
+    # surrounding date sequence confirms the position.
+    candidates = [i for i, d in enumerate(dates) if d == target]
+    if len(candidates) == 1:
+        offset = candidates[0]
+        if offset < len(numeric_header_cols):
+            col_idx, header_day = numeric_header_cols[offset]
+            if header_day == target.day:
+                return col_idx
+
+    return None
+
+def _read_contiguous_number_column(df: pd.DataFrame, col_idx: int, skip_first_data_row: bool = False) -> list[int]:
+    nums = []
+    values = df.iloc[:, col_idx].tolist()
+    if skip_first_data_row:
+        values = values[1:]
+    for raw in values:
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)) or str(raw).strip() == "":
             break
-        if not 1 <= x <= 12:
+        x = _parse_number_value(raw)
+        if x is None:
             break
         nums.append(x)
-
     return nums
+
+
+@st.cache_data(ttl=5)
+def load_numbers() -> list[int]:
+    df = _load_live_sheet_df()
+    df.columns = [str(x).lower().strip() for x in df.columns]
+
+    # 1) Preferred legacy/live input: a physical column named `number`.
+    # Use it only when it actually contains a contiguous Number stream.
+    number_col = None
+    for j, name in enumerate(df.columns):
+        if name == "number":
+            number_col = j
+            break
+    if number_col is not None:
+        nums = _read_contiguous_number_column(df, number_col, skip_first_data_row=False)
+        if nums:
+            return nums
+
+    # 2) New live layout: F:... are date columns. Pick today's exact date.
+    today = current_live_day_id()
+    col_idx = _find_horizontal_number_column(df, today)
+    if col_idx is not None:
+        nums = _read_contiguous_number_column(df, col_idx, skip_first_data_row=False)
+        if nums:
+            return nums
+
+    st.error(
+        f"Cannot find live Number column for {today}. "
+        "Expected either a non-empty 'number' column or a horizontal date column."
+    )
+    st.stop()
 
 
 
@@ -637,6 +837,47 @@ def make_numbers_signature(numbers: list[int], length: Optional[int] = None) -> 
     length = max(0, min(int(length), len(numbers)))
     payload = ",".join(str(int(x)) for x in numbers[:length])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@st.cache_data(ttl=5)
+def load_daily_profit_history_from_sheet() -> list[dict]:
+    """Read completed daily P/L from the same Sheet D:E columns.
+
+    This is the live source of truth for rolling-3-day regime detection.
+    It intentionally does not depend on the current day's Number stream.
+    """
+    try:
+        df = _load_live_sheet_df()
+        return _get_daily_history_from_df(df)
+    except Exception:
+        return []
+
+
+def _merge_sheet_daily_history_into_ctx(ctx: EngineContext) -> EngineContext:
+    """Merge D:E history with persisted history without duplicating days."""
+    ensure_ctx_fields(ctx)
+    merged: dict[str, float] = {}
+    for item in list(getattr(ctx, "daily_profit_history", []) or []):
+        if isinstance(item, dict) and item.get("day_id"):
+            try:
+                merged[str(item["day_id"])] = round(float(item.get("profit", 0.0)), 2)
+            except Exception:
+                continue
+    for item in load_daily_profit_history_from_sheet():
+        try:
+            merged[str(item["day_id"])] = round(float(item["profit"]), 2)
+        except Exception:
+            continue
+    today = current_live_day_id()
+    # Only completed days belong in rolling history. If the Sheet contains the
+    # current day's provisional profit, do not use it in the rolling-3 sum.
+    rows = [
+        {"day_id": d, "profit": p}
+        for d, p in sorted(merged.items())
+        if d < today
+    ]
+    ctx.daily_profit_history = rows[-10:]
+    return ctx
 
 
 def current_live_day_id() -> str:
@@ -1323,6 +1564,14 @@ class SignalEngine:
 
         if min_live_samples is None:
             min_live_samples = self.get_dynamic_coherence_samples(signal)
+
+        # V3.4 adaptive coherence: when the completed 3-day history is
+        # negative and the current day has already suffered two consecutive
+        # settled losses, require one extra live confirmation sample.
+        # This is evaluated only from information available before the new
+        # entry, so it is safe for progressive live execution.
+        if ADAPTIVE_COH and is_bad_multi_day_regime(self.ctx):
+            min_live_samples = max(int(min_live_samples), BAD_REGIME_COH)
 
         min_live_samples = max(
             COHERENCE_MIN_LIVE_SAMPLES,
@@ -2471,6 +2720,8 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "daily_stop_reason": ctx.daily_stop_reason,
         "keep_win_lock_until": ctx.keep_win_lock_until,
         "dataset_anchor_signature": ctx.dataset_anchor_signature,
+        "live_day_id": ctx.live_day_id,
+        "daily_profit_history": list(getattr(ctx, "daily_profit_history", [])),
         "protection_reason": ctx.protection_reason,
         "open_reason": ctx.open_reason,
         "locked_window": ctx.locked_window,
@@ -2736,6 +2987,7 @@ def load_live_state() -> EngineContext:
     ctx.keep_win_lock_until = int(data.get("keep_win_lock_until", 0) or 0)
     ctx.dataset_anchor_signature = str(data.get("dataset_anchor_signature", "") or "")
     ctx.live_day_id = str(data.get("live_day_id", "") or "")
+    ctx.daily_profit_history = list(data.get("daily_profit_history", []))
 
     ctx.protection_reason = data.get("protection_reason", "")
     ctx.open_reason = data.get("open_reason", "")
@@ -2795,7 +3047,9 @@ def get_live_ctx() -> EngineContext:
         st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
     else:
         st.session_state.v50_true_live_ctx = ensure_ctx_fields(st.session_state.v50_true_live_ctx)
-    return st.session_state.v50_true_live_ctx
+    # V3.4: refresh completed-day P/L from the same Google Sheet D:E table.
+    # This survives daily Number replacement and app restarts.
+    return _merge_sheet_daily_history_into_ctx(st.session_state.v50_true_live_ctx)
 
 
 
@@ -2808,6 +3062,79 @@ def get_live_window_state() -> dict[int, WindowRecord]:
     return st.session_state.v50_true_live_window_state
 
 
+def carry_forward_daily_profit_history(ctx: EngineContext) -> list:
+    """Carry completed prior-day P/L across a manual day reset.
+
+    Only the previous completed dataset is appended, and only when the day id
+    changes. This avoids duplicate history if an operator resets/restarts on
+    the same day.
+    """
+    ensure_ctx_fields(ctx)
+    hist = list(getattr(ctx, "daily_profit_history", []) or [])
+    old_day = str(getattr(ctx, "live_day_id", "") or "")
+    today = current_live_day_id()
+    if old_day and old_day != today:
+        settled = [x for x in ctx.trade_history if getattr(x, "hit", None) is not None]
+        if settled:
+            profit = round(sum(float(x.profit) for x in settled), 2)
+            hist.append({"day_id": old_day, "profit": profit})
+    return hist[-10:]
+
+
+def current_day_loss_streak(ctx: EngineContext) -> int:
+    """Count consecutive settled losses in the current live dataset."""
+    streak = 0
+    for rec in reversed(list(getattr(ctx, "trade_history", []) or [])):
+        if getattr(rec, "hit", None) is None:
+            continue
+        if str(getattr(rec, "status", "")) == "LOSS":
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def is_bad_multi_day_regime(ctx: EngineContext) -> bool:
+    """V3.4: negative prior-3-day history + 2 current-day losses."""
+    hist = list(getattr(ctx, "daily_profit_history", []) or [])
+    if len(hist) < MULTI_DAY_NEG_DAY_STREAK:
+        return False
+    try:
+        prior = hist[-MULTI_DAY_NEG_DAY_STREAK:]
+        profits = [
+            float(x.get("profit", 0.0)) if isinstance(x, dict) else float(x)
+            for x in prior
+        ]
+    except Exception:
+        return False
+    if not all(p < 0 for p in profits):
+        return False
+    return current_day_loss_streak(ctx) >= MULTI_DAY_LOSS_COUNT
+
+
+def multi_day_low_confidence_filter(ctx: EngineContext, confidence: float) -> bool:
+    """Return True when a new entry should be suppressed by V3.3.
+
+    Uses only information available before the current trade: completed prior
+    day P/L, current day's settled loss count, and current signal confidence.
+    """
+    if not MULTI_DAY_CONF_FILTER:
+        return False
+    hist = list(getattr(ctx, "daily_profit_history", []) or [])
+    if len(hist) < MULTI_DAY_NEG_DAY_STREAK:
+        return False
+    prior = hist[-MULTI_DAY_NEG_DAY_STREAK:]
+    try:
+        prior_profits = [float(x.get("profit", 0.0)) if isinstance(x, dict) else float(x) for x in prior]
+    except Exception:
+        return False
+    if not all(p < 0 for p in prior_profits):
+        return False
+    settled = [x for x in ctx.trade_history if getattr(x, "hit", None) is not None]
+    losses = sum(1 for x in settled if getattr(x, "status", "") == "LOSS")
+    return losses >= MULTI_DAY_LOSS_COUNT and float(confidence) < MULTI_DAY_CONF_MAX
+
+
 def reset_live_state_button() -> None:
     with st.sidebar:
         st.subheader("Live Control")
@@ -2817,10 +3144,13 @@ def reset_live_state_button() -> None:
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
         if st.button("Reset Live State"):
+            old_ctx_for_history = ensure_ctx_fields(get_live_ctx())
+            carry_history = carry_forward_daily_profit_history(old_ctx_for_history)
             # Manual reset MUST use the same atomic-safe path as automatic
             # daily reset. Never delete remotely and rerun blindly: if the
             # Google State write fails, old state could be loaded again.
             blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.daily_profit_history = carry_history
             blank_ctx.live_day_id = current_live_day_id()
             blank_ctx.protection_reason = "MANUAL_RESET"
             blank_ctx.state_version = STATE_VERSION
@@ -2955,6 +3285,7 @@ class EngineManager:
 
         # Build the exact blank state that is safe to reload after rerun.
         blank_ctx = ensure_ctx_fields(EngineContext())
+        blank_ctx.daily_profit_history = carry_forward_daily_profit_history(self.ctx)
         blank_ctx.live_day_id = current_live_day_id()
         blank_ctx.protection_reason = f"AUTO_RESET_{reason}"
         blank_ctx.state_version = STATE_VERSION
@@ -3078,7 +3409,11 @@ class EngineManager:
                 confidence
             )
 
-            self.trade_engine.open_trade(signal, idx, confidence)
+            if multi_day_low_confidence_filter(self.ctx, confidence):
+                self.ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
+                signal.state = "WAIT"
+            else:
+                self.trade_engine.open_trade(signal, idx, confidence)
             # Commit frontier only after all current-round mutations are complete.
             self.ctx.last_length = idx
 
@@ -3119,7 +3454,11 @@ class EngineManager:
                 confidence
             )
 
-            self.trade_engine.open_trade(signal, idx, confidence)
+            if multi_day_low_confidence_filter(self.ctx, confidence):
+                self.ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
+                signal.state = "WAIT"
+            else:
+                self.trade_engine.open_trade(signal, idx, confidence)
 
             # Commit the processed frontier only after all round work is done.
             self.ctx.last_length = idx
