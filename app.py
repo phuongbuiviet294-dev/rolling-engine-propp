@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_5"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_6"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -516,7 +516,6 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-@st.cache_data(ttl=1)
 def _load_live_sheet_df() -> pd.DataFrame:
     if INPUT_CSV_PATH:
         try:
@@ -712,7 +711,6 @@ def _read_contiguous_number_column(df: pd.DataFrame, col_idx: int, skip_first_da
     return nums
 
 
-@st.cache_data(ttl=1)
 def load_numbers() -> list[int]:
     """Load ONLY the user's current live Number column B.
 
@@ -3231,16 +3229,13 @@ def load_live_state() -> EngineContext:
 # ============================================================
 
 def get_live_ctx() -> EngineContext:
-    existing = st.session_state.get("v50_true_live_ctx")
-    # V3.4.4: an in-memory context from an older deployment is NOT allowed to
-    # survive a code update. Force a fresh persistent load/replay boundary.
-    if existing is None or str(getattr(existing, "state_version", "")) != STATE_VERSION:
-        st.session_state.v50_true_live_ctx = ensure_ctx_fields(load_live_state())
-    else:
-        st.session_state.v50_true_live_ctx = ensure_ctx_fields(existing)
-    # V3.4: refresh completed-day P/L from the same Google Sheet D:E table.
-    # This survives daily Number replacement and app restarts.
-    return _merge_sheet_daily_history_into_ctx(st.session_state.v50_true_live_ctx)
+    # V3.4.6: persistent state is authoritative on EVERY Streamlit rerun.
+    # Do not reuse a potentially stale in-memory session copy. The live page
+    # is browser-refreshed repeatedly, and the persisted ledger must be the
+    # same source used for settlement, profit, and window selection.
+    loaded = ensure_ctx_fields(load_live_state())
+    st.session_state.v50_true_live_ctx = loaded
+    return _merge_sheet_daily_history_into_ctx(loaded)
 
 
 
@@ -3670,6 +3665,18 @@ class EngineManager:
                 self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, DATASET_RESET_ANCHOR_LEN)
             save_live_state(self.ctx)
 
+    def render_live_source_debug(self) -> None:
+        # Operator-visible diagnostic: proves exactly which physical column is
+        # feeding the engine and whether the persistent ledger matches it.
+        st.caption(
+            f"LIVE SOURCE | Google Sheet column B only | "
+            f"numbers={len(self.numbers)} | sheet_round={self.round_id} | "
+            f"state_last_length={self.ctx.last_length} | "
+            f"trades={len(self.ctx.trade_history)} | "
+            f"settled={sum(1 for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None)} | "
+            f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f}"
+        )
+
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
         # If a trade is pending, do not call build_signal(), because build_signal()
         # can relock and mutate state during a pure UI refresh.
@@ -3723,6 +3730,7 @@ class EngineManager:
         self.dashboard.render_top_windows()
         self.dashboard.render_window_debug()
         self.dashboard.render_real_stats_summary()
+        self.render_live_source_debug()
         self.dashboard.render_trade_history()
         self.dashboard.render_equity()
 
