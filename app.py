@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_6"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_7"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -2279,7 +2279,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.4 V3.4.5 Stable Live — Audited")
+        st.title("🚀 V69.4 V3.4.7 Stable Live — Audited")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3429,6 +3429,13 @@ class EngineManager:
             self.reset_context_for_new_dataset("DAY_ID_CHANGED")
             return
 
+        # V3.4.7: clearing physical Google Sheet column B is the daily-clear
+        # action. Reset before load_data(), because load_data() stops on an
+        # empty live stream. A fetch failure still stops inside load_numbers().
+        if initialized and not raw_numbers:
+            self.reset_context_for_new_dataset("DAILY_B_COLUMN_CLEARED")
+            return
+
         if initialized and not saved_day:
             self.reset_context_for_new_dataset("DAY_ID_MISSING")
             return
@@ -3668,13 +3675,29 @@ class EngineManager:
     def render_live_source_debug(self) -> None:
         # Operator-visible diagnostic: proves exactly which physical column is
         # feeding the engine and whether the persistent ledger matches it.
+        settled = sum(
+            1 for x in self.ctx.trade_history
+            if getattr(x, "hit", None) is not None
+        )
+        settled_profit = sum(
+            float(x.profit) for x in self.ctx.trade_history
+            if getattr(x, "hit", None) is not None
+        )
         st.caption(
             f"LIVE SOURCE | Google Sheet column B only | "
             f"numbers={len(self.numbers)} | sheet_round={self.round_id} | "
             f"state_last_length={self.ctx.last_length} | "
             f"trades={len(self.ctx.trade_history)} | "
-            f"settled={sum(1 for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None)} | "
-            f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f}"
+            f"settled={settled} | profit={settled_profit:+.1f}"
+        )
+        st.caption(
+            f"LAST DECISION | processed_round={self.ctx.last_length} | "
+            f"open_reason={getattr(self.ctx, 'open_reason', '') or '-'} | "
+            f"trade_state={getattr(self.ctx, 'trade_state', '') or '-'} | "
+            f"pending={getattr(self.ctx, 'pending_trade', None)} | "
+            f"pending_target={getattr(self.ctx, 'pending_target_round', 0)} | "
+            f"last_open={getattr(self.ctx, 'last_open_round', -1)} | "
+            f"last_settle={getattr(self.ctx, 'last_settle_round', -1)}"
         )
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -3736,7 +3759,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V3.4.5 LIVE B-COLUMN RESET + LEDGER SAFE / AUDITED
+V3.4.7 LIVE B-COLUMN RESET + LEDGER SAFE / AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
