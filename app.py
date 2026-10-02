@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_7"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_8"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -322,6 +322,11 @@ class EngineContext:
     last_window_round: int = -1
     last_signal_round: int = -1
 
+    # V3.4.8: actual decision made on the last processed round.
+    last_decision_round: int = -1
+    last_decision_state: str = "WAIT"
+    last_decision_next_group: Optional[int] = None
+
     cooldown_counter: int = 0
     cooldown_loss_streak_marker: int = -1
     safe_mode_counter: int = 0
@@ -424,6 +429,12 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.blacklisted_windows = {}
     if not hasattr(ctx, "last_decision_confidence"):
         ctx.last_decision_confidence = 0.0
+    if not hasattr(ctx, "last_decision_round"):
+        ctx.last_decision_round = -1
+    if not hasattr(ctx, "last_decision_state"):
+        ctx.last_decision_state = "WAIT"
+    if not hasattr(ctx, "last_decision_next_group"):
+        ctx.last_decision_next_group = None
     if not hasattr(ctx, "daily_stop_active"):
         ctx.daily_stop_active = False
     if not hasattr(ctx, "daily_stop_reason"):
@@ -2279,7 +2290,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.4 V3.4.7 Stable Live — Audited")
+        st.title("🚀 V69.4 V3.4.5 Stable Live — Audited")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2801,6 +2812,9 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "risk_pause_counter": ctx.risk_pause_counter,
         "last_risk_trigger_trade_count": ctx.last_risk_trigger_trade_count,
         "last_decision_confidence": ctx.last_decision_confidence,
+        "last_decision_round": getattr(ctx, "last_decision_round", -1),
+        "last_decision_state": getattr(ctx, "last_decision_state", "WAIT"),
+        "last_decision_next_group": getattr(ctx, "last_decision_next_group", None),
         "daily_stop_active": ctx.daily_stop_active,
         "daily_stop_reason": ctx.daily_stop_reason,
         "keep_win_lock_until": ctx.keep_win_lock_until,
@@ -3159,6 +3173,9 @@ def load_live_state() -> EngineContext:
     ctx.risk_pause_counter = int(data.get("risk_pause_counter", 0))
     ctx.last_risk_trigger_trade_count = int(data.get("last_risk_trigger_trade_count", -1))
     ctx.last_decision_confidence = float(data.get("last_decision_confidence", 0.0))
+    ctx.last_decision_round = int(data.get("last_decision_round", -1))
+    ctx.last_decision_state = str(data.get("last_decision_state", "WAIT"))
+    ctx.last_decision_next_group = data.get("last_decision_next_group")
     ctx.daily_stop_active = bool(data.get("daily_stop_active", False))
     ctx.daily_stop_reason = str(data.get("daily_stop_reason", ""))
     ctx.keep_win_lock_until = int(data.get("keep_win_lock_until", 0) or 0)
@@ -3429,13 +3446,6 @@ class EngineManager:
             self.reset_context_for_new_dataset("DAY_ID_CHANGED")
             return
 
-        # V3.4.7: clearing physical Google Sheet column B is the daily-clear
-        # action. Reset before load_data(), because load_data() stops on an
-        # empty live stream. A fetch failure still stops inside load_numbers().
-        if initialized and not raw_numbers:
-            self.reset_context_for_new_dataset("DAILY_B_COLUMN_CLEARED")
-            return
-
         if initialized and not saved_day:
             self.reset_context_for_new_dataset("DAY_ID_MISSING")
             return
@@ -3570,6 +3580,24 @@ class EngineManager:
 
         self.ctx.last_window_round = target
 
+    def _apply_decision(self, signal: SignalRecord, idx: int, confidence: float) -> None:
+        before = len(self.ctx.trade_history)
+
+        signal.state = self.protection_engine.adaptive_ready_wait(
+            signal, confidence
+        )
+
+        if multi_day_low_confidence_filter(self.ctx, confidence):
+            self.ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
+            signal.state = "WAIT"
+        else:
+            self.trade_engine.open_trade(signal, idx, confidence)
+
+        created = len(self.ctx.trade_history) > before
+        self.ctx.last_decision_round = idx
+        self.ctx.last_decision_state = "PENDING" if created else str(signal.state or "WAIT")
+        self.ctx.last_decision_next_group = signal.next_group if created else None
+
     def hybrid_replay_once(self) -> None:
         # HYBRID LIVE:
         # First run only:
@@ -3602,16 +3630,7 @@ class EngineManager:
             self.ctx.last_decision_confidence = confidence
             setattr(signal, "decision_confidence", confidence)
 
-            signal.state = self.protection_engine.adaptive_ready_wait(
-                signal,
-                confidence
-            )
-
-            if multi_day_low_confidence_filter(self.ctx, confidence):
-                self.ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
-                signal.state = "WAIT"
-            else:
-                self.trade_engine.open_trade(signal, idx, confidence)
+            self._apply_decision(signal, idx, confidence)
             # Commit frontier only after all current-round mutations are complete.
             self.ctx.last_length = idx
 
@@ -3652,16 +3671,7 @@ class EngineManager:
             self.ctx.last_decision_confidence = confidence
             setattr(signal, "decision_confidence", confidence)
 
-            signal.state = self.protection_engine.adaptive_ready_wait(
-                signal,
-                confidence
-            )
-
-            if multi_day_low_confidence_filter(self.ctx, confidence):
-                self.ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
-                signal.state = "WAIT"
-            else:
-                self.trade_engine.open_trade(signal, idx, confidence)
+            self._apply_decision(signal, idx, confidence)
 
             # Commit the processed frontier only after all round work is done.
             self.ctx.last_length = idx
@@ -3675,29 +3685,13 @@ class EngineManager:
     def render_live_source_debug(self) -> None:
         # Operator-visible diagnostic: proves exactly which physical column is
         # feeding the engine and whether the persistent ledger matches it.
-        settled = sum(
-            1 for x in self.ctx.trade_history
-            if getattr(x, "hit", None) is not None
-        )
-        settled_profit = sum(
-            float(x.profit) for x in self.ctx.trade_history
-            if getattr(x, "hit", None) is not None
-        )
         st.caption(
             f"LIVE SOURCE | Google Sheet column B only | "
             f"numbers={len(self.numbers)} | sheet_round={self.round_id} | "
             f"state_last_length={self.ctx.last_length} | "
             f"trades={len(self.ctx.trade_history)} | "
-            f"settled={settled} | profit={settled_profit:+.1f}"
-        )
-        st.caption(
-            f"LAST DECISION | processed_round={self.ctx.last_length} | "
-            f"open_reason={getattr(self.ctx, 'open_reason', '') or '-'} | "
-            f"trade_state={getattr(self.ctx, 'trade_state', '') or '-'} | "
-            f"pending={getattr(self.ctx, 'pending_trade', None)} | "
-            f"pending_target={getattr(self.ctx, 'pending_target_round', 0)} | "
-            f"last_open={getattr(self.ctx, 'last_open_round', -1)} | "
-            f"last_settle={getattr(self.ctx, 'last_settle_round', -1)}"
+            f"settled={sum(1 for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None)} | "
+            f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f}"
         )
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -3726,12 +3720,19 @@ class EngineManager:
             self.ctx.open_reason = "HAS_PENDING"
             return signal, confidence_score, confidence_level
 
-        # V56: display must be read-only. Never call build_signal() here.
+        # V3.4.8: display is read-only and reflects the ACTUAL last decision.
         signal = self.signal_engine.build_signal_snapshot(self.ctx.last_length)
         confidence_score = self.signal_engine.get_confidence_score(signal)
         confidence_level = self.signal_engine.get_confidence_level(confidence_score)
 
-        if self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
+        if getattr(self.ctx, "last_decision_round", -1) == self.ctx.last_length:
+            actual_state = str(getattr(self.ctx, "last_decision_state", "WAIT"))
+            signal.state = "READY" if actual_state == "PENDING" else actual_state
+            signal.next_group = (
+                getattr(self.ctx, "last_decision_next_group", None)
+                if actual_state == "PENDING" else None
+            )
+        elif self.ctx.open_reason in ("TRADE_GAP", "SIGNAL_WAIT", "DUPLICATE_OPEN"):
             signal.state = "WAIT"
 
         return signal, confidence_score, confidence_level
@@ -3759,7 +3760,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V3.4.7 LIVE B-COLUMN RESET + LEDGER SAFE / AUDITED
+V3.4.5 LIVE B-COLUMN RESET + LEDGER SAFE / AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
