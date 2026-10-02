@@ -55,7 +55,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_9"
+STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_4_10"
 
 # PROFIT OPTIMIZED BALANCED 2026-07-04
 # - Keep relock after 1 real loss.
@@ -3347,6 +3347,38 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
+        if st.button("REBUILD TRADE HISTORY FROM CURRENT B"):
+            # Explicit recovery path: discard only the current live ledger/state
+            # and replay the currently loaded Google Sheet column B from the
+            # live-start frontier. This is useful when an old deployment has
+            # advanced last_length but lost its Trade History.
+            old_ctx = ensure_ctx_fields(get_live_ctx())
+            blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
+            blank_ctx.live_day_id = current_live_day_id()
+            blank_ctx.protection_reason = "MANUAL_REBUILD_LEDGER_FROM_CURRENT_B"
+            blank_ctx.state_version = STATE_VERSION
+            blank_ctx.hybrid_initialized = False
+            blank_ctx.last_length = 0
+            blank_ctx.data_length = 0
+            blank_ctx.data_signature = ""
+            blank_ctx.dataset_anchor_signature = ""
+            cfg_rebuild = get_state_backend_config()
+            if cfg_rebuild["backend"] == "gsheet" and cfg_rebuild["sheet_id"]:
+                if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
+                    st.error("REBUILD stopped: Google State could not be cleared safely.")
+                    st.stop()
+            else:
+                try:
+                    if os.path.exists(STATE_FILE):
+                        os.remove(STATE_FILE)
+                except Exception as e:
+                    st.error(f"REBUILD stopped: cannot remove local state: {e}")
+                    st.stop()
+            st.session_state.v50_true_live_ctx = blank_ctx
+            st.session_state.v50_true_live_window_state = {w: WindowRecord() for w in WINDOWS}
+            st.rerun()
+
         if st.button("Reset Live State"):
             old_ctx_for_history = ensure_ctx_fields(get_live_ctx())
             carry_history = carry_forward_daily_profit_history(old_ctx_for_history)
@@ -3686,13 +3718,15 @@ class EngineManager:
     def render_live_source_debug(self) -> None:
         # Operator-visible diagnostic: proves exactly which physical column is
         # feeding the engine and whether the persistent ledger matches it.
+        integrity = ledger_integrity_report(self.ctx)
         st.caption(
             f"LIVE SOURCE | Google Sheet column B only | "
             f"numbers={len(self.numbers)} | sheet_round={self.round_id} | "
             f"state_last_length={self.ctx.last_length} | "
             f"trades={len(self.ctx.trade_history)} | "
             f"settled={sum(1 for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None)} | "
-            f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f}"
+            f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f} | "
+            f"ledger={'OK' if integrity['ok'] else 'ERROR:' + ','.join(integrity['errors'])}"
         )
 
     def build_display_signal(self) -> tuple[SignalRecord, float, str]:
@@ -3761,7 +3795,7 @@ class EngineManager:
 
         st.caption(
             f"""
-V3.4.9 LIVE LEDGER FIX + B-COLUMN RESET + DECISION TRUTH / AUDITED
+V3.4.10 LIVE LEDGER REBUILD + B-COLUMN RESET + DECISION TRUTH / AUDITED
 
 First run: replay from round {LIVE_START_ROUND} to current once.
 
