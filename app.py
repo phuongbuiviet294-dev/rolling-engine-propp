@@ -2664,10 +2664,13 @@ CONF = {confidence_score:.2f}
                     verify_rows.append(
                         {
                             "DAY_SEQ": getattr(self.ctx, "live_day_seq", 0),
-                            "Round": row.get("round"),
-                            "Number": row.get("number"),
-                            "ActualGroup": row.get("actual_group"),
-                            "Decision": row.get("decision_state", row.get("state", "")),
+                            # round_log stores compact keys r/n/g/decision.
+                            # Read those exact persisted keys; do not invent
+                            # round/number/actual_group field names.
+                            "Round": row.get("r"),
+                            "Number": row.get("n"),
+                            "ActualGroup": row.get("g"),
+                            "Decision": row.get("decision", ""),
                             "Phase": row.get("phase", "COMPLETE"),
                         }
                     )
@@ -2675,8 +2678,8 @@ CONF = {confidence_score:.2f}
                 st.caption(
                     f"SHEET READ OK | DAY_SEQ={getattr(self.ctx, 'live_day_seq', 0)} | "
                     f"frontier={self.ctx.last_length} | rows processed={len(audit_rows)} | "
-                    f"latest round={audit_rows[-1].get('round')} | "
-                    f"latest number={audit_rows[-1].get('number')}"
+                    f"latest round={audit_rows[-1].get('r')} | "
+                    f"latest number={audit_rows[-1].get('n')}"
                 )
             else:
                 st.info("No processed Number rounds yet")
