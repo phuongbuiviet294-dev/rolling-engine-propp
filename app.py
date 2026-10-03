@@ -2718,13 +2718,17 @@ CONF = {confidence_score:.2f}
                 display_rows.append(
                     {
                         "round": row.get("r"),
-                        "number": row.get("number"),
-                        "group": row.get("actual_group"),
+                        # append_round_audit() persists compact keys n/g/decision.
+                        # Use those exact persisted keys here; the previous V3 UI
+                        # incorrectly read legacy/nonexistent names and displayed
+                        # None for every number/group/decision.
+                        "number": row.get("n"),
+                        "group": row.get("g"),
                         "window": row.get("window"),
-                        "next_group": row.get("next_group"),
+                        "next_group": row.get("predict"),
                         "signal": row.get("signal"),
                         "confidence": row.get("confidence"),
-                        "decision": row.get("decision_state"),
+                        "decision": row.get("decision"),
                         "open": bool(row.get("open_this_round")),
                         "settle": bool(row.get("settle_this_round")),
                         "result": row.get("result") or "",
