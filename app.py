@@ -4369,30 +4369,13 @@ Regime : {signal.regime}
 
 
 # ============================================================
-# MAIN
+# AUTO REFRESH CONTROL
 # ============================================================
-
-manager = EngineManager()
-
-try:
-    manager.run()
-except Exception as e:
-    st.error(f"Engine Error: {e}")
-    import traceback
-    st.code(traceback.format_exc())
-
-
-# ============================================================
-# AUTO REFRESH - BROWSER SIDE ONLY
-# ============================================================
-# Do NOT use:
-#     time.sleep(5)
-#     st.rerun()
-# on Streamlit Cloud. It keeps the server script thread alive and can crash
-# the app when mobile/browser sessions reconnect repeatedly.
-#
-# This JS refresh runs in the browser, releases the Python script after render,
-# and is much more stable for Streamlit Community Cloud.
+# Use native Streamlit fragments instead of window.parent.location.reload().
+# A full browser reload can race Streamlit's hashed JS chunks on Community
+# Cloud/mobile browsers and produce:
+#   TypeError: Failed to fetch dynamically imported module
+# The fragment reruns only the engine/UI code and does not reload static JS.
 
 with st.sidebar:
     st.divider()
@@ -4405,14 +4388,24 @@ with st.sidebar:
         step=5,
     )
 
+
+def _run_engine_fragment() -> None:
+    manager = EngineManager()
+    try:
+        manager.run()
+    except Exception as e:
+        st.error(f"Engine Error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+
+
 if auto_refresh_enabled:
-    components.html(
-        f"""
-        <script>
-        setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {int(refresh_seconds) * 1000});
-        </script>
-        """,
-        height=0,
-    )
+    # Native Streamlit fragment: no iframe, no dynamic JS component, no
+    # window.location.reload(), while preserving the existing engine flow.
+    @st.fragment(run_every=f"{int(refresh_seconds)}s")
+    def _live_fragment() -> None:
+        _run_engine_fragment()
+
+    _live_fragment()
+else:
+    _run_engine_fragment()
