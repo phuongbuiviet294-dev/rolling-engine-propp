@@ -3717,9 +3717,25 @@ def reset_live_state_button() -> None:
             blank_ctx.data_signature = ""
             blank_ctx.dataset_anchor_signature = ""
             blank_ctx.recovery_replay_all_rounds = True
-            cfg_rebuild = get_state_backend_config()
+            # IMPORTANT: the durable WAL participates in load precedence.
+            # The old rebuild path only cleared Google State/STATE_FILE but left
+            # the previous WAL intact, so restart could immediately prefer the
+            # stale WAL and erase recovery_replay_all_rounds again.
+            blank_ctx.state_revision = int(getattr(old_ctx, "state_revision", 0) or 0) + 1
+            rebuild_payload = serialize_live_state(blank_ctx)
+
+            try:
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(rebuild_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
+            except Exception as e:
+                st.error(f"REBUILD stopped: WAL write failed: {e}")
+                st.stop()
+
             if cfg_rebuild["backend"] == "gsheet" and cfg_rebuild["sheet_id"]:
-                if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
+                if not save_state_to_gsheet(rebuild_payload):
                     st.error("REBUILD stopped: Google State could not be cleared safely.")
                     st.stop()
             else:
@@ -3749,10 +3765,24 @@ def reset_live_state_button() -> None:
             blank_ctx.data_length = 0
             blank_ctx.data_signature = ""
             blank_ctx.dataset_anchor_signature = ""
+            # Reset must advance the durable revision and replace the WAL too;
+            # otherwise the old WAL can win during the next load and undo Reset.
+            blank_ctx.state_revision = int(getattr(old_ctx_for_history, "state_revision", 0) or 0) + 1
+            reset_payload = serialize_live_state(blank_ctx)
+
+            try:
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(reset_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
+            except Exception as e:
+                st.error(f"MANUAL RESET stopped: WAL write failed: {e}")
+                st.stop()
 
             cfg2 = get_state_backend_config()
             if cfg2["backend"] == "gsheet" and cfg2["sheet_id"]:
-                if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
+                if not save_state_to_gsheet(reset_payload):
                     st.error(
                         "MANUAL RESET stopped: Google State could not be reset safely. "
                         "Fix the Google connection and try again. Old state was not touched."
