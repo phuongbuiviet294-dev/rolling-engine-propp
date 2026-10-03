@@ -3734,7 +3734,7 @@ def reset_live_state_button() -> None:
                 st.error(f"REBUILD stopped: WAL write failed: {e}")
                 st.stop()
 
-            if cfg_rebuild["backend"] == "gsheet" and cfg_rebuild["sheet_id"]:
+            if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
                 if not save_state_to_gsheet(rebuild_payload):
                     st.error("REBUILD stopped: Google State could not be cleared safely.")
                     st.stop()
