@@ -2661,6 +2661,9 @@ CONF = {confidence_score:.2f}
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     def render_trade_history(self) -> None:
+        # Trade History = ONLY actual trade records.
+        # Round History is rendered separately below so trade rows are not
+        # visually duplicated inside the per-round audit table.
         st.subheader("Trade History")
 
         if getattr(self.ctx, "last_result_round", -1) >= 0:
@@ -2673,7 +2676,6 @@ CONF = {confidence_score:.2f}
 
         refresh_ledger_checkpoint(self.ctx)
         integrity = ledger_integrity_report(self.ctx)
-        audit_integrity = round_audit_integrity_report(self.ctx)
         st.caption(
             f"LEDGER | trades={integrity['trade_count']} | settled={integrity['settled_count']} | "
             f"pending={integrity['pending_count']} | profit={integrity['profit']:+.1f} | "
@@ -2682,38 +2684,67 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
-        if not self.ctx.trade_history:
+        if self.ctx.trade_history:
+            df = pd.DataFrame(
+                [
+                    {
+                        "open_round": x.round_id,
+                        "settle_round": x.settle_round,
+                        "locked_window": x.locked_window,
+                        "predict": x.predict,
+                        "actual": x.actual,
+                        "hit": x.hit,
+                        "profit": x.profit,
+                        "status": x.status,
+                        "settled": bool(x.hit is not None and x.settle_round is not None),
+                    }
+                    for x in self.ctx.trade_history
+                ]
+            )
+            st.dataframe(df.tail(50), use_container_width=True, hide_index=True)
+        else:
             st.info("No trades")
-            return
 
-        df = pd.DataFrame(
-            [
-                {
-                    "open_round": x.round_id,
-                    "settle_round": x.settle_round,
-                    "locked_window": x.locked_window,
-                    "predict": x.predict,
-                    "actual": x.actual,
-                    "hit": x.hit,
-                    "profit": x.profit,
-                    "status": x.status,
-                    "settled": bool(x.hit is not None and x.settle_round is not None),
-                }
-                for x in self.ctx.trade_history
-            ]
-        )
-
-        st.dataframe(df.tail(50), use_container_width=True)
-
-        with st.expander("Round Audit Log - every processed round"):
-            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
-            if audit_rows:
-                st.dataframe(pd.DataFrame(audit_rows[-100:]), use_container_width=True, hide_index=True)
-                audit_check = round_audit_integrity_report(self.ctx)
-                if not audit_check["ok"]:
-                    st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
+        # --------------------------------------------------------------
+        # ROUND HISTORY: one row for every processed round, including WAIT.
+        # This is intentionally separate from Trade History and uses a compact
+        # per-round schema, so trade records are not displayed a second time.
+        # --------------------------------------------------------------
+        st.subheader("Round History")
+        audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+        if audit_rows:
+            display_rows = []
+            for row in audit_rows:
+                display_rows.append(
+                    {
+                        "round": row.get("r"),
+                        "number": row.get("number"),
+                        "group": row.get("actual_group"),
+                        "window": row.get("window"),
+                        "next_group": row.get("next_group"),
+                        "signal": row.get("signal"),
+                        "confidence": row.get("confidence"),
+                        "decision": row.get("decision_state"),
+                        "open": bool(row.get("open_this_round")),
+                        "settle": bool(row.get("settle_this_round")),
+                        "result": row.get("result") or "",
+                        "profit": row.get("profit"),
+                        "equity": row.get("equity"),
+                    }
+                )
+            st.dataframe(
+                pd.DataFrame(display_rows),
+                use_container_width=True,
+                hide_index=True,
+                height=520,
+            )
+            audit_check = round_audit_integrity_report(self.ctx)
+            if not audit_check["ok"]:
+                st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
             else:
-                st.info("No round audit yet")
+                st.caption(f"ROUND HISTORY | {len(display_rows)} rounds processed | audit=OK")
+        else:
+            st.info("No round history yet")
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
