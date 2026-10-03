@@ -553,23 +553,55 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
+DATA_SHEET_NAME = "data"
+HISTORY_SHEET_NAME = "history"
+MAX_ROUNDS_PER_DAY = 288
+
+
+def _sheet_csv_url(sheet_name: str) -> str:
+    return (
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
+        f"?sheet={sheet_name}&tqx=out:csv&cache={time.time()}"
+    )
+
+
 def _load_live_sheet_df() -> pd.DataFrame:
+    """Read ONLY the current-day `data` tab.
+
+    Contract: data contains header + at most 288 round rows. Historical rows
+    must never be mixed into the live Number stream.
+    """
     if INPUT_CSV_PATH:
         try:
             return pd.read_csv(INPUT_CSV_PATH)
         except Exception as e:
             st.error(f"Load local CSV error: {e}")
             st.stop()
-    url = (
-        f"https://docs.google.com/spreadsheets/d/"
-        f"{SHEET_ID}/export?format=csv"
-        f"&cache={time.time()}"
-    )
     try:
-        return pd.read_csv(url)
+        df = pd.read_csv(_sheet_csv_url(DATA_SHEET_NAME))
     except Exception as e:
-        st.error(f"Load sheet error: {e}")
+        st.error(f"Load Sheet tab '{DATA_SHEET_NAME}' error: {e}")
         st.stop()
+    if len(df) > MAX_ROUNDS_PER_DAY + 5:
+        st.error(
+            f"LIVE DATA ERROR: tab '{DATA_SHEET_NAME}' has {len(df)} rows. "
+            f"Expected at most {MAX_ROUNDS_PER_DAY + 5}. Do not put history in data."
+        )
+        st.stop()
+    return df
+
+
+@st.cache_data(ttl=5)
+def _load_history_sheet_df() -> pd.DataFrame:
+    """Read historical days separately; never used as live Number input."""
+    if INPUT_CSV_PATH:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(_sheet_csv_url(HISTORY_SHEET_NAME))
+    except Exception as e:
+        st.warning(f"History tab '{HISTORY_SHEET_NAME}' unavailable: {e}")
+        return pd.DataFrame()
+
 
 
 def _parse_number_value(raw: Any) -> Optional[int]:
@@ -762,23 +794,17 @@ def _normalize_day_seq(raw: Any) -> Optional[int]:
 
 
 def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
-    """Read the DAY_SEQ Sheet with PRELOADED ROUND metadata + realtime numbers.
+    """Read the new append-only DAY_SEQ Sheet format.
 
     Contract:
-      A = round       (can be preloaded 1..288)
-      B = number      (realtime; blank means the round has not arrived yet)
-      C = day_seq     (preloaded, monotonic 1,2,3,...)
-      D = date        (preloaded)
-      E = daily_profit (normally blank during the live day)
+      A = round
+      B = number
+      C = day_seq (1,2,3,... monotonic)
+      D = date
+      E = daily_profit
 
-    The highest valid DAY_SEQ is the live/current day. Historical rows remain
-    in the Sheet. For the current day, only the contiguous prefix of NON-BLANK
-    numbers is exposed to the engine. Future/preloaded rows are metadata only.
-
-    Example:
-      round 1..288 can exist before the day starts, while B1..B3 are filled.
-      The engine receives only rounds 1..3. If B5 is filled while B4 is blank,
-      B5 is NOT processed until B4 arrives.
+    The highest valid day_seq is the live/current day. Historical rows remain
+    in the Sheet and are never used as the current Number stream.
     """
     df = _load_live_sheet_df()
     if df.shape[1] < 5:
@@ -798,57 +824,48 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         return df, 0, "", []
 
     current_seq = max(valid)
-    idxs = [i for i, x in enumerate(seqs) if x == current_seq]
+    mask = [x == current_seq for x in seqs]
+    idxs = [i for i, ok in enumerate(mask) if ok]
     if not idxs:
         st.warning("Current DAY_SEQ has no rows.")
         return df, current_seq, "", []
 
-    # Metadata validation is independent of the number frontier. This allows
-    # all 288 rows to be pre-created while B (number) is populated in realtime.
-    expected_round = 1
-    current_dates: list[str] = []
-    for i in idxs:
+    # Strictly preserve Sheet row order. Current day must start at round 1 and
+    # rounds must be contiguous 1..N. This catches accidental sorting/mixing.
+    nums: list[int] = []
+    rounds: list[int] = []
+    dates: list[str] = []
+    for pos, i in enumerate(idxs, start=1):
         raw_r = c_round.iloc[i]
+        raw_n = c_number.iloc[i]
         try:
             rr = int(float(str(raw_r).replace(",", ".")))
         except Exception:
             rr = -1
-
-        if rr != expected_round:
-            st.error(
-                f"DAY_SEQ {current_seq} ROUND metadata invalid at Sheet row {i + 1}: "
-                f"expected round {expected_round}, got {raw_r!r}."
-            )
-            st.stop()
-
-        d = _parse_date_value(c_date.iloc[i])
-        current_dates.append(d.isoformat() if d is not None else "")
-        expected_round += 1
-
-    bad_dates = {d for d in current_dates if d}
-    if len(bad_dates) > 1:
-        st.error(f"DAY_SEQ {current_seq} has multiple dates: {sorted(bad_dates)}")
-        st.stop()
-    day_date = next(iter(bad_dates), "")
-
-    # Realtime NUMBER frontier: only a contiguous prefix of valid numbers is
-    # visible to the engine. A future number after a blank is deliberately
-    # ignored, preventing look-ahead / out-of-order processing.
-    nums: list[int] = []
-    for i in idxs:
-        n = _parse_number_value(c_number.iloc[i])
-        if n is None:
+        n = _parse_number_value(raw_n)
+        if rr != pos or n is None:
+            # Current day may be partially filled, but it must still be a
+            # contiguous prefix starting from round 1.
             break
+        rounds.append(rr)
         nums.append(n)
+        d = _parse_date_value(c_date.iloc[i])
+        dates.append(d.isoformat() if d is not None else "")
+
+    if nums:
+        bad_dates = {d for d in dates if d}
+        if len(bad_dates) > 1:
+            st.error(f"DAY_SEQ {current_seq} has multiple dates: {sorted(bad_dates)}")
+            st.stop()
+        day_date = next(iter(bad_dates), "")
+    else:
+        day_date = ""
 
     return df, current_seq, day_date, nums
 
 
 def load_numbers() -> list[int]:
-    """Load ONLY the highest DAY_SEQ contiguous realtime Number prefix.
-
-    Round/day metadata may be preloaded; blank Number cells are not rounds yet.
-    """
+    """Load ONLY the highest DAY_SEQ contiguous Number prefix."""
     _df, _seq, _date, nums = _load_day_seq_sheet_snapshot()
     return nums
 
@@ -902,13 +919,20 @@ def _get_daily_history_from_df_v35(df: pd.DataFrame, current_seq: int) -> list[d
 
 @st.cache_data(ttl=5)
 def load_daily_profit_history_from_sheet() -> list[dict]:
+    """Read completed daily P/L from `history`, never from live `data`."""
     try:
-        df = _load_live_sheet_df()
-        seqs = [_normalize_day_seq(x) for x in df.iloc[:, 2].tolist()] if df.shape[1] >= 3 else []
-        current_seq = max([x for x in seqs if x is not None], default=0)
-        return _get_daily_history_from_df_v35(df, current_seq)
+        live_df = _load_live_sheet_df()
+        if live_df.shape[1] < 3:
+            return []
+        live_seqs = [_normalize_day_seq(x) for x in live_df.iloc[:, 2].tolist()]
+        current_seq = max([x for x in live_seqs if x is not None], default=0)
+        history_df = _load_history_sheet_df()
+        if history_df.empty or history_df.shape[1] < 5:
+            return []
+        return _get_daily_history_from_df_v35(history_df, current_seq)
     except Exception:
         return []
+
 
 
 def _merge_sheet_daily_history_into_ctx(ctx: EngineContext) -> EngineContext:
@@ -2653,45 +2677,8 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
-        # Operator verification: show exactly the Number rounds that the engine
-        # has committed as processed. This remains visible even before LIVE_START
-        # when there are no trades yet.
-        with st.expander("Google Sheet Read History - processed Number frontier", expanded=True):
-            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
-            if audit_rows:
-                verify_rows = []
-                for row in audit_rows[-100:]:
-                    verify_rows.append(
-                        {
-                            "DAY_SEQ": getattr(self.ctx, "live_day_seq", 0),
-                            # round_log stores compact keys r/n/g/decision.
-                            # Read those exact persisted keys; do not invent
-                            # round/number/actual_group field names.
-                            "Round": row.get("r"),
-                            "Number": row.get("n"),
-                            "ActualGroup": row.get("g"),
-                            "Decision": row.get("decision", ""),
-                            "Phase": row.get("phase", "COMPLETE"),
-                        }
-                    )
-                st.dataframe(pd.DataFrame(verify_rows), use_container_width=True, hide_index=True)
-                st.caption(
-                    f"SHEET READ OK | DAY_SEQ={getattr(self.ctx, 'live_day_seq', 0)} | "
-                    f"frontier={self.ctx.last_length} | rows processed={len(audit_rows)} | "
-                    f"latest round={audit_rows[-1].get('r')} | "
-                    f"latest number={audit_rows[-1].get('n')}"
-                )
-            else:
-                st.info("No processed Number rounds yet")
-
-            if not audit_integrity["ok"]:
-                st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_integrity["errors"]))
-
         if not self.ctx.trade_history:
-            st.info(
-                f"No trades yet. This is expected before LIVE_START_ROUND={LIVE_START_ROUND}. "
-                f"Google Sheet Number history above confirms the processed frontier."
-            )
+            st.info("No trades")
             return
 
         df = pd.DataFrame(
@@ -2712,6 +2699,16 @@ CONF = {confidence_score:.2f}
         )
 
         st.dataframe(df.tail(50), use_container_width=True)
+
+        with st.expander("Round Audit Log - every processed round"):
+            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+            if audit_rows:
+                st.dataframe(pd.DataFrame(audit_rows[-100:]), use_container_width=True, hide_index=True)
+                audit_check = round_audit_integrity_report(self.ctx)
+                if not audit_check["ok"]:
+                    st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
+            else:
+                st.info("No round audit yet")
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
@@ -3838,14 +3835,11 @@ class EngineManager:
             _merge_sheet_daily_history_into_ctx(self.ctx)
             return
 
-        # DAY_SEQ is authoritative and monotonic. A forward jump is allowed
-        # when an intermediate day has no captured dataset (e.g. 30 -> 32).
-        # The new observed DAY_SEQ always starts from a clean trading context.
-        if sheet_day_seq > state_seq + 1:
-            st.warning(
-                f"DAY_SEQ FORWARD GAP: STATE={state_seq}, SHEET={sheet_day_seq}. "
-                f"Missing sequence(s) are accepted; starting clean at DAY_SEQ {sheet_day_seq}."
-            )
+        # Only +1 is accepted. Missing DAY_SEQ means the operator has not
+        # completed/started the intermediate day and the engine must not guess.
+        if sheet_day_seq != state_seq + 1:
+            st.error(f"DAY_SEQ SKIPPED: STATE={state_seq}, SHEET={sheet_day_seq}. Expected {state_seq + 1}.")
+            st.stop()
 
         self.reset_context_for_new_day(sheet_day_seq, sheet_day_date)
 
@@ -4024,11 +4018,7 @@ class EngineManager:
             # settle an already-open exact-target trade and update windows, but
             # MUST NOT create retrospective OPENs. This preserves live timing
             # when the Sheet/app was delayed or temporarily offline.
-            # HYBRID REPLAY: every replayed round is its own simulated frontier.
-            # current_length belongs to process_new_rounds(); referencing it here
-            # would raise NameError and, more importantly, would incorrectly
-            # suppress historical OPEN decisions.
-            is_live_frontier = True
+            is_live_frontier = (idx == current_length)
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
@@ -4369,13 +4359,30 @@ Regime : {signal.regime}
 
 
 # ============================================================
-# AUTO REFRESH CONTROL
+# MAIN
 # ============================================================
-# Use native Streamlit fragments instead of window.parent.location.reload().
-# A full browser reload can race Streamlit's hashed JS chunks on Community
-# Cloud/mobile browsers and produce:
-#   TypeError: Failed to fetch dynamically imported module
-# The fragment reruns only the engine/UI code and does not reload static JS.
+
+manager = EngineManager()
+
+try:
+    manager.run()
+except Exception as e:
+    st.error(f"Engine Error: {e}")
+    import traceback
+    st.code(traceback.format_exc())
+
+
+# ============================================================
+# AUTO REFRESH - BROWSER SIDE ONLY
+# ============================================================
+# Do NOT use:
+#     time.sleep(5)
+#     st.rerun()
+# on Streamlit Cloud. It keeps the server script thread alive and can crash
+# the app when mobile/browser sessions reconnect repeatedly.
+#
+# This JS refresh runs in the browser, releases the Python script after render,
+# and is much more stable for Streamlit Community Cloud.
 
 with st.sidebar:
     st.divider()
@@ -4388,24 +4395,14 @@ with st.sidebar:
         step=5,
     )
 
-
-def _run_engine_fragment() -> None:
-    manager = EngineManager()
-    try:
-        manager.run()
-    except Exception as e:
-        st.error(f"Engine Error: {e}")
-        import traceback
-        st.code(traceback.format_exc())
-
-
 if auto_refresh_enabled:
-    # Native Streamlit fragment: no iframe, no dynamic JS component, no
-    # window.location.reload(), while preserving the existing engine flow.
-    @st.fragment(run_every=f"{int(refresh_seconds)}s")
-    def _live_fragment() -> None:
-        _run_engine_fragment()
-
-    _live_fragment()
-else:
-    _run_engine_fragment()
+    components.html(
+        f"""
+        <script>
+        setTimeout(function() {{
+            window.parent.location.reload();
+        }}, {int(refresh_seconds) * 1000});
+        </script>
+        """,
+        height=0,
+    )
