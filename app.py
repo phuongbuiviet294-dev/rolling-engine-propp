@@ -3974,6 +3974,12 @@ class EngineManager:
                 continue
 
             # Durable per-round transaction with crash-safe phase resume.
+            # LIVE GAP RULE: when several rows arrive in one snapshot, only the
+            # latest row is a valid NEW-ENTRY frontier. Intermediate rows may
+            # settle an already-open exact-target trade and update windows, but
+            # MUST NOT create retrospective OPENs. This preserves live timing
+            # when the Sheet/app was delayed or temporarily offline.
+            is_live_frontier = (idx == current_length)
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
@@ -3998,6 +4004,24 @@ class EngineManager:
                 self.ctx.round_txn_phase = "WINDOW_UPDATED"
                 save_live_state(self.ctx)
                 phase = "WINDOW_UPDATED"
+
+            # Intermediate catch-up rows are state/warm-up only. Do not run
+            # build_signal() here because it can relock/cool windows and would
+            # turn an old round into a retrospective trading decision.
+            if phase == "WINDOW_UPDATED" and not is_live_frontier:
+                self.ctx.last_decision_round = idx
+                self.ctx.last_decision_state = "CATCH_UP"
+                self.ctx.last_decision_next_group = None
+                self.ctx.round_txn_opened = False
+                self.ctx.round_txn_phase = "COMPLETE"
+                self.ctx.round_txn_signal = {}
+                self.ctx.last_length = idx
+                append_round_audit(self.ctx, idx, self.numbers[idx - 1], actual_group, None)
+                self.ctx.data_length = idx
+                self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
+                save_live_state(self.ctx)
+                continue
+
             if phase == "WINDOW_UPDATED":
                 signal = self.signal_engine.build_signal(idx)
                 signal = self.signal_engine.apply_sample_aware_coherence(signal)
