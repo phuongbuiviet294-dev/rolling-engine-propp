@@ -762,17 +762,23 @@ def _normalize_day_seq(raw: Any) -> Optional[int]:
 
 
 def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
-    """Read the new append-only DAY_SEQ Sheet format.
+    """Read the DAY_SEQ Sheet with PRELOADED ROUND metadata + realtime numbers.
 
     Contract:
-      A = round
-      B = number
-      C = day_seq (1,2,3,... monotonic)
-      D = date
-      E = daily_profit
+      A = round       (can be preloaded 1..288)
+      B = number      (realtime; blank means the round has not arrived yet)
+      C = day_seq     (preloaded, monotonic 1,2,3,...)
+      D = date        (preloaded)
+      E = daily_profit (normally blank during the live day)
 
-    The highest valid day_seq is the live/current day. Historical rows remain
-    in the Sheet and are never used as the current Number stream.
+    The highest valid DAY_SEQ is the live/current day. Historical rows remain
+    in the Sheet. For the current day, only the contiguous prefix of NON-BLANK
+    numbers is exposed to the engine. Future/preloaded rows are metadata only.
+
+    Example:
+      round 1..288 can exist before the day starts, while B1..B3 are filled.
+      The engine receives only rounds 1..3. If B5 is filled while B4 is blank,
+      B5 is NOT processed until B4 arrives.
     """
     df = _load_live_sheet_df()
     if df.shape[1] < 5:
@@ -792,48 +798,57 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         return df, 0, "", []
 
     current_seq = max(valid)
-    mask = [x == current_seq for x in seqs]
-    idxs = [i for i, ok in enumerate(mask) if ok]
+    idxs = [i for i, x in enumerate(seqs) if x == current_seq]
     if not idxs:
         st.warning("Current DAY_SEQ has no rows.")
         return df, current_seq, "", []
 
-    # Strictly preserve Sheet row order. Current day must start at round 1 and
-    # rounds must be contiguous 1..N. This catches accidental sorting/mixing.
-    nums: list[int] = []
-    rounds: list[int] = []
-    dates: list[str] = []
-    for pos, i in enumerate(idxs, start=1):
+    # Metadata validation is independent of the number frontier. This allows
+    # all 288 rows to be pre-created while B (number) is populated in realtime.
+    expected_round = 1
+    current_dates: list[str] = []
+    for i in idxs:
         raw_r = c_round.iloc[i]
-        raw_n = c_number.iloc[i]
         try:
             rr = int(float(str(raw_r).replace(",", ".")))
         except Exception:
             rr = -1
-        n = _parse_number_value(raw_n)
-        if rr != pos or n is None:
-            # Current day may be partially filled, but it must still be a
-            # contiguous prefix starting from round 1.
-            break
-        rounds.append(rr)
-        nums.append(n)
-        d = _parse_date_value(c_date.iloc[i])
-        dates.append(d.isoformat() if d is not None else "")
 
-    if nums:
-        bad_dates = {d for d in dates if d}
-        if len(bad_dates) > 1:
-            st.error(f"DAY_SEQ {current_seq} has multiple dates: {sorted(bad_dates)}")
+        if rr != expected_round:
+            st.error(
+                f"DAY_SEQ {current_seq} ROUND metadata invalid at Sheet row {i + 1}: "
+                f"expected round {expected_round}, got {raw_r!r}."
+            )
             st.stop()
-        day_date = next(iter(bad_dates), "")
-    else:
-        day_date = ""
+
+        d = _parse_date_value(c_date.iloc[i])
+        current_dates.append(d.isoformat() if d is not None else "")
+        expected_round += 1
+
+    bad_dates = {d for d in current_dates if d}
+    if len(bad_dates) > 1:
+        st.error(f"DAY_SEQ {current_seq} has multiple dates: {sorted(bad_dates)}")
+        st.stop()
+    day_date = next(iter(bad_dates), "")
+
+    # Realtime NUMBER frontier: only a contiguous prefix of valid numbers is
+    # visible to the engine. A future number after a blank is deliberately
+    # ignored, preventing look-ahead / out-of-order processing.
+    nums: list[int] = []
+    for i in idxs:
+        n = _parse_number_value(c_number.iloc[i])
+        if n is None:
+            break
+        nums.append(n)
 
     return df, current_seq, day_date, nums
 
 
 def load_numbers() -> list[int]:
-    """Load ONLY the highest DAY_SEQ contiguous Number prefix."""
+    """Load ONLY the highest DAY_SEQ contiguous realtime Number prefix.
+
+    Round/day metadata may be preloaded; blank Number cells are not rounds yet.
+    """
     _df, _seq, _date, nums = _load_day_seq_sheet_snapshot()
     return nums
 
