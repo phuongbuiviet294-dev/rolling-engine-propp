@@ -4021,7 +4021,11 @@ class EngineManager:
             # settle an already-open exact-target trade and update windows, but
             # MUST NOT create retrospective OPENs. This preserves live timing
             # when the Sheet/app was delayed or temporarily offline.
-            is_live_frontier = (idx == current_length)
+            # HYBRID REPLAY: every replayed round is its own simulated frontier.
+            # current_length belongs to process_new_rounds(); referencing it here
+            # would raise NameError and, more importantly, would incorrectly
+            # suppress historical OPEN decisions.
+            is_live_frontier = True
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
