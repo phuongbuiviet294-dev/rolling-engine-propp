@@ -2638,9 +2638,11 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
+        # Trade ledger is separate from per-round history.  Do not return
+        # early when there are no trades: the operator must still be able to
+        # inspect every processed round.
         if not self.ctx.trade_history:
-            st.info("No trades")
-            return
+            st.info("No trades yet")
 
         df = pd.DataFrame(
             [
@@ -2659,15 +2661,39 @@ CONF = {confidence_score:.2f}
             ]
         )
 
-        st.dataframe(df.tail(50), use_container_width=True)
+        if not df.empty:
+            st.dataframe(df.tail(50), use_container_width=True, hide_index=True)
 
-        with st.expander("Round Audit Log - every processed round"):
-            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+        # IMPORTANT: this is intentionally OUTSIDE an expander.  The user
+        # needs to see the full round-by-round processing history directly,
+        # not only the trade ledger.  round_log is persisted and contains one
+        # idempotent row for every processed round.
+        audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+        st.subheader(f"Round History — every processed round ({len(audit_rows)})")
+        if audit_rows:
+            audit_df = pd.DataFrame(audit_rows).sort_values("r")
+            # Friendly display order. Keep all raw audit fields available but
+            # put the operator-critical fields first.
+            preferred = [
+                "r", "n", "g", "decision", "signal", "predict", "window",
+                "confidence", "reason", "open_this_round", "open_round",
+                "pending_target", "settle_this_round", "settle_round",
+                "settle_open_round", "settle_predict", "settle_window",
+                "actual", "result", "profit", "equity", "phase", "frontier",
+            ]
+            cols = [c for c in preferred if c in audit_df.columns]
+            cols += [c for c in audit_df.columns if c not in cols]
+            audit_df = audit_df[cols]
+            st.dataframe(audit_df, use_container_width=True, hide_index=True, height=620)
+            audit_check = round_audit_integrity_report(self.ctx)
+            if not audit_check["ok"]:
+                st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
+        else:
+            st.info("No round audit yet")
+
+        with st.expander("Raw Round Audit Log"):
             if audit_rows:
-                st.dataframe(pd.DataFrame(audit_rows[-100:]), use_container_width=True, hide_index=True)
-                audit_check = round_audit_integrity_report(self.ctx)
-                if not audit_check["ok"]:
-                    st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
+                st.json(audit_rows[-100:])
             else:
                 st.info("No round audit yet")
 
