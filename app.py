@@ -3461,13 +3461,23 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        if not os.path.exists(STATE_FILE):
+        # LOCAL backend: the durable WAL is also the recovery source.
+        # REBUILD/RESET intentionally writes the new state to WAL first and
+        # may remove STATE_FILE before rerun. The old code returned a fresh
+        # EngineContext here, silently discarding recovery_replay_all_rounds
+        # and causing REBUILD to behave like a normal live catch-up (only the
+        # current frontier was evaluated). Prefer the valid WAL whenever the
+        # local state file is absent or unreadable.
+        if _valid_state(wal_data):
+            data = wal_data
+        elif not os.path.exists(STATE_FILE):
             return EngineContext()
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return EngineContext()
+        else:
+            try:
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                return EngineContext()
 
     if not isinstance(data, dict) or not data:
         return EngineContext()
