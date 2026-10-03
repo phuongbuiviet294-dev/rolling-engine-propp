@@ -361,6 +361,9 @@ class EngineContext:
     # A new state version intentionally forces a clean replay of the current
     # live Number stream instead of trusting an older/stale V58/V3.x ledger.
     state_revision: int = 0
+    # One-shot offline ledger reconstruction from the current data stream.
+    # Recovery mode is NEVER used by normal live processing.
+    recovery_replay_all_rounds: bool = False
     ledger_trade_count: int = 0
     ledger_settled_count: int = 0
     ledger_profit: float = 0.0
@@ -476,6 +479,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
     ctx.round_log = list(ctx.round_log)[-300:]
     if not hasattr(ctx, "state_revision"):
         ctx.state_revision = 0
+    if not hasattr(ctx, "recovery_replay_all_rounds"):
+        ctx.recovery_replay_all_rounds = False
     if not hasattr(ctx, "ledger_trade_count"):
         ctx.ledger_trade_count = 0
     if not hasattr(ctx, "ledger_settled_count"):
@@ -2910,6 +2915,7 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "round_txn_settled": bool(getattr(ctx, "round_txn_settled", False)),
         "round_txn_signal": dict(getattr(ctx, "round_txn_signal", {}) or {}),
         "state_revision": int(getattr(ctx, "state_revision", 0)),
+        "recovery_replay_all_rounds": bool(getattr(ctx, "recovery_replay_all_rounds", False)),
         "ledger_trade_count": int(getattr(ctx, "ledger_trade_count", 0)),
         "ledger_settled_count": int(getattr(ctx, "ledger_settled_count", 0)),
         "ledger_profit": float(getattr(ctx, "ledger_profit", 0.0)),
@@ -3530,6 +3536,7 @@ def load_live_state() -> EngineContext:
     ctx.round_txn_settled = bool(data.get("round_txn_settled", False))
     ctx.round_txn_signal = dict(data.get("round_txn_signal", {}) or {})
     ctx.state_revision = int(data.get("state_revision", 0) or 0)
+    ctx.recovery_replay_all_rounds = bool(data.get("recovery_replay_all_rounds", False))
     ctx.ledger_trade_count = int(data.get("ledger_trade_count", 0) or 0)
     ctx.ledger_settled_count = int(data.get("ledger_settled_count", 0) or 0)
     ctx.ledger_profit = float(data.get("ledger_profit", 0.0) or 0.0)
@@ -3709,6 +3716,7 @@ def reset_live_state_button() -> None:
             blank_ctx.data_length = 0
             blank_ctx.data_signature = ""
             blank_ctx.dataset_anchor_signature = ""
+            blank_ctx.recovery_replay_all_rounds = True
             cfg_rebuild = get_state_backend_config()
             if cfg_rebuild["backend"] == "gsheet" and cfg_rebuild["sheet_id"]:
                 if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
@@ -3786,6 +3794,18 @@ class EngineManager:
         self.maybe_auto_reset_for_new_day(sheet_day_seq, sheet_day_date)
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
+
+        # Never silently accept a persisted state whose ledger checkpoint disagrees
+        # with the actual trade list. A lost/partial ledger must be recoverable,
+        # not presented as a clean "No trades" state.
+        refresh_ledger_checkpoint(self.ctx)
+        ledger_count = int(getattr(self.ctx, "ledger_trade_count", 0) or 0)
+        actual_count = len(getattr(self.ctx, "trade_history", []) or [])
+        if ledger_count != actual_count:
+            st.warning(
+                f"LEDGER CHECKPOINT REPAIRED: metadata={ledger_count}, actual={actual_count}."
+            )
+            save_live_state(self.ctx)
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
@@ -3970,8 +3990,9 @@ class EngineManager:
 
         # Crash-safe resume: startup already rebuilt derived window state to
         # persisted last_length. Never replay rounds 1..last_length again.
+        recovery_mode = bool(getattr(self.ctx, "recovery_replay_all_rounds", False))
         saved_frontier = int(getattr(self.ctx, "last_length", 0) or 0)
-        start_idx = max(1, saved_frontier + 1)
+        start_idx = 1 if recovery_mode else max(1, saved_frontier + 1)
         # The current snapshot length is the only valid live-entry frontier.
         # Intermediate rows in a delayed batch are catch-up only.
         current_length = len(self.numbers)
@@ -4021,7 +4042,10 @@ class EngineManager:
             # settle an already-open exact-target trade and update windows, but
             # MUST NOT create retrospective OPENs. This preserves live timing
             # when the Sheet/app was delayed or temporarily offline.
-            is_live_frontier = (idx == current_length)
+            # Normal live mode: only the current frontier may create a new OPEN.
+            # Recovery mode: intentionally replay the complete current day to
+            # reconstruct a lost ledger from the still-intact Number column.
+            is_live_frontier = recovery_mode or (idx == current_length)
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
@@ -4129,6 +4153,7 @@ class EngineManager:
         self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
         self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(DATASET_RESET_ANCHOR_LEN, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
+        self.ctx.recovery_replay_all_rounds = False
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
