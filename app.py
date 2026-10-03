@@ -3972,6 +3972,9 @@ class EngineManager:
         # persisted last_length. Never replay rounds 1..last_length again.
         saved_frontier = int(getattr(self.ctx, "last_length", 0) or 0)
         start_idx = max(1, saved_frontier + 1)
+        # The current snapshot length is the only valid live-entry frontier.
+        # Intermediate rows in a delayed batch are catch-up only.
+        current_length = len(self.numbers)
 
         for idx in range(start_idx, len(self.groups) + 1):
             actual_group = self.groups[idx - 1]
