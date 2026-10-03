@@ -2653,8 +2653,42 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
+        # Operator verification: show exactly the Number rounds that the engine
+        # has committed as processed. This remains visible even before LIVE_START
+        # when there are no trades yet.
+        with st.expander("Google Sheet Read History - processed Number frontier", expanded=True):
+            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+            if audit_rows:
+                verify_rows = []
+                for row in audit_rows[-100:]:
+                    verify_rows.append(
+                        {
+                            "DAY_SEQ": getattr(self.ctx, "live_day_seq", 0),
+                            "Round": row.get("round"),
+                            "Number": row.get("number"),
+                            "ActualGroup": row.get("actual_group"),
+                            "Decision": row.get("decision_state", row.get("state", "")),
+                            "Phase": row.get("phase", "COMPLETE"),
+                        }
+                    )
+                st.dataframe(pd.DataFrame(verify_rows), use_container_width=True, hide_index=True)
+                st.caption(
+                    f"SHEET READ OK | DAY_SEQ={getattr(self.ctx, 'live_day_seq', 0)} | "
+                    f"frontier={self.ctx.last_length} | rows processed={len(audit_rows)} | "
+                    f"latest round={audit_rows[-1].get('round')} | "
+                    f"latest number={audit_rows[-1].get('number')}"
+                )
+            else:
+                st.info("No processed Number rounds yet")
+
+            if not audit_integrity["ok"]:
+                st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_integrity["errors"]))
+
         if not self.ctx.trade_history:
-            st.info("No trades")
+            st.info(
+                f"No trades yet. This is expected before LIVE_START_ROUND={LIVE_START_ROUND}. "
+                f"Google Sheet Number history above confirms the processed frontier."
+            )
             return
 
         df = pd.DataFrame(
@@ -2675,16 +2709,6 @@ CONF = {confidence_score:.2f}
         )
 
         st.dataframe(df.tail(50), use_container_width=True)
-
-        with st.expander("Round Audit Log - every processed round"):
-            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
-            if audit_rows:
-                st.dataframe(pd.DataFrame(audit_rows[-100:]), use_container_width=True, hide_index=True)
-                audit_check = round_audit_integrity_report(self.ctx)
-                if not audit_check["ok"]:
-                    st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
-            else:
-                st.info("No round audit yet")
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
@@ -3811,11 +3835,14 @@ class EngineManager:
             _merge_sheet_daily_history_into_ctx(self.ctx)
             return
 
-        # Only +1 is accepted. Missing DAY_SEQ means the operator has not
-        # completed/started the intermediate day and the engine must not guess.
-        if sheet_day_seq != state_seq + 1:
-            st.error(f"DAY_SEQ SKIPPED: STATE={state_seq}, SHEET={sheet_day_seq}. Expected {state_seq + 1}.")
-            st.stop()
+        # DAY_SEQ is authoritative and monotonic. A forward jump is allowed
+        # when an intermediate day has no captured dataset (e.g. 30 -> 32).
+        # The new observed DAY_SEQ always starts from a clean trading context.
+        if sheet_day_seq > state_seq + 1:
+            st.warning(
+                f"DAY_SEQ FORWARD GAP: STATE={state_seq}, SHEET={sheet_day_seq}. "
+                f"Missing sequence(s) are accepted; starting clean at DAY_SEQ {sheet_day_seq}."
+            )
 
         self.reset_context_for_new_day(sheet_day_seq, sheet_day_date)
 
