@@ -56,7 +56,7 @@ LIVE_START_ROUND = 180
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V69_4_ADAPTIVE_COH6_FINAL_LIVE_STATE_V3_6_DATA_HISTORY"
+STATE_VERSION = "V69_5_DAY_SEQ_PROFIT_MATCH_FINAL_V3_9"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -102,12 +102,6 @@ STATE_FILE = os.environ.get("V69_STATE_FILE", "v69_live_state.json")
 # remote write cannot cause a restart to replay a round from an older state.
 STATE_WAL_FILE = os.environ.get("V69_STATE_WAL_FILE", STATE_FILE + ".wal")
 STATE_WORKSHEET_DEFAULT = "state_v69"
-
-# V3.6 DATA/HISTORY split: the live Number stream is ONLY the `data` tab.
-# Historical daily P/L is read ONLY from the `history` tab.
-DATA_SHEET_NAME = "data"
-HISTORY_SHEET_NAME = "history"
-MAX_ROUNDS_PER_DAY = 288
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 2
@@ -367,6 +361,9 @@ class EngineContext:
     # A new state version intentionally forces a clean replay of the current
     # live Number stream instead of trusting an older/stale V58/V3.x ledger.
     state_revision: int = 0
+    # One-shot offline ledger reconstruction from the current data stream.
+    # Recovery mode is NEVER used by normal live processing.
+    recovery_replay_all_rounds: bool = False
     ledger_trade_count: int = 0
     ledger_settled_count: int = 0
     ledger_profit: float = 0.0
@@ -482,6 +479,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
     ctx.round_log = list(ctx.round_log)[-300:]
     if not hasattr(ctx, "state_revision"):
         ctx.state_revision = 0
+    if not hasattr(ctx, "recovery_replay_all_rounds"):
+        ctx.recovery_replay_all_rounds = False
     if not hasattr(ctx, "ledger_trade_count"):
         ctx.ledger_trade_count = 0
     if not hasattr(ctx, "ledger_settled_count"):
@@ -559,47 +558,56 @@ window_state = get_window_state()
 # DATA LOADER
 # ============================================================
 
-def _load_sheet_tab_df(sheet_name: str) -> pd.DataFrame:
-    """Read one specific Google Sheets tab by name.
+DATA_SHEET_NAME = "data"
+HISTORY_SHEET_NAME = "history"
+MAX_ROUNDS_PER_DAY = 288
 
-    IMPORTANT: Google Sheets `/export?format=csv` exports the default/first
-    worksheet when no gid is supplied. Our live workbook now has two tabs,
-    `data` and `history`, so using the default worksheet is unsafe.
 
-    The gviz CSV endpoint accepts the worksheet name directly and therefore
-    makes the tab selection explicit on every read.
+def _sheet_csv_url(sheet_name: str) -> str:
+    return (
+        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
+        f"?sheet={sheet_name}&tqx=out:csv&cache={time.time()}"
+    )
+
+
+@st.cache_data(ttl=2)
+def _load_live_sheet_df() -> pd.DataFrame:
+    """Read ONLY the current-day `data` tab.
+
+    Contract: data contains header + at most 288 round rows. Historical rows
+    must never be mixed into the live Number stream.
     """
     if INPUT_CSV_PATH:
-        # Local replay files are treated as the requested live `data` source.
-        # A separate local history file is not required for normal live use.
-        if sheet_name != DATA_SHEET_NAME:
-            return pd.DataFrame()
         try:
             return pd.read_csv(INPUT_CSV_PATH)
         except Exception as e:
             st.error(f"Load local CSV error: {e}")
             st.stop()
-
-    from urllib.parse import quote
-    safe_sheet = quote(str(sheet_name), safe="")
-    url = (
-        f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
-        f"?tqx=out:csv&sheet={safe_sheet}&cache={time.time()}"
-    )
     try:
-        df = pd.read_csv(url)
-        return df
+        df = pd.read_csv(_sheet_csv_url(DATA_SHEET_NAME))
     except Exception as e:
+        st.error(f"Load Sheet tab '{DATA_SHEET_NAME}' error: {e}")
+        st.stop()
+    if len(df) > MAX_ROUNDS_PER_DAY + 5:
         st.error(
-            f"Load Google Sheet tab '{sheet_name}' error: {e}. "
-            f"Check that the spreadsheet is accessible and the tab is named '{sheet_name}'."
+            f"LIVE DATA ERROR: tab '{DATA_SHEET_NAME}' has {len(df)} rows. "
+            f"Expected at most {MAX_ROUNDS_PER_DAY + 5}. Do not put history in data."
         )
         st.stop()
+    return df
 
 
-def _load_live_sheet_df() -> pd.DataFrame:
-    """Live input = Google Sheet tab `data`, never the default worksheet."""
-    return _load_sheet_tab_df(DATA_SHEET_NAME)
+@st.cache_data(ttl=5)
+def _load_history_sheet_df() -> pd.DataFrame:
+    """Read historical days separately; never used as live Number input."""
+    if INPUT_CSV_PATH:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(_sheet_csv_url(HISTORY_SHEET_NAME))
+    except Exception as e:
+        st.warning(f"History tab '{HISTORY_SHEET_NAME}' unavailable: {e}")
+        return pd.DataFrame()
+
 
 
 def _parse_number_value(raw: Any) -> Optional[int]:
@@ -917,21 +925,20 @@ def _get_daily_history_from_df_v35(df: pd.DataFrame, current_seq: int) -> list[d
 
 @st.cache_data(ttl=5)
 def load_daily_profit_history_from_sheet() -> list[dict]:
-    """Read completed daily P/L from the dedicated `history` tab.
-
-    The live `data` tab contains only the current day and must never be used
-    as the multi-day history source.
-    """
+    """Read completed daily P/L from `history`, never from live `data`."""
     try:
-        df = _load_sheet_tab_df(HISTORY_SHEET_NAME)
-        if df.empty or df.shape[1] < 3:
+        live_df = _load_live_sheet_df()
+        if live_df.shape[1] < 3:
             return []
-        live_df = _load_sheet_tab_df(DATA_SHEET_NAME)
-        live_seqs = [_normalize_day_seq(x) for x in live_df.iloc[:, 2].tolist()] if live_df.shape[1] >= 3 else []
+        live_seqs = [_normalize_day_seq(x) for x in live_df.iloc[:, 2].tolist()]
         current_seq = max([x for x in live_seqs if x is not None], default=0)
-        return _get_daily_history_from_df_v35(df, current_seq)
+        history_df = _load_history_sheet_df()
+        if history_df.empty or history_df.shape[1] < 5:
+            return []
+        return _get_daily_history_from_df_v35(history_df, current_seq)
     except Exception:
         return []
+
 
 
 def _merge_sheet_daily_history_into_ctx(ctx: EngineContext) -> EngineContext:
@@ -966,17 +973,9 @@ def current_live_day_id() -> str:
 
 
 def load_data() -> tuple[list[int], list[int], int, int]:
-    # Live numbers ALWAYS come from data!B, using the highest DAY_SEQ.
-    df, seq, day_date, numbers = _load_day_seq_sheet_snapshot()
+    numbers = load_numbers()
     if len(numbers) < MIN_DATA_LEN:
-        # Do not hide the real reason behind a generic "Waiting data...".
-        # This diagnostic is especially important with the two-tab workbook.
-        st.warning(
-            f"Waiting data... | tab={DATA_SHEET_NAME} | "
-            f"DAY_SEQ={seq} | date={day_date or '--'} | "
-            f"numbers_read={len(numbers)} | required={MIN_DATA_LEN}. "
-            f"Enter numbers contiguously in column B starting at round 1."
-        )
+        st.warning("Waiting data...")
         st.stop()
     groups = build_groups(numbers)
     return numbers, groups, groups[-1], len(numbers)
@@ -2365,8 +2364,8 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.4 V3.4.12 LIVE ROUND AUDIT — BUILD 2026-10-02")
-        st.caption("BUILD CHECK: V3.4.11 | STATE RESET BOUNDARY: 3.4.11 | LIVE INPUT: GOOGLE SHEET COLUMN B")
+        st.title("🚀 V69.5 V3.9 LIVE ROUND AUDIT — DATA/HISTORY FINAL")
+        st.caption("BUILD CHECK: V3.9 | STATE VERSION: V69_5_DAY_SEQ_PROFIT_MATCH_FINAL_V3_9 | LIVE INPUT: data!A:E")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2663,6 +2662,9 @@ CONF = {confidence_score:.2f}
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     def render_trade_history(self) -> None:
+        # Trade History = ONLY actual trade records.
+        # Round History is rendered separately below so trade rows are not
+        # visually duplicated inside the per-round audit table.
         st.subheader("Trade History")
 
         if getattr(self.ctx, "last_result_round", -1) >= 0:
@@ -2675,7 +2677,6 @@ CONF = {confidence_score:.2f}
 
         refresh_ledger_checkpoint(self.ctx)
         integrity = ledger_integrity_report(self.ctx)
-        audit_integrity = round_audit_integrity_report(self.ctx)
         st.caption(
             f"LEDGER | trades={integrity['trade_count']} | settled={integrity['settled_count']} | "
             f"pending={integrity['pending_count']} | profit={integrity['profit']:+.1f} | "
@@ -2684,38 +2685,74 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
-        if not self.ctx.trade_history:
+        if self.ctx.trade_history:
+            df = pd.DataFrame(
+                [
+                    {
+                        "open_round": x.round_id,
+                        "settle_round": x.settle_round,
+                        "locked_window": x.locked_window,
+                        "predict": x.predict,
+                        "actual": x.actual,
+                        "hit": x.hit,
+                        "profit": x.profit,
+                        "status": x.status,
+                        "settled": bool(x.hit is not None and x.settle_round is not None),
+                    }
+                    for x in self.ctx.trade_history
+                ]
+            )
+            # Newest trade first so the latest result is visible without scrolling.
+            st.dataframe(df.iloc[::-1].head(50).reset_index(drop=True), use_container_width=True, hide_index=True)
+        else:
             st.info("No trades")
-            return
 
-        df = pd.DataFrame(
-            [
-                {
-                    "open_round": x.round_id,
-                    "settle_round": x.settle_round,
-                    "locked_window": x.locked_window,
-                    "predict": x.predict,
-                    "actual": x.actual,
-                    "hit": x.hit,
-                    "profit": x.profit,
-                    "status": x.status,
-                    "settled": bool(x.hit is not None and x.settle_round is not None),
-                }
-                for x in self.ctx.trade_history
-            ]
-        )
-
-        st.dataframe(df.tail(50), use_container_width=True)
-
-        with st.expander("Round Audit Log - every processed round"):
-            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
-            if audit_rows:
-                st.dataframe(pd.DataFrame(audit_rows[-100:]), use_container_width=True, hide_index=True)
-                audit_check = round_audit_integrity_report(self.ctx)
-                if not audit_check["ok"]:
-                    st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
+        # --------------------------------------------------------------
+        # ROUND HISTORY: one row for every processed round, including WAIT.
+        # This is intentionally separate from Trade History and uses a compact
+        # per-round schema, so trade records are not displayed a second time.
+        # --------------------------------------------------------------
+        st.subheader("Round History")
+        audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+        if audit_rows:
+            display_rows = []
+            for row in audit_rows:
+                display_rows.append(
+                    {
+                        "round": row.get("r"),
+                        # append_round_audit() persists compact keys n/g/decision.
+                        # Use those exact persisted keys here; the previous V3 UI
+                        # incorrectly read legacy/nonexistent names and displayed
+                        # None for every number/group/decision.
+                        "number": row.get("n"),
+                        "group": row.get("g"),
+                        "window": row.get("window"),
+                        "next_group": row.get("predict"),
+                        "signal": row.get("signal"),
+                        "confidence": row.get("confidence"),
+                        "decision": row.get("decision"),
+                        "open": bool(row.get("open_this_round")),
+                        "settle": bool(row.get("settle_this_round")),
+                        "result": row.get("result") or "",
+                        "profit": row.get("profit"),
+                        "equity": row.get("equity"),
+                    }
+                )
+            # Newest processed round first; keep the existing 300-row audit limit.
+            display_df = pd.DataFrame(display_rows).iloc[::-1].reset_index(drop=True)
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                height=520,
+            )
+            audit_check = round_audit_integrity_report(self.ctx)
+            if not audit_check["ok"]:
+                st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
             else:
-                st.info("No round audit yet")
+                st.caption(f"ROUND HISTORY | {len(display_rows)} rounds processed | audit=OK")
+        else:
+            st.info("No round history yet")
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
@@ -2917,6 +2954,7 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "round_txn_settled": bool(getattr(ctx, "round_txn_settled", False)),
         "round_txn_signal": dict(getattr(ctx, "round_txn_signal", {}) or {}),
         "state_revision": int(getattr(ctx, "state_revision", 0)),
+        "recovery_replay_all_rounds": bool(getattr(ctx, "recovery_replay_all_rounds", False)),
         "ledger_trade_count": int(getattr(ctx, "ledger_trade_count", 0)),
         "ledger_settled_count": int(getattr(ctx, "ledger_settled_count", 0)),
         "ledger_profit": float(getattr(ctx, "ledger_profit", 0.0)),
@@ -3462,13 +3500,23 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        if not os.path.exists(STATE_FILE):
+        # LOCAL backend: the durable WAL is also the recovery source.
+        # REBUILD/RESET intentionally writes the new state to WAL first and
+        # may remove STATE_FILE before rerun. The old code returned a fresh
+        # EngineContext here, silently discarding recovery_replay_all_rounds
+        # and causing REBUILD to behave like a normal live catch-up (only the
+        # current frontier was evaluated). Prefer the valid WAL whenever the
+        # local state file is absent or unreadable.
+        if _valid_state(wal_data):
+            data = wal_data
+        elif not os.path.exists(STATE_FILE):
             return EngineContext()
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            return EngineContext()
+        else:
+            try:
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                return EngineContext()
 
     if not isinstance(data, dict) or not data:
         return EngineContext()
@@ -3537,6 +3585,7 @@ def load_live_state() -> EngineContext:
     ctx.round_txn_settled = bool(data.get("round_txn_settled", False))
     ctx.round_txn_signal = dict(data.get("round_txn_signal", {}) or {})
     ctx.state_revision = int(data.get("state_revision", 0) or 0)
+    ctx.recovery_replay_all_rounds = bool(data.get("recovery_replay_all_rounds", False))
     ctx.ledger_trade_count = int(data.get("ledger_trade_count", 0) or 0)
     ctx.ledger_settled_count = int(data.get("ledger_settled_count", 0) or 0)
     ctx.ledger_profit = float(data.get("ledger_profit", 0.0) or 0.0)
@@ -3716,9 +3765,26 @@ def reset_live_state_button() -> None:
             blank_ctx.data_length = 0
             blank_ctx.data_signature = ""
             blank_ctx.dataset_anchor_signature = ""
-            cfg_rebuild = get_state_backend_config()
-            if cfg_rebuild["backend"] == "gsheet" and cfg_rebuild["sheet_id"]:
-                if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
+            blank_ctx.recovery_replay_all_rounds = True
+            # IMPORTANT: the durable WAL participates in load precedence.
+            # The old rebuild path only cleared Google State/STATE_FILE but left
+            # the previous WAL intact, so restart could immediately prefer the
+            # stale WAL and erase recovery_replay_all_rounds again.
+            blank_ctx.state_revision = int(getattr(old_ctx, "state_revision", 0) or 0) + 1
+            rebuild_payload = serialize_live_state(blank_ctx)
+
+            try:
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(rebuild_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
+            except Exception as e:
+                st.error(f"REBUILD stopped: WAL write failed: {e}")
+                st.stop()
+
+            if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+                if not save_state_to_gsheet(rebuild_payload):
                     st.error("REBUILD stopped: Google State could not be cleared safely.")
                     st.stop()
             else:
@@ -3748,10 +3814,24 @@ def reset_live_state_button() -> None:
             blank_ctx.data_length = 0
             blank_ctx.data_signature = ""
             blank_ctx.dataset_anchor_signature = ""
+            # Reset must advance the durable revision and replace the WAL too;
+            # otherwise the old WAL can win during the next load and undo Reset.
+            blank_ctx.state_revision = int(getattr(old_ctx_for_history, "state_revision", 0) or 0) + 1
+            reset_payload = serialize_live_state(blank_ctx)
+
+            try:
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(reset_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
+            except Exception as e:
+                st.error(f"MANUAL RESET stopped: WAL write failed: {e}")
+                st.stop()
 
             cfg2 = get_state_backend_config()
             if cfg2["backend"] == "gsheet" and cfg2["sheet_id"]:
-                if not save_state_to_gsheet(serialize_live_state(blank_ctx)):
+                if not save_state_to_gsheet(reset_payload):
                     st.error(
                         "MANUAL RESET stopped: Google State could not be reset safely. "
                         "Fix the Google connection and try again. Old state was not touched."
@@ -3793,6 +3873,18 @@ class EngineManager:
         self.maybe_auto_reset_for_new_day(sheet_day_seq, sheet_day_date)
 
         self.numbers, self.groups, self.actual_group, self.round_id = load_data()
+
+        # Never silently accept a persisted state whose ledger checkpoint disagrees
+        # with the actual trade list. A lost/partial ledger must be recoverable,
+        # not presented as a clean "No trades" state.
+        refresh_ledger_checkpoint(self.ctx)
+        ledger_count = int(getattr(self.ctx, "ledger_trade_count", 0) or 0)
+        actual_count = len(getattr(self.ctx, "trade_history", []) or [])
+        if ledger_count != actual_count:
+            st.warning(
+                f"LEDGER CHECKPOINT REPAIRED: metadata={ledger_count}, actual={actual_count}."
+            )
+            save_live_state(self.ctx)
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
@@ -3851,6 +3943,13 @@ class EngineManager:
         self.reset_context_for_new_day(sheet_day_seq, sheet_day_date)
 
     def reset_context_for_new_day(self, new_day_seq: int, new_day_date: str) -> None:
+        # PROFIT-MATCH RULE:
+        # A trade opened on the final round of DAY_SEQ N has no target round
+        # inside that completed daily dataset. Historical live behavior starts
+        # DAY_SEQ N+1 from a clean trade state, so unresolved end-of-day PENDING
+        # trades are intentionally discarded at the boundary. Do NOT carry them
+        # into round 1 of the next DAY_SEQ; doing so changes daily P/L and breaks
+        # the audited +46.5 historical result.
         """Atomically start the next DAY_SEQ while preserving daily history."""
         cfg = get_state_backend_config()
         old_ctx = self.ctx
@@ -3970,8 +4069,34 @@ class EngineManager:
 
         # Crash-safe resume: startup already rebuilt derived window state to
         # persisted last_length. Never replay rounds 1..last_length again.
+        recovery_mode = bool(getattr(self.ctx, "recovery_replay_all_rounds", False))
         saved_frontier = int(getattr(self.ctx, "last_length", 0) or 0)
-        start_idx = max(1, saved_frontier + 1)
+        start_idx = 1 if recovery_mode else max(1, saved_frontier + 1)
+        # The current snapshot length is the only valid live-entry frontier.
+        # Intermediate rows in a delayed batch are catch-up only.
+        current_length = len(self.numbers)
+
+        # FAST STARTUP: on a fresh normal day with fewer than LIVE_START_ROUND
+        # numbers, only warm-up windows need to be reconstructed. No trade/open/
+        # settle decision exists below LIVE_START_ROUND, so doing this in memory
+        # and committing once is crash-safe and avoids hundreds of state writes.
+        if (not recovery_mode and saved_frontier == 0 and current_length < LIVE_START_ROUND):
+            for idx in range(1, current_length + 1):
+                self.window_engine.update_one_round(self.groups[idx - 1], idx)
+            self.ctx.last_length = current_length
+            self.ctx.last_window_round = current_length
+            self.ctx.last_decision_round = current_length
+            self.ctx.last_decision_state = "WARMUP"
+            self.ctx.last_decision_next_group = None
+            self.ctx.data_length = current_length
+            self.ctx.data_signature = make_numbers_signature(self.numbers, current_length)
+            self.ctx.dataset_anchor_signature = make_numbers_signature(
+                self.numbers, min(DATASET_RESET_ANCHOR_LEN, current_length)
+            )
+            self.ctx.hybrid_initialized = True
+            self.ctx.recovery_replay_all_rounds = False
+            save_live_state(self.ctx)
+            return
 
         for idx in range(start_idx, len(self.groups) + 1):
             actual_group = self.groups[idx - 1]
@@ -4013,6 +4138,15 @@ class EngineManager:
                 continue
 
             # Durable per-round transaction with crash-safe phase resume.
+            # LIVE GAP RULE: when several rows arrive in one snapshot, only the
+            # latest row is a valid NEW-ENTRY frontier. Intermediate rows may
+            # settle an already-open exact-target trade and update windows, but
+            # MUST NOT create retrospective OPENs. This preserves live timing
+            # when the Sheet/app was delayed or temporarily offline.
+            # Normal live mode: only the current frontier may create a new OPEN.
+            # Recovery mode: intentionally replay the complete current day to
+            # reconstruct a lost ledger from the still-intact Number column.
+            is_live_frontier = recovery_mode or (idx == current_length)
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
@@ -4037,6 +4171,24 @@ class EngineManager:
                 self.ctx.round_txn_phase = "WINDOW_UPDATED"
                 save_live_state(self.ctx)
                 phase = "WINDOW_UPDATED"
+
+            # Intermediate catch-up rows are state/warm-up only. Do not run
+            # build_signal() here because it can relock/cool windows and would
+            # turn an old round into a retrospective trading decision.
+            if phase == "WINDOW_UPDATED" and not is_live_frontier:
+                self.ctx.last_decision_round = idx
+                self.ctx.last_decision_state = "CATCH_UP"
+                self.ctx.last_decision_next_group = None
+                self.ctx.round_txn_opened = False
+                self.ctx.round_txn_phase = "COMPLETE"
+                self.ctx.round_txn_signal = {}
+                self.ctx.last_length = idx
+                append_round_audit(self.ctx, idx, self.numbers[idx - 1], actual_group, None)
+                self.ctx.data_length = idx
+                self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
+                save_live_state(self.ctx)
+                continue
+
             if phase == "WINDOW_UPDATED":
                 signal = self.signal_engine.build_signal(idx)
                 signal = self.signal_engine.apply_sample_aware_coherence(signal)
@@ -4102,6 +4254,7 @@ class EngineManager:
         self.ctx.data_signature = make_numbers_signature(self.numbers, self.ctx.last_length)
         self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(DATASET_RESET_ANCHOR_LEN, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
+        self.ctx.recovery_replay_all_rounds = False
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
@@ -4236,6 +4389,7 @@ class EngineManager:
             f"trades={len(self.ctx.trade_history)} | "
             f"settled={sum(1 for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None)} | "
             f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f} | "
+            f"daily_hist={len(getattr(self.ctx, 'daily_profit_history', []) or [])} | "
             f"ledger={'OK' if integrity['ok'] else 'ERROR:' + ','.join(integrity['errors'])} | audit={'OK' if audit_integrity['ok'] else 'ERROR:' + ','.join(audit_integrity['errors'])}"
         )
 
@@ -4282,32 +4436,12 @@ class EngineManager:
 
         return signal, confidence_score, confidence_level
 
-    def render_live_source_debug(self) -> None:
-        """Show the exact live Google Sheet source used by the engine."""
-        try:
-            _df, seq, day_date, nums = _load_day_seq_sheet_snapshot()
-            filled = len(nums)
-            with st.expander("LIVE DATA SOURCE", expanded=True):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Sheet tab", DATA_SHEET_NAME)
-                c2.metric("DAY_SEQ", seq)
-                c3.metric("DATE", day_date or "--")
-                c4.metric("FRONTIER", filled)
-                st.caption(
-                    f"Reading A:E from Google Sheet tab '{DATA_SHEET_NAME}'. "
-                    f"Only contiguous B values from round 1 are accepted. "
-                    f"History is read separately from '{HISTORY_SHEET_NAME}'."
-                )
-        except Exception as e:
-            st.error(f"LIVE DATA SOURCE diagnostic failed: {e}")
-
     def run(self) -> None:
         self.hybrid_replay_once()
         self.process_new_rounds()
 
         signal, confidence_score, confidence_level = self.build_display_signal()
 
-        self.render_live_source_debug()
         self.dashboard.render_header()
         self.dashboard.render_signal(signal, confidence_score)
         self.dashboard.render_market(signal)
@@ -4327,11 +4461,9 @@ class EngineManager:
             f"""
 V3.5 DAY_SEQ LIVE TRANSACTION + ROUND AUDIT / AUDITED
 
-DAY boundary: highest DAY_SEQ from Google Sheet tab `data`. No daily CLEAR is required.
+DAY boundary: highest Sheet DAY_SEQ. No daily CLEAR is required.
 
-Live Number source: `data` column B. Daily history source: `history`.
-
-After that: only process new rows from `data`.
+After that: only process new Google Sheet rows.
 V58 rule: UI refresh is read-only; only new rounds can change trade state.
 Open/settle decisions happen only when a new round appears, not every rerun.
 Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
