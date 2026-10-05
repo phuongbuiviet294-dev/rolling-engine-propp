@@ -12,6 +12,7 @@ import os
 import math
 import hashlib
 import re
+import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import Counter, deque
@@ -102,6 +103,35 @@ STATE_FILE = os.environ.get("V69_STATE_FILE", "v69_live_state.json")
 # remote write cannot cause a restart to replay a round from an older state.
 STATE_WAL_FILE = os.environ.get("V69_STATE_WAL_FILE", STATE_FILE + ".wal")
 STATE_WORKSHEET_DEFAULT = "state_v69"
+
+
+def _atomic_write_json(path: str, payload: dict) -> None:
+    """Atomic JSON write with a UNIQUE temp file.
+
+    Streamlit can rerun the script concurrently. A fixed `<path>.tmp` lets one
+    rerun rename another rerun's temp file, producing Errno 2. mkstemp gives
+    every writer its own temp file and os.replace keeps the final commit atomic.
+    """
+    target = os.path.abspath(path)
+    directory = os.path.dirname(target) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(target) + ".", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        raise
+
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 2
@@ -3416,12 +3446,7 @@ def save_live_state(ctx: EngineContext) -> None:
     # actually committing, restart can recover the exact newer revision instead
     # of replaying the round from an older Google State snapshot.
     try:
-        wal_tmp = STATE_WAL_FILE + ".tmp"
-        with open(wal_tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(wal_tmp, STATE_WAL_FILE)
+        _atomic_write_json(STATE_WAL_FILE, data)
     except Exception as e:
         st.error(f"Durable WAL write failed: {e}")
         st.stop()
@@ -3436,12 +3461,7 @@ def save_live_state(ctx: EngineContext) -> None:
         st.stop()
 
     try:
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, STATE_FILE)
+        _atomic_write_json(STATE_FILE, data)
     except Exception as e:
         st.error(f"Save local state error: {e}")
         st.stop()
@@ -3774,11 +3794,7 @@ def reset_live_state_button() -> None:
             rebuild_payload = serialize_live_state(blank_ctx)
 
             try:
-                wal_tmp = STATE_WAL_FILE + ".tmp"
-                with open(wal_tmp, "w", encoding="utf-8") as f:
-                    json.dump(rebuild_payload, f, ensure_ascii=False, indent=2)
-                    f.flush(); os.fsync(f.fileno())
-                os.replace(wal_tmp, STATE_WAL_FILE)
+                _atomic_write_json(STATE_WAL_FILE, rebuild_payload)
             except Exception as e:
                 st.error(f"REBUILD stopped: WAL write failed: {e}")
                 st.stop()
@@ -3820,11 +3836,7 @@ def reset_live_state_button() -> None:
             reset_payload = serialize_live_state(blank_ctx)
 
             try:
-                wal_tmp = STATE_WAL_FILE + ".tmp"
-                with open(wal_tmp, "w", encoding="utf-8") as f:
-                    json.dump(reset_payload, f, ensure_ascii=False, indent=2)
-                    f.flush(); os.fsync(f.fileno())
-                os.replace(wal_tmp, STATE_WAL_FILE)
+                _atomic_write_json(STATE_WAL_FILE, reset_payload)
             except Exception as e:
                 st.error(f"MANUAL RESET stopped: WAL write failed: {e}")
                 st.stop()
@@ -3970,11 +3982,7 @@ class EngineManager:
 
         payload = serialize_live_state(blank_ctx)
         try:
-            wal_tmp = STATE_WAL_FILE + ".tmp"
-            with open(wal_tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.flush(); os.fsync(f.fileno())
-            os.replace(wal_tmp, STATE_WAL_FILE)
+            _atomic_write_json(STATE_WAL_FILE, payload)
         except Exception as e:
             st.error(f"NEW DAY SEQ reset stopped: WAL write failed: {e}")
             st.stop()
