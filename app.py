@@ -2394,8 +2394,8 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.5 V3.9 LIVE ROUND AUDIT — DATA/HISTORY FINAL")
-        st.caption("BUILD CHECK: V3.9 | STATE VERSION: V69_5_DAY_SEQ_PROFIT_MATCH_FINAL_V3_9 | LIVE INPUT: data!A:E")
+        st.title("🚀 V69.5 V3.9 LIVE — ROUND1 RECOVERY FIX")
+        st.caption("BUILD CHECK: V3.9-R1FIX | LOGIC UNCHANGED | RESET TODAY = REPLAY ROUND 1..NOW | LIVE INPUT: data!A:E")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3764,6 +3764,7 @@ def multi_day_low_confidence_filter(ctx: EngineContext, confidence: float) -> bo
 def reset_live_state_button() -> None:
     with st.sidebar:
         st.subheader("Live Control")
+        st.caption("R1FIX: dùng RESET TODAY để dựng lại đúng toàn bộ ngày hiện tại từ round 1; không tạo CATCH_UP cho các round >=180.")
         cfg = get_state_backend_config()
         if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
@@ -3814,55 +3815,63 @@ def reset_live_state_button() -> None:
             st.session_state.v50_true_live_window_state = {w: WindowRecord() for w in WINDOWS}
             st.rerun()
 
-        if st.button("Reset Live State"):
+        if st.button("RESET TODAY → REPLAY ROUND 1..NOW"):
+            # R1FIX: a manual reset of the CURRENT DAY must reconstruct the day
+            # exactly as if this same code had been running continuously from round 1.
+            # Rounds 1..179 warm the window engine; rounds >= LIVE_START_ROUND run
+            # the normal settle -> window -> signal -> protection -> open path.
+            # This avoids the old Reset behavior where historical rounds became
+            # CATCH_UP and only the current frontier could open a trade.
             old_ctx_for_history = ensure_ctx_fields(get_live_ctx())
-            carry_history = carry_forward_daily_profit_history(old_ctx_for_history)
-            # Manual reset MUST use the same atomic-safe path as automatic
-            # daily reset. Never delete remotely and rerun blindly: if the
-            # Google State write fails, old state could be loaded again.
             blank_ctx = ensure_ctx_fields(EngineContext())
-            blank_ctx.daily_profit_history = carry_history
-            blank_ctx.live_day_id = current_live_day_id()
-            blank_ctx.protection_reason = "MANUAL_RESET"
+            blank_ctx.daily_profit_history = list(getattr(old_ctx_for_history, "daily_profit_history", []) or [])[-10:]
+            seq, day_date = get_current_sheet_day_info()
+            blank_ctx.live_day_seq = int(seq or 0)
+            blank_ctx.live_day_date = str(day_date or "")
+            blank_ctx.live_day_id = str(day_date or "")
+            blank_ctx.protection_reason = "MANUAL_RESET_REPLAY_FROM_ROUND1"
             blank_ctx.state_version = STATE_VERSION
             blank_ctx.hybrid_initialized = False
             blank_ctx.last_length = 0
             blank_ctx.data_length = 0
             blank_ctx.data_signature = ""
             blank_ctx.dataset_anchor_signature = ""
-            # Reset must advance the durable revision and replace the WAL too;
-            # otherwise the old WAL can win during the next load and undo Reset.
+            blank_ctx.round_log = []
+            blank_ctx.trade_history = []
+            blank_ctx.equity_curve = []
+            blank_ctx.round_txn_round = -1
+            blank_ctx.round_txn_phase = "IDLE"
+            blank_ctx.round_txn_opened = False
+            blank_ctx.round_txn_settled = False
+            blank_ctx.round_txn_signal = {}
+            # Critical switch: hybrid_replay_once() will start_idx=1 and treat every
+            # round >= LIVE_START_ROUND as a valid historical live frontier.
+            blank_ctx.recovery_replay_all_rounds = True
             blank_ctx.state_revision = int(getattr(old_ctx_for_history, "state_revision", 0) or 0) + 1
             reset_payload = serialize_live_state(blank_ctx)
 
             try:
                 _atomic_write_json(STATE_WAL_FILE, reset_payload)
             except Exception as e:
-                st.error(f"MANUAL RESET stopped: WAL write failed: {e}")
+                st.error(f"ROUND1 REPLAY stopped: WAL write failed: {e}")
                 st.stop()
 
             cfg2 = get_state_backend_config()
             if cfg2["backend"] == "gsheet" and cfg2["sheet_id"]:
                 if not save_state_to_gsheet(reset_payload):
-                    st.error(
-                        "MANUAL RESET stopped: Google State could not be reset safely. "
-                        "Fix the Google connection and try again. Old state was not touched."
-                    )
+                    st.error("ROUND1 REPLAY stopped: Google State could not be reset safely.")
                     st.stop()
             else:
                 try:
-                    if os.path.exists(STATE_FILE):
-                        os.remove(STATE_FILE)
+                    _atomic_write_json(STATE_FILE, reset_payload)
                 except Exception as e:
-                    st.error(f"MANUAL RESET stopped: cannot remove local state: {e}")
+                    st.error(f"ROUND1 REPLAY stopped: cannot write local state: {e}")
                     st.stop()
 
             st.session_state.pop("v69_reset_required", None)
             st.session_state.pop("v69_reset_reason", None)
             st.session_state.v50_true_live_ctx = blank_ctx
-            st.session_state.v50_true_live_window_state = {
-                w: WindowRecord() for w in WINDOWS
-            }
+            st.session_state.v50_true_live_window_state = {w: WindowRecord() for w in WINDOWS}
             st.rerun()
 
 
