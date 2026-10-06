@@ -384,6 +384,7 @@ class EngineContext:
     # One-shot offline ledger reconstruction from the current data stream.
     # Recovery mode is NEVER used by normal live processing.
     recovery_replay_all_rounds: bool = False
+    data_correction_sequential_replay: bool = False
     ledger_trade_count: int = 0
     ledger_settled_count: int = 0
     ledger_profit: float = 0.0
@@ -501,6 +502,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.state_revision = 0
     if not hasattr(ctx, "recovery_replay_all_rounds"):
         ctx.recovery_replay_all_rounds = False
+    if not hasattr(ctx, "data_correction_sequential_replay"):
+        ctx.data_correction_sequential_replay = False
     if not hasattr(ctx, "ledger_trade_count"):
         ctx.ledger_trade_count = 0
     if not hasattr(ctx, "ledger_settled_count"):
@@ -2405,7 +2408,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.0 | TRUE-FRONTIER GAP SAFE | LIVE INPUT: GOOGLE SHEET COLUMN B")
+        st.caption("BUILD CHECK: V4.2 | DATA-CORRECTION RECOVERY | TRUE-FRONTIER | LIVE INPUT: GOOGLE SHEET COLUMN B")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2957,6 +2960,7 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "round_txn_signal": dict(getattr(ctx, "round_txn_signal", {}) or {}),
         "state_revision": int(getattr(ctx, "state_revision", 0)),
         "recovery_replay_all_rounds": bool(getattr(ctx, "recovery_replay_all_rounds", False)),
+        "data_correction_sequential_replay": bool(getattr(ctx, "data_correction_sequential_replay", False)),
         "ledger_trade_count": int(getattr(ctx, "ledger_trade_count", 0)),
         "ledger_settled_count": int(getattr(ctx, "ledger_settled_count", 0)),
         "ledger_profit": float(getattr(ctx, "ledger_profit", 0.0)),
@@ -3627,6 +3631,7 @@ def load_live_state() -> EngineContext:
     ctx.round_txn_signal = dict(data.get("round_txn_signal", {}) or {})
     ctx.state_revision = int(data.get("state_revision", 0) or 0)
     ctx.recovery_replay_all_rounds = bool(data.get("recovery_replay_all_rounds", False))
+    ctx.data_correction_sequential_replay = bool(data.get("data_correction_sequential_replay", False))
     ctx.ledger_trade_count = int(data.get("ledger_trade_count", 0) or 0)
     ctx.ledger_settled_count = int(data.get("ledger_settled_count", 0) or 0)
     ctx.ledger_profit = float(data.get("ledger_profit", 0.0) or 0.0)
@@ -3790,6 +3795,56 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
+        if st.button("REPLAY TODAY FROM CORRECTED NUMBERS"):
+            # V4.2 emergency recovery for the ACTIVE DAY only.
+            # Use only when today's ledger is missing/corrupt after Number edits.
+            old_ctx = ensure_ctx_fields(get_live_ctx())
+            blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
+            blank_ctx.live_day_id = str(getattr(old_ctx, "live_day_id", "") or current_live_day_id())
+            blank_ctx.live_day_seq = int(getattr(old_ctx, "live_day_seq", 0) or 0)
+            blank_ctx.live_day_date = str(getattr(old_ctx, "live_day_date", "") or "")
+            blank_ctx.protection_reason = "MANUAL_DATA_CORRECTION_SEQUENTIAL_REPLAY"
+            blank_ctx.state_version = STATE_VERSION
+            blank_ctx.hybrid_initialized = False
+            blank_ctx.last_length = 0
+            blank_ctx.data_length = 0
+            blank_ctx.data_signature = ""
+            blank_ctx.dataset_anchor_signature = ""
+            blank_ctx.recovery_replay_all_rounds = True
+            blank_ctx.data_correction_sequential_replay = True
+            blank_ctx.state_revision = int(getattr(old_ctx, "state_revision", 0) or 0) + 1
+            rebuild_payload = serialize_live_state(blank_ctx)
+
+            try:
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(rebuild_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
+            except Exception as e:
+                st.error(f"REPLAY stopped: WAL write failed: {e}")
+                st.stop()
+
+            if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+                if not save_state_to_gsheet(rebuild_payload):
+                    st.error("REPLAY stopped: Google State write failed.")
+                    st.stop()
+            else:
+                try:
+                    tmp = STATE_FILE + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(rebuild_payload, f, ensure_ascii=False, indent=2)
+                        f.flush(); os.fsync(f.fileno())
+                    os.replace(tmp, STATE_FILE)
+                except Exception as e:
+                    st.error(f"REPLAY stopped: local state write failed: {e}")
+                    st.stop()
+
+            st.session_state.v50_true_live_ctx = blank_ctx
+            st.session_state.v50_true_live_window_state = {w: WindowRecord() for w in WINDOWS}
+            st.rerun()
+
         if st.button("REBUILD ENGINE STATE FROM CURRENT B (NO HISTORICAL TRADES)"):
             # V4.0 TRUE-FRONTIER recovery: rebuild deterministic window/engine state
             # from the currently loaded Number column, but NEVER invent historical
@@ -4165,7 +4220,14 @@ class EngineManager:
             # create a NEW trade. Recovery may rebuild windows/state, but Number
             # history cannot prove historical arrival frontiers and therefore must
             # never create retrospective trades.
-            is_live_frontier = (idx == current_length)
+            # V4.2: normal live/recovery may OPEN only on the physical frontier.
+            # Explicit DATA-CORRECTION replay is different: user has accepted a
+            # deterministic sequential reconstruction of the active day because
+            # its original ledger is missing/corrupt.
+            is_live_frontier = bool(
+                getattr(self.ctx, "data_correction_sequential_replay", False)
+                or (idx == current_length)
+            )
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
@@ -4274,12 +4336,24 @@ class EngineManager:
         self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, min(DATASET_RESET_ANCHOR_LEN, self.ctx.last_length))
         self.ctx.data_length = self.ctx.last_length
         self.ctx.recovery_replay_all_rounds = False
+        self.ctx.data_correction_sequential_replay = False
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
     def process_new_rounds(self) -> None:
         # Process only rows added after the first hybrid replay.
         current_length = len(self.groups)
+
+        # V4.2 correction guard: if rows already processed were edited/deleted,
+        # never silently continue with a ledger produced from different Numbers.
+        last_len = int(getattr(self.ctx, "last_length", 0) or 0)
+        saved_sig = str(getattr(self.ctx, "data_signature", "") or "")
+        if last_len > 0 and saved_sig and current_length >= last_len:
+            now_sig = make_numbers_signature(self.numbers, last_len)
+            if now_sig != saved_sig:
+                self.ctx.protection_reason = "DATA_CORRECTION_DETECTED_USE_REPLAY_TODAY"
+                self.ctx.open_reason = "DATA_CORRECTION_DETECTED_USE_REPLAY_TODAY"
+                return
 
         if current_length <= self.ctx.last_length:
             return
