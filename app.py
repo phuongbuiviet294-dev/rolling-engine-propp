@@ -324,6 +324,8 @@ class WindowRecord:
 @dataclass
 class EngineContext:
     trade_history: list[TradeRecord] = field(default_factory=list)
+    # Cross-deploy/display archive. Strategy NEVER reads this field.
+    trade_archive: list[TradeRecord] = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
     signal_history: deque = field(default_factory=lambda: deque(maxlen=SIGNAL_HISTORY_LEN))
     signal_flip_history: deque = field(default_factory=lambda: deque(maxlen=SIGNAL_HISTORY_LEN))
@@ -2412,7 +2414,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.2.3 | 1 REMOTE COMMIT/ROUND | SINGLE SNAPSHOT | TRUE-FRONTIER")
+        st.caption("BUILD CHECK: V4.2.5 | RESET TODAY ONLY | PERSISTENT ARCHIVE | TRUE-FRONTIER")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2730,13 +2732,16 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
-        if not self.ctx.trade_history:
+        archive_rows = merge_trade_archive(self.ctx)
+        if not archive_rows:
             st.info("No trades")
             return
 
         df = pd.DataFrame(
             [
                 {
+                    "day_seq": int(getattr(x, "open_day_seq", 0) or 0),
+                    "date": str(getattr(x, "open_day_date", "") or ""),
                     "open_round": x.round_id,
                     "settle_round": x.settle_round,
                     "locked_window": x.locked_window,
@@ -2747,11 +2752,15 @@ CONF = {confidence_score:.2f}
                     "status": x.status,
                     "settled": bool(x.hit is not None and x.settle_round is not None),
                 }
-                for x in self.ctx.trade_history
+                for x in archive_rows
             ]
         )
 
-        st.dataframe(df.tail(50), use_container_width=True)
+        st.caption(
+            f"PERSISTENT TRADE ARCHIVE | total={len(archive_rows)} | "
+            f"current-day={len(self.ctx.trade_history)} | survives code deploy/reset/new day"
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
         with st.expander("Round Audit Log - every processed round"):
             audit_rows = list(getattr(self.ctx, "round_log", []) or [])
@@ -2914,6 +2923,7 @@ def serialize_live_state(ctx: EngineContext) -> dict:
     """Serialize EngineContext into the single persistent V3 state payload."""
     return {
         "trade_history": [trade_record_to_dict(x) for x in ctx.trade_history],
+        "trade_archive": [trade_record_to_dict(x) for x in merge_trade_archive(ctx)],
         "equity_curve": list(ctx.equity_curve),
         "signal_history": list(ctx.signal_history),
         "signal_flip_history": list(ctx.signal_flip_history),
@@ -3114,6 +3124,37 @@ def trade_record_from_dict(d: dict) -> TradeRecord:
         open_batch_id=str(d.get("open_batch_id", "") or ""),
         open_is_frontier=bool(d.get("open_is_frontier", False)),
     )
+
+
+
+def _trade_archive_key(rec: TradeRecord) -> tuple:
+    return (
+        int(getattr(rec, "open_day_seq", 0) or 0),
+        str(getattr(rec, "open_day_date", "") or ""),
+        int(getattr(rec, "round_id", 0) or 0),
+    )
+
+
+def merge_trade_archive(ctx: EngineContext) -> list[TradeRecord]:
+    """Merge immutable-ish display archive with current live ledger.
+
+    Current trade_history wins for the same day/open_round so a legitimate
+    corrected-day replay can replace its prior reconstructed record. This
+    archive is display/persistence only and is never used for decisions/profit.
+    """
+    merged = {}
+    for rec in list(getattr(ctx, "trade_archive", []) or []):
+        merged[_trade_archive_key(rec)] = rec
+    for rec in list(getattr(ctx, "trade_history", []) or []):
+        merged[_trade_archive_key(rec)] = rec
+    rows = list(merged.values())
+    rows.sort(key=lambda x: (
+        int(getattr(x, "open_day_seq", 0) or 0),
+        str(getattr(x, "open_day_date", "") or ""),
+        int(getattr(x, "round_id", 0) or 0),
+    ))
+    ctx.trade_archive = rows
+    return rows
 
 
 def _ledger_checksum(ctx: EngineContext) -> str:
@@ -3614,6 +3655,14 @@ def load_live_state() -> EngineContext:
         trade_record_from_dict(x)
         for x in data.get("trade_history", [])
     ]
+    archive_payload = data.get("trade_archive")
+    if isinstance(archive_payload, list):
+        ctx.trade_archive = [trade_record_from_dict(x) for x in archive_payload]
+    else:
+        # First upgrade from V4.2.3: preserve every trade that still exists
+        # in the old persistent state before any reset/new-day transition.
+        ctx.trade_archive = list(ctx.trade_history)
+    merge_trade_archive(ctx)
     ctx.equity_curve = list(data.get("equity_curve", []))
     ctx.signal_history.extend(data.get("signal_history", []))
     ctx.signal_flip_history.extend(data.get("signal_flip_history", []))
@@ -3832,16 +3881,27 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
-        if st.button("FAST REPLAY TODAY FROM CORRECTED NUMBERS"):
-            # V4.2 emergency recovery for the ACTIVE DAY only.
-            # Use only when today's ledger is missing/corrupt after Number edits.
+        if st.button("RESET & REPLAY TODAY", type="primary", use_container_width=True):
+            # Reset ONLY active day; preserve previous-day archive.
             old_ctx = ensure_ctx_fields(get_live_ctx())
+            current_seq = int(getattr(old_ctx, "live_day_seq", 0) or 0)
+            current_date = str(getattr(old_ctx, "live_day_date", "") or "")
+            prior_archive = merge_trade_archive(old_ctx)
+            kept_archive = []
+            for rec in prior_archive:
+                rec_seq = int(getattr(rec, "open_day_seq", 0) or 0)
+                rec_date = str(getattr(rec, "open_day_date", "") or "")
+                is_today = (rec_seq == current_seq) and (not current_date or rec_date == current_date)
+                if not is_today:
+                    kept_archive.append(rec)
+
             blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.trade_archive = list(kept_archive)
             blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
             blank_ctx.live_day_id = str(getattr(old_ctx, "live_day_id", "") or current_live_day_id())
-            blank_ctx.live_day_seq = int(getattr(old_ctx, "live_day_seq", 0) or 0)
-            blank_ctx.live_day_date = str(getattr(old_ctx, "live_day_date", "") or "")
-            blank_ctx.protection_reason = "MANUAL_DATA_CORRECTION_SEQUENTIAL_REPLAY"
+            blank_ctx.live_day_seq = current_seq
+            blank_ctx.live_day_date = current_date
+            blank_ctx.protection_reason = "RESET_REPLAY_TODAY_SEQUENTIAL"
             blank_ctx.state_version = STATE_VERSION
             blank_ctx.hybrid_initialized = False
             blank_ctx.last_length = 0
@@ -3861,12 +3921,12 @@ def reset_live_state_button() -> None:
                     f.flush(); os.fsync(f.fileno())
                 os.replace(wal_tmp, STATE_WAL_FILE)
             except Exception as e:
-                st.error(f"REPLAY stopped: WAL write failed: {e}")
+                st.error(f"RESET & REPLAY stopped: WAL write failed: {e}")
                 st.stop()
 
             if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
                 if not save_state_to_gsheet(rebuild_payload):
-                    st.error("REPLAY stopped: Google State write failed.")
+                    st.error("RESET & REPLAY stopped: Google State write failed.")
                     st.stop()
             else:
                 try:
@@ -3876,11 +3936,15 @@ def reset_live_state_button() -> None:
                         f.flush(); os.fsync(f.fileno())
                     os.replace(tmp, STATE_FILE)
                 except Exception as e:
-                    st.error(f"REPLAY stopped: local state write failed: {e}")
+                    st.error(f"RESET & REPLAY stopped: state write failed: {e}")
                     st.stop()
 
-            st.session_state.v50_true_live_ctx = blank_ctx
-            st.session_state.v50_true_live_window_state = {w: WindowRecord() for w in WINDOWS}
+            st.session_state["live_ctx"] = blank_ctx
+            st.session_state["engine_ctx"] = blank_ctx
+            st.success(
+                f"Reset DaySeq {current_seq}. Previous days preserved. "
+                "Replaying today's numbers sequentially..."
+            )
             st.rerun()
 
         if st.button("REBUILD ENGINE STATE FROM CURRENT B (NO HISTORICAL TRADES)"):
@@ -3890,6 +3954,7 @@ def reset_live_state_button() -> None:
             # Number alone, so the old ledger cannot be reconstructed truthfully.
             old_ctx = ensure_ctx_fields(get_live_ctx())
             blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.trade_archive = list(getattr(old_ctx, "trade_archive", []) or getattr(old_ctx, "trade_history", []) or [])
             blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
             blank_ctx.live_day_id = current_live_day_id()
             blank_ctx.protection_reason = "MANUAL_REBUILD_ENGINE_NO_HISTORICAL_TRADES"
@@ -3939,6 +4004,7 @@ def reset_live_state_button() -> None:
             # daily reset. Never delete remotely and rerun blindly: if the
             # Google State write fails, old state could be loaded again.
             blank_ctx = ensure_ctx_fields(EngineContext())
+            blank_ctx.trade_archive = list(getattr(old_ctx_for_history, "trade_archive", []) or getattr(old_ctx_for_history, "trade_history", []) or [])
             blank_ctx.daily_profit_history = carry_history
             blank_ctx.live_day_id = current_live_day_id()
             blank_ctx.protection_reason = "MANUAL_RESET"
@@ -4098,6 +4164,7 @@ class EngineManager:
         old_ctx = self.ctx
         _merge_sheet_daily_history_into_ctx(old_ctx)
         blank_ctx = ensure_ctx_fields(EngineContext())
+        blank_ctx.trade_archive = list(getattr(old_ctx, "trade_archive", []) or getattr(old_ctx, "trade_history", []) or [])
         blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
         blank_ctx.live_day_seq = int(new_day_seq)
         blank_ctx.live_day_date = str(new_day_date or "")
