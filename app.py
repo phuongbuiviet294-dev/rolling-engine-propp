@@ -243,6 +243,9 @@ class TradeRecord:
 class SignalRecord:
     state: str = "WAIT"
     next_group: Optional[int] = None
+    # V4.2.7: explicit reason why a signal cannot become READY.
+    # This is diagnostic only; it does not alter the trade ledger.
+    wait_reason: str = ""
 
     # Shadow/live performance after LIVE_START_ROUND.
     live_hit_history: deque = field(default_factory=lambda: deque(maxlen=50))
@@ -1561,36 +1564,56 @@ class SignalEngine:
             return w, obj, "RELOCK_BY_SHORT_TERM_FALLBACK"
 
         # ====================================================
-        # 3) Last resort: current TopN best score, but avoid known bad real windows
+        # 3) V4.2.7 READY-ELIGIBLE last resort
         # ====================================================
-        for w, obj in top_rows:
-            known_bad = self.known_bad_window(w)
-            if obj.next_group is not None and not known_bad:
-                return w, obj, "FORCE_TOP_WINDOW_NO_DEADLOCK"
-
-        # Absolute final fallback: any untested or not-bad window with next_group
-        for w, obj in self.window_engine.state.items():
-            known_bad = self.known_bad_window(w)
-            if obj.next_group is not None and not known_bad:
-                return w, obj, "FORCE_ANY_WINDOW_NO_DEADLOCK"
-
-        # If all windows are known bad, pick the least bad by candidate score instead of deadlocking.
-        emergency = []
+        # Previous builds could FORCE an arbitrary window here. That created a
+        # deadlock pattern: e.g. a forced lock with Shadow WR20=0.30 was selected
+        # even though build_signal() requires >= LEADER_MIN_LIVE_WR20 (0.36).
+        # The lock then had 0 real trades and could remain WAIT for many rounds.
+        #
+        # A fallback window must therefore satisfy the SAME minimum quality gates
+        # that can actually reach READY. If none qualifies, leave the engine
+        # unlocked and evaluate again on the next physical frontier.
+        eligible = []
         for w, obj in self.window_engine.state.items():
             if obj.next_group is None:
                 continue
-            if self.is_window_cooled(w):
+            if self.known_bad_window(w):
                 continue
-            emergency.append((self.selection_score(w, obj), w, obj))
 
-        if emergency:
-            emergency.sort(reverse=True)
-            _, w, obj = emergency[0]
-            return w, obj, "EMERGENCY_LEAST_BAD_UNCOOLED"
+            hits20 = list(obj.hit_history)[-20:]
+            hist_wr20 = round(sum(hits20) / len(hits20), 3) if hits20 else 0.0
+            live_n = len(obj.live_hit_history)
 
-        return None, None, "NO_SAFE_CANDIDATE"
+            # Must be capable of passing build_signal READY gates now.
+            if live_n > 0:
+                if float(obj.live_profit20) <= LEADER_MIN_LIVE_PROFIT20:
+                    continue
+                if float(obj.live_wr20) < LEADER_MIN_LIVE_WR20:
+                    continue
+            if float(obj.profit20) <= LOCK_MIN_PROFIT20:
+                continue
+            if hist_wr20 < FALLBACK_MIN_WR20:
+                continue
+            if int(obj.loss_streak) > LOCK_MAX_LOSS_STREAK:
+                continue
 
-        return None, None, "NO_VALID_CANDIDATE"
+            eligible.append((
+                self.selection_score(w, obj),
+                float(obj.live_profit20),
+                float(obj.live_wr20),
+                float(obj.profit20),
+                hist_wr20,
+                -int(obj.loss_streak),
+                w, obj
+            ))
+
+        if eligible:
+            eligible.sort(reverse=True)
+            *_, w, obj = eligible[0]
+            return w, obj, "RELOCK_READY_ELIGIBLE_FALLBACK"
+
+        return None, None, "NO_READY_ELIGIBLE_CANDIDATE"
 
     def build_signal_snapshot(self, round_id: int) -> SignalRecord:
         """Display-only signal.
@@ -1663,9 +1686,11 @@ class SignalEngine:
                 if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
                     state = "READY"
 
+        snapshot_wait_reason = "" if state == "READY" else "SNAPSHOT_NOT_READY"
         return SignalRecord(
             state=state,
             next_group=next_group,
+            wait_reason=snapshot_wait_reason,
             regime=regime,
             top_n=TOPN,
             health20=health20,
@@ -1797,6 +1822,17 @@ class SignalEngine:
         ):
             relock_needed = True
             lock_reason = "REAL_2_LOSS_RELOCK"
+        elif (
+            len(locked_obj.live_hit_history) > 0
+            and (
+                float(locked_obj.live_profit20) <= LEADER_MIN_LIVE_PROFIT20
+                or float(locked_obj.live_wr20) < LEADER_MIN_LIVE_WR20
+            )
+        ):
+            # V4.2.7: do not keep a lock that cannot pass the READY gate.
+            # This fixes FORCE_* locks showing RealTrades=0 + WAIT indefinitely.
+            relock_needed = True
+            lock_reason = "LOCK_NOT_READY_ELIGIBLE"
         elif locked_obj.next_group is None:
             relock_needed = True
             lock_reason = "LOCK_NO_NEXT"
@@ -1868,24 +1904,25 @@ class SignalEngine:
             regime = "NORMAL"
 
         state = "WAIT"
+        wait_reason = ""
         if round_id < LIVE_START_ROUND:
-            state = "WAIT"
+            wait_reason = "BEFORE_LIVE_START"
         elif locked_obj is None:
-            state = "WAIT"
+            wait_reason = "NO_READY_ELIGIBLE_LOCK"
         elif next_group is None:
-            state = "WAIT"
+            wait_reason = "LOCK_NO_NEXT_GROUP"
         elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_profit20 <= LEADER_MIN_LIVE_PROFIT20:
-            state = "WAIT"
+            wait_reason = "LOCK_SHADOW_PROFIT_NOT_POSITIVE"
         elif len(locked_obj.live_hit_history) > 0 and locked_obj.live_wr20 < LEADER_MIN_LIVE_WR20:
-            state = "WAIT"
+            wait_reason = "LOCK_SHADOW_WR_TOO_LOW"
         elif locked_obj.profit20 <= LOCK_MIN_PROFIT20:
-            state = "WAIT"
+            wait_reason = "LOCK_PROFIT20_NOT_POSITIVE"
         elif leader_wr20 < FALLBACK_MIN_WR20:
-            state = "WAIT"
+            wait_reason = "LOCK_WR20_TOO_LOW"
         elif leader_loss_streak > LOCK_MAX_LOSS_STREAK:
-            state = "WAIT"
+            wait_reason = "LOCK_LOSS_STREAK_TOO_HIGH"
         elif stability < STABILITY_READY:
-            state = "WAIT"
+            wait_reason = "STABILITY_TOO_LOW"
         else:
             # Profit optimized:
             # If real performance of locked window is positive, allow READY even
@@ -1899,10 +1936,14 @@ class SignalEngine:
 
             if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
                 state = "READY"
+                wait_reason = ""
+            else:
+                wait_reason = "CONSENSUS_OR_LEADER_WR_NOT_ENOUGH"
 
         signal = SignalRecord(
             state=state,
             next_group=next_group,
+            wait_reason=wait_reason,
             regime=regime,
             top_n=TOPN,
             health20=health20,
@@ -2356,7 +2397,7 @@ class ProtectionEngine:
         self.ctx.protection_reason = ""
 
         if signal.state != "READY":
-            self.ctx.protection_reason = "SIGNAL_NOT_READY"
+            self.ctx.protection_reason = str(getattr(signal, "wait_reason", "") or "SIGNAL_NOT_READY")
             return "WAIT"
 
         ensure_ctx_fields(self.ctx)
@@ -2414,7 +2455,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.2.6 | PROFIT=TRADE LEDGER | RESET TODAY | TRUE-FRONTIER")
+        st.caption("BUILD CHECK: V4.2.7 | PROFIT=TRADE LEDGER | READY-ELIGIBLE RELOCK | TRUE-FRONTIER")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2490,6 +2531,8 @@ CONF = {confidence_score:.2f}
         c6.metric("Live From", LIVE_START_ROUND)
         c7.metric("Wait Reason", self.ctx.protection_reason)
         c8.metric("Open Reason", self.ctx.open_reason)
+        if self.ctx.protection_reason:
+            st.caption(f"WAIT DETAIL: {self.ctx.protection_reason}")
 
     def render_last_result(self) -> None:
         st.subheader("Last Result")
