@@ -2414,7 +2414,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.2.5 | RESET TODAY ONLY | PERSISTENT ARCHIVE | TRUE-FRONTIER")
+        st.caption("BUILD CHECK: V4.2.6 | PROFIT=TRADE LEDGER | RESET TODAY | TRUE-FRONTIER")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2774,6 +2774,13 @@ CONF = {confidence_score:.2f}
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
+        ledger_profit = round(
+            sum(float(x.profit or 0.0) for x in self.ctx.trade_history if x.hit is not None), 2
+        )
+        st.caption(
+            f"CURRENT-DAY LEDGER PROFIT: {ledger_profit:+.1f} | "
+            f"settled={sum(1 for x in self.ctx.trade_history if x.hit is not None)}"
+        )
 
         if not self.ctx.equity_curve:
             return
@@ -4676,6 +4683,20 @@ class EngineManager:
     def run(self) -> None:
         self.hybrid_replay_once()
         self.process_new_rounds()
+
+        # PROFIT LEDGER LOCK: current-day settled trade_history is source of truth.
+        # Never let stale equity from a previous deploy/reset alter displayed P/L.
+        rebuild_real_stats_from_history(self.ctx)
+        ledger_profit = round(
+            sum(float(x.profit or 0.0) for x in self.ctx.trade_history if x.hit is not None), 2
+        )
+        equity_profit = round(float(self.ctx.equity_curve[-1]), 2) if self.ctx.equity_curve else 0.0
+        if ledger_profit != equity_profit:
+            st.error(
+                f"PROFIT INTEGRITY ERROR: ledger={ledger_profit:+.1f}, "
+                f"equity={equity_profit:+.1f}"
+            )
+            rebuild_real_stats_from_history(self.ctx)
 
         signal, confidence_score, confidence_level = self.build_display_signal()
 
