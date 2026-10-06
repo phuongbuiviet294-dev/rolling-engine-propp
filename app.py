@@ -12,7 +12,6 @@ import os
 import math
 import hashlib
 import re
-import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import Counter, deque
@@ -103,35 +102,6 @@ STATE_FILE = os.environ.get("V69_STATE_FILE", "v69_live_state.json")
 # remote write cannot cause a restart to replay a round from an older state.
 STATE_WAL_FILE = os.environ.get("V69_STATE_WAL_FILE", STATE_FILE + ".wal")
 STATE_WORKSHEET_DEFAULT = "state_v69"
-
-
-def _atomic_write_json(path: str, payload: dict) -> None:
-    """Atomic JSON write with a UNIQUE temp file.
-
-    Streamlit can rerun the script concurrently. A fixed `<path>.tmp` lets one
-    rerun rename another rerun's temp file, producing Errno 2. mkstemp gives
-    every writer its own temp file and os.replace keeps the final commit atomic.
-    """
-    target = os.path.abspath(path)
-    directory = os.path.dirname(target) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=os.path.basename(target) + ".", suffix=".tmp", dir=directory
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, target)
-    except Exception:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-        raise
-
 
 # V50 profit protection tuning
 LIVE_LOSS_COOLDOWN_ROUNDS = 2
@@ -600,7 +570,6 @@ def _sheet_csv_url(sheet_name: str) -> str:
     )
 
 
-@st.cache_data(ttl=2)
 def _load_live_sheet_df() -> pd.DataFrame:
     """Read ONLY the current-day `data` tab.
 
@@ -2029,7 +1998,7 @@ class TradeEngine:
                 predict=predict,
                 locked_window=self.ctx.pending_locked_window,
                 actual=actual_group,
-                hit=hit,
+hit=hit,
                 profit=profit,
                 status="WIN" if hit else "LOSS",
                 settle_round=current_round
@@ -2394,8 +2363,8 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.5 V3.9 LIVE ROUND AUDIT — DATA/HISTORY FINAL")
-        st.caption("BUILD CHECK: V3.9 | STATE VERSION: V69_5_DAY_SEQ_PROFIT_MATCH_FINAL_V3_9 | LIVE INPUT: data!A:E")
+        st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
+        st.caption("BUILD CHECK: V4.0 | TRUE-FRONTIER GAP SAFE | LIVE INPUT: GOOGLE SHEET COLUMN B")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2692,9 +2661,6 @@ CONF = {confidence_score:.2f}
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     def render_trade_history(self) -> None:
-        # Trade History = ONLY actual trade records.
-        # Round History is rendered separately below so trade rows are not
-        # visually duplicated inside the per-round audit table.
         st.subheader("Trade History")
 
         if getattr(self.ctx, "last_result_round", -1) >= 0:
@@ -2707,6 +2673,7 @@ CONF = {confidence_score:.2f}
 
         refresh_ledger_checkpoint(self.ctx)
         integrity = ledger_integrity_report(self.ctx)
+        audit_integrity = round_audit_integrity_report(self.ctx)
         st.caption(
             f"LEDGER | trades={integrity['trade_count']} | settled={integrity['settled_count']} | "
             f"pending={integrity['pending_count']} | profit={integrity['profit']:+.1f} | "
@@ -2715,74 +2682,38 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
-        if self.ctx.trade_history:
-            df = pd.DataFrame(
-                [
-                    {
-                        "open_round": x.round_id,
-                        "settle_round": x.settle_round,
-                        "locked_window": x.locked_window,
-                        "predict": x.predict,
-                        "actual": x.actual,
-                        "hit": x.hit,
-                        "profit": x.profit,
-                        "status": x.status,
-                        "settled": bool(x.hit is not None and x.settle_round is not None),
-                    }
-                    for x in self.ctx.trade_history
-                ]
-            )
-            # Newest trade first so the latest result is visible without scrolling.
-            st.dataframe(df.iloc[::-1].head(50).reset_index(drop=True), use_container_width=True, hide_index=True)
-        else:
+        if not self.ctx.trade_history:
             st.info("No trades")
+            return
 
-        # --------------------------------------------------------------
-        # ROUND HISTORY: one row for every processed round, including WAIT.
-        # This is intentionally separate from Trade History and uses a compact
-        # per-round schema, so trade records are not displayed a second time.
-        # --------------------------------------------------------------
-        st.subheader("Round History")
-        audit_rows = list(getattr(self.ctx, "round_log", []) or [])
-        if audit_rows:
-            display_rows = []
-            for row in audit_rows:
-                display_rows.append(
-                    {
-                        "round": row.get("r"),
-                        # append_round_audit() persists compact keys n/g/decision.
-                        # Use those exact persisted keys here; the previous V3 UI
-                        # incorrectly read legacy/nonexistent names and displayed
-                        # None for every number/group/decision.
-                        "number": row.get("n"),
-                        "group": row.get("g"),
-                        "window": row.get("window"),
-                        "next_group": row.get("predict"),
-                        "signal": row.get("signal"),
-                        "confidence": row.get("confidence"),
-                        "decision": row.get("decision"),
-                        "open": bool(row.get("open_this_round")),
-                        "settle": bool(row.get("settle_this_round")),
-                        "result": row.get("result") or "",
-                        "profit": row.get("profit"),
-                        "equity": row.get("equity"),
-                    }
-                )
-            # Newest processed round first; keep the existing 300-row audit limit.
-            display_df = pd.DataFrame(display_rows).iloc[::-1].reset_index(drop=True)
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                height=520,
-            )
-            audit_check = round_audit_integrity_report(self.ctx)
-            if not audit_check["ok"]:
-                st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
+        df = pd.DataFrame(
+            [
+                {
+                    "open_round": x.round_id,
+                    "settle_round": x.settle_round,
+                    "locked_window": x.locked_window,
+                    "predict": x.predict,
+                    "actual": x.actual,
+                    "hit": x.hit,
+                    "profit": x.profit,
+                    "status": x.status,
+                    "settled": bool(x.hit is not None and x.settle_round is not None),
+                }
+                for x in self.ctx.trade_history
+            ]
+        )
+
+        st.dataframe(df.tail(50), use_container_width=True)
+
+        with st.expander("Round Audit Log - every processed round"):
+            audit_rows = list(getattr(self.ctx, "round_log", []) or [])
+            if audit_rows:
+                st.dataframe(pd.DataFrame(audit_rows[-100:]), use_container_width=True, hide_index=True)
+                audit_check = round_audit_integrity_report(self.ctx)
+                if not audit_check["ok"]:
+                    st.error("ROUND AUDIT INTEGRITY: " + "; ".join(audit_check["errors"]))
             else:
-                st.caption(f"ROUND HISTORY | {len(display_rows)} rounds processed | audit=OK")
-        else:
-            st.info("No round history yet")
+                st.info("No round audit yet")
 
     def render_equity(self) -> None:
         st.subheader("Equity Curve")
@@ -3446,7 +3377,12 @@ def save_live_state(ctx: EngineContext) -> None:
     # actually committing, restart can recover the exact newer revision instead
     # of replaying the round from an older Google State snapshot.
     try:
-        _atomic_write_json(STATE_WAL_FILE, data)
+        wal_tmp = STATE_WAL_FILE + ".tmp"
+        with open(wal_tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(wal_tmp, STATE_WAL_FILE)
     except Exception as e:
         st.error(f"Durable WAL write failed: {e}")
         st.stop()
@@ -3461,7 +3397,12 @@ def save_live_state(ctx: EngineContext) -> None:
         st.stop()
 
     try:
-        _atomic_write_json(STATE_FILE, data)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         st.error(f"Save local state error: {e}")
         st.stop()
@@ -3520,23 +3461,13 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        # LOCAL backend: the durable WAL is also the recovery source.
-        # REBUILD/RESET intentionally writes the new state to WAL first and
-        # may remove STATE_FILE before rerun. The old code returned a fresh
-        # EngineContext here, silently discarding recovery_replay_all_rounds
-        # and causing REBUILD to behave like a normal live catch-up (only the
-        # current frontier was evaluated). Prefer the valid WAL whenever the
-        # local state file is absent or unreadable.
-        if _valid_state(wal_data):
-            data = wal_data
-        elif not os.path.exists(STATE_FILE):
+        if not os.path.exists(STATE_FILE):
             return EngineContext()
-        else:
-            try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                return EngineContext()
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return EngineContext()
 
     if not isinstance(data, dict) or not data:
         return EngineContext()
@@ -3769,16 +3700,16 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
-        if st.button("REBUILD TRADE HISTORY FROM CURRENT B"):
-            # Explicit recovery path: discard only the current live ledger/state
-            # and replay the currently loaded Google Sheet column B from the
-            # live-start frontier. This is useful when an old deployment has
-            # advanced last_length but lost its Trade History.
+        if st.button("REBUILD ENGINE STATE FROM CURRENT B (NO HISTORICAL TRADES)"):
+            # V4.0 TRUE-FRONTIER recovery: rebuild deterministic window/engine state
+            # from the currently loaded Number column, but NEVER invent historical
+            # trades. Historical arrival/frontier timing is not recoverable from
+            # Number alone, so the old ledger cannot be reconstructed truthfully.
             old_ctx = ensure_ctx_fields(get_live_ctx())
             blank_ctx = ensure_ctx_fields(EngineContext())
             blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
             blank_ctx.live_day_id = current_live_day_id()
-            blank_ctx.protection_reason = "MANUAL_REBUILD_LEDGER_FROM_CURRENT_B"
+            blank_ctx.protection_reason = "MANUAL_REBUILD_ENGINE_NO_HISTORICAL_TRADES"
             blank_ctx.state_version = STATE_VERSION
             blank_ctx.hybrid_initialized = False
             blank_ctx.last_length = 0
@@ -3794,7 +3725,11 @@ def reset_live_state_button() -> None:
             rebuild_payload = serialize_live_state(blank_ctx)
 
             try:
-                _atomic_write_json(STATE_WAL_FILE, rebuild_payload)
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(rebuild_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
             except Exception as e:
                 st.error(f"REBUILD stopped: WAL write failed: {e}")
                 st.stop()
@@ -3836,7 +3771,11 @@ def reset_live_state_button() -> None:
             reset_payload = serialize_live_state(blank_ctx)
 
             try:
-                _atomic_write_json(STATE_WAL_FILE, reset_payload)
+                wal_tmp = STATE_WAL_FILE + ".tmp"
+                with open(wal_tmp, "w", encoding="utf-8") as f:
+                    json.dump(reset_payload, f, ensure_ascii=False, indent=2)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(wal_tmp, STATE_WAL_FILE)
             except Exception as e:
                 st.error(f"MANUAL RESET stopped: WAL write failed: {e}")
                 st.stop()
@@ -3982,7 +3921,11 @@ class EngineManager:
 
         payload = serialize_live_state(blank_ctx)
         try:
-            _atomic_write_json(STATE_WAL_FILE, payload)
+            wal_tmp = STATE_WAL_FILE + ".tmp"
+            with open(wal_tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush(); os.fsync(f.fileno())
+            os.replace(wal_tmp, STATE_WAL_FILE)
         except Exception as e:
             st.error(f"NEW DAY SEQ reset stopped: WAL write failed: {e}")
             st.stop()
@@ -4055,7 +3998,6 @@ class EngineManager:
         # Only READY reaches OPEN. WAIT is already durably committed as a decision.
         if str(signal.state or "WAIT") == "WAIT":
             return
-
         before = len(self.ctx.trade_history)
         self.trade_engine.open_trade(signal, idx, confidence)
         created = len(self.ctx.trade_history) > before
@@ -4083,28 +4025,6 @@ class EngineManager:
         # The current snapshot length is the only valid live-entry frontier.
         # Intermediate rows in a delayed batch are catch-up only.
         current_length = len(self.numbers)
-
-        # FAST STARTUP: on a fresh normal day with fewer than LIVE_START_ROUND
-        # numbers, only warm-up windows need to be reconstructed. No trade/open/
-        # settle decision exists below LIVE_START_ROUND, so doing this in memory
-        # and committing once is crash-safe and avoids hundreds of state writes.
-        if (not recovery_mode and saved_frontier == 0 and current_length < LIVE_START_ROUND):
-            for idx in range(1, current_length + 1):
-                self.window_engine.update_one_round(self.groups[idx - 1], idx)
-            self.ctx.last_length = current_length
-            self.ctx.last_window_round = current_length
-            self.ctx.last_decision_round = current_length
-            self.ctx.last_decision_state = "WARMUP"
-            self.ctx.last_decision_next_group = None
-            self.ctx.data_length = current_length
-            self.ctx.data_signature = make_numbers_signature(self.numbers, current_length)
-            self.ctx.dataset_anchor_signature = make_numbers_signature(
-                self.numbers, min(DATASET_RESET_ANCHOR_LEN, current_length)
-            )
-            self.ctx.hybrid_initialized = True
-            self.ctx.recovery_replay_all_rounds = False
-            save_live_state(self.ctx)
-            return
 
         for idx in range(start_idx, len(self.groups) + 1):
             actual_group = self.groups[idx - 1]
@@ -4151,10 +4071,11 @@ class EngineManager:
             # settle an already-open exact-target trade and update windows, but
             # MUST NOT create retrospective OPENs. This preserves live timing
             # when the Sheet/app was delayed or temporarily offline.
-            # Normal live mode: only the current frontier may create a new OPEN.
-            # Recovery mode: intentionally replay the complete current day to
-            # reconstruct a lost ledger from the still-intact Number column.
-            is_live_frontier = recovery_mode or (idx == current_length)
+            # V4.0 TRUE-FRONTIER invariant: only the current snapshot frontier may
+            # create a NEW trade. Recovery may rebuild windows/state, but Number
+            # history cannot prove historical arrival frontiers and therefore must
+            # never create retrospective trades.
+            is_live_frontier = (idx == current_length)
             same_txn = int(getattr(self.ctx, "round_txn_round", -1)) == idx
             phase = str(getattr(self.ctx, "round_txn_phase", "") or "") if same_txn else ""
             if same_txn and phase == "COMPLETE":
@@ -4314,6 +4235,30 @@ class EngineManager:
                 save_live_state(self.ctx)
                 phase = "WINDOW_UPDATED"
 
+            # V4.0 TRUE-FRONTIER: if several Sheet rows are discovered in the
+            # same refresh, only the newest row existed as a decision frontier.
+            # Intermediate rows may SETTLE an already-open exact-target trade and
+            # must update windows, but must never create a retrospective signal/open.
+            is_live_frontier = (idx == current_length)
+            if phase == "WINDOW_UPDATED" and not is_live_frontier:
+                self.ctx.last_decision_round = idx
+                self.ctx.last_decision_state = "CATCH_UP"
+                self.ctx.last_decision_next_group = None
+                self.ctx.last_decision_confidence = 0.0
+                self.ctx.open_reason = "CATCH_UP_NO_RETRO_OPEN"
+                self.ctx.round_txn_opened = False
+                self.ctx.round_txn_phase = "COMPLETE"
+                self.ctx.round_txn_signal = {}
+                self.ctx.last_length = idx
+                append_round_audit(self.ctx, idx, self.numbers[idx - 1], actual_group, None)
+                self.ctx.live_day_id = str(getattr(self.ctx, "live_day_date", "") or "")
+                self.ctx.data_length = idx
+                self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
+                if not getattr(self.ctx, "dataset_anchor_signature", "") and idx >= 32:
+                    self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, DATASET_RESET_ANCHOR_LEN)
+                save_live_state(self.ctx)
+                continue
+
             if phase == "WINDOW_UPDATED":
                 signal = self.signal_engine.build_signal(idx)
                 signal = self.signal_engine.apply_sample_aware_coherence(signal)
@@ -4397,7 +4342,6 @@ class EngineManager:
             f"trades={len(self.ctx.trade_history)} | "
             f"settled={sum(1 for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None)} | "
             f"profit={sum(float(x.profit) for x in self.ctx.trade_history if getattr(x, 'hit', None) is not None):+.1f} | "
-            f"daily_hist={len(getattr(self.ctx, 'daily_profit_history', []) or [])} | "
             f"ledger={'OK' if integrity['ok'] else 'ERROR:' + ','.join(integrity['errors'])} | audit={'OK' if audit_integrity['ok'] else 'ERROR:' + ','.join(audit_integrity['errors'])}"
         )
 
