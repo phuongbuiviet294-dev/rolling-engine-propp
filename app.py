@@ -218,6 +218,26 @@ class TradeRecord:
     status: str = "PENDING"
     settle_round: Optional[int] = None
 
+    # V4.1: immutable snapshot captured at the REAL OPEN moment.
+    # Never recompute these fields during replay/restart.
+    open_confidence: float = 0.0
+    open_regime: str = ""
+    open_consensus: float = 0.0
+    open_required_consensus: float = 0.0
+    open_stability: float = 0.0
+    open_shadow_profit20: float = 0.0
+    open_shadow_wr20: float = 0.0
+    open_real_window_profit: float = 0.0
+    open_real_window_wr: float = 0.0
+    open_real_window_trade_count: int = 0
+    open_real_window_loss_streak: int = 0
+    open_protection_reason: str = ""
+    open_lock_reason: str = ""
+    open_day_seq: int = 0
+    open_day_date: str = ""
+    open_batch_id: str = ""
+    open_is_frontier: bool = False
+
 
 @dataclass
 class SignalRecord:
@@ -491,6 +511,10 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.ledger_checksum = ""
     if not hasattr(ctx, "ledger_frontier_round"):
         ctx.ledger_frontier_round = 0
+    if not hasattr(ctx, "current_batch_id"):
+        ctx.current_batch_id = ""
+    if not hasattr(ctx, "current_is_frontier"):
+        ctx.current_is_frontier = False
 
     # Normalize keys loaded from JSON/Google Sheet.
     normalized_stats = {}
@@ -1954,7 +1978,24 @@ class TradeEngine:
             hit=None,
             profit=0.0,
             status="PENDING",
-            settle_round=None
+            settle_round=None,
+            open_confidence=float(confidence_score or 0.0),
+            open_regime=str(getattr(signal, "regime", "") or ""),
+            open_consensus=float(getattr(signal, "consensus", 0.0) or 0.0),
+            open_required_consensus=float(getattr(signal, "required_consensus", 0.0) or 0.0),
+            open_stability=float(getattr(signal, "stability", 0.0) or 0.0),
+            open_shadow_profit20=float(getattr(signal, "shadow_live_profit20", getattr(signal, "live_profit20", 0.0)) or 0.0),
+            open_shadow_wr20=float(getattr(signal, "shadow_live_wr20", getattr(signal, "live_wr20", 0.0)) or 0.0),
+            open_real_window_profit=float(getattr(signal, "real_window_profit", 0.0) or 0.0),
+            open_real_window_wr=float(getattr(signal, "real_window_wr", 0.0) or 0.0),
+            open_real_window_trade_count=int(getattr(signal, "real_window_trade_count", 0) or 0),
+            open_real_window_loss_streak=int(getattr(signal, "real_window_loss_streak", 0) or 0),
+            open_protection_reason=str(getattr(self.ctx, "protection_reason", "") or ""),
+            open_lock_reason=str(getattr(signal, "lock_reason", getattr(self.ctx, "lock_reason", "")) or ""),
+            open_day_seq=int(getattr(self.ctx, "live_day_seq", 0) or 0),
+            open_day_date=str(getattr(self.ctx, "live_day_date", "") or ""),
+            open_batch_id=str(getattr(self.ctx, "current_batch_id", "") or ""),
+            open_is_frontier=bool(getattr(self.ctx, "current_is_frontier", False)),
         )
 
         self.ctx.trade_history.append(record)
@@ -3015,6 +3056,23 @@ def trade_record_to_dict(x: TradeRecord) -> dict:
         "profit": x.profit,
         "status": x.status,
         "settle_round": x.settle_round,
+        "open_confidence": float(getattr(x, "open_confidence", 0.0) or 0.0),
+        "open_regime": str(getattr(x, "open_regime", "") or ""),
+        "open_consensus": float(getattr(x, "open_consensus", 0.0) or 0.0),
+        "open_required_consensus": float(getattr(x, "open_required_consensus", 0.0) or 0.0),
+        "open_stability": float(getattr(x, "open_stability", 0.0) or 0.0),
+        "open_shadow_profit20": float(getattr(x, "open_shadow_profit20", 0.0) or 0.0),
+        "open_shadow_wr20": float(getattr(x, "open_shadow_wr20", 0.0) or 0.0),
+        "open_real_window_profit": float(getattr(x, "open_real_window_profit", 0.0) or 0.0),
+        "open_real_window_wr": float(getattr(x, "open_real_window_wr", 0.0) or 0.0),
+        "open_real_window_trade_count": int(getattr(x, "open_real_window_trade_count", 0) or 0),
+        "open_real_window_loss_streak": int(getattr(x, "open_real_window_loss_streak", 0) or 0),
+        "open_protection_reason": str(getattr(x, "open_protection_reason", "") or ""),
+        "open_lock_reason": str(getattr(x, "open_lock_reason", "") or ""),
+        "open_day_seq": int(getattr(x, "open_day_seq", 0) or 0),
+        "open_day_date": str(getattr(x, "open_day_date", "") or ""),
+        "open_batch_id": str(getattr(x, "open_batch_id", "") or ""),
+        "open_is_frontier": bool(getattr(x, "open_is_frontier", False)),
     }
 
 
@@ -3029,6 +3087,23 @@ def trade_record_from_dict(d: dict) -> TradeRecord:
         profit=float(d.get("profit", 0.0)),
         status=d.get("status", "PENDING"),
         settle_round=d.get("settle_round"),
+        open_confidence=float(d.get("open_confidence", 0.0) or 0.0),
+        open_regime=str(d.get("open_regime", "") or ""),
+        open_consensus=float(d.get("open_consensus", 0.0) or 0.0),
+        open_required_consensus=float(d.get("open_required_consensus", 0.0) or 0.0),
+        open_stability=float(d.get("open_stability", 0.0) or 0.0),
+        open_shadow_profit20=float(d.get("open_shadow_profit20", 0.0) or 0.0),
+        open_shadow_wr20=float(d.get("open_shadow_wr20", 0.0) or 0.0),
+        open_real_window_profit=float(d.get("open_real_window_profit", 0.0) or 0.0),
+        open_real_window_wr=float(d.get("open_real_window_wr", 0.0) or 0.0),
+        open_real_window_trade_count=int(d.get("open_real_window_trade_count", 0) or 0),
+        open_real_window_loss_streak=int(d.get("open_real_window_loss_streak", 0) or 0),
+        open_protection_reason=str(d.get("open_protection_reason", "") or ""),
+        open_lock_reason=str(d.get("open_lock_reason", "") or ""),
+        open_day_seq=int(d.get("open_day_seq", 0) or 0),
+        open_day_date=str(d.get("open_day_date", "") or ""),
+        open_batch_id=str(d.get("open_batch_id", "") or ""),
+        open_is_frontier=bool(d.get("open_is_frontier", False)),
     )
 
 
@@ -3278,6 +3353,21 @@ def append_round_audit(ctx: EngineContext, round_id: int, number: int, group: in
         "profit": round(float(getattr(settle_rec, "profit", 0.0)), 2) if settle_this and settle_rec is not None else None,
         "equity": round(float(ctx.equity_curve[-1]), 2) if ctx.equity_curve else 0.0,
         "frontier": int(getattr(ctx, "last_length", 0) or 0),
+        "batch_id": str(getattr(ctx, "current_batch_id", "") or ""),
+        "is_live_frontier": bool(getattr(ctx, "current_is_frontier", False)),
+        "open_confidence": round(float(getattr(open_rec, "open_confidence", 0.0)), 4) if open_this and open_rec is not None else None,
+        "open_regime": str(getattr(open_rec, "open_regime", "")) if open_this and open_rec is not None else "",
+        "open_consensus": round(float(getattr(open_rec, "open_consensus", 0.0)), 4) if open_this and open_rec is not None else None,
+        "open_required_consensus": round(float(getattr(open_rec, "open_required_consensus", 0.0)), 4) if open_this and open_rec is not None else None,
+        "open_stability": round(float(getattr(open_rec, "open_stability", 0.0)), 4) if open_this and open_rec is not None else None,
+        "open_shadow_profit20": round(float(getattr(open_rec, "open_shadow_profit20", 0.0)), 2) if open_this and open_rec is not None else None,
+        "open_shadow_wr20": round(float(getattr(open_rec, "open_shadow_wr20", 0.0)), 4) if open_this and open_rec is not None else None,
+        "open_real_window_profit": round(float(getattr(open_rec, "open_real_window_profit", 0.0)), 2) if open_this and open_rec is not None else None,
+        "open_real_window_wr": round(float(getattr(open_rec, "open_real_window_wr", 0.0)), 4) if open_this and open_rec is not None else None,
+        "open_real_window_trade_count": int(getattr(open_rec, "open_real_window_trade_count", 0)) if open_this and open_rec is not None else None,
+        "open_real_window_loss_streak": int(getattr(open_rec, "open_real_window_loss_streak", 0)) if open_this and open_rec is not None else None,
+        "open_protection_reason": str(getattr(open_rec, "open_protection_reason", "")) if open_this and open_rec is not None else "",
+        "open_lock_reason": str(getattr(open_rec, "open_lock_reason", "")) if open_this and open_rec is not None else "",
     }
     logs = list(getattr(ctx, "round_log", []) or [])
     replaced = False
@@ -4194,7 +4284,13 @@ class EngineManager:
         if current_length <= self.ctx.last_length:
             return
 
+        batch_start = int(self.ctx.last_length) + 1
+        batch_id = f"{int(getattr(self.ctx, 'live_day_seq', 0) or 0)}:{batch_start}-{current_length}"
+
         for idx in range(self.ctx.last_length + 1, current_length + 1):
+            # V4.1 audit identity for the physical arrival snapshot.
+            self.ctx.current_batch_id = batch_id
+            self.ctx.current_is_frontier = bool(idx == current_length)
             # Transactional round processing:
             # last_length is committed ONLY after every state mutation for this
             # round has completed and the state has been persisted. This prevents
