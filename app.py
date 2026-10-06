@@ -2412,7 +2412,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.2.2 | SINGLE SHEET SNAPSHOT | FAST RECOVERY | TRUE-FRONTIER")
+        st.caption("BUILD CHECK: V4.2.3 | 1 REMOTE COMMIT/ROUND | SINGLE SNAPSHOT | TRUE-FRONTIER")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3465,6 +3465,32 @@ def round_audit_integrity_report(ctx: EngineContext) -> dict:
     return {"ok": not errors, "errors": errors, "round_count": len(logs), "frontier": frontier}
 
 
+def save_live_checkpoint(ctx: EngineContext) -> None:
+    """Fast crash-safe checkpoint for intermediate phases.
+
+    Writes only the durable local WAL. The completed round is committed to the
+    configured backend by save_live_state(). On restart load_live_state()
+    already compares WAL/state revisions, so an interrupted round can resume
+    from the newest durable phase without doing multiple remote writes.
+    """
+    if bool(getattr(ctx, "fast_recovery_mode", False)):
+        return
+    ensure_ctx_fields(ctx)
+    refresh_ledger_checkpoint(ctx)
+    ctx.state_revision = int(getattr(ctx, "state_revision", 0) or 0) + 1
+    data = serialize_live_state(ctx)
+    try:
+        wal_tmp = STATE_WAL_FILE + ".tmp"
+        with open(wal_tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(wal_tmp, STATE_WAL_FILE)
+    except Exception as e:
+        st.error(f"Durable WAL checkpoint failed: {e}")
+        st.stop()
+
+
 def save_live_state(ctx: EngineContext) -> None:
     # V4.2.1 FAST RECOVERY: sequential reconstruction can execute hundreds of
     # transaction phases. Do not write remote/local state at every phase.
@@ -4408,7 +4434,7 @@ class EngineManager:
                 self.ctx.round_txn_opened = False
                 self.ctx.round_txn_settled = False
                 self.ctx.round_txn_signal = {}
-                save_live_state(self.ctx)
+                save_live_checkpoint(self.ctx)
                 phase = "STARTED"
 
             # Resume from the last durable phase. Each phase is persisted
@@ -4418,13 +4444,13 @@ class EngineManager:
                 settled_this_round = self.trade_engine.settle_trade(actual_group, idx)
                 self.ctx.round_txn_settled = bool(settled_this_round or getattr(self.ctx, "pending_trade", None) is None)
                 self.ctx.round_txn_phase = "SETTLED"
-                save_live_state(self.ctx)
+                save_live_checkpoint(self.ctx)
                 phase = "SETTLED"
 
             if phase == "SETTLED":
                 self.window_engine.update_one_round(actual_group, idx)
                 self.ctx.round_txn_phase = "WINDOW_UPDATED"
-                save_live_state(self.ctx)
+                save_live_checkpoint(self.ctx)
                 phase = "WINDOW_UPDATED"
 
             # V4.0 TRUE-FRONTIER: if several Sheet rows are discovered in the
@@ -4448,7 +4474,7 @@ class EngineManager:
                 self.ctx.data_signature = make_numbers_signature(self.numbers, idx)
                 if not getattr(self.ctx, "dataset_anchor_signature", "") and idx >= 32:
                     self.ctx.dataset_anchor_signature = make_numbers_signature(self.numbers, DATASET_RESET_ANCHOR_LEN)
-                save_live_state(self.ctx)
+                save_live_checkpoint(self.ctx)
                 continue
 
             if phase == "WINDOW_UPDATED":
@@ -4459,7 +4485,7 @@ class EngineManager:
                 setattr(signal, "decision_confidence", confidence)
                 self.ctx.round_txn_signal = signal_to_txn_dict(signal, confidence)
                 self.ctx.round_txn_phase = "SIGNAL_READY"
-                save_live_state(self.ctx)
+                save_live_checkpoint(self.ctx)
                 phase = "SIGNAL_READY"
             else:
                 # Resume the exact persisted SIGNAL_READY snapshot.
@@ -4501,14 +4527,14 @@ class EngineManager:
                         self.ctx.last_decision_state = "PENDING" if created else decision_state
                         self.ctx.last_decision_next_group = signal.next_group if created else None
                         if created:
-                            save_live_state(self.ctx)
+                            save_live_checkpoint(self.ctx)
                     else:
                         self.ctx.last_decision_round = idx
                         self.ctx.last_decision_state = "WAIT"
                         self.ctx.last_decision_next_group = None
                 self.ctx.round_txn_opened = bool(getattr(self.ctx, "last_open_round", -1) == idx)
                 self.ctx.round_txn_phase = "OPENED" if self.ctx.round_txn_opened else "COMPLETE"
-                save_live_state(self.ctx)
+                save_live_checkpoint(self.ctx)
 
             # Audit must show the committed frontier for THIS round.
             self.ctx.round_txn_phase = "COMPLETE"
