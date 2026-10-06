@@ -385,6 +385,7 @@ class EngineContext:
     # Recovery mode is NEVER used by normal live processing.
     recovery_replay_all_rounds: bool = False
     data_correction_sequential_replay: bool = False
+    fast_recovery_mode: bool = False
     ledger_trade_count: int = 0
     ledger_settled_count: int = 0
     ledger_profit: float = 0.0
@@ -504,6 +505,8 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.recovery_replay_all_rounds = False
     if not hasattr(ctx, "data_correction_sequential_replay"):
         ctx.data_correction_sequential_replay = False
+    if not hasattr(ctx, "fast_recovery_mode"):
+        ctx.fast_recovery_mode = False
     if not hasattr(ctx, "ledger_trade_count"):
         ctx.ledger_trade_count = 0
     if not hasattr(ctx, "ledger_settled_count"):
@@ -2408,7 +2411,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.2 | DATA-CORRECTION RECOVERY | TRUE-FRONTIER | LIVE INPUT: GOOGLE SHEET COLUMN B")
+        st.caption("BUILD CHECK: V4.2.1 | FAST RECOVERY RAM-FIRST | TRUE-FRONTIER | LIVE INPUT: GOOGLE SHEET COLUMN B")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2961,6 +2964,7 @@ def serialize_live_state(ctx: EngineContext) -> dict:
         "state_revision": int(getattr(ctx, "state_revision", 0)),
         "recovery_replay_all_rounds": bool(getattr(ctx, "recovery_replay_all_rounds", False)),
         "data_correction_sequential_replay": bool(getattr(ctx, "data_correction_sequential_replay", False)),
+        "fast_recovery_mode": bool(getattr(ctx, "fast_recovery_mode", False)),
         "ledger_trade_count": int(getattr(ctx, "ledger_trade_count", 0)),
         "ledger_settled_count": int(getattr(ctx, "ledger_settled_count", 0)),
         "ledger_profit": float(getattr(ctx, "ledger_profit", 0.0)),
@@ -3461,6 +3465,11 @@ def round_audit_integrity_report(ctx: EngineContext) -> dict:
 
 
 def save_live_state(ctx: EngineContext) -> None:
+    # V4.2.1 FAST RECOVERY: sequential reconstruction can execute hundreds of
+    # transaction phases. Do not write remote/local state at every phase.
+    # Normal TRUE-LIVE never sets this flag, so crash-safe persistence is unchanged.
+    if bool(getattr(ctx, "fast_recovery_mode", False)):
+        return
     ensure_ctx_fields(ctx)
     refresh_ledger_checkpoint(ctx)
     ctx.state_revision = int(getattr(ctx, "state_revision", 0) or 0) + 1
@@ -3632,6 +3641,7 @@ def load_live_state() -> EngineContext:
     ctx.state_revision = int(data.get("state_revision", 0) or 0)
     ctx.recovery_replay_all_rounds = bool(data.get("recovery_replay_all_rounds", False))
     ctx.data_correction_sequential_replay = bool(data.get("data_correction_sequential_replay", False))
+    ctx.fast_recovery_mode = bool(data.get("fast_recovery_mode", False))
     ctx.ledger_trade_count = int(data.get("ledger_trade_count", 0) or 0)
     ctx.ledger_settled_count = int(data.get("ledger_settled_count", 0) or 0)
     ctx.ledger_profit = float(data.get("ledger_profit", 0.0) or 0.0)
@@ -3795,7 +3805,7 @@ def reset_live_state_button() -> None:
             st.caption(f"State backend: Google Sheet / worksheet={cfg['worksheet']}")
         else:
             st.caption(f"State backend: local file {STATE_FILE}")
-        if st.button("REPLAY TODAY FROM CORRECTED NUMBERS"):
+        if st.button("FAST REPLAY TODAY FROM CORRECTED NUMBERS"):
             # V4.2 emergency recovery for the ACTIVE DAY only.
             # Use only when today's ledger is missing/corrupt after Number edits.
             old_ctx = ensure_ctx_fields(get_live_ctx())
@@ -3813,6 +3823,7 @@ def reset_live_state_button() -> None:
             blank_ctx.dataset_anchor_signature = ""
             blank_ctx.recovery_replay_all_rounds = True
             blank_ctx.data_correction_sequential_replay = True
+            blank_ctx.fast_recovery_mode = True
             blank_ctx.state_revision = int(getattr(old_ctx, "state_revision", 0) or 0) + 1
             rebuild_payload = serialize_live_state(blank_ctx)
 
@@ -4337,6 +4348,7 @@ class EngineManager:
         self.ctx.data_length = self.ctx.last_length
         self.ctx.recovery_replay_all_rounds = False
         self.ctx.data_correction_sequential_replay = False
+        self.ctx.fast_recovery_mode = False
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
