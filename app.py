@@ -28,7 +28,7 @@ import streamlit.components.v1 as components
 # ============================================================
 
 st.set_page_config(
-    page_title="V69.5 Profit Guard DAY_SEQ",
+    page_title="V70 Number-Only Deterministic Live",
     layout="wide"
 )
 
@@ -2454,7 +2454,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
+        st.title("🚀 V70 NUMBER-ONLY DETERMINISTIC LIVE — BUILD 2026-10-06")
         st.caption("BUILD CHECK: V4.2.7 | PROFIT=TRADE LEDGER | READY-ELIGIBLE RELOCK | TRUE-FRONTIER")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
@@ -4789,11 +4789,333 @@ Regime : {signal.regime}
         )
 
 
+
+# ============================================================
+# V70 NUMBER-ONLY DETERMINISTIC ENGINE
+# ============================================================
+# Design contract:
+#   1) Number rows are the strategy source of truth.
+#   2) Every rerun reconstructs the current day sequentially from round 1..N.
+#   3) A row is treated exactly as if it had arrived one-by-one in live order.
+#   4) No saved lock/cooldown/blacklist/profit state is allowed to change the result.
+#   5) Completed historical days are replayed from the history tab and cached.
+#      Their computed P/L is fed into the next day for multi-day protection.
+# Therefore the same Number dataset must always produce the same trades/profit.
+
+
+def _extract_day_snapshots(df: pd.DataFrame) -> list[dict]:
+    """Extract strict DAY_SEQ datasets from physical A:E columns.
+
+    Returns only contiguous 1..N prefixes. Duplicate/conflicting rounds are marked
+    invalid so the audit can show the exact data problem instead of guessing.
+    """
+    if df is None or df.empty or df.shape[1] < 4:
+        return []
+
+    by_seq: dict[int, dict] = {}
+    for i in range(len(df)):
+        seq = _normalize_day_seq(df.iloc[i, 2]) if df.shape[1] >= 3 else None
+        if seq is None:
+            continue
+        try:
+            rr = int(float(str(df.iloc[i, 0]).replace(",", ".")))
+        except Exception:
+            continue
+        number = _parse_number_value(df.iloc[i, 1])
+        if rr < 1 or number is None:
+            continue
+        d = _parse_date_value(df.iloc[i, 3]) if df.shape[1] >= 4 else None
+        p = _parse_daily_profit_v35(df.iloc[i, 4]) if df.shape[1] >= 5 else None
+
+        rec = by_seq.setdefault(seq, {
+            "day_seq": int(seq),
+            "date": d.isoformat() if d else "",
+            "round_map": {},
+            "stored_profit": None,
+            "errors": [],
+        })
+        if d is not None:
+            ds = d.isoformat()
+            if rec["date"] and rec["date"] != ds:
+                rec["errors"].append(f"MULTIPLE_DATES:{rec['date']}|{ds}")
+            rec["date"] = ds
+        if rr in rec["round_map"] and rec["round_map"][rr] != number:
+            rec["errors"].append(f"CONFLICT_ROUND_{rr}")
+        rec["round_map"][rr] = number
+        if p is not None:
+            rec["stored_profit"] = round(float(p), 2)
+
+    out = []
+    for seq in sorted(by_seq):
+        rec = by_seq[seq]
+        nums = []
+        r = 1
+        while r in rec["round_map"]:
+            nums.append(int(rec["round_map"][r]))
+            r += 1
+        if len(nums) != len(rec["round_map"]):
+            rec["errors"].append(
+                f"NON_CONTIGUOUS:prefix={len(nums)},rows={len(rec['round_map'])}"
+            )
+        out.append({
+            "day_seq": int(seq),
+            "date": str(rec["date"] or ""),
+            "numbers": nums,
+            "stored_profit": rec["stored_profit"],
+            "errors": sorted(set(rec["errors"])),
+        })
+    return out
+
+
+def _replay_one_day_deterministic(
+    numbers: list[int],
+    day_seq: int,
+    day_date: str,
+    prior_daily_history: list[dict],
+) -> tuple[EngineContext, dict[int, WindowRecord], SignalRecord, float]:
+    """Pure sequential replay of one day using only Number + prior computed daily P/L."""
+    ctx = ensure_ctx_fields(EngineContext())
+    ctx.live_day_seq = int(day_seq or 0)
+    ctx.live_day_date = str(day_date or "")
+    ctx.live_day_id = ctx.live_day_date
+    ctx.daily_profit_history = list(prior_daily_history or [])[-10:]
+    ctx.fast_recovery_mode = True  # guarantees no persistence helper writes during replay
+    ctx.data_correction_sequential_replay = True
+
+    state = {w: WindowRecord() for w in WINDOWS}
+    we = WindowEngine(ctx, state)
+    te = TradeEngine(ctx)
+    se = SignalEngine(ctx, we)
+    pe = ProtectionEngine(ctx, te)
+    groups = build_groups(numbers)
+
+    last_signal = SignalRecord()
+    last_conf = 0.0
+
+    for idx, actual_group in enumerate(groups, start=1):
+        ctx.current_batch_id = f"DET:{day_seq}:{idx}"
+        ctx.current_is_frontier = True
+
+        if idx < LIVE_START_ROUND:
+            we.update_one_round(actual_group, idx)
+            ctx.last_length = idx
+            ctx.last_decision_round = idx
+            ctx.last_decision_state = "WARMUP"
+            ctx.last_decision_next_group = None
+            continue
+
+        # Exact target settlement always happens before the new decision.
+        te.settle_trade(actual_group, idx)
+        we.update_one_round(actual_group, idx)
+
+        signal = se.build_signal(idx)
+        signal = se.apply_sample_aware_coherence(signal)
+        confidence = se.get_confidence_score(signal)
+        ctx.last_decision_confidence = confidence
+        setattr(signal, "decision_confidence", confidence)
+
+        signal.state = pe.adaptive_ready_wait(signal, confidence)
+        if multi_day_low_confidence_filter(ctx, confidence):
+            ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
+            signal.state = "WAIT"
+
+        ctx.last_decision_round = idx
+        ctx.last_decision_state = str(signal.state or "WAIT")
+        ctx.last_decision_next_group = None
+
+        if signal.state == "READY":
+            before = len(ctx.trade_history)
+            te.open_trade(signal, idx, confidence)
+            if len(ctx.trade_history) > before:
+                ctx.last_decision_state = "PENDING"
+                ctx.last_decision_next_group = signal.next_group
+
+        ctx.last_length = idx
+        ctx.data_length = idx
+        ctx.data_signature = make_numbers_signature(numbers, idx)
+        append_round_audit(ctx, idx, numbers[idx - 1], actual_group, signal)
+        last_signal = signal
+        last_conf = confidence
+
+    # End-of-day pending is intentionally NOT settled against the next day.
+    # Profit contains settled trades only, exactly matching the daily contract.
+    rebuild_real_stats_from_history(ctx)
+    refresh_ledger_checkpoint(ctx)
+    ctx.fast_recovery_mode = False
+    ctx.data_correction_sequential_replay = False
+
+    if numbers:
+        # Read-only display snapshot after replay. Do not mutate the replayed decision.
+        last_signal = se.build_signal_snapshot(len(numbers))
+        last_conf = se.get_confidence_score(last_signal)
+        if ctx.pending_trade is not None:
+            last_signal.state = "READY"
+            last_signal.next_group = ctx.pending_trade
+        elif ctx.last_decision_round == len(numbers):
+            actual_state = str(ctx.last_decision_state or "WAIT")
+            last_signal.state = "READY" if actual_state == "PENDING" else actual_state
+            last_signal.next_group = ctx.last_decision_next_group if actual_state == "PENDING" else None
+
+    return ctx, state, last_signal, float(last_conf)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _deterministic_completed_history_cache() -> tuple[list[dict], list[dict], list[dict]]:
+    """Replay completed history once per cache window.
+
+    Returns summary rows, serialized trade archive, and computed prior daily P/L.
+    Historical strategy state is NEVER reused by the live day.
+    """
+    history_df = _load_history_sheet_df()
+    snapshots = _extract_day_snapshots(history_df)
+    summary = []
+    archive_dicts = []
+    prior = []
+
+    for snap in snapshots:
+        nums = list(snap["numbers"])
+        if not nums:
+            summary.append({
+                "day_seq": snap["day_seq"], "date": snap["date"], "rounds": 0,
+                "trades": 0, "wins": 0, "losses": 0, "profit": 0.0,
+                "stored_profit": snap["stored_profit"], "diff": None,
+                "status": "DATA_ERROR", "errors": ";".join(snap["errors"] or ["NO_NUMBERS"]),
+            })
+            continue
+
+        ctx, _state, _sig, _conf = _replay_one_day_deterministic(
+            nums, snap["day_seq"], snap["date"], prior
+        )
+        settled = [x for x in ctx.trade_history if x.hit is not None]
+        profit = round(sum(float(x.profit) for x in settled), 2)
+        wins = sum(1 for x in settled if int(x.hit) == 1)
+        losses = len(settled) - wins
+        stored = snap["stored_profit"]
+        diff = round(profit - float(stored), 2) if stored is not None else None
+        status = "OK" if (stored is None or abs(diff or 0.0) < 1e-9) and not snap["errors"] else "MISMATCH"
+        summary.append({
+            "day_seq": snap["day_seq"], "date": snap["date"], "rounds": len(nums),
+            "trades": len(settled), "wins": wins, "losses": losses, "profit": profit,
+            "stored_profit": stored, "diff": diff, "status": status,
+            "errors": ";".join(snap["errors"]),
+        })
+        archive_dicts.extend(trade_record_to_dict(x) for x in ctx.trade_history)
+        prior.append({"day_seq": int(snap["day_seq"]), "day_id": str(snap["date"] or snap["day_seq"]), "profit": profit})
+        prior = prior[-10:]
+
+    return summary, archive_dicts, prior
+
+
+class DeterministicEngineManager:
+    def __init__(self) -> None:
+        raw_df, sheet_day_seq, sheet_day_date, raw_numbers = _load_day_seq_sheet_snapshot()
+        if sheet_day_seq <= 0:
+            st.warning("Waiting for DAY_SEQ...")
+            st.stop()
+        if len(raw_numbers) < MIN_DATA_LEN:
+            st.warning("Waiting data...")
+            st.stop()
+
+        self.raw_df = raw_df
+        self.day_seq = int(sheet_day_seq)
+        self.day_date = str(sheet_day_date or "")
+        self.numbers = list(raw_numbers)
+        self.round_id = len(self.numbers)
+
+        # Completed history is recomputed from Number, not trusted from stored P/L.
+        self.audit_rows, archive_dicts, prior = _deterministic_completed_history_cache()
+        self.ctx, self.window_state, self.signal, self.confidence_score = _replay_one_day_deterministic(
+            self.numbers, self.day_seq, self.day_date, prior
+        )
+        self.ctx.trade_archive = [trade_record_from_dict(x) for x in archive_dicts]
+        merge_trade_archive(self.ctx)
+
+        self.window_engine = WindowEngine(self.ctx, self.window_state)
+        self.trade_engine = TradeEngine(self.ctx)
+        self.signal_engine = SignalEngine(self.ctx, self.window_engine)
+        self.protection_engine = ProtectionEngine(self.ctx, self.trade_engine)
+        self.dashboard = Dashboard(
+            self.ctx, self.window_engine, self.signal_engine,
+            self.trade_engine, self.protection_engine
+        )
+
+    def render_audit(self) -> None:
+        st.subheader("Deterministic Audit — Number → Replay → Profit")
+        current_settled = [x for x in self.ctx.trade_history if x.hit is not None]
+        current_profit = round(sum(float(x.profit) for x in current_settled), 2)
+        current_row = {
+            "day_seq": self.day_seq,
+            "date": self.day_date,
+            "rounds": len(self.numbers),
+            "trades": len(current_settled),
+            "wins": sum(1 for x in current_settled if int(x.hit) == 1),
+            "losses": sum(1 for x in current_settled if int(x.hit) == 0),
+            "profit": current_profit,
+            "stored_profit": None,
+            "diff": None,
+            "status": "LIVE",
+            "errors": "",
+        }
+        rows = list(self.audit_rows) + [current_row]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        mismatches = [r for r in self.audit_rows if r.get("status") == "MISMATCH"]
+        if mismatches:
+            st.warning(
+                f"AUDIT FOUND {len(mismatches)} historical mismatch day(s). "
+                "The deterministic Profit column is recomputed from Number; stored_profit is comparison only."
+            )
+        else:
+            st.success("Historical audit: no mismatch found against stored completed-day profit.")
+
+        st.caption(
+            f"DETERMINISTIC KEY | day_seq={self.day_seq} | rounds={self.round_id} | "
+            f"number_sha256={make_numbers_signature(self.numbers)[:16]} | "
+            f"ledger_sha256={_ledger_checksum(self.ctx)[:16]} | "
+            f"profit={current_profit:+.1f}. Refresh/redeploy with unchanged Number must reproduce this key."
+        )
+
+    def build_display_signal(self) -> tuple[SignalRecord, float, str]:
+        signal = self.signal
+        conf = float(self.confidence_score)
+        level = self.signal_engine.get_confidence_level(conf)
+        if self.ctx.pending_trade is not None:
+            signal.state = "READY"
+            signal.next_group = self.ctx.pending_trade
+            self.ctx.protection_reason = "WAITING_RESULT"
+            self.ctx.open_reason = "OPENED"
+        return signal, conf, level
+
+    def run(self) -> None:
+        signal, confidence_score, confidence_level = self.build_display_signal()
+
+        self.dashboard.render_header()
+        self.dashboard.render_signal(signal, confidence_score)
+        self.dashboard.render_market(signal)
+        self.dashboard.render_profit()
+        self.dashboard.render_risk()
+        self.dashboard.render_last_result()
+        self.dashboard.render_current_trade()
+        self.render_audit()
+        self.dashboard.render_top_windows()
+        self.dashboard.render_window_debug()
+        self.dashboard.render_real_stats_summary()
+        self.dashboard.render_trade_history()
+        self.dashboard.render_equity()
+
+        st.caption(
+            f"V70 deterministic mode | Source of truth = DAY_SEQ + Number only | "
+            f"Current round={self.round_id} | Live start={LIVE_START_ROUND} | "
+            f"Confidence={confidence_level} | Pending={self.ctx.pending_trade} | "
+            f"Locked W={self.ctx.locked_window}. Strategy state is rebuilt every rerun."
+        )
+
+
 # ============================================================
 # MAIN
 # ============================================================
 
-manager = EngineManager()
+manager = DeterministicEngineManager()
 
 try:
     manager.run()
