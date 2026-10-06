@@ -600,6 +600,7 @@ def _sheet_csv_url(sheet_name: str) -> str:
     )
 
 
+@st.cache_data(ttl=2, show_spinner=False)
 def _load_live_sheet_df() -> pd.DataFrame:
     """Read ONLY the current-day `data` tab.
 
@@ -2411,7 +2412,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.2.1 | FAST RECOVERY RAM-FIRST | TRUE-FRONTIER | LIVE INPUT: GOOGLE SHEET COLUMN B")
+        st.caption("BUILD CHECK: V4.2.2 | SINGLE SHEET SNAPSHOT | FAST RECOVERY | TRUE-FRONTIER")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3979,7 +3980,16 @@ class EngineManager:
             st.stop()
         self.maybe_auto_reset_for_new_day(sheet_day_seq, sheet_day_date)
 
-        self.numbers, self.groups, self.actual_group, self.round_id = load_data()
+        # V4.2.2 SINGLE-SNAPSHOT: reuse the exact snapshot already fetched above.
+        # Do not call load_data()/load_numbers() here because that would fetch the
+        # same Google Sheet again and can also create a mixed-snapshot race.
+        self.numbers = list(raw_numbers)
+        if len(self.numbers) < MIN_DATA_LEN:
+            st.warning("Waiting data...")
+            st.stop()
+        self.groups = build_groups(self.numbers)
+        self.actual_group = self.groups[-1]
+        self.round_id = len(self.numbers)
 
         # Never silently accept a persisted state whose ledger checkpoint disagrees
         # with the actual trade list. A lost/partial ledger must be recoverable,
