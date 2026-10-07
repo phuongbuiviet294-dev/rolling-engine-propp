@@ -12,7 +12,7 @@ import os
 import math
 import hashlib
 import re
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -676,7 +676,7 @@ def _parse_profit_value(raw: Any) -> Optional[float]:
         return None
 
 
-def _parse_date_value(raw: Any) -> Optional[date]:
+def _parse_date_value(raw: Any) -> Optional[datetime.date]:
     """Parse Sheet dates deterministically.
 
     User Sheet dates are normally dd/mm/yyyy.  Never let pandas infer an
@@ -689,7 +689,7 @@ def _parse_date_value(raw: Any) -> Optional[date]:
         return raw.date()
     if isinstance(raw, datetime):
         return raw.date()
-    if isinstance(raw, date):
+    if isinstance(raw, datetime.date):
         return raw
     s = str(raw).strip()
     if not s or s.lower() in {"nan", "nat", "none"}:
@@ -2453,7 +2453,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.3.4 | DATE TYPE FIX | HISTORY AUDIT-ONLY | NO CACHE")
+        st.caption("BUILD CHECK: V4.3.5 | LOCAL WAL RECOVERY FIX | NO CACHE | HISTORY AUDIT-ONLY")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3690,12 +3690,32 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        if not os.path.exists(STATE_FILE):
-            return EngineContext()
+        # V4.3.5 CRITICAL LOCAL-WAL RECOVERY FIX:
+        # Local backend previously ignored STATE_WAL_FILE completely here.
+        # Intermediate transaction phases are checkpointed to WAL, so a
+        # Streamlit rerun/restart between phase checkpoint and final STATE_FILE
+        # commit could load an older state and execute the same mutation again.
+        # Always compare local STATE_FILE and WAL and resume the highest valid
+        # revision, exactly as the Google backend already does.
+        local_data = None
         try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    local_data = json.load(f)
         except Exception:
+            local_data = None
+
+        local_valid = _valid_state(local_data)
+        wal_valid = _valid_state(wal_data)
+        if local_valid and wal_valid:
+            local_rev = int(local_data.get("state_revision", 0) or 0)
+            wal_rev = int(wal_data.get("state_revision", 0) or 0)
+            data = wal_data if wal_rev > local_rev else local_data
+        elif wal_valid:
+            data = wal_data
+        elif local_valid:
+            data = local_data
+        else:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
