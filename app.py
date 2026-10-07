@@ -53,11 +53,6 @@ GROUP_HISTORY_LEN = 80
 COOLDOWN_ROUNDS = 3
 MIN_DATA_LEN = 30
 LIVE_START_ROUND = 180
-
-# V4.4: calculation is stateless. Every refresh replays R1..current from the
-# fresh immutable Google snapshot, exactly like the Excel/backtest path.
-STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V4.4.9 | INPUT + DAY BOUNDARY LOCK | FAIL CLOSED | SAME NUMBERS = SAME LEDGER"
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
@@ -597,7 +592,6 @@ window_state = get_window_state()
 
 DATA_SHEET_NAME = "data"
 HISTORY_SHEET_NAME = "history"
-DAILY_SUMMARY_SHEET_NAME = "daily_summary"
 MAX_ROUNDS_PER_DAY = 288
 
 
@@ -645,21 +639,6 @@ def _load_history_sheet_df() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _load_daily_summary_df() -> pd.DataFrame:
-    """Read completion metadata for finished days.
-
-    day_seq/date/round_count are authoritative completion metadata.
-    daily_profit is NEVER trusted for strategy/profit calculation.
-    """
-    if INPUT_CSV_PATH:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(_sheet_csv_url(DAILY_SUMMARY_SHEET_NAME))
-    except Exception as e:
-        st.warning(f"Daily summary tab '{DAILY_SUMMARY_SHEET_NAME}' unavailable: {e}")
-        return pd.DataFrame()
-
-
 
 def _parse_number_value(raw: Any) -> Optional[int]:
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
@@ -698,14 +677,28 @@ def _parse_profit_value(raw: Any) -> Optional[float]:
 
 
 def _parse_date_value(raw: Any) -> Optional[datetime.date]:
+    """Parse Sheet dates deterministically.
+
+    User Sheet dates are normally dd/mm/yyyy.  Never let pandas infer an
+    ambiguous value such as 02/09/2026 as mm/dd/yyyy.  ISO dates remain
+    supported for state/ledger serialization.
+    """
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return None
-    try:
-        dt = pd.to_datetime(raw, errors="coerce", dayfirst=False)
-        if not pd.isna(dt):
-            return dt.date()
-    except Exception:
-        pass
+    if isinstance(raw, pd.Timestamp):
+        return raw.date()
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, datetime.date):
+        return raw
+    s = str(raw).strip()
+    if not s or s.lower() in {"nan", "nat", "none"}:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            pass
     return None
 
 
@@ -906,21 +899,10 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
                 "Engine stopped; row order must be contiguous."
             )
             st.stop()
-        raw_number_blank = (
-            raw_n is None
-            or (isinstance(raw_n, float) and pd.isna(raw_n))
-            or str(raw_n).strip() == ""
-            or str(raw_n).strip().lower() in {"nan", "nat", "none"}
-        )
-        if n is None and not raw_number_blank:
-            st.error(
-                f"LIVE DATA ERROR DaySeq {current_seq} round {pos}: invalid Number={raw_n!r}. "
-                "Allowed values are integer 1..12. Fix the Sheet and refresh."
-            )
-            st.stop()
         if n is None:
-            # A truly blank tail is normal while waiting for the next result.
-            # A blank inside the stream is a hard data gap.
+            # A blank tail is normal. A blank/invalid row followed by any valid
+            # Number in the same DAY_SEQ is a data gap and must fail-stop rather
+            # than silently treating the earlier row as the live frontier.
             later_valid = False
             for j in idxs[pos:]:
                 if _parse_number_value(c_number.iloc[j]) is not None:
@@ -936,13 +918,7 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         rounds.append(rr)
         nums.append(n)
         d = _parse_date_value(c_date.iloc[i])
-        if d is None:
-            st.error(
-                f"LIVE DATA ERROR DaySeq {current_seq} round {pos}: missing/invalid date. "
-                "Fix column D and refresh."
-            )
-            st.stop()
-        dates.append(d.isoformat())
+        dates.append(d.isoformat() if d is not None else "")
 
     if nums:
         bad_dates = {d for d in dates if d}
@@ -954,47 +930,6 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         day_date = ""
 
     return df, current_seq, day_date, nums
-
-
-def _extract_day_seq_snapshot_from_df(df: pd.DataFrame, target_seq: int) -> tuple[str, list[int]]:
-    """Extract one DAY_SEQ from an already-fetched immutable Sheet snapshot.
-
-    Used at a day boundary so an app that was offline near midnight can finish
-    every still-unprocessed round of DAY_SEQ N before switching to N+1.
-    This function NEVER performs another Google read.
-    """
-    if df.shape[1] < 4 or int(target_seq or 0) <= 0:
-        return "", []
-    seqs = [_normalize_day_seq(x) for x in df.iloc[:, 2].tolist()]
-    idxs = [i for i, x in enumerate(seqs) if x == int(target_seq)]
-    if not idxs:
-        return "", []
-    nums: list[int] = []
-    dates: list[str] = []
-    for pos, i in enumerate(idxs, start=1):
-        raw_r = df.iloc[i, 0]
-        try:
-            rr = int(float(str(raw_r).replace(",", ".")))
-        except Exception:
-            rr = -1
-        if rr != pos:
-            st.error(f"DAY BOUNDARY ERROR DaySeq {target_seq}: expected round {pos}, found {raw_r!r}.")
-            st.stop()
-        n = _parse_number_value(df.iloc[i, 1])
-        if n is None:
-            later_valid = any(_parse_number_value(df.iloc[j, 1]) is not None for j in idxs[pos:])
-            if later_valid:
-                st.error(f"DAY BOUNDARY GAP DaySeq {target_seq}: round {pos} blank/invalid but later Number exists.")
-                st.stop()
-            break
-        nums.append(n)
-        d = _parse_date_value(df.iloc[i, 3])
-        dates.append(d.isoformat() if d is not None else "")
-    nonempty = {d for d in dates if d}
-    if len(nonempty) > 1:
-        st.error(f"DAY_SEQ {target_seq} has multiple dates: {sorted(nonempty)}")
-        st.stop()
-    return next(iter(nonempty), ""), nums
 
 
 def load_numbers() -> list[int]:
@@ -1051,7 +986,11 @@ def _get_daily_history_from_df_v35(df: pd.DataFrame, current_seq: int) -> list[d
 
 
 def load_daily_profit_history_from_sheet() -> list[dict]:
-    """Read completed daily P/L from `history`, never from live `data`."""
+    """Audit-only reader for completed Sheet P/L.
+
+    IMPORTANT: this function must never be used to gate/pause LIVE or overwrite
+    ctx.daily_profit_history.  Persistent ledger/state remains authoritative.
+    """
     try:
         live_df = _load_live_sheet_df()
         if live_df.shape[1] < 3:
@@ -2513,8 +2452,8 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.5 V4.4.2 FULL HISTORY REPLAY LIVE")
-        st.caption("BUILD CHECK: V4.3.1 | HISTORY BOUNDARY FIX | DURABLE STATE")
+        st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
+        st.caption("BUILD CHECK: V4.3.3 | HISTORY AUDIT-ONLY | NO CACHE | DATE FIX")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2832,16 +2771,7 @@ CONF = {confidence_score:.2f}
         if not integrity["ok"]:
             st.error("LEDGER INTEGRITY: " + ", ".join(integrity["errors"]))
 
-        # V4.4.8 PROFIT/LEDGER SINGLE SOURCE:
-        # In stateless mode the reconstructed current-day trade_history is the
-        # only authoritative ledger shown to the operator. Do not merge legacy
-        # persistent archives into the live table, because that can make the UI
-        # appear to contain trades/profit that did not come from this replay.
-        archive_rows = (
-            list(self.ctx.trade_history)
-            if STATELESS_REPLAY_LIVE
-            else merge_trade_archive(self.ctx)
-        )
+        archive_rows = merge_trade_archive(self.ctx)
         if not archive_rows:
             st.info("No trades")
             return
@@ -2865,17 +2795,10 @@ CONF = {confidence_score:.2f}
             ]
         )
 
-        if STATELESS_REPLAY_LIVE:
-            st.caption(
-                f"STATELESS CURRENT-DAY LEDGER | total={len(archive_rows)} | "
-                f"settled={integrity['settled_count']} | pending={integrity['pending_count']} | "
-                f"profit={integrity['profit']:+.1f}"
-            )
-        else:
-            st.caption(
-                f"PERSISTENT TRADE ARCHIVE | total={len(archive_rows)} | "
-                f"current-day={len(self.ctx.trade_history)} | survives code deploy/reset/new day"
-            )
+        st.caption(
+            f"PERSISTENT TRADE ARCHIVE | total={len(archive_rows)} | "
+            f"current-day={len(self.ctx.trade_history)} | survives code deploy/reset/new day"
+        )
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         with st.expander("Round Audit Log - every processed round"):
@@ -3649,7 +3572,7 @@ def save_live_checkpoint(ctx: EngineContext) -> None:
     already compares WAL/state revisions, so an interrupted round can resume
     from the newest durable phase without doing multiple remote writes.
     """
-    if bool(getattr(ctx, "fast_recovery_mode", False)) or bool(getattr(ctx, "stateless_internal_replay", False)):
+    if bool(getattr(ctx, "fast_recovery_mode", False)):
         return
     ensure_ctx_fields(ctx)
     refresh_ledger_checkpoint(ctx)
@@ -3671,7 +3594,7 @@ def save_live_state(ctx: EngineContext) -> None:
     # V4.2.1 FAST RECOVERY: sequential reconstruction can execute hundreds of
     # transaction phases. Do not write remote/local state at every phase.
     # Normal TRUE-LIVE never sets this flag, so crash-safe persistence is unchanged.
-    if bool(getattr(ctx, "fast_recovery_mode", False)) or bool(getattr(ctx, "stateless_internal_replay", False)):
+    if bool(getattr(ctx, "fast_recovery_mode", False)):
         return
     ensure_ctx_fields(ctx)
     refresh_ledger_checkpoint(ctx)
@@ -3767,29 +3690,12 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        # V4.3.4 LOCAL CRASH RECOVERY:
-        # Intermediate transaction phases are checkpointed to STATE_WAL_FILE,
-        # while STATE_FILE is committed only at a completed durable save.
-        # Therefore local mode MUST compare both files and resume the highest
-        # valid revision. Ignoring a newer WAL can repeat SETTLE/WINDOW/SIGNAL/OPEN
-        # after a process crash and make LIVE differ from deterministic replay.
-        local_data = None
-        if os.path.exists(STATE_FILE):
-            try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
-                    local_data = json.load(f)
-            except Exception:
-                local_data = None
-
-        if _valid_state(local_data) and _valid_state(wal_data):
-            local_rev = int(local_data.get("state_revision", 0) or 0)
-            wal_rev = int(wal_data.get("state_revision", 0) or 0)
-            data = wal_data if wal_rev > local_rev else local_data
-        elif _valid_state(wal_data):
-            data = wal_data
-        elif _valid_state(local_data):
-            data = local_data
-        else:
+        if not os.path.exists(STATE_FILE):
+            return EngineContext()
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
@@ -4219,126 +4125,21 @@ def reset_live_state_button() -> None:
 
 class EngineManager:
     def __init__(self) -> None:
-        # V4.4.2 STATELESS: legacy reset/replay buttons are not part of calculation.
-        # Keep them hidden to avoid suggesting persistent state controls strategy.
-        if not STATELESS_REPLAY_LIVE:
-            reset_live_state_button()
+        reset_live_state_button()
 
         # V4.3.2 TRUE SINGLE SNAPSHOT: fetch Google `data` exactly once at the
         # beginning of this Streamlit run. Persistent state loading must not
         # trigger any second Google data/history read.
         raw_df, sheet_day_seq, sheet_day_date, raw_numbers = _load_day_seq_sheet_snapshot()
 
-        if STATELESS_REPLAY_LIVE:
-            # V4.4 STATELESS CALCULATION:
-            # Never use yesterday's/incremental persistent engine state to calculate
-            # today's trades.  The current immutable Sheet snapshot is the complete
-            # input.  This makes Google LIVE equivalent to Excel replay.
-            self.ctx = ensure_ctx_fields(EngineContext())
-            self.ctx.live_day_seq = int(sheet_day_seq or 0)
-            self.ctx.live_day_date = str(sheet_day_date or "")
-            self.ctx.live_day_id = self.ctx.live_day_date
-            # Prior completed daily P/L is read from the SAME immutable A:E snapshot.
-            # It is used only as causal D-1/D-2/... input; current DAY_SEQ is excluded.
-            # V4.4.2: derive prior-day profit from historical Numbers using the
-            # exact same deterministic engine. Google daily_profit is audit-only.
-            history_df = _load_history_sheet_df()
-            summary_df = _load_daily_summary_df()
-            # V4.4.9 COMPLETION MARKER:
-            # Day N cannot start until every prior day has BOTH:
-            #   (1) contiguous history Numbers, and
-            #   (2) daily_summary completion metadata whose round_count/date
-            #       exactly match history.
-            # This closes the partial-copy race at a day boundary.
-            try:
-                _validate_completed_history_against_summary(
-                    history_df, summary_df, int(sheet_day_seq or 0)
-                )
-            except Exception as e:
-                st.warning(
-                    f"HISTORY NOT READY for DaySeq {int(sheet_day_seq or 0)}: {e}. "
-                    "LIVE calculation is paused; fix/finish the Sheet copy and refresh."
-                )
-                st.stop()
-            self.ctx.daily_profit_history = replay_prior_days_from_numbers(
-                history_df, int(sheet_day_seq or 0)
-            )[-10:]
-            # Suppress WAL/state writes during deterministic replay.  Calculation
-            # state is disposable and rebuilt from R1 on every refresh.
-            # V4.4.5 PURE STATELESS:
-            # This context is disposable calculation state. Keep persistence disabled
-            # for the ENTIRE Streamlit run, including the final hybrid_replay_once()
-            # commit path. Earlier V4.4.x could clear fast_recovery_mode at the end
-            # and accidentally write the reconstructed calculation state to WAL/state.
-            self.ctx.fast_recovery_mode = True
-            self.ctx.stateless_internal_replay = True
-            self.ctx.hybrid_initialized = False
-            self.ctx.recovery_replay_all_rounds = True
-            self.ctx.data_correction_sequential_replay = True
-            self.window_state = {w: WindowRecord() for w in WINDOWS}
-        else:
-            self.ctx = ensure_ctx_fields(get_live_ctx())
-            self.window_state = get_live_window_state()
-
-        # V4.3.4 CRASH-SAFE LOCAL WAL:
-        # If Google has already started DAY_SEQ N+1 while persisted state for N
-        # is behind the final contiguous Number present for N, finish N first.
-        # Otherwise reset_context_for_new_day() would freeze an incomplete daily
-        # ledger/profit and could change next-day multi-day protection.
-        state_seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
-        if (not STATELESS_REPLAY_LIVE) and state_seq > 0 and int(sheet_day_seq or 0) == state_seq + 1:
-            prev_date, prev_numbers = _extract_day_seq_snapshot_from_df(raw_df, state_seq)
-            state_frontier = int(getattr(self.ctx, "last_length", 0) or 0)
-            if len(prev_numbers) < state_frontier:
-                st.error(
-                    f"DAY BOUNDARY REGRESSION DaySeq {state_seq}: state frontier={state_frontier}, "
-                    f"Sheet contiguous rounds={len(prev_numbers)}. Engine stopped."
-                )
-                st.stop()
-            if len(prev_numbers) > state_frontier:
-                sheet_day_seq = state_seq
-                sheet_day_date = prev_date or str(getattr(self.ctx, "live_day_date", "") or "")
-                raw_numbers = prev_numbers
-                st.warning(
-                    f"DAY BOUNDARY CATCH-UP: finishing DaySeq {state_seq} "
-                    f"rounds {state_frontier + 1}..{len(prev_numbers)} before switching to DaySeq {state_seq + 1}."
-                )
+        self.ctx = ensure_ctx_fields(get_live_ctx())
+        self.window_state = get_live_window_state()
 
         # V3.5: the Sheet is append-only. DAY_SEQ is the only day boundary.
         if sheet_day_seq <= 0:
             st.warning("Waiting for DAY_SEQ...")
             st.stop()
-        # V4.4.3: a new DaySeq may appear before its first Number is committed.
-        # Treat that as an incomplete Google write, never as a calculable day.
-        if STATELESS_REPLAY_LIVE and len(raw_numbers) == 0:
-            st.warning(f"DaySeq {sheet_day_seq} detected but round 1 Number is not ready. Waiting; no trade generated.")
-            st.stop()
-        # V4.4.4 SNAPSHOT MONOTONIC GUARD:
-        # A stale Google response is safe for calculation (stateless replay), but it
-        # must not make the UI appear to move backwards within the same Streamlit
-        # browser session. This guard NEVER supplies Numbers to the strategy; it only
-        # rejects a regressed snapshot. A later fresh refresh will retry normally.
-        if STATELESS_REPLAY_LIVE:
-            snap_key = "_v444_last_accepted_snapshot"
-            previous = st.session_state.get(snap_key)
-            current_seq = int(sheet_day_seq or 0)
-            current_len = int(len(raw_numbers))
-            if isinstance(previous, dict):
-                prev_seq = int(previous.get("day_seq", 0) or 0)
-                prev_len = int(previous.get("round_count", 0) or 0)
-                if current_seq < prev_seq or (current_seq == prev_seq and current_len < prev_len):
-                    st.warning(
-                        f"STALE GOOGLE SNAPSHOT rejected: received DaySeq {current_seq} R{current_len}, "
-                        f"but this session already accepted DaySeq {prev_seq} R{prev_len}. "
-                        "Waiting for a fresh snapshot; no calculation/trade generated from stale data."
-                    )
-                    st.stop()
-            st.session_state[snap_key] = {
-                "day_seq": current_seq,
-                "round_count": current_len,
-            }
-        if not STATELESS_REPLAY_LIVE:
-            self.maybe_auto_reset_for_new_day(sheet_day_seq, sheet_day_date)
+        self.maybe_auto_reset_for_new_day(sheet_day_seq, sheet_day_date)
 
         # V4.2.2 SINGLE-SNAPSHOT: reuse the exact snapshot already fetched above.
         # Do not call load_data()/load_numbers() here because that would fetch the
@@ -4351,17 +4152,17 @@ class EngineManager:
         self.actual_group = self.groups[-1]
         self.round_id = len(self.numbers)
 
-        # V4.4.6: persisted-ledger repair belongs only to the legacy incremental
-        # path. Stateless calculation starts from an empty disposable ledger.
-        if not STATELESS_REPLAY_LIVE:
-            refresh_ledger_checkpoint(self.ctx)
-            ledger_count = int(getattr(self.ctx, "ledger_trade_count", 0) or 0)
-            actual_count = len(getattr(self.ctx, "trade_history", []) or [])
-            if ledger_count != actual_count:
-                st.warning(
-                    f"LEDGER CHECKPOINT REPAIRED: metadata={ledger_count}, actual={actual_count}."
-                )
-                save_live_state(self.ctx)
+        # Never silently accept a persisted state whose ledger checkpoint disagrees
+        # with the actual trade list. A lost/partial ledger must be recoverable,
+        # not presented as a clean "No trades" state.
+        refresh_ledger_checkpoint(self.ctx)
+        ledger_count = int(getattr(self.ctx, "ledger_trade_count", 0) or 0)
+        actual_count = len(getattr(self.ctx, "trade_history", []) or [])
+        if ledger_count != actual_count:
+            st.warning(
+                f"LEDGER CHECKPOINT REPAIRED: metadata={ledger_count}, actual={actual_count}."
+            )
+            save_live_state(self.ctx)
 
         self.window_engine = WindowEngine(self.ctx, self.window_state)
         self.trade_engine = TradeEngine(self.ctx)
@@ -4369,18 +4170,17 @@ class EngineManager:
         self.protection_engine = ProtectionEngine(self.ctx, self.trade_engine)
         self.dashboard = Dashboard(self.ctx, self.window_engine, self.signal_engine, self.trade_engine, self.protection_engine)
 
-        # V4.4.6: stateless replay must never resume/rebuild from a persisted
-        # frontier. hybrid_replay_once() will consume R1..current from scratch.
-        if not STATELESS_REPLAY_LIVE:
-            resume_target = int(getattr(self.ctx, "last_length", 0) or 0)
-            txn_round = int(getattr(self.ctx, "round_txn_round", -1) or -1)
-            txn_phase = str(getattr(self.ctx, "round_txn_phase", "") or "")
-            if txn_round > resume_target and txn_phase in {
-                "WARMUP_UPDATED", "WARMUP_COMPLETE", "WINDOW_UPDATED", "SIGNAL_READY", "DECISION_READY", "OPENED", "COMPLETE"
-            }:
-                resume_target = txn_round
-            if resume_target > 0:
-                self.rebuild_windows_to_length(resume_target)
+        # Legacy dataset replacement protection is intentionally disabled in
+        # V3.5. DAY_SEQ already identifies the active dataset.
+        resume_target = int(getattr(self.ctx, "last_length", 0) or 0)
+        txn_round = int(getattr(self.ctx, "round_txn_round", -1) or -1)
+        txn_phase = str(getattr(self.ctx, "round_txn_phase", "") or "")
+        if txn_round > resume_target and txn_phase in {
+            "WARMUP_UPDATED", "WARMUP_COMPLETE", "WINDOW_UPDATED", "SIGNAL_READY", "DECISION_READY", "OPENED", "COMPLETE"
+        }:
+            resume_target = txn_round
+        if resume_target > 0:
+            self.rebuild_windows_to_length(resume_target)
 
     def maybe_auto_reset_for_new_day(self, sheet_day_seq: int, sheet_day_date: str) -> None:
         """DAY_SEQ-driven daily boundary. No CLEAR B and no server-date reset."""
@@ -4433,7 +4233,7 @@ class EngineManager:
         old_ctx = self.ctx
         _merge_sheet_daily_history_into_ctx(old_ctx)
 
-        # V4.3.3 DAY-BOUNDARY CATCH-UP:
+        # V4.3.2 NO-CACHE SINGLE-SNAPSHOT:
         # The just-completed day's profit must come from the immutable LIVE
         # ledger, not from the Google `history` tab. The history tab may be
         # copied/formula-refreshed several seconds or minutes after DAY_SEQ
@@ -4754,8 +4554,7 @@ class EngineManager:
         self.ctx.data_length = self.ctx.last_length
         self.ctx.recovery_replay_all_rounds = False
         self.ctx.data_correction_sequential_replay = False
-        if not bool(getattr(self.ctx, "stateless_internal_replay", False)):
-            self.ctx.fast_recovery_mode = False
+        self.ctx.fast_recovery_mode = False
         rebuild_real_stats_from_history(self.ctx)
         save_live_state(self.ctx)
 
@@ -5055,7 +4854,7 @@ class EngineManager:
         integrity = ledger_integrity_report(self.ctx)
         audit_integrity = round_audit_integrity_report(self.ctx)
         st.caption(
-            f"LIVE SOURCE | {'STATELESS R1->CURRENT' if STATELESS_REPLAY_LIVE else 'INCREMENTAL'} | Google Sheet A:E DAY_SEQ format | "
+            f"LIVE SOURCE | Google Sheet A:E DAY_SEQ format | "
             f"day_seq={getattr(self.ctx, "live_day_seq", 0)} | numbers={len(self.numbers)} | sheet_round={self.round_id} | "
             f"state_last_length={self.ctx.last_length} | "
             f"trades={len(self.ctx.trade_history)} | "
@@ -5114,18 +4913,16 @@ class EngineManager:
         # PROFIT LEDGER LOCK: current-day settled trade_history is source of truth.
         # Never let stale equity from a previous deploy/reset alter displayed P/L.
         rebuild_real_stats_from_history(self.ctx)
-        refresh_ledger_checkpoint(self.ctx)
         ledger_profit = round(
             sum(float(x.profit or 0.0) for x in self.ctx.trade_history if x.hit is not None), 2
         )
         equity_profit = round(float(self.ctx.equity_curve[-1]), 2) if self.ctx.equity_curve else 0.0
-        if ledger_profit != equity_profit or round(float(getattr(self.ctx, "ledger_profit", 0.0)), 2) != ledger_profit:
+        if ledger_profit != equity_profit:
             st.error(
                 f"PROFIT INTEGRITY ERROR: ledger={ledger_profit:+.1f}, "
-                f"checkpoint={float(getattr(self.ctx, 'ledger_profit', 0.0)):+.1f}, "
-                f"equity={equity_profit:+.1f}. LIVE display stopped."
+                f"equity={equity_profit:+.1f}"
             )
-            st.stop()
+            rebuild_real_stats_from_history(self.ctx)
 
         signal, confidence_score, confidence_level = self.build_display_signal()
 
@@ -5146,12 +4943,14 @@ class EngineManager:
 
         st.caption(
             f"""
-V4.4.2 STATELESS REPLAY LIVE / AUDITED
+V3.5 DAY_SEQ LIVE TRANSACTION + ROUND AUDIT / AUDITED
 
-Calculation source: fresh Google Numbers. No st.cache_data.
-Each refresh rebuilds prior daily P/L causally from historical Numbers, then replays current DAY_SEQ from R1 to current round.
-Stored Google daily_profit and legacy persistent engine state do NOT control strategy calculation.
-Invariant: same prior Numbers + same current Numbers + same code = same ledger/profit/signal.
+DAY boundary: highest Sheet DAY_SEQ. No daily CLEAR is required.
+
+After that: only process new Google Sheet rows.
+V58 rule: UI refresh is read-only; only new rounds can change trade state.
+Open/settle decisions happen only when a new round appears, not every rerun.
+Trade state is saved to Google Sheet if configured, otherwise local JSON fallback.
 Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
 
 Current Sheet Round : {self.round_id}
@@ -5176,161 +4975,6 @@ Regime : {signal.regime}
 # ============================================================
 # MAIN
 # ============================================================
-
-
-def _validated_numbers_by_day(history_df: pd.DataFrame, current_seq: int) -> list[tuple[int, str, list[int]]]:
-    """Build completed historical days from the history sheet.
-
-    Only round/number/day_seq/date are trusted. daily_profit is deliberately ignored.
-    A day must be contiguous from round 1; malformed days fail closed.
-    """
-    if history_df is None or history_df.empty or history_df.shape[1] < 3:
-        return []
-    cols = {str(c).strip().lower(): c for c in history_df.columns}
-    rc = cols.get("round", history_df.columns[0])
-    nc = cols.get("number", history_df.columns[1])
-    sc = cols.get("day_seq", history_df.columns[2])
-    dc = cols.get("date", history_df.columns[3] if history_df.shape[1] > 3 else history_df.columns[0])
-    tmp = history_df[[rc, nc, sc, dc]].copy()
-    tmp["_seq"] = pd.to_numeric(tmp[sc], errors="coerce")
-    tmp["_round"] = pd.to_numeric(tmp[rc], errors="coerce")
-    tmp = tmp[(tmp["_seq"] > 0) & (tmp["_seq"] < int(current_seq or 0))]
-    out = []
-    for seq, g in tmp.groupby("_seq", sort=True):
-        g = g.sort_values("_round")
-        nums=[]; expected=1; day_id=""
-        for _, row in g.iterrows():
-            rr = int(row["_round"]) if pd.notna(row["_round"]) else -1
-            n = _parse_number_value(row[nc])
-            if rr != expected or n is None:
-                raise ValueError(f"Historical DaySeq {int(seq)} invalid at expected round {expected}: round={rr}, number={row[nc]}")
-            nums.append(n); expected += 1
-            if not day_id:
-                d = _parse_date_value(row[dc])
-                day_id = d.isoformat() if d else f"DAYSEQ_{int(seq)}"
-        if nums:
-            out.append((int(seq), day_id, nums))
-    return out
-
-
-def _validate_completed_history_against_summary(
-    history_df: pd.DataFrame,
-    summary_df: pd.DataFrame,
-    current_seq: int,
-) -> list[tuple[int, str, list[int]]]:
-    """Prove that every prior DaySeq is complete before starting current_seq.
-
-    Full 288-round days are self-proving. A legitimate short day (<288) must
-    have a daily_summary marker whose round_count/date exactly match history.
-    This fits the existing Sheet workflow where some full days may not yet have
-    summary rows, while still blocking partial copies such as R1..50/R1..287.
-
-    daily_profit is NEVER trusted.
-    """
-    hist_days = _validated_numbers_by_day(history_df, current_seq)
-    expected = list(range(1, int(current_seq or 0)))
-    hist_by_seq = {int(seq): (day_id, nums) for seq, day_id, nums in hist_days}
-    missing_hist = [x for x in expected if x not in hist_by_seq]
-    if missing_hist:
-        raise ValueError(f"missing history DaySeq={missing_hist[:10]}")
-
-    summary_by_seq = {}
-    if summary_df is not None and not summary_df.empty:
-        cols = {str(c).strip().lower(): c for c in summary_df.columns}
-        if {"day_seq", "date", "round_count"}.issubset(cols):
-            for _, row in summary_df.iterrows():
-                seq = _normalize_day_seq(row[cols["day_seq"]])
-                if seq is None or seq >= int(current_seq or 0):
-                    continue
-                if seq in summary_by_seq:
-                    raise ValueError(f"daily_summary duplicate DaySeq {seq}")
-                try:
-                    rc = int(float(str(row[cols["round_count"]]).replace(",", ".")))
-                except Exception:
-                    rc = -1
-                d = _parse_date_value(row[cols["date"]])
-                if rc < 1 or rc > MAX_ROUNDS_PER_DAY or d is None:
-                    raise ValueError(f"daily_summary invalid DaySeq {seq}: round_count/date")
-                summary_by_seq[seq] = (d.isoformat(), rc)
-
-    for seq in expected:
-        hist_date, nums = hist_by_seq[seq]
-        n = len(nums)
-        marker = summary_by_seq.get(seq)
-
-        if marker is None:
-            if n != MAX_ROUNDS_PER_DAY:
-                raise ValueError(
-                    f"DaySeq {seq} has only {n} history rounds and no completion marker"
-                )
-            continue
-
-        sum_date, round_count = marker
-        if n != round_count:
-            raise ValueError(
-                f"DaySeq {seq} partial/mismatched history: history rounds={n}, "
-                f"daily_summary round_count={round_count}"
-            )
-        if hist_date != sum_date:
-            raise ValueError(
-                f"DaySeq {seq} date mismatch: history={hist_date}, daily_summary={sum_date}"
-            )
-    return hist_days
-
-def _replay_one_day_stateless(numbers: list[int], prior_history: list[dict], day_seq: int, day_id: str) -> tuple[float, list[TradeRecord]]:
-    """Replay one day from R1 using exactly EngineManager.hybrid_replay_once()."""
-    m = EngineManager.__new__(EngineManager)
-    m.ctx = ensure_ctx_fields(EngineContext())
-    m.ctx.live_day_seq = int(day_seq)
-    m.ctx.live_day_date = str(day_id or "")
-    m.ctx.live_day_id = str(day_id or "")
-    m.ctx.daily_profit_history = list(prior_history)[-10:]
-    m.ctx.fast_recovery_mode = True
-    m.ctx.stateless_internal_replay = True
-    m.ctx.hybrid_initialized = False
-    m.ctx.recovery_replay_all_rounds = True
-    m.ctx.data_correction_sequential_replay = True
-    m.window_state = {w: WindowRecord() for w in WINDOWS}
-    m.numbers = list(numbers)
-    m.groups = build_groups(m.numbers)
-    m.actual_group = m.groups[-1] if m.groups else None
-    m.round_id = len(m.numbers)
-    m.window_engine = WindowEngine(m.ctx, m.window_state)
-    m.trade_engine = TradeEngine(m.ctx)
-    m.signal_engine = SignalEngine(m.ctx, m.window_engine)
-    m.protection_engine = ProtectionEngine(m.ctx, m.trade_engine)
-    m.hybrid_replay_once()
-    rebuild_real_stats_from_history(m.ctx)
-
-    # V4.4.7 DAY ISOLATION LOCK:
-    # Profit belongs only to trades settled inside this DAY_SEQ. A trade opened
-    # on the final available round remains PENDING in the returned audit ledger,
-    # but its execution state is explicitly terminated with this disposable day
-    # context. It can NEVER be settled by R1 of the next DAY_SEQ.
-    ledger = list(m.ctx.trade_history)
-    profit = round(sum(
-        float(t.profit or 0.0)
-        for t in ledger
-        if str(t.status).upper() in {"WIN", "LOSS"}
-    ), 2)
-    m.ctx.pending_trade = None
-    m.ctx.pending_target_round = None
-    m.ctx.pending_round = -1
-    m.ctx.trade_state = "FLAT"
-    return profit, ledger
-
-
-def replay_prior_days_from_numbers(history_df: pd.DataFrame, current_seq: int) -> list[dict]:
-    """Causal Day1..Day(N-1) replay. No stored daily_profit is trusted."""
-    seed=[]
-    results=[]
-    for seq, day_id, nums in _validated_numbers_by_day(history_df, current_seq):
-        profit, _ = _replay_one_day_stateless(nums, seed, seq, day_id)
-        item = {"day_seq": int(seq), "day_id": day_id, "profit": float(profit)}
-        results.append(item)
-        seed.append(item)
-        seed = seed[-10:]
-    return results
 
 manager = EngineManager()
 
