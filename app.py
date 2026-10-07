@@ -12,7 +12,7 @@ import os
 import math
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -676,7 +676,7 @@ def _parse_profit_value(raw: Any) -> Optional[float]:
         return None
 
 
-def _parse_date_value(raw: Any) -> Optional[datetime.date]:
+def _parse_date_value(raw: Any) -> Optional[date]:
     """Parse Sheet dates deterministically.
 
     User Sheet dates are normally dd/mm/yyyy.  Never let pandas infer an
@@ -689,7 +689,7 @@ def _parse_date_value(raw: Any) -> Optional[datetime.date]:
         return raw.date()
     if isinstance(raw, datetime):
         return raw.date()
-    if isinstance(raw, datetime.date):
+    if isinstance(raw, date):
         return raw
     s = str(raw).strip()
     if not s or s.lower() in {"nan", "nat", "none"}:
@@ -2453,7 +2453,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.3.3 | HISTORY AUDIT-ONLY | NO CACHE | DATE FIX")
+        st.caption("BUILD CHECK: V4.3.4 | DATE TYPE FIX | HISTORY AUDIT-ONLY | NO CACHE")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
