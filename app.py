@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V4.4.8 | PROFIT SINGLE SOURCE | CURRENT LEDGER ONLY | SAME NUMBERS = SAME LEDGER"
+BUILD_TAG = "V4.4.9 | INPUT + DAY BOUNDARY LOCK | FAIL CLOSED | SAME NUMBERS = SAME LEDGER"
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
@@ -597,6 +597,7 @@ window_state = get_window_state()
 
 DATA_SHEET_NAME = "data"
 HISTORY_SHEET_NAME = "history"
+DAILY_SUMMARY_SHEET_NAME = "daily_summary"
 MAX_ROUNDS_PER_DAY = 288
 
 
@@ -641,6 +642,21 @@ def _load_history_sheet_df() -> pd.DataFrame:
         return pd.read_csv(_sheet_csv_url(HISTORY_SHEET_NAME))
     except Exception as e:
         st.warning(f"History tab '{HISTORY_SHEET_NAME}' unavailable: {e}")
+        return pd.DataFrame()
+
+
+def _load_daily_summary_df() -> pd.DataFrame:
+    """Read completion metadata for finished days.
+
+    day_seq/date/round_count are authoritative completion metadata.
+    daily_profit is NEVER trusted for strategy/profit calculation.
+    """
+    if INPUT_CSV_PATH:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(_sheet_csv_url(DAILY_SUMMARY_SHEET_NAME))
+    except Exception as e:
+        st.warning(f"Daily summary tab '{DAILY_SUMMARY_SHEET_NAME}' unavailable: {e}")
         return pd.DataFrame()
 
 
@@ -890,10 +906,21 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
                 "Engine stopped; row order must be contiguous."
             )
             st.stop()
+        raw_number_blank = (
+            raw_n is None
+            or (isinstance(raw_n, float) and pd.isna(raw_n))
+            or str(raw_n).strip() == ""
+            or str(raw_n).strip().lower() in {"nan", "nat", "none"}
+        )
+        if n is None and not raw_number_blank:
+            st.error(
+                f"LIVE DATA ERROR DaySeq {current_seq} round {pos}: invalid Number={raw_n!r}. "
+                "Allowed values are integer 1..12. Fix the Sheet and refresh."
+            )
+            st.stop()
         if n is None:
-            # A blank tail is normal. A blank/invalid row followed by any valid
-            # Number in the same DAY_SEQ is a data gap and must fail-stop rather
-            # than silently treating the earlier row as the live frontier.
+            # A truly blank tail is normal while waiting for the next result.
+            # A blank inside the stream is a hard data gap.
             later_valid = False
             for j in idxs[pos:]:
                 if _parse_number_value(c_number.iloc[j]) is not None:
@@ -909,7 +936,13 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         rounds.append(rr)
         nums.append(n)
         d = _parse_date_value(c_date.iloc[i])
-        dates.append(d.isoformat() if d is not None else "")
+        if d is None:
+            st.error(
+                f"LIVE DATA ERROR DaySeq {current_seq} round {pos}: missing/invalid date. "
+                "Fix column D and refresh."
+            )
+            st.stop()
+        dates.append(d.isoformat())
 
     if nums:
         bad_dates = {d for d in dates if d}
@@ -4210,22 +4243,21 @@ class EngineManager:
             # V4.4.2: derive prior-day profit from historical Numbers using the
             # exact same deterministic engine. Google daily_profit is audit-only.
             history_df = _load_history_sheet_df()
-            # V4.4.3 DAY-BOUNDARY FAIL-SAFE:
-            # Do not start Day N until history contains every completed DaySeq
-            # 1..N-1. This prevents a newly-created Day N row in `data` from
-            # making the engine run without Day N-1 while the history copy is
-            # still catching up. Stored daily_profit remains audit-only.
-            hist_days = _validated_numbers_by_day(history_df, int(sheet_day_seq or 0))
-            hist_seqs = [int(x[0]) for x in hist_days]
-            expected_hist = list(range(1, int(sheet_day_seq or 0)))
-            if hist_seqs != expected_hist:
-                missing = [x for x in expected_hist if x not in set(hist_seqs)]
-                extra = [x for x in hist_seqs if x not in set(expected_hist)]
+            summary_df = _load_daily_summary_df()
+            # V4.4.9 COMPLETION MARKER:
+            # Day N cannot start until every prior day has BOTH:
+            #   (1) contiguous history Numbers, and
+            #   (2) daily_summary completion metadata whose round_count/date
+            #       exactly match history.
+            # This closes the partial-copy race at a day boundary.
+            try:
+                _validate_completed_history_against_summary(
+                    history_df, summary_df, int(sheet_day_seq or 0)
+                )
+            except Exception as e:
                 st.warning(
-                    f"HISTORY NOT READY for DaySeq {int(sheet_day_seq or 0)}. "
-                    f"Missing completed DaySeq={missing[:10]}"
-                    + (f", unexpected={extra[:10]}" if extra else "")
-                    + ". LIVE calculation is paused; no trade will be generated."
+                    f"HISTORY NOT READY for DaySeq {int(sheet_day_seq or 0)}: {e}. "
+                    "LIVE calculation is paused; fix/finish the Sheet copy and refresh."
                 )
                 st.stop()
             self.ctx.daily_profit_history = replay_prior_days_from_numbers(
@@ -5180,6 +5212,70 @@ def _validated_numbers_by_day(history_df: pd.DataFrame, current_seq: int) -> lis
             out.append((int(seq), day_id, nums))
     return out
 
+
+def _validate_completed_history_against_summary(
+    history_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    current_seq: int,
+) -> list[tuple[int, str, list[int]]]:
+    """Prove that every prior DaySeq is complete before starting current_seq.
+
+    Full 288-round days are self-proving. A legitimate short day (<288) must
+    have a daily_summary marker whose round_count/date exactly match history.
+    This fits the existing Sheet workflow where some full days may not yet have
+    summary rows, while still blocking partial copies such as R1..50/R1..287.
+
+    daily_profit is NEVER trusted.
+    """
+    hist_days = _validated_numbers_by_day(history_df, current_seq)
+    expected = list(range(1, int(current_seq or 0)))
+    hist_by_seq = {int(seq): (day_id, nums) for seq, day_id, nums in hist_days}
+    missing_hist = [x for x in expected if x not in hist_by_seq]
+    if missing_hist:
+        raise ValueError(f"missing history DaySeq={missing_hist[:10]}")
+
+    summary_by_seq = {}
+    if summary_df is not None and not summary_df.empty:
+        cols = {str(c).strip().lower(): c for c in summary_df.columns}
+        if {"day_seq", "date", "round_count"}.issubset(cols):
+            for _, row in summary_df.iterrows():
+                seq = _normalize_day_seq(row[cols["day_seq"]])
+                if seq is None or seq >= int(current_seq or 0):
+                    continue
+                if seq in summary_by_seq:
+                    raise ValueError(f"daily_summary duplicate DaySeq {seq}")
+                try:
+                    rc = int(float(str(row[cols["round_count"]]).replace(",", ".")))
+                except Exception:
+                    rc = -1
+                d = _parse_date_value(row[cols["date"]])
+                if rc < 1 or rc > MAX_ROUNDS_PER_DAY or d is None:
+                    raise ValueError(f"daily_summary invalid DaySeq {seq}: round_count/date")
+                summary_by_seq[seq] = (d.isoformat(), rc)
+
+    for seq in expected:
+        hist_date, nums = hist_by_seq[seq]
+        n = len(nums)
+        marker = summary_by_seq.get(seq)
+
+        if marker is None:
+            if n != MAX_ROUNDS_PER_DAY:
+                raise ValueError(
+                    f"DaySeq {seq} has only {n} history rounds and no completion marker"
+                )
+            continue
+
+        sum_date, round_count = marker
+        if n != round_count:
+            raise ValueError(
+                f"DaySeq {seq} partial/mismatched history: history rounds={n}, "
+                f"daily_summary round_count={round_count}"
+            )
+        if hist_date != sum_date:
+            raise ValueError(
+                f"DaySeq {seq} date mismatch: history={hist_date}, daily_summary={sum_date}"
+            )
+    return hist_days
 
 def _replay_one_day_stateless(numbers: list[int], prior_history: list[dict], day_seq: int, day_id: str) -> tuple[float, list[TradeRecord]]:
     """Replay one day from R1 using exactly EngineManager.hybrid_replay_once()."""
