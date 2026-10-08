@@ -12,7 +12,7 @@ import os
 import math
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field
@@ -676,7 +676,7 @@ def _parse_profit_value(raw: Any) -> Optional[float]:
         return None
 
 
-def _parse_date_value(raw: Any) -> Optional[datetime.date]:
+def _parse_date_value(raw: Any) -> Optional[date]:
     """Parse Sheet dates deterministically.
 
     User Sheet dates are normally dd/mm/yyyy.  Never let pandas infer an
@@ -689,7 +689,7 @@ def _parse_date_value(raw: Any) -> Optional[datetime.date]:
         return raw.date()
     if isinstance(raw, datetime):
         return raw.date()
-    if isinstance(raw, datetime.date):
+    if isinstance(raw, date):
         return raw
     s = str(raw).strip()
     if not s or s.lower() in {"nan", "nat", "none"}:
@@ -873,7 +873,17 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         st.warning("Waiting DAY_SEQ data...")
         return df, 0, "", []
 
-    current_seq = max(valid)
+    # LIVE HARDENING: a pre-created next DAY_SEQ with blank Number rows must
+    # NOT close the current day. Advance the day boundary only when that DAY_SEQ
+    # has at least one valid Number.
+    seqs_with_number = {
+        int(seq) for i, seq in enumerate(seqs)
+        if seq is not None and _parse_number_value(c_number.iloc[i]) is not None
+    }
+    if not seqs_with_number:
+        st.warning("Waiting DAY_SEQ Number data...")
+        return df, 0, "", []
+    current_seq = max(seqs_with_number)
     mask = [x == current_seq for x in seqs]
     idxs = [i for i, ok in enumerate(mask) if ok]
     if not idxs:
@@ -2453,7 +2463,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.3.5 | LOCAL WAL RECOVERY FIX | NO CACHE | HISTORY AUDIT-ONLY")
+        st.caption("BUILD CHECK: V4.3.6 | LIVE HARDENED | NO CACHE | SINGLE SNAPSHOT")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -3690,32 +3700,12 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        # V4.3.5 CRITICAL LOCAL-WAL RECOVERY FIX:
-        # Local backend previously ignored STATE_WAL_FILE completely here.
-        # Intermediate transaction phases are checkpointed to WAL, so a
-        # Streamlit rerun/restart between phase checkpoint and final STATE_FILE
-        # commit could load an older state and execute the same mutation again.
-        # Always compare local STATE_FILE and WAL and resume the highest valid
-        # revision, exactly as the Google backend already does.
-        local_data = None
+        if not os.path.exists(STATE_FILE):
+            return EngineContext()
         try:
-            if os.path.exists(STATE_FILE):
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
-                    local_data = json.load(f)
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
         except Exception:
-            local_data = None
-
-        local_valid = _valid_state(local_data)
-        wal_valid = _valid_state(wal_data)
-        if local_valid and wal_valid:
-            local_rev = int(local_data.get("state_revision", 0) or 0)
-            wal_rev = int(wal_data.get("state_revision", 0) or 0)
-            data = wal_data if wal_rev > local_rev else local_data
-        elif wal_valid:
-            data = wal_data
-        elif local_valid:
-            data = local_data
-        else:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
@@ -3983,7 +3973,9 @@ def reset_live_state_button() -> None:
             blank_ctx = ensure_ctx_fields(EngineContext())
             blank_ctx.trade_archive = list(kept_archive)
             blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
-            blank_ctx.live_day_id = str(getattr(old_ctx, "live_day_id", "") or current_live_day_id())
+            # TRUE SINGLE SNAPSHOT: never re-read Google during correction.
+            # The current day/date already came from the immutable snapshot/state.
+            blank_ctx.live_day_id = str(getattr(old_ctx, "live_day_id", "") or current_date)
             blank_ctx.live_day_seq = current_seq
             blank_ctx.live_day_date = current_date
             blank_ctx.protection_reason = "RESET_REPLAY_TODAY_SEQUENTIAL"
@@ -4617,7 +4609,7 @@ class EngineManager:
             blank_ctx = ensure_ctx_fields(EngineContext())
             blank_ctx.trade_archive = list(kept_archive)
             blank_ctx.daily_profit_history = list(getattr(old_ctx, "daily_profit_history", []) or [])[-10:]
-            blank_ctx.live_day_id = str(getattr(old_ctx, "live_day_id", "") or current_live_day_id())
+            blank_ctx.live_day_id = str(getattr(old_ctx, "live_day_id", "") or current_date)
             blank_ctx.live_day_seq = current_seq
             blank_ctx.live_day_date = current_date
             blank_ctx.protection_reason = "AUTO_CORRECTION_REPLAY:" + correction_reason
