@@ -2462,24 +2462,33 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V69.5 V4.0 TRUE-FRONTIER LIVE — BUILD 2026-10-06")
-        st.caption("BUILD CHECK: V4.3.6 | LIVE HARDENED | NO CACHE | SINGLE SNAPSHOT")
+        st.title("🚀 V69.5 V4.3.9 FINAL LIVE — BUILD 2026-10-08")
+        st.caption("BUILD CHECK: V4.3.9 FINAL LIVE | WAL+TXN RECOVERY | DETERMINISTIC | NO CACHE | SINGLE SNAPSHOT")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
 
         current_round = self.ctx.last_length
-        target_round = current_round + 1
+        day_complete = int(current_round) >= int(MAX_ROUNDS_PER_DAY)
+        target_round = None if day_complete else current_round + 1
 
         # UI-only time labels. These values never enter the trading engine.
         current_time, target_time = get_current_target_time_display_only(current_round)
 
-        title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
-        action = (
-            f"BET GROUP = {signal.next_group}"
-            if signal.state == "READY" and signal.next_group is not None
-            else f"NEXT GROUP = {signal.next_group}"
-        )
+        if day_complete:
+            title = "DAY COMPLETE"
+            action = "NO MORE ROUND TODAY"
+            round_line = f"CURRENT ROUND = {current_round} / {MAX_ROUNDS_PER_DAY}"
+            time_line = f"CURRENT TIME = {current_time}"
+        else:
+            title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
+            action = (
+                f"BET GROUP = {signal.next_group}"
+                if signal.state == "READY" and signal.next_group is not None
+                else f"NEXT GROUP = {signal.next_group}"
+            )
+            round_line = f"CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}"
+            time_line = f"CURRENT TIME = {current_time} → TARGET TIME = {target_time}"
 
         st.markdown(
             f"""
@@ -2494,8 +2503,8 @@ font-weight:bold;
 ">
 {title}<br>
 STATE = {signal.state}<br>
-CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
-CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>
+{round_line}<br>
+{time_line}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
 </div>
@@ -3700,12 +3709,32 @@ def load_live_state() -> EngineContext:
             st.stop()
 
     elif data is None:
-        if not os.path.exists(STATE_FILE):
-            return EngineContext()
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+        # V4.3.7 CRITICAL LOCAL-WAL RECOVERY FIX:
+        # Intermediate LIVE phases are checkpointed to WAL only.  The old local
+        # loader ignored WAL and loaded STATE_FILE directly, so a process restart
+        # between SETTLED/WINDOW_UPDATED/SIGNAL_READY/OPENED and the final state
+        # commit could replay an already-applied phase.  Always choose the highest
+        # valid revision between local state and WAL.
+        local_data = None
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    local_data = json.load(f)
+            except Exception:
+                local_data = None
+
+        local_valid = _valid_state(local_data)
+        wal_valid = _valid_state(wal_data)
+        if local_valid and wal_valid:
+            if int(wal_data.get("state_revision", 0) or 0) > int(local_data.get("state_revision", 0) or 0):
+                data = wal_data
+            else:
+                data = local_data
+        elif wal_valid:
+            data = wal_data
+        elif local_valid:
+            data = local_data
+        else:
             return EngineContext()
 
     if not isinstance(data, dict) or not data:
@@ -4276,7 +4305,7 @@ class EngineManager:
             }
 
         blank_ctx = ensure_ctx_fields(EngineContext())
-        blank_ctx.trade_archive = list(getattr(old_ctx, "trade_archive", []) or getattr(old_ctx, "trade_history", []) or [])
+        blank_ctx.trade_archive = list(merge_trade_archive(old_ctx))
         blank_ctx.daily_profit_history = [hist_by_seq[k] for k in sorted(hist_by_seq)][-10:]
         blank_ctx.live_day_seq = int(new_day_seq)
         blank_ctx.live_day_date = str(new_day_date or "")
@@ -4340,7 +4369,21 @@ class EngineManager:
         self.ctx.last_window_round = target
 
     def rebuild_windows_to_last_length(self) -> None:
-        self.rebuild_windows_to_length(int(getattr(self.ctx, "last_length", 0) or 0))
+        # V4.3.8 CRITICAL TXN RECOVERY FIX:
+        # window_state is DERIVED and is not serialized.  If a crash happens
+        # after WINDOW_UPDATED (or any later phase) but before last_length is
+        # committed, WAL contains txn_round=R while last_length=R-1.  Rebuilding
+        # only to last_length and then resuming from WINDOW_UPDATED would skip
+        # R's window update and make LIVE diverge after restart.
+        target = int(getattr(self.ctx, "last_length", 0) or 0)
+        txn_round = int(getattr(self.ctx, "round_txn_round", -1) or -1)
+        txn_phase = str(getattr(self.ctx, "round_txn_phase", "") or "")
+        phases_with_window_update = {
+            "WINDOW_UPDATED", "SIGNAL_READY", "DECISION_READY", "OPENED", "COMPLETE"
+        }
+        if txn_round > target and txn_phase in phases_with_window_update:
+            target = txn_round
+        self.rebuild_windows_to_length(target)
 
     def _apply_decision(self, signal: SignalRecord, idx: int, confidence: float) -> None:
         # V3.4.24: split protection/decision from OPEN into a durable phase.
