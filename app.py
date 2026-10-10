@@ -57,11 +57,11 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V70.8.1 | RAW NUMBER HISTORY ONLY | CAUSAL CUTOVER SAFE | DAILY TARGET 10"
+BUILD_TAG = "V71 | SIMPLE LIVE | RAW HISTORY REPLAY | BASELINE CORE | DAILY TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
-V70_SWITCH_ENABLED = True
+V70_SWITCH_ENABLED = False
 V70_SWITCH_RANK20_MIN = 3
 V70_SWITCH_WR_GAP_MIN = 0.075
 
@@ -81,7 +81,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V70_8_1_RAW_NUMBER_REPLAY_V1"
+STATE_VERSION = "V71_SIMPLE_LIVE_RAW_REPLAY_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -1098,40 +1098,20 @@ def load_data() -> tuple[list[int], list[int], int, int]:
 
 
 def v70_active_for_day(day_seq: int) -> bool:
-    """Fail-safe deployment gate.
+    """V71: V70 switch is intentionally disabled.
 
-    A value <=0 means V70 is NOT armed.  V70 becomes active only on/after the
-    explicit cutover DAY_SEQ.  This prevents a code deploy from retrospectively
-    rewriting an already-started day.
+    Kept only as a compatibility helper so the surrounding engine code does not
+    need a larger refactor.  Always returns False.
     """
-    try:
-        seq = int(day_seq or 0)
-    except Exception:
-        return False
-    return bool(
-        V70_SWITCH_ENABLED
-        and V70_CUTOVER_DAY_SEQ > 0
-        and seq >= V70_CUTOVER_DAY_SEQ
-    )
+    return False
 
 
 def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int) -> list[dict]:
-    """V70.8: rebuild prior-day profit ONLY from raw historical Numbers.
+    """V71: rebuild all prior-day profit only from raw historical Numbers.
 
-    The stored daily_profit column is deliberately ignored.
-
-    Causal replay:
-      Day1 -> profit1
-      Day2 receives Day1 result
-      ...
-      Day(N-1) receives only already-replayed prior-day results
-
-    Strategy version:
-      - before V70_CUTOVER_DAY_SEQ: baseline semantics
-      - on/after V70_CUTOVER_DAY_SEQ: V70 semantics
-
-    Historical raw data must contain contiguous Round 1..N for every completed
-    DaySeq.  Any missing/malformed day fails closed.
+    Stored daily_profit is ignored.  Every completed DaySeq is replayed with the
+    SAME V71 strategy used live: baseline core, V70 switch disabled, target +10.
+    This guarantees same code + same Numbers -> same prior-day seed.
     """
     current_seq = int(current_seq or 0)
     if current_seq <= 1:
@@ -1152,39 +1132,21 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int) -> lis
         )
 
     resolved: list[dict] = []
-
     for seq in required:
         day_id, nums = raw_by_seq[seq]
-
-        use_v70 = bool(
-            V70_CUTOVER_DAY_SEQ > 0
-            and int(seq) >= int(V70_CUTOVER_DAY_SEQ)
-        )
-
-        profit_lock = (
-            V70_LIVE_DAILY_PROFIT_LOCK
-            if use_v70
-            else V70_BASELINE_DAILY_PROFIT_LOCK
-        )
-
         profit, _ledger = _replay_one_day_stateless(
             nums,
             resolved[-10:],
             seq,
             day_id,
-            v70_enabled=use_v70,
-            daily_profit_lock=profit_lock,
+            v70_enabled=False,
+            daily_profit_lock=10.0,
         )
-
         resolved.append({
             "day_seq": int(seq),
             "day_id": str(day_id or seq),
             "profit": round(float(profit), 2),
-            "source": (
-                "RAW_REPLAY_V70"
-                if use_v70
-                else "RAW_REPLAY_BASELINE"
-            ),
+            "source": "RAW_REPLAY_V71",
         })
 
     return resolved[-10:]
@@ -2588,8 +2550,8 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V70.8.1 RAW HISTORY REPLAY LIVE")
-        st.caption("BUILD CHECK: V70.8.1 | RAW NUMBER HISTORY ONLY | CUTOVER SAFE")
+        st.title("🚀 V71 SIMPLE LIVE")
+        st.caption("BUILD CHECK: V71 | RAW NUMBER HISTORY ONLY | CUTOVER SAFE")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -4361,12 +4323,8 @@ class EngineManager:
                 )
 
             # Explicit day-level deployment gate.  With cutover=0 V70 is baseline-only.
-            self.ctx.v70_switch_enabled = v70_active_for_day(int(sheet_day_seq or 0))
-            self.ctx.daily_profit_lock_override = (
-                V70_LIVE_DAILY_PROFIT_LOCK
-                if self.ctx.v70_switch_enabled
-                else V70_BASELINE_DAILY_PROFIT_LOCK
-            )
+            self.ctx.v70_switch_enabled = False
+            self.ctx.daily_profit_lock_override = 10.0
 
             # Suppress WAL/state writes during deterministic replay.  Calculation
             # state is disposable and rebuilt from R1 on every refresh.
@@ -4383,12 +4341,8 @@ class EngineManager:
             self.window_state = {w: WindowRecord() for w in WINDOWS}
         else:
             self.ctx = ensure_ctx_fields(get_live_ctx())
-            self.ctx.v70_switch_enabled = v70_active_for_day(int(sheet_day_seq or 0))
-            self.ctx.daily_profit_lock_override = (
-                V70_LIVE_DAILY_PROFIT_LOCK
-                if self.ctx.v70_switch_enabled
-                else V70_BASELINE_DAILY_PROFIT_LOCK
-            )
+            self.ctx.v70_switch_enabled = False
+            self.ctx.daily_profit_lock_override = 10.0
             self.window_state = get_live_window_state()
 
         # V4.3.4 CRASH-SAFE LOCAL WAL:
@@ -5769,22 +5723,9 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
 
 manager = EngineManager()
 
-if V70_CUTOVER_DAY_SEQ <= 0:
-    st.warning(
-        "V70.8 is NOT ARMED: V70_CUTOVER_DAY_SEQ=0. "
-        "The engine is running baseline logic only. Set V70_CUTOVER_DAY_SEQ to the NEXT DaySeq "
-        "and deploy before Round 1 for a clean cutover."
-    )
-elif int(getattr(manager.ctx, "live_day_seq", 0) or 0) < V70_CUTOVER_DAY_SEQ:
-    st.info(
-        f"V70.8 ARMED for DaySeq {V70_CUTOVER_DAY_SEQ}. "
-        f"Current DaySeq {int(getattr(manager.ctx, 'live_day_seq', 0) or 0)} remains baseline."
-    )
-else:
-    st.success(
-        f"V70.8 ACTIVE from DaySeq {V70_CUTOVER_DAY_SEQ}. "
-        "Prior-day multi-day protection is seeded from ACTUAL completed daily_profit."
-    )
+st.success(
+    "V71 SIMPLE LIVE ACTIVE | baseline core | raw-history replay | daily target +10 | V70 switch OFF"
+)
 
 try:
     manager.run()
