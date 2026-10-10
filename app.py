@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V70.6 | CUTOVER SAFE | ACTUAL HISTORY SEED | CORE READY RECHECK | DAILY TARGET 10"
+BUILD_TAG = "V70.7 | CUTOVER SAFE | AUTO BACKFILL HISTORY | CORE READY RECHECK | DAILY TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -82,7 +82,7 @@ V70_REQUIRE_ACTUAL_HISTORY_SEED = True
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V70_6_CUTOVER_SAFE_V1"
+STATE_VERSION = "V70_7_AUTO_BACKFILL_SAFE_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -1117,25 +1117,77 @@ def v70_active_for_day(day_seq: int) -> bool:
 
 
 def _actual_history_seed_from_df(history_df: pd.DataFrame, current_seq: int) -> list[dict]:
-    """Use completed ACTUAL daily P/L as multi-day seed.
+    """Build prior-day seed using ACTUAL P/L first, raw-number replay only for gaps.
 
-    This is intentionally different from historical strategy replay: when code
-    is upgraded, prior days must preserve what actually happened, not what the
-    new version hypothetically would have done.
+    Rules:
+    - Existing daily_profit is authoritative and is NEVER overwritten.
+    - Missing daily_profit is backfilled in memory from raw Number rows.
+    - DaySeq before V70_CUTOVER_DAY_SEQ replays with V4.4.8 baseline semantics.
+    - DaySeq on/after cutover replays with V70 semantics.
+    - Each missing day's replay receives only already-resolved earlier-day seeds.
+    - Missing/malformed raw Number data still fails closed.
     """
-    rows = _get_daily_history_from_df_v35(history_df, int(current_seq or 0))
-    if int(current_seq or 0) <= 1:
+    current_seq = int(current_seq or 0)
+    if current_seq <= 1:
         return []
 
-    by_seq = {int(x["day_seq"]): x for x in rows}
-    needed = list(range(max(1, int(current_seq) - 10), int(current_seq)))
-    missing = [s for s in needed if s not in by_seq]
-    if V70_REQUIRE_ACTUAL_HISTORY_SEED and missing:
+    actual_rows = _get_daily_history_from_df_v35(history_df, current_seq)
+    actual_by_seq = {int(x["day_seq"]): dict(x) for x in actual_rows}
+
+    # Validate/read raw history once. This raises on malformed round continuity.
+    raw_days = {
+        int(seq): (str(day_id or seq), list(nums))
+        for seq, day_id, nums in _validated_numbers_by_day(history_df, current_seq)
+    }
+
+    needed_all = list(range(1, current_seq))
+    missing_raw = [s for s in needed_all if s not in actual_by_seq and s not in raw_days]
+    if missing_raw:
         raise ValueError(
-            "ACTUAL HISTORY SEED NOT READY: missing daily_profit for completed "
-            f"DaySeq={missing}. LIVE is fail-closed to avoid deployment-state drift."
+            "HISTORY BACKFILL NOT READY: missing both daily_profit and raw Number "
+            f"for completed DaySeq={missing_raw}. LIVE is fail-closed."
         )
-    return [by_seq[s] for s in needed if s in by_seq][-10:]
+
+    resolved: list[dict] = []
+    for seq in needed_all:
+        if seq in actual_by_seq:
+            item = dict(actual_by_seq[seq])
+            item["source"] = "ACTUAL_DAILY_PROFIT"
+        else:
+            day_id, nums = raw_days[seq]
+
+            use_v70 = bool(
+                V70_CUTOVER_DAY_SEQ > 0
+                and int(seq) >= int(V70_CUTOVER_DAY_SEQ)
+            )
+            profit_lock = (
+                V70_LIVE_DAILY_PROFIT_LOCK
+                if use_v70
+                else V70_BASELINE_DAILY_PROFIT_LOCK
+            )
+
+            profit, _ledger = _replay_one_day_stateless(
+                nums,
+                resolved[-10:],
+                seq,
+                day_id,
+                v70_enabled=use_v70,
+                daily_profit_lock=profit_lock,
+            )
+            item = {
+                "day_seq": int(seq),
+                "day_id": str(day_id or seq),
+                "profit": round(float(profit), 2),
+                "source": (
+                    "REPLAY_BACKFILL_V70"
+                    if use_v70
+                    else "REPLAY_BACKFILL_BASELINE"
+                ),
+            }
+
+        resolved.append(item)
+
+    return resolved[-10:]
 
 
 def group_of(n: int) -> int:
@@ -4286,10 +4338,10 @@ class EngineManager:
                 )
                 st.stop()
             # V70.6 CUTOVER SAFE:
-            # Multi-day protection must be seeded by ACTUAL completed daily P/L,
-            # not by hypothetically replaying old days with the newly deployed code.
-            # If the history sheet has not published the completed P/L yet, fail
-            # closed instead of changing today's protection state.
+            # Multi-day protection prefers ACTUAL completed daily P/L.
+            # Missing daily_profit is backfilled causally from raw Number rows using
+            # baseline semantics before cutover and V70 semantics from cutover onward.
+            # If both P/L and raw Numbers are unavailable/malformed, fail closed.
             try:
                 self.ctx.daily_profit_history = _actual_history_seed_from_df(
                     history_df, int(sheet_day_seq or 0)
@@ -4297,6 +4349,19 @@ class EngineManager:
             except ValueError as exc:
                 st.warning(str(exc))
                 st.stop()
+
+            backfilled = [
+                x for x in list(self.ctx.daily_profit_history or [])
+                if str(x.get("source", "")).startswith("REPLAY_BACKFILL")
+            ]
+            if backfilled:
+                st.info(
+                    "HISTORY AUTO-BACKFILL: "
+                    + ", ".join(
+                        f"DaySeq {int(x['day_seq'])}={float(x['profit']):+.1f} ({x['source']})"
+                        for x in backfilled
+                    )
+                )
 
             # Explicit day-level deployment gate.  With cutover=0 V70 is baseline-only.
             self.ctx.v70_switch_enabled = v70_active_for_day(int(sheet_day_seq or 0))
@@ -5709,18 +5774,18 @@ manager = EngineManager()
 
 if V70_CUTOVER_DAY_SEQ <= 0:
     st.warning(
-        "V70.6 is NOT ARMED: V70_CUTOVER_DAY_SEQ=0. "
+        "V70.7 is NOT ARMED: V70_CUTOVER_DAY_SEQ=0. "
         "The engine is running baseline logic only. Set V70_CUTOVER_DAY_SEQ to the NEXT DaySeq "
         "and deploy before Round 1 for a clean cutover."
     )
 elif int(getattr(manager.ctx, "live_day_seq", 0) or 0) < V70_CUTOVER_DAY_SEQ:
     st.info(
-        f"V70.6 ARMED for DaySeq {V70_CUTOVER_DAY_SEQ}. "
+        f"V70.7 ARMED for DaySeq {V70_CUTOVER_DAY_SEQ}. "
         f"Current DaySeq {int(getattr(manager.ctx, 'live_day_seq', 0) or 0)} remains baseline."
     )
 else:
     st.success(
-        f"V70.6 ACTIVE from DaySeq {V70_CUTOVER_DAY_SEQ}. "
+        f"V70.7 ACTIVE from DaySeq {V70_CUTOVER_DAY_SEQ}. "
         "Prior-day multi-day protection is seeded from ACTUAL completed daily_profit."
     )
 
