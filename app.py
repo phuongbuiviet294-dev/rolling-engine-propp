@@ -57,16 +57,13 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.1 | SIMPLE LIVE + SHADOW SKIP3 | LIVE CORE UNCHANGED | TARGET 10"
+BUILD_TAG = "V71.2 | PROFIT GATE | >=1 WINDOW P20>4 | CUTOVER SAFE | TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
 V70_SWITCH_ENABLED = False
 V70_SWITCH_RANK20_MIN = 3
 V70_SWITCH_WR_GAP_MIN = 0.075
-
-SHADOW_SKIP3_ENABLED = True
-SHADOW_SKIP3_COUNT = 3
 
 # V70.6 CUTOVER SAFE
 # V70 is disabled until the live DAY_SEQ reaches this value.
@@ -78,13 +75,33 @@ try:
 except Exception:
     V70_CUTOVER_DAY_SEQ = 0
 
+# V71.2 PROFIT-DAY GATE
+# Historical audit rule:
+#   At the first LIVE decision (R180), count windows whose causal Profit20 > 4.
+#   Trade the day only when at least 1 such window exists.
+#
+# CUTOVER SAFE:
+# - Days before V71_HEALTH_GATE_CUTOVER_DAY_SEQ replay exactly as V71 baseline.
+# - Default 45 preserves all history through current DaySeq 44 and is intended for a clean
+#   next-day deployment starting at DaySeq 45.
+# - Override with env V71_HEALTH_GATE_CUTOVER_DAY_SEQ if your next DaySeq differs.
+try:
+    V71_HEALTH_GATE_CUTOVER_DAY_SEQ = int(
+        os.environ.get("V71_HEALTH_GATE_CUTOVER_DAY_SEQ", "45") or 45
+    )
+except Exception:
+    V71_HEALTH_GATE_CUTOVER_DAY_SEQ = 45
+
+V71_HEALTH_GATE_MIN_WINDOWS = 1
+V71_HEALTH_GATE_PROFIT20_GT = 4.0
+
 V70_BASELINE_DAILY_PROFIT_LOCK = 30.5
 V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_1_SIMPLE_LIVE_SHADOW_V1"
+STATE_VERSION = "V71_2_PROFIT_GATE_P20GT4_CUTOVER_SAFE_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -396,8 +413,6 @@ class EngineContext:
     live_day_seq: int = 0
     live_day_date: str = ""
     daily_profit_history: list = field(default_factory=list)
-    shadow_skip_mode: bool = False
-    shadow_skip_remaining: int = 0
     # V3.4.12: compact per-round audit trail for the current live dataset.
     round_log: list = field(default_factory=list)
     # V3.4.14: durable per-round transaction marker.
@@ -523,10 +538,6 @@ def ensure_ctx_fields(ctx: EngineContext) -> EngineContext:
         ctx.live_day_seq = 0
     if not hasattr(ctx, "live_day_date"):
         ctx.live_day_date = ""
-    if not hasattr(ctx, "shadow_skip_mode"):
-        ctx.shadow_skip_mode = False
-    if not hasattr(ctx, "shadow_skip_remaining"):
-        ctx.shadow_skip_remaining = 0
     if not hasattr(ctx, "daily_profit_history") or ctx.daily_profit_history is None:
         ctx.daily_profit_history = []
     ctx.daily_profit_history = list(ctx.daily_profit_history)[-10:]
@@ -4800,20 +4811,38 @@ class EngineManager:
             self.ctx.protection_reason = "MULTI_DAY_LOW_CONF_FILTER"
             signal.state = "WAIT"
 
+        # V71.2 PROFIT-DAY GATE (causal + frozen for the whole day).
+        # The gate is evaluated exactly once: at the first decision round >= R180.
+        # It uses only window statistics available at that moment.
+        _gate_cutover = int(V71_HEALTH_GATE_CUTOVER_DAY_SEQ or 0)
+        _day_seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
+        _gate_enabled_today = (_gate_cutover > 0 and _day_seq >= _gate_cutover)
+
+        if _gate_enabled_today:
+            if not hasattr(self.ctx, "v71_health_gate_eligible"):
+                _healthy_count = sum(
+                    1
+                    for _w, _obj in self.window_engine.state.items()
+                    if float(getattr(_obj, "profit20", 0.0) or 0.0)
+                    > float(V71_HEALTH_GATE_PROFIT20_GT)
+                )
+                self.ctx.v71_health_gate_count = int(_healthy_count)
+                self.ctx.v71_health_gate_eligible = bool(
+                    _healthy_count >= int(V71_HEALTH_GATE_MIN_WINDOWS)
+                )
+                self.ctx.v71_health_gate_round = int(idx)
+
+            if not bool(getattr(self.ctx, "v71_health_gate_eligible", False)):
+                self.ctx.protection_reason = (
+                    f"V71_DAY_GATE_NO_TRADE_"
+                    f"P20GT{V71_HEALTH_GATE_PROFIT20_GT:g}_"
+                    f"COUNT{int(getattr(self.ctx, 'v71_health_gate_count', 0) or 0)}"
+                )
+                signal.state = "WAIT"
+
         self.ctx.last_decision_round = idx
         self.ctx.last_decision_state = str(signal.state or "WAIT")
         self.ctx.last_decision_next_group = None
-
-        # V71.1 SHADOW ONLY. Real LIVE ctx keeps shadow_skip_mode=False.
-        if (
-            bool(getattr(self.ctx, "shadow_skip_mode", False))
-            and str(signal.state or "WAIT") != "WAIT"
-            and int(getattr(self.ctx, "shadow_skip_remaining", 0) or 0) > 0
-        ):
-            self.ctx.shadow_skip_remaining = int(self.ctx.shadow_skip_remaining) - 1
-            self.ctx.protection_reason = "SHADOW_SKIP3_AFTER_EXACT2_NEG"
-            self.ctx.open_reason = "SHADOW_SKIP3_AFTER_EXACT2_NEG"
-            signal.state = "WAIT"
 
         # Only READY may change window/prediction. WAIT is durably WAIT.
         if str(signal.state or "WAIT") != "WAIT":
@@ -5505,8 +5534,6 @@ def _replay_one_day_stateless(
     *,
     v70_enabled: bool = True,
     daily_profit_lock: float = DAILY_PROFIT_LOCK,
-    shadow_skip_mode: bool = False,
-    shadow_skip_remaining: int = 0,
 ) -> tuple[float, list[TradeRecord]]:
     """Replay one day from R1 using exactly EngineManager.hybrid_replay_once().
 
@@ -5519,8 +5546,6 @@ def _replay_one_day_stateless(
     m.ctx.live_day_date = str(day_id or "")
     m.ctx.live_day_id = str(day_id or "")
     m.ctx.daily_profit_history = list(prior_history)[-10:]
-    m.ctx.shadow_skip_mode = bool(shadow_skip_mode)
-    m.ctx.shadow_skip_remaining = int(shadow_skip_remaining or 0)
     m.ctx.v70_switch_enabled = bool(v70_enabled)
     m.ctx.daily_profit_lock_override = float(daily_profit_lock)
     m.ctx.fast_recovery_mode = True
@@ -5572,68 +5597,6 @@ def replay_prior_days_from_numbers(history_df: pd.DataFrame, current_seq: int) -
         seed.append(item)
         seed = seed[-10:]
     return results
-
-def _exact_two_negative_tail(history: list[dict]) -> bool:
-    vals = []
-    for x in list(history or []):
-        try:
-            vals.append(float(x.get("profit", 0.0)))
-        except Exception:
-            pass
-    if len(vals) < 2:
-        return False
-    if not (vals[-1] < 0 and vals[-2] < 0):
-        return False
-    return len(vals) == 2 or vals[-3] >= 0
-
-
-def replay_shadow_skip3_history(history_df: pd.DataFrame, current_seq: int) -> list[dict]:
-    """Causal raw-number shadow replay. Never changes live state."""
-    seed = []
-    rows = []
-    for seq, day_id, nums in _validated_numbers_by_day(history_df, current_seq):
-        trigger = bool(SHADOW_SKIP3_ENABLED and _exact_two_negative_tail(seed))
-        profit, _ledger = _replay_one_day_stateless(
-            nums,
-            seed,
-            seq,
-            day_id,
-            v70_enabled=False,
-            daily_profit_lock=10.0,
-            shadow_skip_mode=trigger,
-            shadow_skip_remaining=(SHADOW_SKIP3_COUNT if trigger else 0),
-        )
-        item = {
-            "day_seq": int(seq),
-            "day_id": str(day_id or seq),
-            "profit": round(float(profit), 2),
-            "trigger_exact2neg": trigger,
-        }
-        rows.append(item)
-        seed.append({"day_seq": int(seq), "day_id": str(day_id or seq), "profit": float(profit)})
-        seed = seed[-10:]
-    return rows
-
-
-def replay_shadow_current_day(
-    numbers: list[int],
-    prior_history: list[dict],
-    day_seq: int,
-    day_id: str,
-):
-    trigger = bool(SHADOW_SKIP3_ENABLED and _exact_two_negative_tail(prior_history))
-    profit, ledger = _replay_one_day_stateless(
-        numbers,
-        list(prior_history or [])[-10:],
-        int(day_seq),
-        str(day_id or day_seq),
-        v70_enabled=False,
-        daily_profit_lock=10.0,
-        shadow_skip_mode=trigger,
-        shadow_skip_remaining=(SHADOW_SKIP3_COUNT if trigger else 0),
-    )
-    return round(float(profit), 2), ledger, trigger
-
 
 def _negative_day_streak(values: list[float]) -> int:
     best = cur = 0
@@ -5807,54 +5770,6 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
             )
 
 
-def render_shadow_skip3_panel(manager: EngineManager) -> None:
-    with st.expander("SHADOW SKIP3 after exactly 2 negative days", expanded=False):
-        st.caption(
-            "SHADOW ONLY — does not alter real LIVE trades. "
-            "Uses raw Number history and ignores stored daily_profit."
-        )
-        try:
-            history_df = getattr(manager, "history_df", None)
-            current_seq = int(getattr(manager.ctx, "live_day_seq", 0) or 0)
-            if history_df is None or current_seq <= 0:
-                st.info("Shadow history not ready.")
-                return
-
-            base_rows = replay_prior_days_from_numbers(history_df, current_seq)
-            shadow_rows = replay_shadow_skip3_history(history_df, current_seq)
-            base_vals = [float(x["profit"]) for x in base_rows]
-            shadow_vals = [float(x["profit"]) for x in shadow_rows]
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("V71 history", f"{sum(base_vals):+.1f}")
-            c2.metric("Shadow history", f"{sum(shadow_vals):+.1f}",
-                      f"{sum(shadow_vals)-sum(base_vals):+.1f}")
-            c3.metric("Shadow negative days", str(sum(v < 0 for v in shadow_vals)))
-            c4.metric("Shadow max neg streak", str(_negative_day_streak(shadow_vals)))
-
-            triggered = [x["day_seq"] for x in shadow_rows if x["trigger_exact2neg"]]
-            st.caption(f"Shadow trigger DaySeq: {triggered}")
-
-            if getattr(manager, "numbers", None):
-                sp, _ledger, trigger_today = replay_shadow_current_day(
-                    list(manager.numbers),
-                    list(getattr(manager.ctx, "daily_profit_history", []) or []),
-                    int(getattr(manager.ctx, "live_day_seq", 0) or 0),
-                    str(getattr(manager.ctx, "live_day_date", "") or ""),
-                )
-                live_p = round(float(manager.trade_engine.get_total_profit()), 2)
-                st.write({
-                    "today_shadow_trigger": trigger_today,
-                    "live_profit": live_p,
-                    "shadow_profit": sp,
-                    "shadow_delta": round(sp-live_p, 2),
-                })
-
-            st.dataframe(pd.DataFrame(shadow_rows), use_container_width=True, hide_index=True)
-        except Exception as exc:
-            st.warning(f"Shadow audit unavailable: {exc}")
-
-
 manager = EngineManager()
 
 st.success(
@@ -5864,7 +5779,6 @@ st.success(
 try:
     manager.run()
     render_v70_historical_audit(manager)
-    render_shadow_skip3_panel(manager)
 except Exception as e:
     st.error(f"Engine Error: {e}")
     import traceback
