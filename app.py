@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.14 | REAL LIVE + LOGICAL AUDIT | VERIFIED CACHE | TARGET 10"
+BUILD_TAG = "V71.15 | CONTINUOUS STRATEGY | PHYSICAL AUDIT ONLY | TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_14_DUAL_PROFIT_AUDIT_D49_V1"
+STATE_VERSION = "V71_15_CONTINUOUS_STRATEGY_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -154,6 +154,7 @@ STATE_WAL_FILE = os.environ.get("V69_STATE_WAL_FILE", STATE_FILE + ".wal")
 # V71.4 physical-frontier journal
 FRONTIER_JOURNAL_CUTOVER_DAY_SEQ = 49
 ENTRY_DEFENSIVE_CUTOVER_DAY_SEQ = 49
+STRATEGY_FRONTIER_MODE = "continuous"
 HISTORICAL_MISSING_FRONTIER_POLICY = "logical_recovery"
 FRONTIER_JOURNAL_VERSION = "V71_6_FRONTIER_JOURNAL_V2"
 FRONTIER_JOURNAL_FILE = os.environ.get(
@@ -162,7 +163,7 @@ FRONTIER_JOURNAL_FILE = os.environ.get(
 
 # V71.9 verified raw-history profit cache.
 # Cache is optimization-only: a miss/corruption always falls back to exact replay.
-HISTORY_CACHE_VERSION = "V71_14_DUAL_PROFIT_AUDIT_V6"
+HISTORY_CACHE_VERSION = "V71_15_CONTINUOUS_STRATEGY_V7"
 HISTORY_CACHE_FILE = os.environ.get(
     "V71_HISTORY_CACHE_FILE", STATE_FILE + ".history_cache.json"
 )
@@ -1384,6 +1385,11 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
 
         if use_cache:
             profit = round(float(cached.get("profit")), 2)
+            _physical_profit = (
+                round(float(cached.get("physical_profit")), 2)
+                if _is_finite_number(cached.get("physical_profit"))
+                else None
+            )
             _logical_profit = (
                 round(float(cached.get("logical_profit")), 2)
                 if _is_finite_number(cached.get("logical_profit"))
@@ -1423,6 +1429,17 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 )
                 _logical_profit = round(float(_logical_profit), 2)
 
+                # V71.15 strategy semantics:
+                # Strategy is continuous/deterministic and must not depend on
+                # whether a browser tab happened to be awake for every round.
+                if STRATEGY_FRONTIER_MODE == "continuous":
+                    _physical_profit = profit
+                    profit = _logical_profit
+                else:
+                    _physical_profit = profit
+            else:
+                _physical_profit = None
+
             replayed_days += 1
             source = (
                 "RECOVERED_LOGICAL"
@@ -1433,6 +1450,7 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             cache_records[str(seq)] = {
                 "input_hash": input_hash,
                 "profit": profit,
+                "physical_profit": _physical_profit,
                 "logical_profit": _logical_profit,
                 "day_id": str(day_id or seq),
                 "diag": dict(_diag or {}),
@@ -1443,8 +1461,14 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             "day_seq": int(seq),
             "day_id": str(day_id or seq),
             "profit": profit,
+            "physical_profit": _physical_profit,
             "logical_profit": _logical_profit,
-            "source": source,
+            "source": (
+                "CONTINUOUS_STRATEGY"
+                if int(seq) >= int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ)
+                and STRATEGY_FRONTIER_MODE == "continuous"
+                else source
+            ),
             "diag": dict(_diag or {}),
         })
 
@@ -2963,7 +2987,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V71 SIMPLE LIVE")
-        st.caption("BUILD CHECK: V71.14 | REAL LIVE + LOGICAL AUDIT | CUTOVER SAFE")
+        st.caption("BUILD CHECK: V71.15 | CONTINUOUS STRATEGY | PHYSICAL AUDIT ONLY")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -4803,6 +4827,7 @@ def _history_day_input_hash(
         "live_start_round": int(LIVE_START_ROUND),
         "frontier_cutover": int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ),
         "missing_frontier_policy": str(HISTORICAL_MISSING_FRONTIER_POLICY),
+        "strategy_frontier_mode": str(STRATEGY_FRONTIER_MODE),
         "prior10": prior10,
         "v70_enabled": False,
         "daily_profit_lock": 10.0,
@@ -4841,6 +4866,11 @@ def _normalize_history_profit_cache(data: Any) -> dict:
         records[str(seq)] = {
             "input_hash": ih,
             "profit": round(float(v.get("profit")), 2),
+            "physical_profit": (
+                round(float(v.get("physical_profit")), 2)
+                if _is_finite_number(v.get("physical_profit"))
+                else None
+            ),
             "logical_profit": (
                 round(float(v.get("logical_profit")), 2)
                 if _is_finite_number(v.get("logical_profit"))
@@ -5219,7 +5249,11 @@ class EngineManager:
                     str(sheet_day_date or ""),
                     len(raw_numbers or []),
                 )
-                self.ctx.live_frontiers = list(self.current_live_frontiers)
+                self.ctx.live_frontiers = (
+                    None
+                    if STRATEGY_FRONTIER_MODE == "continuous"
+                    else list(self.current_live_frontiers)
+                )
             else:
                 self.ctx.live_frontiers = None
 
@@ -5229,7 +5263,14 @@ class EngineManager:
                     "RAW HISTORY REPLAY SEED: "
                     + ", ".join(
                         (
-                            f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
+                            (
+                                f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
+                                + (
+                                    f"[PHY={float(x.get('physical_profit')):+.1f}]"
+                                    if x.get("physical_profit", None) is not None
+                                    else ""
+                                )
+                            )
                             + (
                                 "[REC]"
                                 if str(x.get("source", "")).startswith("RECOVERED_LOGICAL")
@@ -5282,12 +5323,12 @@ class EngineManager:
                 ]
                 if _dual:
                     st.info(
-                        "REAL LIVE vs LOGICAL AUDIT: "
+                        "STRATEGY CONTINUOUS vs PHYSICAL AUDIT: "
                         + ", ".join(
                             (
                                 f"D{int(x.get('day_seq', 0) or 0)} "
-                                f"REAL={float(x.get('profit', 0.0) or 0.0):+.1f} "
-                                f"| LOGICAL={float(x.get('logical_profit', 0.0) or 0.0):+.1f}"
+                                f"STRATEGY={float(x.get('profit', 0.0) or 0.0):+.1f} "
+                                f"| PHYSICAL={float(x.get('physical_profit', 0.0) or 0.0):+.1f}"
                             )
                             for x in _dual
                         )
@@ -6878,7 +6919,7 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
 manager = EngineManager()
 
 st.success(
-    "V71.14 LIVE ACTIVE | REAL physical + LOGICAL audit | daily target +10 | V70 switch OFF"
+    "V71.15 LIVE ACTIVE | CONTINUOUS deterministic strategy | physical journal audit-only | target +10"
 )
 
 try:
