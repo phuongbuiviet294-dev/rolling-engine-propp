@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.13 | ZERO PROFIT CACHE RECHECK | LOGICAL RECOVERY | TARGET 10"
+BUILD_TAG = "V71.14 | REAL LIVE + LOGICAL AUDIT | VERIFIED CACHE | TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_13_ZERO_PROFIT_RECHECK_D49_V1"
+STATE_VERSION = "V71_14_DUAL_PROFIT_AUDIT_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -162,7 +162,7 @@ FRONTIER_JOURNAL_FILE = os.environ.get(
 
 # V71.9 verified raw-history profit cache.
 # Cache is optimization-only: a miss/corruption always falls back to exact replay.
-HISTORY_CACHE_VERSION = "V71_13_ZERO_PROFIT_RECHECK_V5"
+HISTORY_CACHE_VERSION = "V71_14_DUAL_PROFIT_AUDIT_V6"
 HISTORY_CACHE_FILE = os.environ.get(
     "V71_HISTORY_CACHE_FILE", STATE_FILE + ".history_cache.json"
 )
@@ -1384,6 +1384,11 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
 
         if use_cache:
             profit = round(float(cached.get("profit")), 2)
+            _logical_profit = (
+                round(float(cached.get("logical_profit")), 2)
+                if _is_finite_number(cached.get("logical_profit"))
+                else None
+            )
             _diag = dict(cached.get("diag", {}) or {})
             cache_hits += 1
             source = (
@@ -1402,6 +1407,22 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 allowed_frontiers=_frontiers,
             )
             profit = round(float(profit), 2)
+
+            # Audit-only logical replay: simulate every round as a decision frontier.
+            # Never used as causal seed when physical frontier evidence exists.
+            _logical_profit = None
+            if int(seq) >= int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ):
+                _logical_profit, _logical_ledger = _replay_one_day_stateless(
+                    nums,
+                    resolved[-10:],
+                    seq,
+                    day_id,
+                    v70_enabled=False,
+                    daily_profit_lock=10.0,
+                    allowed_frontiers=None,
+                )
+                _logical_profit = round(float(_logical_profit), 2)
+
             replayed_days += 1
             source = (
                 "RECOVERED_LOGICAL"
@@ -1412,6 +1433,7 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             cache_records[str(seq)] = {
                 "input_hash": input_hash,
                 "profit": profit,
+                "logical_profit": _logical_profit,
                 "day_id": str(day_id or seq),
                 "diag": dict(_diag or {}),
             }
@@ -1421,6 +1443,7 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             "day_seq": int(seq),
             "day_id": str(day_id or seq),
             "profit": profit,
+            "logical_profit": _logical_profit,
             "source": source,
             "diag": dict(_diag or {}),
         })
@@ -2940,7 +2963,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V71 SIMPLE LIVE")
-        st.caption("BUILD CHECK: V71.13 | ZERO-PROFIT CACHE RECHECK | CUTOVER SAFE")
+        st.caption("BUILD CHECK: V71.14 | REAL LIVE + LOGICAL AUDIT | CUTOVER SAFE")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -4818,6 +4841,11 @@ def _normalize_history_profit_cache(data: Any) -> dict:
         records[str(seq)] = {
             "input_hash": ih,
             "profit": round(float(v.get("profit")), 2),
+            "logical_profit": (
+                round(float(v.get("logical_profit")), 2)
+                if _is_finite_number(v.get("logical_profit"))
+                else None
+            ),
             "day_id": str(v.get("day_id", "") or ""),
             "diag": dict(v.get("diag", {}) or {}),
         }
@@ -5212,7 +5240,13 @@ class EngineManager:
                                     f"[T={int((x.get('diag') or {}).get('trade_count', 0) or 0)}"
                                     f",G={int((x.get('diag') or {}).get('gate_count', 0) or 0)}"
                                     f",GE={1 if bool((x.get('diag') or {}).get('gate_eligible', False)) else 0}"
-                                    f",F={(x.get('diag') or {}).get('frontier_count', 'L')}]"
+                                    f",F={(x.get('diag') or {}).get('frontier_count', 'L')}"
+                                    + (
+                                        f",LOG={float(x.get('logical_profit')):+.1f}"
+                                        if x.get('logical_profit', None) is not None
+                                        else ""
+                                    )
+                                    + "]"
                                 )
                                 if abs(float(x.get('profit', 0.0) or 0.0)) < 1e-9
                                 else ""
@@ -5240,6 +5274,23 @@ class EngineManager:
                         f"gate_round={int(_d.get('gate_round', 0) or 0)}, "
                         f"last_state={str(_d.get('last_decision_state', '') or '')}, "
                         f"reason={str(_d.get('protection_reason', '') or '')}"
+                    )
+
+                _dual = [
+                    x for x in replayed_seed
+                    if x.get("logical_profit", None) is not None
+                ]
+                if _dual:
+                    st.info(
+                        "REAL LIVE vs LOGICAL AUDIT: "
+                        + ", ".join(
+                            (
+                                f"D{int(x.get('day_seq', 0) or 0)} "
+                                f"REAL={float(x.get('profit', 0.0) or 0.0):+.1f} "
+                                f"| LOGICAL={float(x.get('logical_profit', 0.0) or 0.0):+.1f}"
+                            )
+                            for x in _dual
+                        )
                     )
 
             # Explicit day-level deployment gate.  With cutover=0 V70 is baseline-only.
@@ -6827,7 +6878,7 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
 manager = EngineManager()
 
 st.success(
-    "V71.13 LIVE ACTIVE | zero-profit audit | verified cache | daily target +10 | V70 switch OFF"
+    "V71.14 LIVE ACTIVE | REAL physical + LOGICAL audit | daily target +10 | V70 switch OFF"
 )
 
 try:
