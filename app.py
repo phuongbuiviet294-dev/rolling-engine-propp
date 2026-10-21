@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.6 LIVE FIX | META WINDOW | GAP-AWARE | FRONTIER V2 | TARGET 10"
+BUILD_TAG = "V71.9 | VERIFIED HISTORY CACHE | ROBUST ENTRY | FRONTIER V2 | TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_6_META_WINDOW_SELECTOR_D49_LIVE_FIX_V2"
+STATE_VERSION = "V71_9_VERIFIED_HISTORY_CACHE_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -153,9 +153,17 @@ STATE_FILE = os.environ.get("V69_STATE_FILE", "v69_live_state.json")
 STATE_WAL_FILE = os.environ.get("V69_STATE_WAL_FILE", STATE_FILE + ".wal")
 # V71.4 physical-frontier journal
 FRONTIER_JOURNAL_CUTOVER_DAY_SEQ = 49
+ENTRY_DEFENSIVE_CUTOVER_DAY_SEQ = 49
 FRONTIER_JOURNAL_VERSION = "V71_6_FRONTIER_JOURNAL_V2"
 FRONTIER_JOURNAL_FILE = os.environ.get(
     "V71_FRONTIER_JOURNAL_FILE", STATE_FILE + ".frontiers.json"
+)
+
+# V71.9 verified raw-history profit cache.
+# Cache is optimization-only: a miss/corruption always falls back to exact replay.
+HISTORY_CACHE_VERSION = "V71_9_HISTORY_CACHE_V1"
+HISTORY_CACHE_FILE = os.environ.get(
+    "V71_HISTORY_CACHE_FILE", STATE_FILE + ".history_cache.json"
 )
 
 STATE_WORKSHEET_DEFAULT = "state_v69"
@@ -1146,11 +1154,15 @@ def v70_active_for_day(day_seq: int) -> bool:
 
 
 def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, frontier_journal: Optional[dict] = None) -> list[dict]:
-    """V71: rebuild all prior-day profit only from raw historical Numbers.
+    """Rebuild prior-day profit from raw Numbers with a checksum-verified cache.
 
-    Stored daily_profit is ignored.  Every completed DaySeq is replayed with the
-    SAME V71 strategy used live: baseline core, V70 switch disabled, target +10.
-    This guarantees same code + same Numbers -> same prior-day seed.
+    The cache stores only daily profit plus an input hash.  The hash includes:
+    strategy/cache version, raw Numbers, physical frontiers and the previous
+    10 resolved daily profits.  Therefore any historical edit automatically
+    invalidates the edited day and every causally affected downstream day.
+
+    Cache is NEVER trusted on hash mismatch and is optimization-only.  Missing,
+    corrupt or unavailable cache falls back to exact stateless replay.
     """
     current_seq = int(current_seq or 0)
     if current_seq <= 1:
@@ -1170,9 +1182,16 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             f"{missing}. LIVE is fail-closed."
         )
 
+    cache = load_history_profit_cache()
+    cache_records = dict(cache.get("records", {}) or {})
+    cache_changed = False
+    cache_hits = 0
+    replayed_days = 0
+
     resolved: list[dict] = []
     for seq in required:
         day_id, nums = raw_by_seq[seq]
+
         _frontiers = None
         if int(seq) >= FRONTIER_JOURNAL_CUTOVER_DAY_SEQ:
             _frontiers = frontier_list_for_replay(
@@ -1181,21 +1200,76 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 require_record=True,
             )
 
-        profit, _ledger = _replay_one_day_stateless(
-            nums,
-            resolved[-10:],
-            seq,
-            day_id,
-            v70_enabled=False,
-            daily_profit_lock=10.0,
+        input_hash = _history_day_input_hash(
+            seq=int(seq),
+            day_id=str(day_id or seq),
+            numbers=list(nums),
             allowed_frontiers=_frontiers,
+            prior_history=resolved[-10:],
         )
+
+        cached = cache_records.get(str(seq), {})
+        use_cache = (
+            isinstance(cached, dict)
+            and str(cached.get("input_hash", "")) == input_hash
+            and _is_finite_number(cached.get("profit"))
+        )
+
+        if use_cache:
+            profit = round(float(cached.get("profit")), 2)
+            cache_hits += 1
+            source = "RAW_REPLAY_V71"
+        else:
+            profit, _ledger = _replay_one_day_stateless(
+                nums,
+                resolved[-10:],
+                seq,
+                day_id,
+                v70_enabled=False,
+                daily_profit_lock=10.0,
+                allowed_frontiers=_frontiers,
+            )
+            profit = round(float(profit), 2)
+            replayed_days += 1
+            source = "RAW_REPLAY_V71"
+
+            cache_records[str(seq)] = {
+                "input_hash": input_hash,
+                "profit": profit,
+                "day_id": str(day_id or seq),
+            }
+            cache_changed = True
+
         resolved.append({
             "day_seq": int(seq),
             "day_id": str(day_id or seq),
-            "profit": round(float(profit), 2),
-            "source": "RAW_REPLAY_V71",
+            "profit": profit,
+            "source": source,
         })
+
+    # Remove impossible/future stale records.  Old completed history is retained.
+    valid_keys = {str(x) for x in required}
+    stale_keys = [k for k in cache_records if k not in valid_keys and int(k) >= current_seq]
+    if stale_keys:
+        for k in stale_keys:
+            cache_records.pop(k, None)
+        cache_changed = True
+
+    if cache_changed:
+        save_history_profit_cache({
+            "version": HISTORY_CACHE_VERSION,
+            "records": cache_records,
+        })
+
+    # Diagnostics only; never influence strategy.
+    try:
+        self_msg = (
+            f"HISTORY CACHE: verified={cache_hits}, replayed={replayed_days}, "
+            f"required={len(required)}"
+        )
+        st.caption(self_msg)
+    except Exception:
+        pass
 
     return resolved[-10:]
 
@@ -4490,6 +4564,196 @@ def _frontier_journal_storage_payload(journal: dict) -> dict:
     }
 
 
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except Exception:
+        return False
+
+
+def _history_day_input_hash(
+    *,
+    seq: int,
+    day_id: str,
+    numbers: list[int],
+    allowed_frontiers: Optional[list[int]],
+    prior_history: list[dict],
+) -> str:
+    """Deterministic causal signature for one completed historical day."""
+    prior10 = [
+        [
+            int(x.get("day_seq", 0) or 0),
+            round(float(x.get("profit", 0.0) or 0.0), 2),
+        ]
+        for x in list(prior_history or [])[-10:]
+    ]
+
+    payload = {
+        "cache_version": HISTORY_CACHE_VERSION,
+        "strategy_version": STATE_VERSION,
+        "day_seq": int(seq),
+        "day_id": str(day_id or seq),
+        "numbers": [int(x) for x in list(numbers or [])],
+        "frontiers": (
+            None if allowed_frontiers is None
+            else sorted(set(int(x) for x in list(allowed_frontiers or [])))
+        ),
+        "prior10": prior10,
+        "v70_enabled": False,
+        "daily_profit_lock": 10.0,
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _normalize_history_profit_cache(data: Any) -> dict:
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_records = data.get("records", {})
+    if not isinstance(raw_records, dict):
+        raw_records = {}
+
+    records = {}
+    for k, v in raw_records.items():
+        try:
+            seq = int(k)
+        except Exception:
+            continue
+
+        if seq <= 0 or not isinstance(v, dict):
+            continue
+
+        ih = str(v.get("input_hash", "") or "")
+        if len(ih) != 64 or not _is_finite_number(v.get("profit")):
+            continue
+
+        records[str(seq)] = {
+            "input_hash": ih,
+            "profit": round(float(v.get("profit")), 2),
+            "day_id": str(v.get("day_id", "") or ""),
+        }
+
+    return {
+        "version": HISTORY_CACHE_VERSION,
+        "records": records,
+    }
+
+
+def _history_cache_worksheet_name(cfg: dict) -> str:
+    base = str(cfg.get("worksheet", "state") or "state")
+    return (base + "_history_cache")[:100]
+
+
+def load_history_profit_cache() -> dict:
+    """Best-effort optimization cache. Never stop LIVE if cache is unavailable."""
+    cfg = get_state_backend_config()
+
+    if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+        try:
+            client = get_gsheet_client()
+            if client is None:
+                return _normalize_history_profit_cache({})
+
+            sh = client.open_by_key(cfg["sheet_id"])
+            try:
+                ws = sh.worksheet(_history_cache_worksheet_name(cfg))
+            except Exception:
+                return _normalize_history_profit_cache({})
+
+            raw = "".join(str(x or "") for x in ws.col_values(1))
+            if not raw:
+                return _normalize_history_profit_cache({})
+
+            parsed = json.loads(raw)
+            if str(parsed.get("version", "")) != HISTORY_CACHE_VERSION:
+                return _normalize_history_profit_cache({})
+            return _normalize_history_profit_cache(parsed)
+        except Exception:
+            return _normalize_history_profit_cache({})
+
+    try:
+        if not os.path.exists(HISTORY_CACHE_FILE):
+            return _normalize_history_profit_cache({})
+        with open(HISTORY_CACHE_FILE, "r", encoding="utf-8") as f:
+            parsed = json.load(f)
+        if str(parsed.get("version", "")) != HISTORY_CACHE_VERSION:
+            return _normalize_history_profit_cache({})
+        return _normalize_history_profit_cache(parsed)
+    except Exception:
+        return _normalize_history_profit_cache({})
+
+
+def save_history_profit_cache(cache: dict) -> None:
+    """Best-effort atomic/chunked save. Failure must never alter LIVE decisions."""
+    data = _normalize_history_profit_cache(cache)
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    cfg = get_state_backend_config()
+
+    if cfg["backend"] == "gsheet" and cfg["sheet_id"]:
+        try:
+            client = get_gsheet_client()
+            if client is None:
+                return
+
+            sh = client.open_by_key(cfg["sheet_id"])
+            name = _history_cache_worksheet_name(cfg)
+            try:
+                ws = sh.worksheet(name)
+            except Exception:
+                ws = sh.add_worksheet(title=name, rows=10, cols=2)
+
+            chunk_size = 40000
+            chunks = [
+                payload[i:i + chunk_size]
+                for i in range(0, len(payload), chunk_size)
+            ] or [""]
+
+            old_count = max(1, len(ws.col_values(1)))
+            need_rows = max(10, len(chunks) + 2, old_count + 1)
+            try:
+                ws.resize(rows=need_rows, cols=2)
+            except Exception:
+                pass
+
+            write_rows = [[x] for x in chunks]
+            if old_count > len(chunks):
+                write_rows.extend([[""]] * (old_count - len(chunks)))
+
+            ws.update(
+                f"A1:A{len(write_rows)}",
+                write_rows,
+            )
+            ws.update("B1", [[time.strftime("%Y-%m-%d %H:%M:%S")]])
+
+            verify = "".join(
+                str(x or "")
+                for x in ws.col_values(1)[:len(chunks)]
+            )
+            if verify != payload:
+                # Cache write verification failure is performance-only.
+                return
+            return
+        except Exception:
+            return
+
+    try:
+        tmp = HISTORY_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, HISTORY_CACHE_FILE)
+    except Exception:
+        return
+
+
 def _frontier_journal_worksheet_name(cfg: dict) -> str:
     base = str(cfg.get("worksheet", "state") or "state")
     return (base + "_frontiers")[:100]
@@ -5269,6 +5533,51 @@ class EngineManager:
                     f"COUNT{int(getattr(self.ctx, 'v71_health_gate_count', 0) or 0)}"
                 )
                 signal.state = "WAIT"
+
+        # V71.7 CAUSAL ENTRY TIMING:
+        # In a weak 10-day regime, do not immediately re-enter on the same
+        # frontier that has just settled a WIN. Waiting one physical frontier
+        # avoids over-trading a short-lived post-win continuation.
+        _entry_prior = list(getattr(self.ctx, "daily_profit_history", []) or [])[-10:]
+        _entry_recent10 = sum(
+            float(_x.get("profit", 0.0) or 0.0)
+            for _x in _entry_prior
+        )
+        _entry_day_seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
+
+        _entry_frontiers = sorted(set(
+            int(x) for x in (getattr(self.ctx, "live_frontiers", None) or [])
+            if int(x) <= int(idx)
+        ))
+
+        if getattr(self.ctx, "live_frontiers", None) is None:
+            # Legacy logical replay behaves like an every-round frontier stream.
+            _entry_contiguous = True
+        else:
+            _entry_recent_frontiers = _entry_frontiers[-4:]
+            _entry_recent_gaps = [
+                _entry_recent_frontiers[i] - _entry_recent_frontiers[i - 1]
+                for i in range(1, len(_entry_recent_frontiers))
+            ]
+            # Causal only: inspect already-observed frontiers <= current idx.
+            # Require 3 consecutive gap=1 observations before enabling the
+            # defensive post-WIN wait. This prevents the rule from firing in
+            # intermittent/bursty refresh conditions.
+            _entry_contiguous = (
+                len(_entry_recent_gaps) >= 3
+                and all(int(_g) == 1 for _g in _entry_recent_gaps[-3:])
+            )
+
+        if (
+            _entry_day_seq >= int(ENTRY_DEFENSIVE_CUTOVER_DAY_SEQ)
+            and _entry_recent10 < 0.0
+            and _entry_contiguous
+            and str(getattr(self.ctx, "last_result_status", "") or "") == "WIN"
+            and int(getattr(self.ctx, "last_result_round", -1) or -1) == int(idx)
+            and str(getattr(signal, "state", "WAIT") or "WAIT") == "READY"
+        ):
+            self.ctx.protection_reason = "ENTRY_DEFENSIVE_WAIT_AFTER_WIN"
+            signal.state = "WAIT"
 
         self.ctx.last_decision_round = idx
         self.ctx.last_decision_state = str(signal.state or "WAIT")
