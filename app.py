@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.10 | HISTORY COMPLETION GUARD | VERIFIED CACHE | FRONTIER V2 | TARGET 10"
+BUILD_TAG = "V71.11 | LOGICAL HISTORY RECOVERY | VERIFIED CACHE | FRONTIER V2 | TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_10_HISTORY_COMPLETION_GUARD_D49_V1"
+STATE_VERSION = "V71_11_LOGICAL_RECOVERY_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -154,6 +154,7 @@ STATE_WAL_FILE = os.environ.get("V69_STATE_WAL_FILE", STATE_FILE + ".wal")
 # V71.4 physical-frontier journal
 FRONTIER_JOURNAL_CUTOVER_DAY_SEQ = 49
 ENTRY_DEFENSIVE_CUTOVER_DAY_SEQ = 49
+HISTORICAL_MISSING_FRONTIER_POLICY = "logical_recovery"
 FRONTIER_JOURNAL_VERSION = "V71_6_FRONTIER_JOURNAL_V2"
 FRONTIER_JOURNAL_FILE = os.environ.get(
     "V71_FRONTIER_JOURNAL_FILE", STATE_FILE + ".frontiers.json"
@@ -161,7 +162,7 @@ FRONTIER_JOURNAL_FILE = os.environ.get(
 
 # V71.9 verified raw-history profit cache.
 # Cache is optimization-only: a miss/corruption always falls back to exact replay.
-HISTORY_CACHE_VERSION = "V71_10_HISTORY_COMPLETION_V2"
+HISTORY_CACHE_VERSION = "V71_11_LOGICAL_RECOVERY_V3"
 HISTORY_CACHE_FILE = os.environ.get(
     "V71_HISTORY_CACHE_FILE", STATE_FILE + ".history_cache.json"
 )
@@ -1189,6 +1190,13 @@ def _validate_postcutover_completed_day(
     journal = _normalize_frontier_journal(frontier_journal or {})
     key = str(seq)
     if key not in journal.get("days", {}):
+        if HISTORICAL_MISSING_FRONTIER_POLICY == "logical_recovery":
+            return {
+                "status": "LOGICAL_RECOVERY_NO_JOURNAL",
+                "raw_len": len(nums),
+                "max_seen": 0,
+                "frontiers": None,
+            }
         raise ValueError(
             f"FRONTIER JOURNAL NOT READY: missing DaySeq {seq}. "
             "LIVE is fail-closed to prevent retrospective OPENs."
@@ -1223,6 +1231,13 @@ def _validate_postcutover_completed_day(
         )
 
     if max_seen < int(LIVE_START_ROUND):
+        if HISTORICAL_MISSING_FRONTIER_POLICY == "logical_recovery":
+            return {
+                "status": "LOGICAL_RECOVERY_NO_LIVE_FRONTIER",
+                "raw_len": len(nums),
+                "max_seen": max_seen,
+                "frontiers": None,
+            }
         return {
             "status": "NO_PHYSICAL_LIVE_AFTER_R180",
             "raw_len": len(nums),
@@ -1246,6 +1261,19 @@ def _historical_day_diagnostic_message(seq: int, check: dict) -> str:
             f"history has {int(check.get('raw_len', 0))} raw rounds, "
             f"but the app was only physically observed through R"
             f"{int(check.get('max_seen', 0))}, before LIVE_START R{LIVE_START_ROUND}."
+        )
+    if status == "LOGICAL_RECOVERY_NO_LIVE_FRONTIER":
+        return (
+            f"D{int(seq)} RECOVERED_LOGICAL: history has "
+            f"{int(check.get('raw_len', 0))} raw rounds but physical journal only reached "
+            f"R{int(check.get('max_seen', 0))}. Profit is rebuilt from raw Numbers, "
+            "not claimed as observed physical-live profit."
+        )
+    if status == "LOGICAL_RECOVERY_NO_JOURNAL":
+        return (
+            f"D{int(seq)} RECOVERED_LOGICAL: no physical frontier journal exists. "
+            f"Profit is rebuilt from {int(check.get('raw_len', 0))} raw Numbers, "
+            "not claimed as observed physical-live profit."
         )
     return ""
 
@@ -1297,7 +1325,12 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 numbers=list(nums),
                 frontier_journal=frontier_journal or {},
             )
-            _frontiers = list(_postcutover_check.get("frontiers", []) or [])
+            _checked_frontiers = _postcutover_check.get("frontiers", [])
+            _frontiers = (
+                None
+                if _checked_frontiers is None
+                else list(_checked_frontiers or [])
+            )
 
             _diag = _historical_day_diagnostic_message(int(seq), _postcutover_check)
             if _diag:
@@ -1321,10 +1354,20 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             and _is_finite_number(cached.get("profit"))
         )
 
+        _recovery_status = (
+            str(_postcutover_check.get("status", "") or "")
+            if _postcutover_check is not None else ""
+        )
+        _recovered_logical = _recovery_status.startswith("LOGICAL_RECOVERY_")
+
         if use_cache:
             profit = round(float(cached.get("profit")), 2)
             cache_hits += 1
-            source = "RAW_REPLAY_V71"
+            source = (
+                "RECOVERED_LOGICAL_CACHE"
+                if _recovered_logical
+                else "RAW_REPLAY_V71"
+            )
         else:
             profit, _ledger = _replay_one_day_stateless(
                 nums,
@@ -1337,7 +1380,11 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             )
             profit = round(float(profit), 2)
             replayed_days += 1
-            source = "RAW_REPLAY_V71"
+            source = (
+                "RECOVERED_LOGICAL"
+                if _recovered_logical
+                else "RAW_REPLAY_V71"
+            )
 
             cache_records[str(seq)] = {
                 "input_hash": input_hash,
@@ -4707,6 +4754,7 @@ def _history_day_input_hash(
         ),
         "live_start_round": int(LIVE_START_ROUND),
         "frontier_cutover": int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ),
+        "missing_frontier_policy": str(HISTORICAL_MISSING_FRONTIER_POLICY),
         "prior10": prior10,
         "v70_enabled": False,
         "daily_profit_lock": 10.0,
@@ -5126,7 +5174,14 @@ class EngineManager:
                 st.info(
                     "RAW HISTORY REPLAY SEED: "
                     + ", ".join(
-                        f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
+                        (
+                            f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
+                            + (
+                                "[REC]"
+                                if str(x.get("source", "")).startswith("RECOVERED_LOGICAL")
+                                else ""
+                            )
+                        )
                         for x in replayed_seed
                     )
                     + " | daily_profit column ignored"
