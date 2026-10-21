@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.9 | VERIFIED HISTORY CACHE | ROBUST ENTRY | FRONTIER V2 | TARGET 10"
+BUILD_TAG = "V71.10 | HISTORY COMPLETION GUARD | VERIFIED CACHE | FRONTIER V2 | TARGET 10"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_9_VERIFIED_HISTORY_CACHE_D49_V1"
+STATE_VERSION = "V71_10_HISTORY_COMPLETION_GUARD_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -161,7 +161,7 @@ FRONTIER_JOURNAL_FILE = os.environ.get(
 
 # V71.9 verified raw-history profit cache.
 # Cache is optimization-only: a miss/corruption always falls back to exact replay.
-HISTORY_CACHE_VERSION = "V71_9_HISTORY_CACHE_V1"
+HISTORY_CACHE_VERSION = "V71_10_HISTORY_COMPLETION_V2"
 HISTORY_CACHE_FILE = os.environ.get(
     "V71_HISTORY_CACHE_FILE", STATE_FILE + ".history_cache.json"
 )
@@ -1153,6 +1153,103 @@ def v70_active_for_day(day_seq: int) -> bool:
     return False
 
 
+
+def _validate_postcutover_completed_day(
+    *,
+    seq: int,
+    numbers: list[int],
+    frontier_journal: Optional[dict],
+) -> dict:
+    """Validate that a post-cutover historical day is safe to replay.
+
+    Distinguishes three cases:
+    1) historical raw data itself is incomplete -> FAIL CLOSED;
+    2) physical journal is inconsistent with raw history -> FAIL CLOSED;
+    3) raw day is complete enough but app was never physically observed at/after
+       LIVE_START_ROUND -> legitimate physical-live profit 0, with explicit diagnostic.
+    """
+    seq = int(seq or 0)
+    nums = list(numbers or [])
+
+    if seq < int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ):
+        return {
+            "status": "LEGACY_PRE_CUTOVER",
+            "raw_len": len(nums),
+            "max_seen": len(nums),
+            "frontiers": None,
+        }
+
+    if len(nums) < int(LIVE_START_ROUND):
+        raise ValueError(
+            f"HISTORICAL DAY INCOMPLETE: DaySeq {seq} has only {len(nums)} raw rounds, "
+            f"below LIVE_START_ROUND={LIVE_START_ROUND}. "
+            "LIVE is paused instead of silently recording profit 0."
+        )
+
+    journal = _normalize_frontier_journal(frontier_journal or {})
+    key = str(seq)
+    if key not in journal.get("days", {}):
+        raise ValueError(
+            f"FRONTIER JOURNAL NOT READY: missing DaySeq {seq}. "
+            "LIVE is fail-closed to prevent retrospective OPENs."
+        )
+
+    day = dict(journal["days"].get(key, {}) or {})
+    frontiers = sorted(set(
+        int(x)
+        for x in list(day.get("frontiers", []) or [])
+        if int(x) >= int(LIVE_START_ROUND)
+    ))
+    max_seen = int(day.get("max_seen", 0) or 0)
+
+    if max_seen > len(nums):
+        raise ValueError(
+            f"HISTORY/JOURNAL REGRESSION DaySeq {seq}: journal max_seen={max_seen} "
+            f"but history has only {len(nums)} contiguous rounds. "
+            "History copy is not ready; LIVE is paused."
+        )
+
+    if frontiers and max(frontiers) > len(nums):
+        raise ValueError(
+            f"HISTORY/JOURNAL FRONTIER MISMATCH DaySeq {seq}: "
+            f"last frontier={max(frontiers)} but history length={len(nums)}. "
+            "LIVE is paused."
+        )
+
+    if max_seen >= int(LIVE_START_ROUND) and not frontiers:
+        raise ValueError(
+            f"FRONTIER JOURNAL INCONSISTENT DaySeq {seq}: max_seen={max_seen} "
+            f"but no frontier >= R{LIVE_START_ROUND}. LIVE is paused."
+        )
+
+    if max_seen < int(LIVE_START_ROUND):
+        return {
+            "status": "NO_PHYSICAL_LIVE_AFTER_R180",
+            "raw_len": len(nums),
+            "max_seen": max_seen,
+            "frontiers": [],
+        }
+
+    return {
+        "status": "PHYSICAL_LIVE_OK",
+        "raw_len": len(nums),
+        "max_seen": max_seen,
+        "frontiers": frontiers,
+    }
+
+
+def _historical_day_diagnostic_message(seq: int, check: dict) -> str:
+    status = str(check.get("status", "") or "")
+    if status == "NO_PHYSICAL_LIVE_AFTER_R180":
+        return (
+            f"D{int(seq)} physical-live profit is 0 by design: "
+            f"history has {int(check.get('raw_len', 0))} raw rounds, "
+            f"but the app was only physically observed through R"
+            f"{int(check.get('max_seen', 0))}, before LIVE_START R{LIVE_START_ROUND}."
+        )
+    return ""
+
+
 def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, frontier_journal: Optional[dict] = None) -> list[dict]:
     """Rebuild prior-day profit from raw Numbers with a checksum-verified cache.
 
@@ -1193,12 +1290,21 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
         day_id, nums = raw_by_seq[seq]
 
         _frontiers = None
+        _postcutover_check = None
         if int(seq) >= FRONTIER_JOURNAL_CUTOVER_DAY_SEQ:
-            _frontiers = frontier_list_for_replay(
-                frontier_journal or {},
-                int(seq),
-                require_record=True,
+            _postcutover_check = _validate_postcutover_completed_day(
+                seq=int(seq),
+                numbers=list(nums),
+                frontier_journal=frontier_journal or {},
             )
+            _frontiers = list(_postcutover_check.get("frontiers", []) or [])
+
+            _diag = _historical_day_diagnostic_message(int(seq), _postcutover_check)
+            if _diag:
+                try:
+                    st.warning(_diag)
+                except Exception:
+                    pass
 
         input_hash = _history_day_input_hash(
             seq=int(seq),
@@ -4599,6 +4705,8 @@ def _history_day_input_hash(
             None if allowed_frontiers is None
             else sorted(set(int(x) for x in list(allowed_frontiers or [])))
         ),
+        "live_start_round": int(LIVE_START_ROUND),
+        "frontier_cutover": int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ),
         "prior10": prior10,
         "v70_enabled": False,
         "daily_profit_lock": 10.0,
