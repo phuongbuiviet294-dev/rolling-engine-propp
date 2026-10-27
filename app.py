@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.1 | NO CACHE | FULL RAW REPLAY | DYNAMIC LOCK 2.5/10 | C79"
+BUILD_TAG = "V71.18.1A | NO CACHE | CLEAN AUDIT UI | DYNAMIC LOCK 2.5/10 | C79"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_18_1_NO_CACHE_D49_V1"
+STATE_VERSION = "V71_18_1A_UI_CLEAN_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -1330,6 +1330,7 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
 
     resolved: list[dict] = []
     replayed_days = 0
+    recovered_logical_days: list[int] = []
 
     for seq in required:
         day_id, nums = raw_by_seq[seq]
@@ -1346,7 +1347,10 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             _frontiers = None if _checked_frontiers is None else list(_checked_frontiers or [])
 
             _diag_msg = _historical_day_diagnostic_message(int(seq), _postcutover_check)
-            if _diag_msg:
+            _diag_status = str(_postcutover_check.get("status", "") or "")
+            if _diag_status.startswith("LOGICAL_RECOVERY_"):
+                recovered_logical_days.append(int(seq))
+            elif _diag_msg:
                 try:
                     st.warning(_diag_msg)
                 except Exception:
@@ -1412,6 +1416,19 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
         })
 
     try:
+        if recovered_logical_days:
+            _first = min(recovered_logical_days)
+            _last = max(recovered_logical_days)
+            _span = (
+                f"D{_first}-D{_last}"
+                if recovered_logical_days == list(range(_first, _last + 1))
+                else ",".join(f"D{x}" for x in recovered_logical_days)
+            )
+            st.info(
+                "HISTORICAL PHYSICAL JOURNAL: missing/incomplete for "
+                f"{_span}. Continuous strategy rebuilt from raw Numbers; "
+                "strategy profit/Trade History are unaffected."
+            )
         st.caption(
             f"HISTORY CACHE: DISABLED | raw replayed={replayed_days} "
             f"| required={len(required)} | every refresh"
@@ -2909,7 +2926,7 @@ class Dashboard:
 
     def render_header(self) -> None:
         st.title("🚀 V71 SIMPLE LIVE")
-        st.caption("BUILD CHECK: V71.18.1 | NO CACHE | FULL RAW REPLAY EVERY REFRESH")
+        st.caption("BUILD CHECK: V71.18.1A | NO CACHE | CLEAN AUDIT UI")
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -6896,7 +6913,7 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
 manager = EngineManager()
 
 st.success(
-    "V71.18.1 CANDIDATE | NO CACHE | prev-day negative => +2.5, else +10"
+    "V71.18.1A CANDIDATE | NO CACHE | CLEAN AUDIT UI | prev-day negative => +2.5, else +10"
 )
 
 try:
