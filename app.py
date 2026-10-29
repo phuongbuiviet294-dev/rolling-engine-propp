@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.1A | NO CACHE | CLEAN AUDIT UI | DYNAMIC LOCK 2.5/10 | C79"
+BUILD_TAG = "V71.18.2 | LIVE101 | NO CACHE | 101+CONF>=0.55 WAIT2 | DYNAMIC LOCK 2.5/10 | C79"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -106,7 +106,7 @@ V70_LIVE_DAILY_PROFIT_LOCK = 10.0
 KEEP_WIN_ROUNDS = 4
 DATASET_RESET_ANCHOR_LEN = 32
 LIVE_TIMEZONE = "Asia/Phnom_Penh"
-STATE_VERSION = "V71_18_1A_UI_CLEAN_D49_V1"
+STATE_VERSION = "V71_18_2_LIVE101_D49_V1"
 # V3.5 is a clean state boundary because the dataset model changes from
 # CLEAR-B daily replacement to append-only DAY_SEQ. Never import an older
 # live ledger into the new DAY_SEQ engine.
@@ -235,6 +235,9 @@ STABILITY_READY = 0.45
 
 # V53 defensive gates
 MIN_CONFIDENCE_READY = 0.46
+LIVE101_ENABLED = True
+LIVE101_CONFIDENCE_MIN = 0.55
+LIVE101_WAIT_ROUNDS = 2
 SAFE_DRAWDOWN_FROM_PEAK = -4.0
 SAFE_MODE_ROUNDS = 2
 
@@ -2447,6 +2450,32 @@ class TradeEngine:
         self.ctx.equity_curve.append(round(equity, 2))
 
     def open_trade(self, signal: SignalRecord, round_id: int, confidence_score: float = 0.0) -> None:
+        # V71.18.2 LIVE101 audited rule:
+        # settled pattern 101 + candidate confidence >= 0.55 => suppress entries
+        # on the 101 settlement frontier and the immediately following frontier.
+        # Causal only: uses settled current-day Trade History and current signal.
+        if LIVE101_ENABLED:
+            _settled101 = [
+                t for t in getattr(self.ctx, "trade_history", [])
+                if str(getattr(t, "status", "")).upper() in {"WIN", "LOSS"}
+            ]
+            _bits101 = "".join(
+                "1" if str(getattr(t, "status", "")).upper() == "WIN" else "0"
+                for t in _settled101
+            )
+            if (
+                _bits101.endswith("101")
+                and float(confidence_score or 0.0) >= float(LIVE101_CONFIDENCE_MIN)
+            ):
+                _last101_settle = int(
+                    getattr(_settled101[-1], "settle_round", 0) or 0
+                )
+                if int(round_id) <= _last101_settle + int(LIVE101_WAIT_ROUNDS) - 1:
+                    self.ctx.open_reason = (
+                        f"LIVE101_WAIT{int(LIVE101_WAIT_ROUNDS)}_"
+                        f"CONF_GE_{float(LIVE101_CONFIDENCE_MIN):.2f}"
+                    )
+                    return
         self.ctx.open_reason = ""
 
         if round_id < LIVE_START_ROUND:
