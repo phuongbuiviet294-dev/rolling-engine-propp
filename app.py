@@ -3303,8 +3303,67 @@ CONF = {confidence_score:.2f}
             if STATELESS_REPLAY_LIVE
             else merge_trade_archive(self.ctx)
         )
+        # V117.5 FAST LIVE V2: always show operator status BEFORE any
+        # early return from an empty trade ledger.
+        if V1175_BET_FILTER_ENABLED:
+            try:
+                _seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
+                _round_now = int(getattr(self.ctx, "last_length", 0) or 0)
+                _prior_hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
+                _prev_bet_profit = (
+                    float(_prior_hist[-1].get("bet_profit_v1175", 0.0) or 0.0)
+                    if _prior_hist else 0.0
+                )
+
+                _bet_rows = _v1175_apply_bet_filter(
+                    list(self.ctx.trade_history),
+                    _prev_bet_profit,
+                )
+                _settled_bet_profit = round(
+                    sum(float(r.get("bet_profit", 0.0) or 0.0) for r in _bet_rows),
+                    2,
+                )
+
+                st.subheader("V117.5 FAST LIVE")
+                st.caption(
+                    f"DAY={_seq} | ROUND={_round_now} | "
+                    f"PREV BET P/L={_prev_bet_profit:+.1f} | "
+                    f"TODAY BET P/L={_settled_bet_profit:+.1f} | "
+                    "ENGINE STATE UNCHANGED"
+                )
+
+                _latest = _bet_rows[-1] if _bet_rows else None
+                if _latest is None:
+                    _live_start = int(globals().get("LIVE_START_ROUND", 180) or 180)
+                    if _round_now < _live_start:
+                        st.info(
+                            f"NO ENGINE SIGNAL YET | current round={_round_now} | "
+                            f"live starts from R{_live_start}"
+                        )
+                    else:
+                        st.info(
+                            f"NO ENGINE TRADE YET AT R{_round_now} | "
+                            "engine has not opened a qualifying trade"
+                        )
+                else:
+                    _action = str(_latest.get("bet_action", "SKIP"))
+                    _reason = str(_latest.get("bet_skip_reason", ""))
+                    _grp = int(_latest.get("group", 0) or 0)
+                    _rnd = int(_latest.get("open_round", 0) or 0)
+                    _status = str(_latest.get("status", "") or "")
+                    if _action == "BET":
+                        st.success(
+                            f"R{_rnd} | G{_grp} | BET | {_status} | {_reason}"
+                        )
+                    else:
+                        st.warning(
+                            f"R{_rnd} | G{_grp} | SKIP | {_status} | {_reason}"
+                        )
+            except Exception as _bet_err:
+                st.warning(f"V117.5 FAST LIVE unavailable: {_bet_err}")
+
         if not archive_rows:
-            st.info("No trades")
+            st.info("Trade History: No engine trades yet")
             return
 
         df = pd.DataFrame(
@@ -3338,51 +3397,6 @@ CONF = {confidence_score:.2f}
                 f"current-day={len(self.ctx.trade_history)} | survives code deploy/reset/new day"
             )
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # V117.5 FAST LIVE: compact operator panel only.
-        # No extra dataframe render and no second historical replay.
-        if V1175_BET_FILTER_ENABLED:
-            try:
-                _seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
-                if _seq > 0:
-                    _prior_hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
-                    _prev_bet_profit = (
-                        float(_prior_hist[-1].get("bet_profit_v1175", 0.0) or 0.0)
-                        if _prior_hist else 0.0
-                    )
-                    _bet_rows = _v1175_apply_bet_filter(
-                        list(self.ctx.trade_history),
-                        _prev_bet_profit,
-                    )
-                    _settled_bet_profit = round(
-                        sum(float(r.get("bet_profit", 0.0) or 0.0) for r in _bet_rows),
-                        2,
-                    )
-
-                    _latest = _bet_rows[-1] if _bet_rows else None
-                    st.subheader("V117.5 FAST LIVE")
-                    st.caption(
-                        f"PREV BET P/L={_prev_bet_profit:+.1f} | "
-                        f"TODAY BET P/L={_settled_bet_profit:+.1f} | "
-                        "ENGINE STATE UNCHANGED"
-                    )
-
-                    if _latest is not None:
-                        _action = str(_latest.get("bet_action", "SKIP"))
-                        _reason = str(_latest.get("bet_skip_reason", ""))
-                        _grp = int(_latest.get("group", 0) or 0)
-                        _rnd = int(_latest.get("open_round", 0) or 0)
-                        _status = str(_latest.get("status", "") or "")
-                        if _action == "BET":
-                            st.success(
-                                f"R{_rnd} | G{_grp} | BET | {_status} | {_reason}"
-                            )
-                        else:
-                            st.warning(
-                                f"R{_rnd} | G{_grp} | SKIP | {_status} | {_reason}"
-                            )
-            except Exception as _bet_err:
-                st.warning(f"V117.5 FAST LIVE unavailable: {_bet_err}")
 
         with st.expander("Round Audit Log - every processed round"):
             audit_rows = list(getattr(self.ctx, "round_log", []) or [])
