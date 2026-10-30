@@ -3339,8 +3339,8 @@ CONF = {confidence_score:.2f}
             )
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # V117.5 shadow betting layer: engine ledger remains authoritative and
-        # untouched.  This table only tells the operator BET vs SKIP.
+        # V117.5 FAST LIVE: compact operator panel only.
+        # No extra dataframe render and no second historical replay.
         if V1175_BET_FILTER_ENABLED:
             try:
                 _seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
@@ -3358,38 +3358,31 @@ CONF = {confidence_score:.2f}
                         sum(float(r.get("bet_profit", 0.0) or 0.0) for r in _bet_rows),
                         2,
                     )
-                    _bet_count = sum(
-                        1 for r in _bet_rows
-                        if r.get("bet_allowed")
-                        and str(r.get("status", "")).upper() in {"WIN", "LOSS"}
-                    )
-                    _skip_count = sum(
-                        1 for r in _bet_rows if not r.get("bet_allowed")
-                    )
-                    st.subheader("V117.5 BET FILTER - SHADOW")
+
+                    _latest = _bet_rows[-1] if _bet_rows else None
+                    st.subheader("V117.5 FAST LIVE")
                     st.caption(
                         f"PREV BET P/L={_prev_bet_profit:+.1f} | "
-                        f"CURRENT BET P/L={_settled_bet_profit:+.1f} | "
-                        f"BET settled={_bet_count} | skipped signals={_skip_count} | "
+                        f"TODAY BET P/L={_settled_bet_profit:+.1f} | "
                         "ENGINE STATE UNCHANGED"
                     )
-                    if _bet_rows:
-                        _bdf = pd.DataFrame(_bet_rows)
-                        st.dataframe(
-                            _bdf[
-                                [
-                                    "open_round", "settle_round", "group", "status",
-                                    "bet_action", "bet_skip_reason", "bet_profit",
-                                    "prev_day_bet_profit", "g3_signal_rank",
-                                    "open_p20", "open_wr20", "open_stability",
-                                    "open_confidence", "open_lock_reason",
-                                ]
-                            ],
-                            use_container_width=True,
-                            hide_index=True,
-                        )
+
+                    if _latest is not None:
+                        _action = str(_latest.get("bet_action", "SKIP"))
+                        _reason = str(_latest.get("bet_skip_reason", ""))
+                        _grp = int(_latest.get("group", 0) or 0)
+                        _rnd = int(_latest.get("open_round", 0) or 0)
+                        _status = str(_latest.get("status", "") or "")
+                        if _action == "BET":
+                            st.success(
+                                f"R{_rnd} | G{_grp} | BET | {_status} | {_reason}"
+                            )
+                        else:
+                            st.warning(
+                                f"R{_rnd} | G{_grp} | SKIP | {_status} | {_reason}"
+                            )
             except Exception as _bet_err:
-                st.warning(f"V117.5 BET FILTER shadow unavailable: {_bet_err}")
+                st.warning(f"V117.5 FAST LIVE unavailable: {_bet_err}")
 
         with st.expander("Round Audit Log - every processed round"):
             audit_rows = list(getattr(self.ctx, "round_log", []) or [])
