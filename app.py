@@ -1334,6 +1334,9 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
     resolved: list[dict] = []
     replayed_days = 0
     recovered_logical_days: list[int] = []
+    # V117.5 betting-layer prior P/L is rebuilt inside this SAME raw replay.
+    # No second historical replay and no cache/session dependency.
+    _v1175_prev_bet_profit = 0.0
 
     for seq in required:
         day_id, nums = raw_by_seq[seq]
@@ -1402,6 +1405,21 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
         replayed_days += 1
         source = "RECOVERED_LOGICAL" if _recovered_logical else "RAW_REPLAY_NO_CACHE"
 
+        # V117.5 SHADOW P/L piggybacks on the already-computed engine ledger.
+        # In continuous strategy mode, use the logical ledger because that is
+        # the same ledger/path used by the audited V117.5 candidate.
+        _v1175_bet_ledger = _ledger
+        if (
+            int(seq) >= int(FRONTIER_JOURNAL_CUTOVER_DAY_SEQ)
+            and STRATEGY_FRONTIER_MODE == "continuous"
+            and _logical_profit is not None
+        ):
+            _v1175_bet_ledger = _logical_ledger
+        _v1175_bet_profit_value = _v1175_bet_profit(
+            _v1175_bet_ledger,
+            _v1175_prev_bet_profit,
+        )
+
         resolved.append({
             "day_seq": int(seq),
             "day_id": str(day_id or seq),
@@ -1416,7 +1434,9 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 else source
             ),
             "diag": dict(_diag or {}),
+            "bet_profit_v1175": round(float(_v1175_bet_profit_value), 2),
         })
+        _v1175_prev_bet_profit = float(_v1175_bet_profit_value)
 
     try:
         if recovered_logical_days:
@@ -3318,6 +3338,58 @@ CONF = {confidence_score:.2f}
                 f"current-day={len(self.ctx.trade_history)} | survives code deploy/reset/new day"
             )
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # V117.5 shadow betting layer: engine ledger remains authoritative and
+        # untouched.  This table only tells the operator BET vs SKIP.
+        if V1175_BET_FILTER_ENABLED:
+            try:
+                _seq = int(getattr(self.ctx, "live_day_seq", 0) or 0)
+                if _seq > 0:
+                    _prior_hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
+                    _prev_bet_profit = (
+                        float(_prior_hist[-1].get("bet_profit_v1175", 0.0) or 0.0)
+                        if _prior_hist else 0.0
+                    )
+                    _bet_rows = _v1175_apply_bet_filter(
+                        list(self.ctx.trade_history),
+                        _prev_bet_profit,
+                    )
+                    _settled_bet_profit = round(
+                        sum(float(r.get("bet_profit", 0.0) or 0.0) for r in _bet_rows),
+                        2,
+                    )
+                    _bet_count = sum(
+                        1 for r in _bet_rows
+                        if r.get("bet_allowed")
+                        and str(r.get("status", "")).upper() in {"WIN", "LOSS"}
+                    )
+                    _skip_count = sum(
+                        1 for r in _bet_rows if not r.get("bet_allowed")
+                    )
+                    st.subheader("V117.5 BET FILTER - SHADOW")
+                    st.caption(
+                        f"PREV BET P/L={_prev_bet_profit:+.1f} | "
+                        f"CURRENT BET P/L={_settled_bet_profit:+.1f} | "
+                        f"BET settled={_bet_count} | skipped signals={_skip_count} | "
+                        "ENGINE STATE UNCHANGED"
+                    )
+                    if _bet_rows:
+                        _bdf = pd.DataFrame(_bet_rows)
+                        st.dataframe(
+                            _bdf[
+                                [
+                                    "open_round", "settle_round", "group", "status",
+                                    "bet_action", "bet_skip_reason", "bet_profit",
+                                    "prev_day_bet_profit", "g3_signal_rank",
+                                    "open_p20", "open_wr20", "open_stability",
+                                    "open_confidence", "open_lock_reason",
+                                ]
+                            ],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+            except Exception as _bet_err:
+                st.warning(f"V117.5 BET FILTER shadow unavailable: {_bet_err}")
 
         with st.expander("Round Audit Log - every processed round"):
             audit_rows = list(getattr(self.ctx, "round_log", []) or [])
@@ -6750,6 +6822,216 @@ def _replay_one_day_stateless(
     m.ctx.trade_state = "FLAT"
     return profit, ledger
 
+
+
+# ============================================================================
+# V117.5 BET FILTER SHADOW LAYER
+# ============================================================================
+# IMPORTANT:
+# - This layer NEVER changes EngineContext, window selection, KEEP/relock,
+#   cooldown, blacklist, protection, C79, pending trade, or daily engine target.
+# - It only decides whether an already-generated LIVE101 trade signal should be
+#   physically BET or SKIP.
+# - Previous-day BET profit is replayed causally from raw Numbers, not stored
+#   session/cache state. Therefore browser refresh/restart is deterministic.
+# - Frozen after D1-D54 anti-overfit audit. Do not retune thresholds in live.
+V1175_BET_FILTER_ENABLED = True
+V1175_G1_P20_MIN = 11.0
+V1175_G1_STABILITY_MIN = 0.60
+V1175_G2_WR20_MIN = 0.40
+V1175_G4_CONFIDENCE_MIN = 0.53
+V1175_PREV_DAY_NEGATIVE_THRESHOLD = 0.0
+V1175_G3_SKIP_AFTER_NEGATIVE_DAY = 2
+V1175_G1_RELOCK_REASON = "RELOCK_BY_SHORT_TERM_FALLBACK_REAL_2_LOSS_RELOCK"
+
+
+def _v1175_trade_base_bet_decision(t: TradeRecord) -> tuple[bool, str]:
+    """Frozen group filter. Pure function: reads TradeRecord only."""
+    try:
+        group = int(getattr(t, "predict", 0) or 0)
+    except Exception:
+        group = 0
+
+    p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
+    wr20 = float(getattr(t, "open_shadow_wr20", 0.0) or 0.0)
+    stability = float(getattr(t, "open_stability", 0.0) or 0.0)
+    confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
+    lock_reason = str(getattr(t, "open_lock_reason", "") or "")
+
+    if group == 1:
+        normal_ok = (
+            p20 >= V1175_G1_P20_MIN
+            and stability >= V1175_G1_STABILITY_MIN
+        )
+        relock_ok = (
+            lock_reason == V1175_G1_RELOCK_REASON
+            and p20 < V1175_G1_P20_MIN
+            and stability >= V1175_G1_STABILITY_MIN
+        )
+        if normal_ok:
+            return True, "G1_P20_STABILITY_OK"
+        if relock_ok:
+            return True, "G1_RELOCK2LOSS_EXCEPTION"
+        return False, "G1_FILTER"
+
+    if group == 2:
+        return (
+            (True, "G2_WR20_OK")
+            if wr20 >= V1175_G2_WR20_MIN
+            else (False, "G2_WR20_FILTER")
+        )
+
+    if group == 3:
+        return True, "G3_BASE_OK"
+
+    if group == 4:
+        return (
+            (True, "G4_CONFIDENCE_OK")
+            if confidence >= V1175_G4_CONFIDENCE_MIN
+            else (False, "G4_CONFIDENCE_FILTER")
+        )
+
+    return False, "UNKNOWN_GROUP"
+
+
+def _v1175_apply_bet_filter(
+    ledger: list[TradeRecord],
+    prev_day_bet_profit: float,
+) -> list[dict]:
+    """Return deterministic BET/SKIP rows without mutating the engine ledger.
+
+    The G3 counter includes eligible G3 engine signals in opening-round order.
+    This intentionally includes a current PENDING signal so the operator sees
+    the BET/SKIP instruction before settlement.
+    """
+    rows = []
+    g3_seen = 0
+    prev_negative = (
+        float(prev_day_bet_profit or 0.0)
+        < V1175_PREV_DAY_NEGATIVE_THRESHOLD
+    )
+
+    ordered = sorted(
+        list(ledger or []),
+        key=lambda t: (
+            int(getattr(t, "round_id", 0) or 0),
+            int(getattr(t, "settle_round", 10**9) or 10**9),
+        ),
+    )
+
+    for t in ordered:
+        base_allowed, base_reason = _v1175_trade_base_bet_decision(t)
+        allowed = bool(base_allowed)
+        reason = str(base_reason)
+
+        try:
+            group = int(getattr(t, "predict", 0) or 0)
+        except Exception:
+            group = 0
+
+        if base_allowed and group == 3:
+            g3_seen += 1
+            if (
+                prev_negative
+                and g3_seen <= V1175_G3_SKIP_AFTER_NEGATIVE_DAY
+            ):
+                allowed = False
+                reason = f"G3_AFTER_NEG_DAY_SKIP_{g3_seen}"
+
+        status = str(getattr(t, "status", "") or "").upper()
+        settled = status in {"WIN", "LOSS"}
+        engine_profit = float(getattr(t, "profit", 0.0) or 0.0)
+        bet_profit = engine_profit if (allowed and settled) else 0.0
+
+        rows.append(
+            {
+                "day_seq": int(getattr(t, "open_day_seq", 0) or 0),
+                "date": str(getattr(t, "open_day_date", "") or ""),
+                "open_round": int(getattr(t, "round_id", 0) or 0),
+                "settle_round": getattr(t, "settle_round", None),
+                "group": group,
+                "status": status,
+                "engine_profit": round(engine_profit, 2),
+                "bet_allowed": bool(allowed),
+                "bet_action": "BET" if allowed else "SKIP",
+                "bet_skip_reason": reason,
+                "bet_profit": round(bet_profit, 2),
+                "prev_day_bet_profit": round(float(prev_day_bet_profit or 0.0), 2),
+                "g3_signal_rank": int(g3_seen) if group == 3 and base_allowed else None,
+                "open_p20": round(float(getattr(t, "open_shadow_profit20", 0.0) or 0.0), 3),
+                "open_wr20": round(float(getattr(t, "open_shadow_wr20", 0.0) or 0.0), 3),
+                "open_stability": round(float(getattr(t, "open_stability", 0.0) or 0.0), 3),
+                "open_confidence": round(float(getattr(t, "open_confidence", 0.0) or 0.0), 3),
+                "open_lock_reason": str(getattr(t, "open_lock_reason", "") or ""),
+            }
+        )
+    return rows
+
+
+def _v1175_bet_profit(
+    ledger: list[TradeRecord],
+    prev_day_bet_profit: float,
+) -> float:
+    rows = _v1175_apply_bet_filter(ledger, prev_day_bet_profit)
+    return round(sum(float(r["bet_profit"]) for r in rows), 2)
+
+
+def replay_prior_days_v1175_bet_filter(
+    history_df: pd.DataFrame,
+    current_seq: int,
+) -> list[dict]:
+    """Causal raw-history replay of prior-day V117.5 BET P/L.
+
+    Engine target/history remain LIVE101's own engine P/L.  Only the G3
+    post-negative-day guard uses the previous V117.5 BET P/L.
+    """
+    engine_seed = []
+    bet_results = []
+    prev_bet_profit = 0.0
+
+    for seq, day_id, nums in _validated_numbers_by_day(history_df, current_seq):
+        engine_target = get_dynamic_daily_profit_lock(engine_seed)
+        engine_profit, ledger = _replay_one_day_stateless(
+            nums,
+            engine_seed,
+            seq,
+            day_id,
+            v70_enabled=False,
+            daily_profit_lock=engine_target,
+        )
+        bet_profit = _v1175_bet_profit(ledger, prev_bet_profit)
+
+        engine_item = {
+            "day_seq": int(seq),
+            "day_id": day_id,
+            "profit": float(engine_profit),
+        }
+        engine_seed.append(engine_item)
+        engine_seed = engine_seed[-10:]
+
+        bet_results.append(
+            {
+                "day_seq": int(seq),
+                "day_id": day_id,
+                "engine_profit": round(float(engine_profit), 2),
+                "bet_profit": round(float(bet_profit), 2),
+            }
+        )
+        prev_bet_profit = float(bet_profit)
+
+    return bet_results
+
+
+def current_day_v1175_bet_rows(
+    history_df: pd.DataFrame,
+    current_seq: int,
+    current_ledger: list[TradeRecord],
+) -> tuple[list[dict], float]:
+    """Return current-day BET/SKIP rows and previous completed BET profit."""
+    prior = replay_prior_days_v1175_bet_filter(history_df, current_seq)
+    prev_bet_profit = float(prior[-1]["bet_profit"]) if prior else 0.0
+    rows = _v1175_apply_bet_filter(current_ledger, prev_bet_profit)
+    return rows, round(prev_bet_profit, 2)
 
 def replay_prior_days_from_numbers(history_df: pd.DataFrame, current_seq: int) -> list[dict]:
     """Causal Day1..Day(N-1) replay. No stored daily_profit is trusted."""
