@@ -7486,7 +7486,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.3 HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.4 HISTORY-LIVE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7615,9 +7615,58 @@ def render_history_live_authoritative(manager) -> None:
             f"after negative day skip first {HISTORY_LIVE_PREV_NEG_G2_SKIP} eligible G2."
         )
 
-        # Reuse V7 stale-source detector as an additional fail-closed gate.
+        # V10.4 OPERATOR PANEL: ALWAYS show round/target/action/group before any
+        # normal WAIT return. Strategy is unchanged; this is display-only.
         raw_stale = bool(getattr(manager.ctx, "live_raw_is_stale", False))
         raw_age = float(getattr(manager.ctx, "live_raw_observed_age_seconds", 0.0) or 0.0)
+
+        _ui_target = None if current_round >= MAX_ROUNDS_PER_DAY else current_round + 1
+        _ui_action = "WAIT"
+        _ui_group = "—"
+        _ui_reason = ""
+        _ui_conf = None
+        _ui_p20 = None
+        _ui_stab = None
+
+        if raw_stale:
+            _ui_reason = f"DATA STALE ~{int(raw_age)}s"
+        elif current_round >= MAX_ROUNDS_PER_DAY:
+            _ui_reason = "DAY COMPLETE — WAIT FOR NEXT DAY"
+        elif current_round < LIVE_START_ROUND:
+            _ui_reason = f"BEFORE LIVE START R{LIVE_START_ROUND}"
+        elif pending is None:
+            _ui_reason = (
+                "POSITIVE PROFIT LOCK REACHED"
+                if _positive_lock_reached
+                else "NO QUALIFYING PENDING HISTORY-LIVE TRADE"
+            )
+        else:
+            _pending_target = int(pending.get("open_round", 0) or 0) + 1
+            if _pending_target == current_round + 1 and _pending_target <= MAX_ROUNDS_PER_DAY:
+                _ui_target = _pending_target
+                _ui_action = str(pending.get("bet_action", "SKIP") or "SKIP").upper()
+                _ui_group = f"G{int(pending.get('group', 0) or 0)}"
+                _ui_reason = str(pending.get("reason", "") or "")
+                _ui_conf = float(pending.get("confidence", 0.0) or 0.0)
+                _ui_p20 = float(pending.get("p20", 0.0) or 0.0)
+                _ui_stab = float(pending.get("stability", 0.0) or 0.0)
+            else:
+                _ui_reason = "INVALID TARGET ROUND — FAIL CLOSED"
+
+        st.markdown("## 🎯 LIVE DECISION")
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _c1.metric("CURRENT ROUND", f"R{current_round}")
+        _c2.metric("TARGET ROUND", f"R{_ui_target}" if _ui_target is not None else "NEXT DAY")
+        _c3.metric("ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
+        _c4.metric("GROUP", _ui_group)
+        st.caption(f"REASON: {_ui_reason or '—'}")
+
+        if _ui_conf is not None:
+            st.caption(
+                f"CONF={_ui_conf:.3f} | P20={_ui_p20:+.1f} | STAB={_ui_stab:.3f} | "
+                f"ACTION ID=D{seq}-R{_ui_target} | BET ONCE ONLY"
+            )
+
         if raw_stale:
             st.error(
                 f"DATA STALE ~{int(raw_age)}s (limit={LIVE_STALE_SECONDS}s). "
@@ -7634,12 +7683,15 @@ def render_history_live_authoritative(manager) -> None:
         if pending is None:
             if _positive_lock_reached:
                 st.success(
-                    f"🔒 CURRENT ACTION: WAIT — POSITIVE PROFIT LOCK REACHED | "
-                    f"ENGINE {float(engine_profit):+.1f} >= TARGET {float(lock):+.1f}. "
-                    "STOP-LOSS -2.5 remains OFF. Wait for next DAY_SEQ."
+                    f"🔒 CURRENT ACTION: WAIT / NO BET → R{current_round + 1} | "
+                    f"POSITIVE PROFIT LOCK REACHED | ENGINE {float(engine_profit):+.1f} "
+                    f">= TARGET {float(lock):+.1f}. STOP-LOSS -2.5 remains OFF."
                 )
             else:
-                st.info("⏸️ CURRENT ACTION: WAIT — no qualifying pending History-Live trade at this frontier.")
+                st.info(
+                    f"⏸️ CURRENT ACTION: WAIT / NO BET → R{current_round + 1} | "
+                    "no qualifying pending History-Live trade at this frontier."
+                )
             return
 
         target = int(pending.get("open_round", 0) or 0) + 1
@@ -7663,7 +7715,7 @@ def render_history_live_authoritative(manager) -> None:
             )
         else:
             st.warning(
-                f"⛔ CURRENT ACTION: SKIP R{target} | ENGINE G{group} | "
+                f"⛔ CURRENT ACTION: SKIP G{group} → R{target} | "
                 f"CONF={conf:.3f} | P20={p20:+.1f} | STAB={stab:.3f} | {reason}"
             )
     except Exception as exc:
