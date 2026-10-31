@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | NO CACHE | 101+CONF>=0.55 WAIT2 | DYNAMIC LOCK 2.5/10 | C79"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10 HISTORY-LIVE AUTHORITATIVE | STOP-OFF | FROZEN D1-D40"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -265,8 +265,9 @@ WINDOW_SELECTION_MODE = "shadow"  # "ucb" or "score"
 UCB_EXPLORATION_C = 0.22
 MIN_TRADES_FOR_PROTECTION = 6
 
-# Daily Stop Guard - protect against deep negative days.
-# These guards only block opening NEW trades. Pending trades still settle normally.
+# LEGACY V7 DIAGNOSTIC fixed daily stop.
+# V10 authoritative History-Live DOES NOT use this fixed -2.5 stop; its
+# StopOffHistoryLiveTradeEngine overrides daily_stop_status().
 DAILY_STOP_LOSS = -2.5
 
 # V3.4: live daily-history + adaptive coherence.
@@ -3046,7 +3047,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V7.1 TARGET-TOGGLE")
+        st.title("🚀 ADAPTIVE SAFE LIVE V7 TOP-ACTION")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
         st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
@@ -3259,8 +3260,8 @@ CONF = {confidence_score:.2f}
         c2.metric("ENGINE P20", snap["profit20"])
         c3.metric("ENGINE WR20", snap["wr20"])
         c4.metric("Drawdown", snap["drawdown"])
-        c5.metric("Daily Stop", "ON" if snap.get("daily_stop_active") else "OFF")
-        c6.metric("Stop Reason", snap.get("daily_stop_reason", ""))
+        c5.metric("LEGACY Daily Stop", "ON" if snap.get("daily_stop_active") else "OFF")
+        c6.metric("LEGACY Stop Reason", snap.get("daily_stop_reason", ""))
 
     def render_risk(self) -> None:
         c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
@@ -3300,7 +3301,7 @@ CONF = {confidence_score:.2f}
         st.subheader("Current Trade")
 
         if self.ctx.pending_trade is None:
-            st.info("No pending ENGINE trade. Do not place a bet unless the ADAPTIVE OPERATOR ACTION panel says BET.")
+            st.info("No pending LEGACY engine trade. Use ONLY the top HISTORY-LIVE V10 LIVE ACTION panel for BET/SKIP/WAIT.")
             return
 
         target_round = self.ctx.pending_round + 1
@@ -3326,7 +3327,7 @@ CONF = {confidence_score:.2f}
         )
 
     def render_profit_config(self) -> None:
-        with st.expander("Profit Optimized Config"):
+        with st.expander("LEGACY V7 Engine Config — DIAGNOSTIC ONLY"):
             st.json(
                 {
                     "CONSENSUS_READY": CONSENSUS_READY,
@@ -3531,7 +3532,7 @@ CONF = {confidence_score:.2f}
                 _prev_a=float(_hist_a[-1].get("adaptive_bet_profit",0.0) or 0.0) if _hist_a else 0.0
                 _rows_a=_adaptive_apply_bet_filter(list(self.ctx.trade_history),_prev_a,_choices_a)
                 _pnl_a=round(sum(float(_r.get("bet_profit",0.0) or 0.0) for _r in _rows_a),2)
-                st.subheader("Adaptive Bet Audit (ledger only)")
+                st.subheader("LEGACY V7 Adaptive Audit — DIAGNOSTIC ONLY")
                 st.caption(f"DAY={int(getattr(self.ctx,'live_day_seq',0) or 0)} | ROUND={int(getattr(self.ctx,'last_length',0) or 0)} | PREV BET P/L={_prev_a:+.1f} | TODAY BET P/L={_pnl_a:+.1f} | G1=P{_choices_a.get('G1')} | G2=WR{_choices_a.get('G2')} | G3={_choices_a.get('G3')} | G4={_choices_a.get('G4')} | ENGINE UNCHANGED")
                 _la=_rows_a[-1] if _rows_a else None
                 if _la is None: st.info("NO ADAPTIVE LEDGER ROW YET")
@@ -6906,87 +6907,87 @@ class EngineManager:
         return signal, confidence_score, confidence_level
 
     def run(self) -> None:
-        self.hybrid_replay_once()
-        self.process_new_rounds()
-
-        # PROFIT LEDGER LOCK: current-day settled trade_history is source of truth.
-        # Never let stale equity from a previous deploy/reset alter displayed P/L.
-        rebuild_real_stats_from_history(self.ctx)
-        refresh_ledger_checkpoint(self.ctx)
-        ledger_profit = round(
-            sum(float(x.profit or 0.0) for x in self.ctx.trade_history if x.hit is not None), 2
-        )
-        equity_profit = round(float(self.ctx.equity_curve[-1]), 2) if self.ctx.equity_curve else 0.0
-        if ledger_profit != equity_profit or round(float(getattr(self.ctx, "ledger_profit", 0.0)), 2) != ledger_profit:
-            st.error(
-                f"PROFIT INTEGRITY ERROR: ledger={ledger_profit:+.1f}, "
-                f"checkpoint={float(getattr(self.ctx, 'ledger_profit', 0.0)):+.1f}, "
-                f"equity={equity_profit:+.1f}. LIVE display stopped."
-            )
-            st.stop()
-
-        signal, confidence_score, confidence_level = self.build_display_signal()
-
-        # V6 deterministic current-run checksums. These are display/safety metadata
-        # only and never feed the strategy.
-        self.ctx.live_engine_signature = make_engine_ledger_signature(self.ctx)
-        _choice_hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
-        _choice_now = _adaptive_select_choices(_choice_hist) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
-        self.ctx.live_adaptive_choice_signature = hashlib.sha256(
-            json.dumps(_choice_now, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-
-        # V7 TOP-ACTION UI:
-        # header + authoritative physical BET/SKIP/WAIT are injected into the
-        # placeholder created before EngineManager, so they remain at the top
-        # even when raw-history audit messages are rendered during initialization.
+        # V10: calculate/display the authoritative History-Live action FIRST.
+        # It depends only on immutable raw history + current raw prefix and does
+        # not depend on the legacy V7 current-day ledger/state below.
         with _live_top_slot.container():
-            self.dashboard.render_header()
-            self.dashboard.render_adaptive_operator_action()
+            render_history_live_authoritative(self)
 
         st.divider()
-        st.caption("ENGINE / AUDIT DETAILS — diagnostic only")
-        self.dashboard.render_signal(signal, confidence_score)
-        self.dashboard.render_market(signal)
-        self.dashboard.render_profit()
-        self.dashboard.render_risk()
-        self.dashboard.render_last_result()
-        self.dashboard.render_current_trade()
-        self.dashboard.render_profit_config()
-        self.dashboard.render_top_windows()
-        self.dashboard.render_window_debug()
-        self.dashboard.render_real_stats_summary()
-        self.render_live_source_debug()
-        self.dashboard.render_trade_history()
-        self.dashboard.render_equity()
-
         st.caption(
-            f"""
-V4.4.2 STATELESS REPLAY LIVE / AUDITED
+            "LEGACY V7 ENGINE / AUDIT DETAILS — DIAGNOSTIC ONLY — "
+            "DO NOT USE AS BET INSTRUCTION"
+        )
 
-Calculation source: fresh Google Numbers. No st.cache_data.
-Each refresh reads raw history/current Numbers fresh. Completed-history replay may be reused only when its raw hash is identical; current DAY_SEQ always replays R1 to current round.
-Stored Google daily_profit and legacy persistent engine state do NOT control strategy calculation.
-Invariant: same prior Numbers + same current Numbers + same code = same ledger/profit/signal.
-ADAPTIVE OPERATOR ACTION is the only physical BET/SKIP instruction. ENGINE SIGNAL is diagnostic only.
+        try:
+            self.hybrid_replay_once()
+            self.process_new_rounds()
+
+            # Legacy diagnostic integrity. A failure here must never retroactively
+            # alter the already-computed V10 top action.
+            rebuild_real_stats_from_history(self.ctx)
+            refresh_ledger_checkpoint(self.ctx)
+            ledger_profit = round(
+                sum(float(x.profit or 0.0) for x in self.ctx.trade_history if x.hit is not None), 2
+            )
+            equity_profit = round(float(self.ctx.equity_curve[-1]), 2) if self.ctx.equity_curve else 0.0
+            if ledger_profit != equity_profit or round(float(getattr(self.ctx, "ledger_profit", 0.0)), 2) != ledger_profit:
+                st.warning(
+                    f"LEGACY V7 PROFIT INTEGRITY ERROR: ledger={ledger_profit:+.1f}, "
+                    f"checkpoint={float(getattr(self.ctx, 'ledger_profit', 0.0)):+.1f}, "
+                    f"equity={equity_profit:+.1f}. Legacy diagnostics stopped; V10 top action is independent."
+                )
+                return
+
+            signal, confidence_score, confidence_level = self.build_display_signal()
+
+            # Legacy deterministic signatures are diagnostic only.
+            self.ctx.live_engine_signature = make_engine_ledger_signature(self.ctx)
+            _choice_hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
+            _choice_now = _adaptive_select_choices(_choice_hist) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
+            self.ctx.live_adaptive_choice_signature = hashlib.sha256(
+                json.dumps(_choice_now, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+
+            self.dashboard.render_signal(signal, confidence_score)
+            self.dashboard.render_market(signal)
+            self.dashboard.render_profit()
+            self.dashboard.render_risk()
+            self.dashboard.render_last_result()
+            self.dashboard.render_current_trade()
+            self.dashboard.render_profit_config()
+            self.dashboard.render_top_windows()
+            self.dashboard.render_window_debug()
+            self.dashboard.render_real_stats_summary()
+            self.render_live_source_debug()
+            self.dashboard.render_trade_history()
+            self.dashboard.render_equity()
+
+            st.caption(
+                f"""
+V10 HISTORY-LIVE / STATELESS / AUDITED
+
+Authoritative calculation source: fresh raw history + current raw Numbers.
+Stored Google daily_profit and legacy persistent engine state do NOT control V10 action.
+Invariant: same prior raw Numbers + same current Numbers + same code = same V10 action.
+HISTORY-LIVE V10 TOP ACTION is the only physical BET/SKIP/WAIT instruction.
+All legacy V7 engine/adaptive panels below are diagnostic only.
 
 Current Sheet Round : {self.round_id}
-
-Engine Last Round : {self.ctx.last_length}
-
+Legacy Engine Last Round : {self.ctx.last_length}
 Live Start : {LIVE_START_ROUND}
-
-Confidence : {confidence_level}
-
-Trade State : {self.ctx.trade_state}
-
-Pending Trade : {self.ctx.pending_trade} / Open Round : {self.ctx.pending_round}
-
-Locked Window : {self.ctx.locked_window}
-
-Regime : {signal.regime}
+Legacy Confidence : {confidence_level}
+Legacy Trade State : {self.ctx.trade_state}
+Legacy Pending Trade : {self.ctx.pending_trade} / Open Round : {self.ctx.pending_round}
+Legacy Locked Window : {self.ctx.locked_window}
+Legacy Regime : {signal.regime}
 """
-        )
+            )
+        except Exception as exc:
+            st.warning(
+                f"LEGACY V7 DIAGNOSTIC ERROR: {exc}. "
+                "V10 top action was calculated independently from raw data."
+            )
 
 
 # ============================================================
@@ -7268,6 +7269,376 @@ def _adaptive_select_choices(prior_items: list[dict]) -> dict:
         if best!=cur and scores[best]<cur_score+ADAPTIVE_SWITCH_MARGIN: best=cur
         selected[gkey]=best if gkey=="G3" or (gkey=="G4" and best=="BASE") else ("BASE" if gkey=="G4" and best=="BASE" else int(best))
     return selected
+
+
+# ============================================================================
+# V10 STOP-OFF HISTORY-LIVE — AUTHORITATIVE PHYSICAL ACTION
+# ============================================================================
+# DESIGN:
+# - The top HISTORY-LIVE panel is the ONLY authoritative physical BET/SKIP/WAIT action.
+# - A completely separate STOP-OFF strategy is rebuilt causally from raw
+#   historical Numbers D1..D(N-1), then the current day is replayed R1..current.
+# - This avoids a false cutover that mixes old hard-stop state with new stop-off
+#   state. Same raw history + same current prefix => same shadow action.
+# - Rule was selected on D1-D40 only; D41-D58 is validation/holdout.
+# - Promoted after train/validation/holdout + prefix-causal determinism audit.
+HISTORY_LIVE_LIVE_ENABLED = True
+HISTORY_LIVE_RECOVERY_TRIGGER = -3.0
+HISTORY_LIVE_RECOVERY_CONF_MIN = 0.56
+HISTORY_LIVE_G4_P20_MIN = 5.5
+HISTORY_LIVE_G4_STABILITY_MIN = 0.50
+HISTORY_LIVE_PREV_NEG_G2_SKIP = 2
+HISTORY_LIVE_G3_KEEP_REASON = "KEEP_AFTER_WIN_5R"
+
+
+class StopOffHistoryLiveTradeEngine(TradeEngine):
+    """Disposable authoritative replay TradeEngine with only fixed DAILY_STOP_LOSS removed."""
+    def daily_stop_status(self) -> tuple[bool, str]:
+        loss_streak = self.get_loss_streak()
+        drawdown = self.get_drawdown()
+        pullback = self.get_daily_pullback_from_peak()
+        if loss_streak >= DAILY_MAX_LOSS_STREAK:
+            return True, "DAILY_MAX_LOSS_STREAK"
+        if drawdown <= DAILY_MAX_DRAWDOWN or pullback <= DAILY_MAX_DRAWDOWN:
+            return True, "DAILY_MAX_DRAWDOWN"
+        daily_profit_lock = float(getattr(self.ctx, "daily_profit_lock_override", DAILY_PROFIT_LOCK))
+        if self.get_total_profit() >= daily_profit_lock:
+            return True, "DAILY_PROFIT_LOCK"
+        return False, ""
+
+
+def _history_live_replay_one_day(
+    numbers: list[int], prior_history: list[dict], day_seq: int, day_id: str,
+    daily_profit_lock: float,
+) -> tuple[float, list[TradeRecord]]:
+    """Stateless STOP-OFF replay for one day; authoritative action is derived only from this disposable replay."""
+    m = EngineManager.__new__(EngineManager)
+    m.ctx = ensure_ctx_fields(EngineContext())
+    m.ctx.live_day_seq = int(day_seq)
+    m.ctx.live_day_date = str(day_id or "")
+    m.ctx.live_day_id = str(day_id or "")
+    m.ctx.daily_profit_history = list(prior_history)[-10:]
+    m.ctx.live_frontiers = None
+    m.ctx.v70_switch_enabled = False
+    m.ctx.daily_profit_lock_override = float(daily_profit_lock)
+    m.ctx.fast_recovery_mode = True
+    m.ctx.stateless_internal_replay = True
+    m.ctx.hybrid_initialized = False
+    m.ctx.recovery_replay_all_rounds = True
+    m.ctx.data_correction_sequential_replay = True
+    m.window_state = {w: WindowRecord() for w in WINDOWS}
+    m.numbers = list(numbers)
+    m.groups = build_groups(m.numbers)
+    m.actual_group = m.groups[-1] if m.groups else None
+    m.round_id = len(m.numbers)
+    m.window_engine = WindowEngine(m.ctx, m.window_state)
+    m.trade_engine = StopOffHistoryLiveTradeEngine(m.ctx)
+    m.signal_engine = SignalEngine(m.ctx, m.window_engine)
+    m.protection_engine = ProtectionEngine(m.ctx, m.trade_engine)
+    m.hybrid_replay_once()
+    rebuild_real_stats_from_history(m.ctx)
+    ledger = list(m.ctx.trade_history)
+    profit = round(sum(
+        float(t.profit or 0.0) for t in ledger
+        if str(t.status).upper() in {"WIN", "LOSS"}
+    ), 2)
+    return profit, ledger
+
+
+def _history_live_apply_overlay(
+    ledger: list[TradeRecord], adaptive_rows: list[dict], prev_physical_profit: float,
+) -> list[dict]:
+    """Frozen causal physical overlay selected on D1-D40 only."""
+    amap = {
+        (int(r.get("open_round", 0) or 0), int(r.get("group", 0) or 0)): r
+        for r in list(adaptive_rows or [])
+    }
+    engine_pnl = 0.0
+    physical_pnl = 0.0
+    prev_negative = float(prev_physical_profit or 0.0) < 0.0
+    g2_eligible_seen = 0
+    out = []
+    for t in sorted(
+        list(ledger or []),
+        key=lambda x: (int(getattr(x, "round_id", 0) or 0), int(getattr(x, "settle_round", 10**9) or 10**9)),
+    ):
+        open_round = int(getattr(t, "round_id", 0) or 0)
+        group = int(getattr(t, "predict", 0) or 0)
+        base = dict(amap.get((open_round, group), {}) or {})
+        allowed = bool(base.get("bet_allowed", False))
+        reasons = [str(base.get("bet_skip_reason", "") or "")]
+
+        if allowed and group == 2:
+            g2_eligible_seen += 1
+            if prev_negative and g2_eligible_seen <= HISTORY_LIVE_PREV_NEG_G2_SKIP:
+                allowed = False
+                reasons.append(f"HL_G2_AFTER_NEG_SKIP_{g2_eligible_seen}")
+
+        confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
+        p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
+        stability = float(getattr(t, "open_stability", 0.0) or 0.0)
+        lock_reason = str(getattr(t, "open_lock_reason", "") or "")
+
+        if allowed and group == 3 and lock_reason == HISTORY_LIVE_G3_KEEP_REASON:
+            allowed = False
+            reasons.append("HL_G3_KEEP_AFTER_WIN_SKIP")
+
+        if allowed and group == 4 and (
+            p20 < HISTORY_LIVE_G4_P20_MIN or stability < HISTORY_LIVE_G4_STABILITY_MIN
+        ):
+            allowed = False
+            reasons.append("HL_G4_P20_STABILITY_FILTER")
+
+        recovery_mode = (
+            engine_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
+            or physical_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
+        )
+        if allowed and recovery_mode and confidence < HISTORY_LIVE_RECOVERY_CONF_MIN:
+            allowed = False
+            reasons.append("HL_RECOVERY_CONF_FILTER")
+
+        status = str(getattr(t, "status", "") or "").upper()
+        settled = status in {"WIN", "LOSS"}
+        engine_profit = float(getattr(t, "profit", 0.0) or 0.0)
+        bet_profit = engine_profit if allowed and settled else 0.0
+        out.append({
+            "open_round": open_round,
+            "settle_round": getattr(t, "settle_round", None),
+            "group": group,
+            "status": status,
+            "bet_action": "BET" if allowed else "SKIP",
+            "bet_allowed": bool(allowed),
+            "bet_profit": round(float(bet_profit), 2),
+            "engine_profit": round(float(engine_profit), 2),
+            "confidence": confidence,
+            "p20": p20,
+            "stability": stability,
+            "lock_reason": lock_reason,
+            "engine_pnl_before": round(engine_pnl, 2),
+            "physical_pnl_before": round(physical_pnl, 2),
+            "reason": "|".join(x for x in reasons if x),
+        })
+        if settled:
+            engine_pnl += engine_profit
+            physical_pnl += bet_profit
+    return out
+
+
+def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
+    """Build independent STOP-OFF history from raw D1..D(N-1), causally.
+
+    LIVE fail-closed invariant:
+    - every completed DaySeq 1..current_seq-1 must exist exactly once;
+    - each day is already validated as contiguous R1..RN by _validated_numbers_by_day;
+    - stored daily_profit is never trusted for strategy state.
+    """
+    current_seq = int(current_seq or 0)
+    days = _validated_numbers_by_day(history_df, current_seq)
+    got = [int(x[0]) for x in days]
+    expected = list(range(1, current_seq)) if current_seq > 1 else []
+    if got != expected:
+        missing = [x for x in expected if x not in set(got)]
+        extra = [x for x in got if x not in set(expected)]
+        raise RuntimeError(
+            f"HISTORY-LIVE FAIL-CLOSED: expected DaySeq 1..{max(current_seq-1,0)}, "
+            f"got={got[:5]}...{got[-5:] if got else []}; missing={missing}; extra={extra}"
+        )
+
+    resolved = []
+    adaptive_prev = 0.0
+    physical_prev = 0.0
+    replayed = 0
+    for seq, day_id, nums in days:
+        lock = get_dynamic_daily_profit_lock(resolved[-10:])
+        eng, ledger = _history_live_replay_one_day(nums, resolved[-10:], seq, day_id, lock)
+        choices = _adaptive_select_choices(resolved) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
+        adaptive_rows = _adaptive_apply_bet_filter(ledger, adaptive_prev, choices)
+        adaptive_profit = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in adaptive_rows), 2)
+        cf = _adaptive_counterfactual(ledger, adaptive_prev)
+        physical_rows = _history_live_apply_overlay(ledger, adaptive_rows, physical_prev)
+        physical_profit = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in physical_rows), 2)
+        resolved.append({
+            "day_seq": int(seq), "day_id": str(day_id or seq),
+            "profit": round(float(eng), 2), "daily_profit_lock": float(lock),
+            "adaptive_bet_profit": adaptive_profit,
+            "adaptive_choices": dict(choices), "adaptive_cf": dict(cf),
+            "history_live_physical_profit": physical_profit,
+        })
+        adaptive_prev = adaptive_profit
+        physical_prev = physical_profit
+        replayed += 1
+    return resolved, adaptive_prev, physical_prev, replayed
+
+
+def render_history_live_authoritative(manager) -> None:
+    """Render the ONLY authoritative physical action for V10.
+
+    Every refresh reconstructs STOP-OFF history from raw Numbers and replays the
+    current day only through the observed frontier. Any integrity uncertainty
+    fails closed to WAIT / DO NOT BET.
+    """
+    st.markdown("# 🚀 V10 HISTORY-LIVE — LIVE ACTION")
+    st.caption(
+        "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
+        "STOP -2.5 OFF • NO CACHE • FROZEN RULE"
+    )
+
+    if not HISTORY_LIVE_LIVE_ENABLED:
+        st.error("HISTORY-LIVE LIVE is disabled. CURRENT ACTION: WAIT / DO NOT BET.")
+        return
+
+    try:
+        seq = int(getattr(manager.ctx, "live_day_seq", 0) or 0)
+        day_date = str(getattr(manager.ctx, "live_day_date", "") or "")
+        hdf = getattr(manager, "history_df", None)
+        numbers = list(getattr(manager, "numbers", []) or [])
+        current_round = int(getattr(manager, "round_id", len(numbers)) or len(numbers))
+
+        # Source/frontier invariants.
+        if seq <= 0:
+            st.error("LIVE SELF-CHECK FAILED: invalid DAY_SEQ. CURRENT ACTION: WAIT / DO NOT BET.")
+            return
+        if hdf is None or hdf.empty:
+            st.error("LIVE SELF-CHECK FAILED: raw history unavailable. CURRENT ACTION: WAIT / DO NOT BET.")
+            return
+        if len(numbers) != current_round:
+            st.error(
+                f"LIVE SELF-CHECK FAILED: raw frontier={len(numbers)} != engine frontier={current_round}. "
+                "CURRENT ACTION: WAIT / DO NOT BET."
+            )
+            return
+
+        # Rebuild independent strategy history and current day.
+        prior, prev_adaptive, prev_physical, replayed = _history_live_build_prior(hdf, seq)
+        if replayed != max(0, seq - 1):
+            st.error(
+                f"LIVE SELF-CHECK FAILED: history replayed={replayed}, expected={max(0,seq-1)}. "
+                "CURRENT ACTION: WAIT / DO NOT BET."
+            )
+            return
+
+        lock = get_dynamic_daily_profit_lock(prior[-10:])
+        engine_profit, ledger = _history_live_replay_one_day(
+            numbers, prior[-10:], seq, day_date, lock,
+        )
+        choices = _adaptive_select_choices(prior) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
+        adaptive_rows = _adaptive_apply_bet_filter(ledger, prev_adaptive, choices)
+        rows = _history_live_apply_overlay(ledger, adaptive_rows, prev_physical)
+        pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in rows), 2)
+
+        # No future settlement may exist relative to the observed raw frontier.
+        future_rows = [
+            r for r in rows
+            if r.get("settle_round") is not None
+            and int(r.get("settle_round") or 0) > current_round
+        ]
+        if future_rows:
+            st.error("LIVE SELF-CHECK FAILED: future settlement detected. CURRENT ACTION: WAIT / DO NOT BET.")
+            return
+
+        pending_rows = [
+            r for r in rows
+            if int(r.get("open_round", -1) or -1) == current_round
+            and str(r.get("status", "") or "").upper() == "PENDING"
+        ]
+        if len(pending_rows) > 1:
+            st.error("LIVE SELF-CHECK FAILED: duplicate pending action at frontier. CURRENT ACTION: WAIT / DO NOT BET.")
+            return
+        pending = pending_rows[0] if pending_rows else None
+
+        # Deterministic source/action signatures shown to operator.
+        hist_days = _validated_numbers_by_day(hdf, seq)
+        hist_sig = make_history_signature(hist_days)
+        raw_sig = make_numbers_signature(numbers)
+        action_payload = {
+            "rule": "V10_HL_D1_40_FROZEN",
+            "day_seq": seq,
+            "day_date": day_date,
+            "round": current_round,
+            "history_sig": hist_sig,
+            "raw_sig": raw_sig,
+            "prev_physical": round(float(prev_physical), 2),
+            "choices": choices,
+            "pending": pending or {},
+        }
+        action_sig = hashlib.sha256(
+            json.dumps(action_payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+        hist_physical = [float(x.get("history_live_physical_profit", 0.0) or 0.0) for x in prior]
+        hist_total = round(sum(hist_physical), 2)
+        hist_neg = sum(1 for x in hist_physical if x < 0.0)
+        hist_streak = _negative_day_streak(hist_physical)
+        hist_dd = _equity_max_drawdown(hist_physical)
+
+        st.caption(
+            f"D{seq} {day_date or ''} | R{current_round}/288 | HISTORY={replayed} days | "
+            f"TODAY P/L={pnl:+.1f} | ENGINE={float(engine_profit):+.1f} | "
+            f"PREV PHYSICAL={float(prev_physical):+.1f} | TARGET={float(lock):+.1f}"
+        )
+        st.caption(
+            f"HISTORY CHECK: total={hist_total:+.1f} | negative days={hist_neg} | "
+            f"max neg streak={hist_streak} | DD={hist_dd:+.1f} | "
+            f"G1=P{choices.get('G1')} G2=WR{choices.get('G2')} G3={choices.get('G3')} G4={choices.get('G4')}"
+        )
+        st.caption(
+            f"CHECKSUM RAW={_short_hash(raw_sig)} | HIST={_short_hash(hist_sig)} | "
+            f"ACTION={_short_hash(action_sig)} | SELF-CHECK=PASS"
+        )
+        st.caption(
+            f"FROZEN RULE: recovery if Engine/Physical <= {HISTORY_LIVE_RECOVERY_TRIGGER:+.1f} "
+            f"requires CONF>={HISTORY_LIVE_RECOVERY_CONF_MIN:.2f}; "
+            f"G3 KEEP_AFTER_WIN skip; G4 P20>={HISTORY_LIVE_G4_P20_MIN:.1f} "
+            f"and STAB>={HISTORY_LIVE_G4_STABILITY_MIN:.2f}; "
+            f"after negative day skip first {HISTORY_LIVE_PREV_NEG_G2_SKIP} eligible G2."
+        )
+
+        # Reuse V7 stale-source detector as an additional fail-closed gate.
+        raw_stale = bool(getattr(manager.ctx, "live_raw_is_stale", False))
+        raw_age = float(getattr(manager.ctx, "live_raw_observed_age_seconds", 0.0) or 0.0)
+        if raw_stale:
+            st.error(
+                f"DATA STALE ~{int(raw_age)}s (limit={LIVE_STALE_SECONDS}s). "
+                "CURRENT ACTION: WAIT / DO NOT BET."
+            )
+            return
+
+        if current_round >= MAX_ROUNDS_PER_DAY:
+            st.success(f"✅ DAY COMPLETE — WAIT FOR NEXT DAY | TODAY P/L {pnl:+.1f}")
+            return
+        if current_round < LIVE_START_ROUND:
+            st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
+            return
+        if pending is None:
+            st.info("⏸️ CURRENT ACTION: WAIT — no qualifying pending History-Live trade at this frontier.")
+            return
+
+        target = int(pending.get("open_round", 0) or 0) + 1
+        if target != current_round + 1 or target > MAX_ROUNDS_PER_DAY:
+            st.error("LIVE SELF-CHECK FAILED: invalid target round. CURRENT ACTION: WAIT / DO NOT BET.")
+            return
+
+        action = str(pending.get("bet_action", "SKIP") or "SKIP").upper()
+        group = int(pending.get("group", 0) or 0)
+        reason = str(pending.get("reason", "") or "")
+        conf = float(pending.get("confidence", 0.0) or 0.0)
+        p20 = float(pending.get("p20", 0.0) or 0.0)
+        stab = float(pending.get("stability", 0.0) or 0.0)
+
+        st.caption(f"ACTION VALID FOR R{target} ONLY | OPEN R{current_round} | ACTION CHECKSUM={_short_hash(action_sig)}")
+        if action == "BET":
+            st.success(
+                f"✅ CURRENT ACTION: BET G{group} → R{target} | "
+                f"CONF={conf:.3f} | P20={p20:+.1f} | STAB={stab:.3f} | {reason}"
+            )
+        else:
+            st.warning(
+                f"⛔ CURRENT ACTION: SKIP R{target} | ENGINE G{group} | "
+                f"CONF={conf:.3f} | P20={p20:+.1f} | STAB={stab:.3f} | {reason}"
+            )
+    except Exception as exc:
+        st.error(f"HISTORY-LIVE LIVE FAIL-CLOSED: {exc}")
+        st.error("CURRENT ACTION: WAIT / DO NOT BET.")
 
 # V117.5 BET FILTER SHADOW LAYER
 # ============================================================================
@@ -7665,27 +8036,7 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
             )
 
 
-# V7.1 TARGET TOGGLE
-# This control is evaluated BEFORE EngineManager construction so the selected
-# mode is used consistently by historical causal replay and the current live day.
-with st.sidebar:
-    st.divider()
-    st.subheader("Daily target mode")
-    DYNAMIC_LOCK_ENABLED = st.checkbox(
-        "Use +2.5 target after previous negative day",
-        value=True,
-        help=(
-            "ON: if the previous resolved engine day is negative, today's target is +2.5. "
-            "OFF: disable the +2.5 rule and use +10 every day."
-        ),
-        key="dynamic_lock_2_5_enabled",
-    )
-    if DYNAMIC_LOCK_ENABLED:
-        st.caption("Mode: previous day negative → +2.5; otherwise +10")
-    else:
-        st.warning("Mode: +2.5 disabled → target +10 every day")
-
-# Reserve the first visible position on the page for the live operator panel.
+# V7: reserve the first visible position on the page for the live operator panel.
 # EngineManager.__init__ may emit historical/audit messages, but this placeholder
 # remains above them and is populated after the fresh replay finishes.
 _live_top_slot = st.empty()
@@ -7693,9 +8044,7 @@ _live_top_slot = st.empty()
 manager = EngineManager()
 
 st.success(
-    "ADAPTIVE SAFE V7.1 | TOP ACTION | "
-    + ("NEG-DAY TARGET +2.5 ON" if DYNAMIC_LOCK_ENABLED else "NEG-DAY TARGET +2.5 OFF / TARGET +10")
-    + " | CURRENT DAY FRESH | LIVE SELF-CHECK"
+    "V10 HISTORY-LIVE | AUTHORITATIVE LIVE | STOP -2.5 OFF | RAW REPLAY | FAIL-CLOSED"
 )
 
 try:
@@ -7739,7 +8088,7 @@ with st.sidebar:
         disabled=not auto_refresh_enabled,
     )
 
-_current_round_for_refresh = int(getattr(manager.ctx, "last_length", 0) or 0)
+_current_round_for_refresh = int(getattr(manager, "round_id", 0) or 0)
 if auto_refresh_enabled and _current_round_for_refresh < 288:
     st.sidebar.info(
         f"Auto refresh ON: every {int(refresh_seconds)}s. "
