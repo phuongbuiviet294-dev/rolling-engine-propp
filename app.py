@@ -3046,7 +3046,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V7 TOP-ACTION")
+        st.title("🚀 ADAPTIVE SAFE LIVE V7.1 TARGET-TOGGLE")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
         st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
@@ -7665,7 +7665,27 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
             )
 
 
-# V7: reserve the first visible position on the page for the live operator panel.
+# V7.1 TARGET TOGGLE
+# This control is evaluated BEFORE EngineManager construction so the selected
+# mode is used consistently by historical causal replay and the current live day.
+with st.sidebar:
+    st.divider()
+    st.subheader("Daily target mode")
+    DYNAMIC_LOCK_ENABLED = st.checkbox(
+        "Use +2.5 target after previous negative day",
+        value=True,
+        help=(
+            "ON: if the previous resolved engine day is negative, today's target is +2.5. "
+            "OFF: disable the +2.5 rule and use +10 every day."
+        ),
+        key="dynamic_lock_2_5_enabled",
+    )
+    if DYNAMIC_LOCK_ENABLED:
+        st.caption("Mode: previous day negative → +2.5; otherwise +10")
+    else:
+        st.warning("Mode: +2.5 disabled → target +10 every day")
+
+# Reserve the first visible position on the page for the live operator panel.
 # EngineManager.__init__ may emit historical/audit messages, but this placeholder
 # remains above them and is populated after the fresh replay finishes.
 _live_top_slot = st.empty()
@@ -7673,7 +7693,9 @@ _live_top_slot = st.empty()
 manager = EngineManager()
 
 st.success(
-    "ADAPTIVE SAFE V7 | TOP ACTION | VERIFIED HISTORY REPLAY | CURRENT DAY FRESH | LIVE SELF-CHECK"
+    "ADAPTIVE SAFE V7.1 | TOP ACTION | "
+    + ("NEG-DAY TARGET +2.5 ON" if DYNAMIC_LOCK_ENABLED else "NEG-DAY TARGET +2.5 OFF / TARGET +10")
+    + " | CURRENT DAY FRESH | LIVE SELF-CHECK"
 )
 
 try:
