@@ -315,6 +315,10 @@ class TradeRecord:
     open_stability: float = 0.0
     open_shadow_profit20: float = 0.0
     open_shadow_wr20: float = 0.0
+    # Adaptive physical-bet layer snapshots. Keys are P windows 4..26.
+    # Captured at OPEN; never recomputed from future rounds.
+    open_shadow_profit_by_n: dict = field(default_factory=dict)
+    open_shadow_wr_by_n: dict = field(default_factory=dict)
     open_real_window_profit: float = 0.0
     open_real_window_wr: float = 0.0
     open_real_window_trade_count: int = 0
@@ -359,6 +363,8 @@ class SignalRecord:
     locked_live_loss_streak: int = 0
     shadow_live_profit20: float = 0.0
     shadow_live_wr20: float = 0.0
+    shadow_live_profit_by_n: dict = field(default_factory=dict)
+    shadow_live_wr_by_n: dict = field(default_factory=dict)
     real_window_profit: float = 0.0
     real_window_wr: float = 0.0
     real_window_trade_count: int = 0
@@ -1337,6 +1343,7 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
     # V117.5 betting-layer prior P/L is rebuilt inside this SAME raw replay.
     # No second historical replay and no cache/session dependency.
     _v1175_prev_bet_profit = 0.0
+    _adaptive_prev_bet_profit = 0.0
 
     for seq in required:
         day_id, nums = raw_by_seq[seq]
@@ -1419,6 +1426,10 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             _v1175_bet_ledger,
             _v1175_prev_bet_profit,
         )
+        _adaptive_choices = _adaptive_select_choices(resolved) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
+        _adaptive_rows = _adaptive_apply_bet_filter(_v1175_bet_ledger, _adaptive_prev_bet_profit, _adaptive_choices)
+        _adaptive_profit_value = round(sum(float(_r.get("bet_profit",0.0) or 0.0) for _r in _adaptive_rows),2)
+        _adaptive_cf = _adaptive_counterfactual(_v1175_bet_ledger, _adaptive_prev_bet_profit)
 
         resolved.append({
             "day_seq": int(seq),
@@ -1435,8 +1446,12 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             ),
             "diag": dict(_diag or {}),
             "bet_profit_v1175": round(float(_v1175_bet_profit_value), 2),
+            "adaptive_bet_profit": round(float(_adaptive_profit_value), 2),
+            "adaptive_choices": dict(_adaptive_choices),
+            "adaptive_cf": dict(_adaptive_cf),
         })
         _v1175_prev_bet_profit = float(_v1175_bet_profit_value)
+        _adaptive_prev_bet_profit = float(_adaptive_profit_value)
 
     try:
         if recovered_logical_days:
@@ -2134,6 +2149,14 @@ class SignalEngine:
                 if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
                     state = "READY"
 
+        _snapshot_hits = list(locked_obj.live_hit_history) if locked_obj is not None else []
+        _snapshot_p_by_n = {}
+        _snapshot_wr_by_n = {}
+        for _n in range(4, 27):
+            _tail = _snapshot_hits[-_n:]
+            _snapshot_p_by_n[str(_n)] = round(sum(WIN_GROUP if bool(_x) else LOSS_GROUP for _x in _tail), 3) if _tail else 0.0
+            _snapshot_wr_by_n[str(_n)] = round(sum(1 for _x in _tail if bool(_x)) / len(_tail), 3) if _tail else 0.0
+
         return SignalRecord(
             state=state,
             next_group=next_group,
@@ -2155,6 +2178,8 @@ class SignalEngine:
             locked_live_loss_streak=self.ctx.locked_live_loss_streak,
             shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
             shadow_live_wr20=(locked_obj.live_wr20 if locked_obj is not None else 0.0),
+            shadow_live_profit_by_n=_snapshot_p_by_n,
+            shadow_live_wr_by_n=_snapshot_wr_by_n,
             real_window_profit=real_locked_stat["profit"],
             real_window_wr=real_locked_stat["wr"],
             real_window_trade_count=real_locked_stat["trade_count"],
@@ -2422,6 +2447,14 @@ class SignalEngine:
             if real_ok or consensus >= required_consensus or leader_wr20 >= 0.50:
                 state = "READY"
 
+        _live_hits = list(locked_obj.live_hit_history) if locked_obj is not None else []
+        _p_by_n = {}
+        _wr_by_n = {}
+        for _n in range(4, 27):
+            _tail = _live_hits[-_n:]
+            _p_by_n[str(_n)] = round(sum(WIN_GROUP if bool(_x) else LOSS_GROUP for _x in _tail), 3) if _tail else 0.0
+            _wr_by_n[str(_n)] = round(sum(1 for _x in _tail if bool(_x)) / len(_tail), 3) if _tail else 0.0
+
         signal = SignalRecord(
             state=state,
             next_group=next_group,
@@ -2443,6 +2476,8 @@ class SignalEngine:
             locked_live_loss_streak=self.ctx.locked_live_loss_streak,
             shadow_live_profit20=(locked_obj.live_profit20 if locked_obj is not None else 0.0),
             shadow_live_wr20=(locked_obj.live_wr20 if locked_obj is not None else 0.0),
+            shadow_live_profit_by_n=_p_by_n,
+            shadow_live_wr_by_n=_wr_by_n,
             real_window_profit=real_locked_stat["profit"],
             real_window_wr=real_locked_stat["wr"],
             real_window_trade_count=real_locked_stat["trade_count"],
@@ -2552,6 +2587,8 @@ class TradeEngine:
             open_stability=float(getattr(signal, "stability", 0.0) or 0.0),
             open_shadow_profit20=float(getattr(signal, "shadow_live_profit20", getattr(signal, "live_profit20", 0.0)) or 0.0),
             open_shadow_wr20=float(getattr(signal, "shadow_live_wr20", getattr(signal, "live_wr20", 0.0)) or 0.0),
+            open_shadow_profit_by_n=dict(getattr(signal, "shadow_live_profit_by_n", {}) or {}),
+            open_shadow_wr_by_n=dict(getattr(signal, "shadow_live_wr_by_n", {}) or {}),
             open_real_window_profit=float(getattr(signal, "real_window_profit", 0.0) or 0.0),
             open_real_window_wr=float(getattr(signal, "real_window_wr", 0.0) or 0.0),
             open_real_window_trade_count=int(getattr(signal, "real_window_trade_count", 0) or 0),
@@ -2600,17 +2637,13 @@ class TradeEngine:
             record.status = "WIN" if hit else "LOSS"
             record.settle_round = current_round
         else:
-            record = TradeRecord(
-                round_id=self.ctx.pending_round,
-                predict=predict,
-                locked_window=self.ctx.pending_locked_window,
-                actual=actual_group,
-hit=hit,
-                profit=profit,
-                status="WIN" if hit else "LOSS",
-                settle_round=current_round
+            # ADAPTIVE SAFE V3 NO-CACHE: never synthesize a settled record without the
+            # immutable OPEN snapshots required by adaptive P4..P26 decisions.
+            self.ctx.open_reason = "PENDING_RECORD_MISSING_FAIL_CLOSED"
+            raise RuntimeError(
+                "PENDING RECORD MISSING: original TradeRecord snapshot is unavailable. "
+                "LIVE stopped to preserve deterministic adaptive replay."
             )
-            self.ctx.trade_history.append(record)
 
         self.update_equity(profit)
 
@@ -2974,8 +3007,97 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 V71 SIMPLE LIVE")
-        st.caption("BUILD CHECK: V71.18.1A | NO CACHE | CLEAN AUDIT UI")
+        st.title("🚀 ADAPTIVE SAFE LIVE V3 NO-CACHE")
+        st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
+
+    def render_adaptive_operator_action(self) -> None:
+        """Single authoritative physical BET/SKIP instruction."""
+        if not ADAPTIVE_SAFE_ENABLED:
+            st.error("ADAPTIVE SAFE is disabled. No physical BET instruction is available.")
+            return
+        try:
+            hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
+            choices = _adaptive_select_choices(hist)
+            prev_bet = float(hist[-1].get("adaptive_bet_profit", 0.0) or 0.0) if hist else 0.0
+            rows = _adaptive_apply_bet_filter(
+                list(getattr(self.ctx, "trade_history", []) or []),
+                prev_bet,
+                choices,
+            )
+            today_pnl = round(
+                sum(float(r.get("bet_profit", 0.0) or 0.0) for r in rows),
+                2,
+            )
+            current_round = int(getattr(self.ctx, "last_length", 0) or 0)
+            pending_round = int(getattr(self.ctx, "pending_round", -1) or -1)
+            pending_group = getattr(self.ctx, "pending_trade", None)
+
+            st.subheader("🎯 ADAPTIVE OPERATOR ACTION — USE THIS PANEL")
+            st.caption("SOURCE OF TRUTH: fresh raw Numbers → R1..CURRENT replay → adaptive decision. Persistent P-window snapshots are ignored.")
+            st.caption(
+                f"DAY={int(getattr(self.ctx,'live_day_seq',0) or 0)} | "
+                f"ROUND={current_round} | PREV ADAPTIVE P/L={prev_bet:+.1f} | "
+                f"TODAY ADAPTIVE P/L={today_pnl:+.1f} | "
+                f"G1=P{choices.get('G1')} | G2=WR{choices.get('G2')} | "
+                f"G3={choices.get('G3')} | G4={choices.get('G4')}"
+            )
+
+            current = None
+            # NO-CACHE invariant: current-day adaptive features must come from the
+            # freshly replayed TradeRecord objects in this Streamlit run.
+            if pending_group is not None and pending_round >= 0:
+                _pending_record = None
+                if (
+                    self.ctx.pending_index is not None
+                    and 0 <= int(self.ctx.pending_index) < len(self.ctx.trade_history)
+                ):
+                    _pending_record = self.ctx.trade_history[int(self.ctx.pending_index)]
+                if _pending_record is None:
+                    st.error("NO-CACHE INVARIANT ERROR: pending TradeRecord missing after raw replay.")
+                    st.stop()
+                _pmap = dict(getattr(_pending_record, "open_shadow_profit_by_n", {}) or {})
+                _wrmap = dict(getattr(_pending_record, "open_shadow_wr_by_n", {}) or {})
+                if not _pmap or not _wrmap:
+                    st.error(
+                        "NO-CACHE INVARIANT ERROR: adaptive P/WR maps were not rebuilt "
+                        "from fresh raw Numbers in this run."
+                    )
+                    st.stop()
+                for row in reversed(rows):
+                    if (
+                        int(row.get("open_round", -999) or -999) == pending_round
+                        and int(row.get("group", 0) or 0) == int(pending_group)
+                        and str(row.get("status", "") or "").upper() == "PENDING"
+                    ):
+                        current = row
+                        break
+
+            if current is None:
+                st.info(
+                    "CURRENT ACTION: WAIT — no pending adaptive trade. "
+                    "Historical BET/SKIP rows are audit only."
+                )
+                return
+
+            action = str(current.get("bet_action", "SKIP") or "SKIP").upper()
+            group = int(current.get("group", 0) or 0)
+            reason = str(current.get("bet_skip_reason", "") or "")
+            target_round = pending_round + 1
+            option = current.get("adaptive_option", "")
+
+            if action == "BET":
+                st.success(
+                    f"CURRENT ACTION: BET G{group} FOR R{target_round} | "
+                    f"open R{pending_round} | option={option} | {reason}"
+                )
+            else:
+                st.warning(
+                    f"CURRENT ACTION: SKIP R{target_round} | engine G{group} | "
+                    f"open R{pending_round} | option={option} | {reason}"
+                )
+        except Exception as exc:
+            st.error(f"ADAPTIVE OPERATOR ACTION FAIL-CLOSED: {exc}")
+            st.stop()
 
     def render_signal(self, signal: SignalRecord, confidence_score: float) -> None:
         color = "#00aa00" if signal.state == "READY" else "#555555"
@@ -2986,11 +3108,11 @@ class Dashboard:
         # UI-only time labels. These values never enter the trading engine.
         current_time, target_time = get_current_target_time_display_only(current_round)
 
-        title = "CURRENT SIGNAL" if signal.state == "READY" else "NO TRADE"
+        title = "ENGINE SIGNAL — DIAGNOSTIC ONLY" if signal.state == "READY" else "ENGINE WAIT"
         action = (
-            f"BET GROUP = {signal.next_group}"
-            if signal.state == "READY" and signal.next_group is not None
-            else f"NEXT GROUP = {signal.next_group}"
+            f"ENGINE GROUP = {signal.next_group}"
+            if signal.next_group is not None
+            else "ENGINE GROUP = NONE"
         )
 
         st.markdown(
@@ -3034,9 +3156,9 @@ CONF = {confidence_score:.2f}
         snap = self.trade_engine.snapshot()
 
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Total Profit", snap["total_profit"])
-        c2.metric("Profit20", snap["profit20"])
-        c3.metric("WR20", snap["wr20"])
+        c1.metric("ENGINE Total P/L", snap["total_profit"])
+        c2.metric("ENGINE P20", snap["profit20"])
+        c3.metric("ENGINE WR20", snap["wr20"])
         c4.metric("Drawdown", snap["drawdown"])
         c5.metric("Daily Stop", "ON" if snap.get("daily_stop_active") else "OFF")
         c6.metric("Stop Reason", snap.get("daily_stop_reason", ""))
@@ -3073,13 +3195,13 @@ CONF = {confidence_score:.2f}
         c3.metric("Predict", last.predict)
         c4.metric("Actual", last.actual)
         c5.metric("Result", last.status)
-        c6.metric("Profit", last.profit)
+        c6.metric("ENGINE Profit", last.profit)
 
     def render_current_trade(self) -> None:
         st.subheader("Current Trade")
 
         if self.ctx.pending_trade is None:
-            st.info("No pending trade. Follow the main signal panel.")
+            st.info("No pending ENGINE trade. Do not place a bet unless the ADAPTIVE OPERATOR ACTION panel says BET.")
             return
 
         target_round = self.ctx.pending_round + 1
@@ -3095,12 +3217,12 @@ CONF = {confidence_score:.2f}
         c1.metric("Open Round", self.ctx.pending_round)
         c2.metric("Target Round", target_round)
         c3.metric("Locked Window", display_pending_window)
-        c4.metric("Bet Group", self.ctx.pending_trade)
+        c4.metric("Engine Group", self.ctx.pending_trade)
         c5.metric("Open CONF", round(float(getattr(self.ctx, "pending_confidence", 0.0)), 3))
         c6.metric("Status", "WAIT RESULT")
 
         st.caption(
-            f"This pending trade was opened after round {self.ctx.pending_round}. "
+            f"This is the pending ENGINE trade opened after round {self.ctx.pending_round}. "
             f"It will be settled when round {target_round} appears."
         )
 
@@ -3303,6 +3425,23 @@ CONF = {confidence_score:.2f}
             if STATELESS_REPLAY_LIVE
             else merge_trade_archive(self.ctx)
         )
+        # ADAPTIVE SAFE LIVE: physical BET/SKIP only; engine state remains unchanged.
+        if ADAPTIVE_SAFE_ENABLED:
+            try:
+                _hist_a=list(getattr(self.ctx,"daily_profit_history",[]) or []); _choices_a=_adaptive_select_choices(_hist_a)
+                _prev_a=float(_hist_a[-1].get("adaptive_bet_profit",0.0) or 0.0) if _hist_a else 0.0
+                _rows_a=_adaptive_apply_bet_filter(list(self.ctx.trade_history),_prev_a,_choices_a)
+                _pnl_a=round(sum(float(_r.get("bet_profit",0.0) or 0.0) for _r in _rows_a),2)
+                st.subheader("Adaptive Bet Audit (ledger only)")
+                st.caption(f"DAY={int(getattr(self.ctx,'live_day_seq',0) or 0)} | ROUND={int(getattr(self.ctx,'last_length',0) or 0)} | PREV BET P/L={_prev_a:+.1f} | TODAY BET P/L={_pnl_a:+.1f} | G1=P{_choices_a.get('G1')} | G2=WR{_choices_a.get('G2')} | G3={_choices_a.get('G3')} | G4={_choices_a.get('G4')} | ENGINE UNCHANGED")
+                _la=_rows_a[-1] if _rows_a else None
+                if _la is None: st.info("NO ADAPTIVE LEDGER ROW YET")
+                else:
+                    _m=f"R{int(_la.get('open_round',0))} | G{int(_la.get('group',0))} | {_la.get('bet_action')} | {_la.get('status')} | {_la.get('bet_skip_reason')}"
+                    st.caption("LATEST LEDGER ROW (AUDIT ONLY): " + _m)
+            except Exception as _e:
+                st.error(f"ADAPTIVE SAFE LIVE FAIL-CLOSED: {_e}"); st.stop()
+
         # V117.5 FAST LIVE V2: always show operator status BEFORE any
         # early return from an empty trade ledger.
         if V1175_BET_FILTER_ENABLED:
@@ -3324,7 +3463,7 @@ CONF = {confidence_score:.2f}
                     2,
                 )
 
-                st.subheader("V117.5 FAST LIVE")
+                st.subheader("V117.5 Baseline Shadow (diagnostic only)")
                 st.caption(
                     f"DAY={_seq} | ROUND={_round_now} | "
                     f"PREV BET P/L={_prev_bet_profit:+.1f} | "
@@ -3409,12 +3548,12 @@ CONF = {confidence_score:.2f}
                 st.info("No round audit yet")
 
     def render_equity(self) -> None:
-        st.subheader("Equity Curve")
+        st.subheader("ENGINE Equity Curve")
         ledger_profit = round(
             sum(float(x.profit or 0.0) for x in self.ctx.trade_history if x.hit is not None), 2
         )
         st.caption(
-            f"CURRENT-DAY LEDGER PROFIT: {ledger_profit:+.1f} | "
+            f"ENGINE CURRENT-DAY P/L: {ledger_profit:+.1f} | "
             f"settled={sum(1 for x in self.ctx.trade_history if x.hit is not None)}"
         )
 
@@ -3575,7 +3714,12 @@ def load_state_from_gsheet() -> dict | None:
 
 
 def serialize_live_state(ctx: EngineContext) -> dict:
-    """Serialize EngineContext into the single persistent V3 state payload."""
+    """Serialize durable WAL/day-boundary state only.
+
+    NO-CACHE invariant:
+    adaptive P4..P26 / WR4..WR26 feature maps are NOT persisted and are never
+    authoritative. They are rebuilt from fresh raw Numbers on every run.
+    """
     return {
         "trade_history": [trade_record_to_dict(x) for x in ctx.trade_history],
         "trade_archive": [trade_record_to_dict(x) for x in merge_trade_archive(ctx)],
@@ -3768,6 +3912,10 @@ def trade_record_from_dict(d: dict) -> TradeRecord:
         open_stability=float(d.get("open_stability", 0.0) or 0.0),
         open_shadow_profit20=float(d.get("open_shadow_profit20", 0.0) or 0.0),
         open_shadow_wr20=float(d.get("open_shadow_wr20", 0.0) or 0.0),
+        # NO-CACHE: P4..P26 / WR4..WR26 are intentionally NOT restored.
+        # They must be rebuilt from fresh raw Numbers during the current replay.
+        open_shadow_profit_by_n={},
+        open_shadow_wr_by_n={},
         open_real_window_profit=float(d.get("open_real_window_profit", 0.0) or 0.0),
         open_real_window_wr=float(d.get("open_real_window_wr", 0.0) or 0.0),
         open_real_window_trade_count=int(d.get("open_real_window_trade_count", 0) or 0),
@@ -6608,6 +6756,7 @@ class EngineManager:
         signal, confidence_score, confidence_level = self.build_display_signal()
 
         self.dashboard.render_header()
+        self.dashboard.render_adaptive_operator_action()
         self.dashboard.render_signal(signal, confidence_score)
         self.dashboard.render_market(signal)
         self.dashboard.render_profit()
@@ -6630,7 +6779,7 @@ Calculation source: fresh Google Numbers. No st.cache_data.
 Each refresh rebuilds prior daily P/L causally from historical Numbers, then replays current DAY_SEQ from R1 to current round.
 Stored Google daily_profit and legacy persistent engine state do NOT control strategy calculation.
 Invariant: same prior Numbers + same current Numbers + same code = same ledger/profit/signal.
-Main panel shows READY/WAIT only. PENDING is shown only in Trade History and Current Trade.
+ADAPTIVE OPERATOR ACTION is the only physical BET/SKIP instruction. ENGINE SIGNAL is diagnostic only.
 
 Current Sheet Round : {self.round_id}
 
@@ -6832,6 +6981,105 @@ def _replay_one_day_stateless(
 
 
 # ============================================================================
+# ============================================================
+# ADAPTIVE SAFE PHYSICAL BET LAYER
+# ============================================================
+ADAPTIVE_SAFE_ENABLED = True
+ADAPTIVE_LOOKBACK_DAYS = 9
+ADAPTIVE_MIN_OBS_DAYS = 2
+ADAPTIVE_SWITCH_MARGIN = 3.0
+ADAPTIVE_NEG_DAY_PENALTY = 0.50
+ADAPTIVE_G3_GAP = 8.0
+
+def _adaptive_defaults() -> dict:
+    return {"G1": 20, "G2": 20, "G3": "BASE", "G4": "BASE"}
+
+def _trade_pn(t: TradeRecord, n: int) -> float:
+    d = dict(getattr(t, "open_shadow_profit_by_n", {}) or {})
+    return float(d.get(str(int(n)), getattr(t, "open_shadow_profit20", 0.0) if int(n)==20 else 0.0) or 0.0)
+
+def _trade_wrn(t: TradeRecord, n: int) -> float:
+    d = dict(getattr(t, "open_shadow_wr_by_n", {}) or {})
+    return float(d.get(str(int(n)), getattr(t, "open_shadow_wr20", 0.0) if int(n)==20 else 0.0) or 0.0)
+
+def _adaptive_group_allowed(t: TradeRecord, group: int, option) -> tuple[bool, str]:
+    p20 = _trade_pn(t, 20)
+    stability = float(getattr(t, "open_stability", 0.0) or 0.0)
+    confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
+    lock_reason = str(getattr(t, "open_lock_reason", "") or "")
+    if group == 1:
+        n=int(option); pn=_trade_pn(t,n); th=11.0*n/20.0
+        ok=(pn>=th and stability>=0.60) or (lock_reason==V1175_G1_RELOCK_REASON and pn<th and stability>=0.60)
+        return ok, f"G1_P{n}_{'OK' if ok else 'FILTER'}"
+    if group == 2:
+        n=int(option); ok=_trade_wrn(t,n)>=0.40
+        return ok, f"G2_WR{n}_{'OK' if ok else 'FILTER'}"
+    if group == 3:
+        if str(option)=="GAP8":
+            ok=(p20-_trade_pn(t,12))<=ADAPTIVE_G3_GAP
+            return ok, "G3_GAP8_OK" if ok else "G3_GAP8_FILTER"
+        return True, "G3_BASE_OK"
+    if group == 4:
+        if confidence<0.53: return False, "G4_CONFIDENCE_FILTER"
+        if str(option)=="BASE": return True, "G4_BASE_OK"
+        n=int(option); ok=(p20-_trade_pn(t,n))<=max(0.0,float(20-n))
+        return ok, f"G4_P{n}_{'OK' if ok else 'FILTER'}"
+    return False, "UNKNOWN_GROUP"
+
+def _adaptive_apply_bet_filter(ledger, prev_day_bet_profit: float, choices: dict) -> list[dict]:
+    rows=[]; g3_seen=0; prev_negative=float(prev_day_bet_profit or 0.0)<0.0
+    for t in sorted(list(ledger or []), key=lambda x:(int(getattr(x,"round_id",0) or 0),int(getattr(x,"settle_round",10**9) or 10**9))):
+        g=int(getattr(t,"predict",0) or 0); opt=choices.get(f"G{g}",_adaptive_defaults().get(f"G{g}"))
+        allowed,reason=_adaptive_group_allowed(t,g,opt)
+        if g==3:
+            g3_seen+=1
+            if prev_negative and g3_seen<=V1175_G3_SKIP_AFTER_NEGATIVE_DAY:
+                allowed=False; reason=f"G3_AFTER_NEG_DAY_SKIP_{g3_seen}"
+        status=str(getattr(t,"status","") or "").upper(); settled=status in {"WIN","LOSS"}; ep=float(getattr(t,"profit",0.0) or 0.0)
+        rows.append({"day_seq":int(getattr(t,"open_day_seq",0) or 0),"date":str(getattr(t,"open_day_date","") or ""),"open_round":int(getattr(t,"round_id",0) or 0),"settle_round":getattr(t,"settle_round",None),"group":g,"status":status,"engine_profit":round(ep,2),"bet_allowed":bool(allowed),"bet_action":"BET" if allowed else "SKIP","bet_skip_reason":reason,"bet_profit":round(ep if allowed and settled else 0.0,2),"adaptive_option":opt})
+    return rows
+
+def _adaptive_counterfactual(ledger, prev_day_bet_profit: float) -> dict:
+    out={"G1":{},"G2":{},"G3":{},"G4":{}}
+    optsets={"G1":list(range(4,27)),"G2":list(range(4,27)),"G3":["BASE","GAP8"],"G4":["BASE"]+list(range(4,27))}
+    ordered=sorted(list(ledger or []),key=lambda x:int(getattr(x,"round_id",0) or 0))
+    for key,opts in optsets.items():
+        g=int(key[1])
+        for opt in opts:
+            pnl=0.0; g3=0
+            for t in ordered:
+                if int(getattr(t,"predict",0) or 0)!=g: continue
+                allowed,_=_adaptive_group_allowed(t,g,opt)
+                if g==3:
+                    g3+=1
+                    if float(prev_day_bet_profit or 0.0)<0.0 and g3<=V1175_G3_SKIP_AFTER_NEGATIVE_DAY: allowed=False
+                if allowed and str(getattr(t,"status","") or "").upper() in {"WIN","LOSS"}: pnl+=float(getattr(t,"profit",0.0) or 0.0)
+            out[key][str(opt)]=round(pnl,2)
+    return out
+
+def _adaptive_select_choices(prior_items: list[dict]) -> dict:
+    defaults=_adaptive_defaults()
+    if not prior_items: return defaults
+    current=dict(prior_items[-1].get("adaptive_choices",defaults) or defaults); hist=list(prior_items[-ADAPTIVE_LOOKBACK_DAYS:]); selected=dict(current)
+    sets={"G1":[str(x) for x in range(4,27)],"G2":[str(x) for x in range(4,27)],"G3":["BASE","GAP8"],"G4":["BASE"]+[str(x) for x in range(4,27)]}
+    for gkey,opts in sets.items():
+        scores={}; obs={}
+        for opt in opts:
+            vals=[]
+            for item in hist:
+                vals.append(float(dict(dict(item.get("adaptive_cf",{}) or {}).get(gkey,{}) or {}).get(str(opt),0.0) or 0.0))
+            obs[opt]=sum(1 for v in vals if abs(v)>1e-9)
+            comp=0.0
+            if gkey in {"G1","G2"}: comp=0.02*abs(int(opt)-20)
+            elif gkey=="G4" and opt!="BASE": comp=0.20+0.04*abs(int(opt)-20)
+            scores[opt]=sum(vals)-ADAPTIVE_NEG_DAY_PENALTY*sum(1 for v in vals if v<0.0)-comp
+        eligible=[o for o in opts if obs[o]>=ADAPTIVE_MIN_OBS_DAYS]
+        if not eligible: continue
+        best=max(eligible,key=lambda o:scores[o]); cur=str(current.get(gkey,defaults[gkey])); cur_score=scores.get(cur,float("-inf"))
+        if best!=cur and scores[best]<cur_score+ADAPTIVE_SWITCH_MARGIN: best=cur
+        selected[gkey]=best if gkey=="G3" or (gkey=="G4" and best=="BASE") else ("BASE" if gkey=="G4" and best=="BASE" else int(best))
+    return selected
+
 # V117.5 BET FILTER SHADOW LAYER
 # ============================================================================
 # IMPORTANT:
@@ -7048,7 +7296,7 @@ def replay_prior_days_from_numbers(history_df: pd.DataFrame, current_seq: int) -
         _hist_target = get_dynamic_daily_profit_lock(seed)
         profit, _ = _replay_one_day_stateless(
             nums, seed, seq, day_id,
-            v70_enabled=True, daily_profit_lock=_hist_target
+            v70_enabled=False, daily_profit_lock=_hist_target
         )
         item = {"day_seq": int(seq), "day_id": day_id, "profit": float(profit)}
         results.append(item)
