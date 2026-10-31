@@ -693,6 +693,13 @@ DATA_SHEET_NAME = "data"
 HISTORY_SHEET_NAME = "history"
 MAX_ROUNDS_PER_DAY = 288
 
+# V6 operator/runtime safety. Current-day raw Numbers are still replayed fresh
+# on every refresh. Only completed-history replay may be reused when its raw
+# fingerprint is byte-for-byte identical.
+VERIFIED_HISTORY_REPLAY_MEMO = True
+LIVE_STALE_SECONDS = int(os.environ.get("LIVE_STALE_SECONDS", "720") or 720)
+VERIFIED_REPLAY_VERSION = "V6_HISTORY_RAW_HASH_1"
+
 
 def _sheet_csv_url(sheet_name: str) -> str:
     return (
@@ -1496,6 +1503,38 @@ def make_numbers_signature(numbers: list[int], length: Optional[int] = None) -> 
     length = max(0, min(int(length), len(numbers)))
     payload = ",".join(str(int(x)) for x in numbers[:length])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def make_history_signature(days: list[tuple[int, str, list[int]]]) -> str:
+    """Hash only raw causal history inputs: DaySeq/date/Numbers."""
+    parts = []
+    for seq, day_id, nums in list(days or []):
+        parts.append(
+            f"{int(seq)}|{str(day_id or '')}|{make_numbers_signature(list(nums or []))}"
+        )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def make_engine_ledger_signature(ctx) -> str:
+    """Compact deterministic hash of the current reconstructed engine ledger."""
+    rows = []
+    for t in list(getattr(ctx, "trade_history", []) or []):
+        rows.append(
+            "|".join([
+                str(int(getattr(t, "round_id", 0) or 0)),
+                str(int(getattr(t, "predict", 0) or 0)),
+                str(getattr(t, "status", "") or ""),
+                f"{float(getattr(t, 'profit', 0.0) or 0.0):.2f}",
+                str(getattr(t, "locked_window", "") or ""),
+                str(getattr(t, "open_lock_reason", "") or ""),
+            ])
+        )
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def _short_hash(value: str) -> str:
+    s = str(value or "")
+    return s[:10] if s else "NA"
 
 
 def _format_round_time_display_only(value: Any) -> str:
@@ -3007,7 +3046,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V5 NO-CACHE")
+        st.title("🚀 ADAPTIVE SAFE LIVE V6 VERIFIED-REPLAY")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
         st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
@@ -3042,6 +3081,24 @@ class Dashboard:
                 f"G1=P{choices.get('G1')} | G2=WR{choices.get('G2')} | "
                 f"G3={choices.get('G3')} | G4={choices.get('G4')}"
             )
+            _raw_age = float(getattr(self.ctx, "live_raw_observed_age_seconds", 0.0) or 0.0)
+            _raw_stale = bool(getattr(self.ctx, "live_raw_is_stale", False))
+            st.caption(
+                "LIVE CHECKSUM: "
+                f"RAW={_short_hash(getattr(self.ctx,'live_raw_signature',''))} | "
+                f"HIST={_short_hash(getattr(self.ctx,'live_history_signature',''))} | "
+                f"ENGINE={_short_hash(getattr(self.ctx,'live_engine_signature',''))} | "
+                f"ADAPT={_short_hash(getattr(self.ctx,'live_adaptive_choice_signature',''))} | "
+                f"RAW AGE≈{int(_raw_age)}s | "
+                f"HISTORY REPLAY={'REUSED-VERIFIED' if bool(getattr(self.ctx,'live_history_replay_reused',False)) else 'FRESH'}"
+            )
+
+            if _raw_stale:
+                st.error(
+                    f"DATA STALE: raw Numbers have not changed for ~{int(_raw_age)}s "
+                    f"(limit={LIVE_STALE_SECONDS}s). CURRENT ACTION: WAIT / DO NOT BET."
+                )
+                return
 
             if current_round >= 288:
                 st.success(
@@ -3093,6 +3150,33 @@ class Dashboard:
             reason = str(current.get("bet_skip_reason", "") or "")
             target_round = pending_round + 1
             option = current.get("adaptive_option", "")
+
+            # V6 action-expiry + self-check gate.
+            # A physical instruction is valid only immediately after its OPEN round
+            # and only for the very next round.
+            _self_checks = {
+                "pending_matches_current_round": int(pending_round) == int(current_round),
+                "target_in_day": 1 <= int(target_round) <= MAX_ROUNDS_PER_DAY,
+                "raw_not_stale": not bool(getattr(self.ctx, "live_raw_is_stale", False)),
+                "fresh_pmap": bool(_pmap),
+                "fresh_wrmap": bool(_wrmap),
+                "raw_hash_present": bool(str(getattr(self.ctx, "live_raw_signature", "") or "")),
+                "engine_hash_present": bool(str(getattr(self.ctx, "live_engine_signature", "") or "")),
+                "adaptive_hash_present": bool(str(getattr(self.ctx, "live_adaptive_choice_signature", "") or "")),
+            }
+            _failed = [k for k, ok in _self_checks.items() if not ok]
+            if _failed:
+                st.error(
+                    "LIVE SELF-CHECK FAILED: "
+                    + ", ".join(_failed)
+                    + ". CURRENT ACTION: WAIT / DO NOT BET."
+                )
+                return
+
+            st.caption(
+                f"ACTION VALID FOR R{target_round} ONLY | "
+                f"OPEN R{pending_round} | SELF-CHECK=PASS"
+            )
 
             if action == "BET":
                 st.success(
@@ -5443,15 +5527,47 @@ class EngineManager:
             # V70.8: multi-day protection is rebuilt only from historical raw Numbers.
             # Stored daily_profit is never trusted. Each completed day is replayed
             # causally using baseline before cutover and V70 from cutover onward.
-            try:
-                self.ctx.daily_profit_history = _raw_history_seed_from_df(
-                    history_df,
-                    int(sheet_day_seq or 0),
-                    frontier_journal=self.frontier_journal,
-                )
-            except ValueError as exc:
-                st.warning(str(exc))
-                st.stop()
+            _history_sig = make_history_signature(hist_days)
+            self.history_signature = _history_sig
+            _hist_memo_key = "_v6_verified_history_replay_memo"
+            _hist_memo = st.session_state.get(_hist_memo_key)
+            _hist_reused = False
+
+            if (
+                VERIFIED_HISTORY_REPLAY_MEMO
+                and isinstance(_hist_memo, dict)
+                and str(_hist_memo.get("version", "")) == VERIFIED_REPLAY_VERSION
+                and str(_hist_memo.get("history_signature", "")) == _history_sig
+                and int(_hist_memo.get("current_day_seq", 0) or 0) == int(sheet_day_seq or 0)
+                and isinstance(_hist_memo.get("daily_profit_history"), list)
+            ):
+                # Safe derived memoization: source raw history fingerprint is identical.
+                # Current-day Numbers are NOT reused and will still replay from R1.
+                self.ctx.daily_profit_history = [
+                    dict(x) for x in list(_hist_memo.get("daily_profit_history") or [])
+                ]
+                _hist_reused = True
+            else:
+                try:
+                    self.ctx.daily_profit_history = _raw_history_seed_from_df(
+                        history_df,
+                        int(sheet_day_seq or 0),
+                        frontier_journal=self.frontier_journal,
+                    )
+                except ValueError as exc:
+                    st.warning(str(exc))
+                    st.stop()
+                if VERIFIED_HISTORY_REPLAY_MEMO:
+                    st.session_state[_hist_memo_key] = {
+                        "version": VERIFIED_REPLAY_VERSION,
+                        "history_signature": _history_sig,
+                        "current_day_seq": int(sheet_day_seq or 0),
+                        "daily_profit_history": [
+                            dict(x) for x in list(self.ctx.daily_profit_history or [])
+                        ],
+                    }
+
+            self.history_replay_reused = bool(_hist_reused)
 
             # Only an engine-ready snapshot is trade-eligible.
             if int(sheet_day_seq or 0) >= FRONTIER_JOURNAL_CUTOVER_DAY_SEQ:
@@ -5662,6 +5778,41 @@ class EngineManager:
         self.groups = build_groups(self.numbers)
         self.actual_group = self.groups[-1]
         self.round_id = len(self.numbers)
+
+        # V6 current raw observation fingerprint.
+        # This is NOT a decision cache. It only measures whether the fresh raw
+        # snapshot has changed between UI refreshes.
+        self.current_raw_signature = make_numbers_signature(self.numbers)
+        _obs_key = "_v6_raw_observation"
+        _obs_now = time.time()
+        _obs_prev = st.session_state.get(_obs_key)
+        if (
+            not isinstance(_obs_prev, dict)
+            or int(_obs_prev.get("day_seq", 0) or 0) != int(sheet_day_seq or 0)
+            or str(_obs_prev.get("raw_signature", "")) != self.current_raw_signature
+        ):
+            _obs_changed_at = _obs_now
+        else:
+            _obs_changed_at = float(_obs_prev.get("changed_at", _obs_now) or _obs_now)
+        self.raw_observed_age_seconds = max(0.0, _obs_now - _obs_changed_at)
+        self.raw_is_stale = bool(
+            int(self.round_id or 0) < MAX_ROUNDS_PER_DAY
+            and self.raw_observed_age_seconds > float(LIVE_STALE_SECONDS)
+        )
+        st.session_state[_obs_key] = {
+            "day_seq": int(sheet_day_seq or 0),
+            "round_count": int(self.round_id or 0),
+            "raw_signature": self.current_raw_signature,
+            "changed_at": float(_obs_changed_at),
+            "observed_at": float(_obs_now),
+        }
+
+        # Expose transient live-check metadata on disposable context.
+        self.ctx.live_raw_signature = self.current_raw_signature
+        self.ctx.live_history_signature = str(getattr(self, "history_signature", "") or "")
+        self.ctx.live_raw_observed_age_seconds = float(self.raw_observed_age_seconds)
+        self.ctx.live_raw_is_stale = bool(self.raw_is_stale)
+        self.ctx.live_history_replay_reused = bool(getattr(self, "history_replay_reused", False))
 
         # V4.4.6: persisted-ledger repair belongs only to the legacy incremental
         # path. Stateless calculation starts from an empty disposable ledger.
@@ -6778,6 +6929,15 @@ class EngineManager:
 
         signal, confidence_score, confidence_level = self.build_display_signal()
 
+        # V6 deterministic current-run checksums. These are display/safety metadata
+        # only and never feed the strategy.
+        self.ctx.live_engine_signature = make_engine_ledger_signature(self.ctx)
+        _choice_hist = list(getattr(self.ctx, "daily_profit_history", []) or [])
+        _choice_now = _adaptive_select_choices(_choice_hist) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
+        self.ctx.live_adaptive_choice_signature = hashlib.sha256(
+            json.dumps(_choice_now, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
         self.dashboard.render_header()
         self.dashboard.render_adaptive_operator_action()
         self.dashboard.render_signal(signal, confidence_score)
@@ -6799,7 +6959,7 @@ class EngineManager:
 V4.4.2 STATELESS REPLAY LIVE / AUDITED
 
 Calculation source: fresh Google Numbers. No st.cache_data.
-Each refresh rebuilds prior daily P/L causally from historical Numbers, then replays current DAY_SEQ from R1 to current round.
+Each refresh reads raw history/current Numbers fresh. Completed-history replay may be reused only when its raw hash is identical; current DAY_SEQ always replays R1 to current round.
 Stored Google daily_profit and legacy persistent engine state do NOT control strategy calculation.
 Invariant: same prior Numbers + same current Numbers + same code = same ledger/profit/signal.
 ADAPTIVE OPERATOR ACTION is the only physical BET/SKIP instruction. ENGINE SIGNAL is diagnostic only.
@@ -7502,7 +7662,7 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
 manager = EngineManager()
 
 st.success(
-    "ADAPTIVE SAFE V5 | NO CACHE | STABLE UI | manual refresh default | prev-day negative => +2.5, else +10"
+    "ADAPTIVE SAFE V6 | VERIFIED HISTORY REPLAY | CURRENT DAY FRESH | LIVE SELF-CHECK | prev-day negative => +2.5, else +10"
 )
 
 try:
