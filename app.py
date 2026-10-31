@@ -3007,7 +3007,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V4 NO-CACHE")
+        st.title("🚀 ADAPTIVE SAFE LIVE V5 NO-CACHE")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
         st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
@@ -7502,7 +7502,7 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
 manager = EngineManager()
 
 st.success(
-    "V71.18.1A CANDIDATE | NO CACHE | CLEAN AUDIT UI | prev-day negative => +2.5, else +10"
+    "ADAPTIVE SAFE V5 | NO CACHE | STABLE UI | manual refresh default | prev-day negative => +2.5, else +10"
 )
 
 try:
@@ -7528,16 +7528,30 @@ except Exception as e:
 
 with st.sidebar:
     st.divider()
-    auto_refresh_enabled = st.checkbox("Auto refresh", value=True)
+    st.caption("Refresh control — NO CACHE remains active on every refresh.")
+    if st.button("🔄 Refresh now", use_container_width=True):
+        st.rerun()
+
+    auto_refresh_enabled = st.checkbox(
+        "Auto refresh",
+        value=False,
+        help="OFF by default so the UI stays stable for inspection. When ON, the whole Streamlit page reloads."
+    )
     refresh_seconds = st.number_input(
         "Refresh seconds",
-        min_value=5,
-        max_value=60,
-        value=10,
-        step=5,
+        min_value=15,
+        max_value=120,
+        value=30,
+        step=15,
+        disabled=not auto_refresh_enabled,
     )
 
-if auto_refresh_enabled:
+_current_round_for_refresh = int(getattr(manager.ctx, "last_length", 0) or 0)
+if auto_refresh_enabled and _current_round_for_refresh < 288:
+    st.sidebar.info(
+        f"Auto refresh ON: every {int(refresh_seconds)}s. "
+        "Turn it OFF while reviewing the dashboard."
+    )
     components.html(
         f"""
         <script>
@@ -7548,3 +7562,5 @@ if auto_refresh_enabled:
         """,
         height=0,
     )
+elif auto_refresh_enabled and _current_round_for_refresh >= 288:
+    st.sidebar.success("Day complete at R288 — auto refresh paused.")
