@@ -3046,7 +3046,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V6 VERIFIED-REPLAY")
+        st.title("🚀 ADAPTIVE SAFE LIVE V7 TOP-ACTION")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
         st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
@@ -3072,8 +3072,8 @@ class Dashboard:
             pending_round = int(getattr(self.ctx, "pending_round", -1) or -1)
             pending_group = getattr(self.ctx, "pending_trade", None)
 
-            st.subheader("🎯 ADAPTIVE OPERATOR ACTION — USE THIS PANEL")
-            st.caption("SOURCE OF TRUTH: fresh raw Numbers → R1..CURRENT replay → adaptive decision. Persistent P-window snapshots are ignored.")
+            st.markdown("## 🎯 LIVE ACTION — BET / SKIP / WAIT")
+            st.caption("AUTHORITATIVE LIVE PANEL • fresh raw Numbers → verified replay → adaptive BET/SKIP")
             st.caption(
                 f"DAY={int(getattr(self.ctx,'live_day_seq',0) or 0)} | "
                 f"ROUND={current_round} | PREV ADAPTIVE P/L={prev_bet:+.1f} | "
@@ -3102,9 +3102,8 @@ class Dashboard:
 
             if current_round >= 288:
                 st.success(
-                    f"DAY COMPLETE: R{current_round} / 288 | "
-                    f"TODAY ADAPTIVE P/L={today_pnl:+.1f} | "
-                    "CURRENT ACTION: WAIT FOR NEXT DAY"
+                    f"✅ DAY COMPLETE — WAIT FOR NEXT DAY  |  "
+                    f"R{current_round}/288  |  TODAY P/L {today_pnl:+.1f}"
                 )
                 return
 
@@ -3140,8 +3139,7 @@ class Dashboard:
 
             if current is None:
                 st.info(
-                    "CURRENT ACTION: WAIT — no pending adaptive trade. "
-                    "Historical BET/SKIP rows are audit only."
+                    "⏸️ CURRENT ACTION: WAIT — no valid pending adaptive trade."
                 )
                 return
 
@@ -3180,13 +3178,13 @@ class Dashboard:
 
             if action == "BET":
                 st.success(
-                    f"CURRENT ACTION: BET G{group} FOR R{target_round} | "
-                    f"open R{pending_round} | option={option} | {reason}"
+                    f"✅ CURRENT ACTION: BET G{group} → R{target_round}  |  "
+                    f"option={option}  |  {reason}"
                 )
             else:
                 st.warning(
-                    f"CURRENT ACTION: SKIP R{target_round} | engine G{group} | "
-                    f"open R{pending_round} | option={option} | {reason}"
+                    f"⛔ CURRENT ACTION: SKIP R{target_round}  |  "
+                    f"ENGINE G{group}  |  option={option}  |  {reason}"
                 )
         except Exception as exc:
             st.error(f"ADAPTIVE OPERATOR ACTION FAIL-CLOSED: {exc}")
@@ -6938,8 +6936,16 @@ class EngineManager:
             json.dumps(_choice_now, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
-        self.dashboard.render_header()
-        self.dashboard.render_adaptive_operator_action()
+        # V7 TOP-ACTION UI:
+        # header + authoritative physical BET/SKIP/WAIT are injected into the
+        # placeholder created before EngineManager, so they remain at the top
+        # even when raw-history audit messages are rendered during initialization.
+        with _live_top_slot.container():
+            self.dashboard.render_header()
+            self.dashboard.render_adaptive_operator_action()
+
+        st.divider()
+        st.caption("ENGINE / AUDIT DETAILS — diagnostic only")
         self.dashboard.render_signal(signal, confidence_score)
         self.dashboard.render_market(signal)
         self.dashboard.render_profit()
@@ -7659,10 +7665,15 @@ def render_v70_historical_audit(manager: EngineManager) -> None:
             )
 
 
+# V7: reserve the first visible position on the page for the live operator panel.
+# EngineManager.__init__ may emit historical/audit messages, but this placeholder
+# remains above them and is populated after the fresh replay finishes.
+_live_top_slot = st.empty()
+
 manager = EngineManager()
 
 st.success(
-    "ADAPTIVE SAFE V6 | VERIFIED HISTORY REPLAY | CURRENT DAY FRESH | LIVE SELF-CHECK | prev-day negative => +2.5, else +10"
+    "ADAPTIVE SAFE V7 | TOP ACTION | VERIFIED HISTORY REPLAY | CURRENT DAY FRESH | LIVE SELF-CHECK"
 )
 
 try:
