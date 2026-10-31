@@ -1463,9 +1463,9 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 else ",".join(f"D{x}" for x in recovered_logical_days)
             )
             st.info(
-                "HISTORICAL PHYSICAL JOURNAL: missing/incomplete for "
+                "ENGINE FRONTIER JOURNAL (AUDIT ONLY): missing/incomplete for "
                 f"{_span}. Continuous strategy rebuilt from raw Numbers; "
-                "strategy profit/Trade History are unaffected."
+                "continuous engine strategy is rebuilt from raw Numbers; adaptive actual BET/SKIP is unaffected."
             )
         st.caption(
             f"HISTORY CACHE: DISABLED | raw replayed={replayed_days} "
@@ -3007,8 +3007,9 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V3 NO-CACHE")
+        st.title("🚀 ADAPTIVE SAFE LIVE V4 NO-CACHE")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
+        st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
     def render_adaptive_operator_action(self) -> None:
         """Single authoritative physical BET/SKIP instruction."""
@@ -3041,6 +3042,14 @@ class Dashboard:
                 f"G1=P{choices.get('G1')} | G2=WR{choices.get('G2')} | "
                 f"G3={choices.get('G3')} | G4={choices.get('G4')}"
             )
+
+            if current_round >= 288:
+                st.success(
+                    f"DAY COMPLETE: R{current_round} / 288 | "
+                    f"TODAY ADAPTIVE P/L={today_pnl:+.1f} | "
+                    "CURRENT ACTION: WAIT FOR NEXT DAY"
+                )
+                return
 
             current = None
             # NO-CACHE invariant: current-day adaptive features must come from the
@@ -3103,17 +3112,25 @@ class Dashboard:
         color = "#00aa00" if signal.state == "READY" else "#555555"
 
         current_round = self.ctx.last_length
-        target_round = current_round + 1
+        day_complete = int(current_round or 0) >= 288
+        target_round = None if day_complete else int(current_round or 0) + 1
 
         # UI-only time labels. These values never enter the trading engine.
         current_time, target_time = get_current_target_time_display_only(current_round)
 
-        title = "ENGINE SIGNAL — DIAGNOSTIC ONLY" if signal.state == "READY" else "ENGINE WAIT"
-        action = (
-            f"ENGINE GROUP = {signal.next_group}"
-            if signal.next_group is not None
-            else "ENGINE GROUP = NONE"
-        )
+        if day_complete:
+            title = "ENGINE DAY COMPLETE — DIAGNOSTIC ONLY"
+            action = "WAIT FOR NEXT DAY"
+            target_round_text = "DAY COMPLETE"
+            target_time = "--:--"
+        else:
+            title = "ENGINE SIGNAL — DIAGNOSTIC ONLY" if signal.state == "READY" else "ENGINE WAIT"
+            action = (
+                f"ENGINE GROUP = {signal.next_group}"
+                if signal.next_group is not None
+                else "ENGINE GROUP = NONE"
+            )
+            target_round_text = str(target_round)
 
         st.markdown(
             f"""
@@ -3128,7 +3145,7 @@ font-weight:bold;
 ">
 {title}<br>
 STATE = {signal.state}<br>
-CURRENT ROUND = {current_round} → TARGET ROUND = {target_round}<br>
+CURRENT ROUND = {current_round} → TARGET = {target_round_text}<br>
 CURRENT TIME = {current_time} → TARGET TIME = {target_time}<br>
 {action}<br>
 CONF = {confidence_score:.2f}
@@ -5474,8 +5491,13 @@ class EngineManager:
                             (
                                 f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
                                 + (
-                                    f"[PHY={float(x.get('physical_profit')):+.1f}]"
+                                    f"[FRONTIER={float(x.get('physical_profit')):+.1f}]"
                                     if x.get("physical_profit", None) is not None
+                                    else ""
+                                )
+                                + (
+                                    f"[ADAPT={float(x.get('adaptive_bet_profit')):+.1f}]"
+                                    if x.get("adaptive_bet_profit", None) is not None
                                     else ""
                                 )
                             )
@@ -5531,12 +5553,13 @@ class EngineManager:
                 ]
                 if _dual:
                     st.info(
-                        "STRATEGY CONTINUOUS vs PHYSICAL AUDIT: "
+                        "ENGINE STRATEGY vs FRONTIER JOURNAL vs ADAPTIVE BET (AUDIT ONLY): "
                         + ", ".join(
                             (
                                 f"D{int(x.get('day_seq', 0) or 0)} "
-                                f"STRATEGY={float(x.get('profit', 0.0) or 0.0):+.1f} "
-                                f"| PHYSICAL={float(x.get('physical_profit', 0.0) or 0.0):+.1f}"
+                                f"ENGINE={float(x.get('profit', 0.0) or 0.0):+.1f} "
+                                f"| FRONTIER={float(x.get('physical_profit', 0.0) or 0.0):+.1f} "
+                                f"| ADAPT={float(x.get('adaptive_bet_profit', 0.0) or 0.0):+.1f}"
                             )
                             for x in _dual
                         )
