@@ -3046,7 +3046,7 @@ class Dashboard:
         self.protection_engine = protection_engine
 
     def render_header(self) -> None:
-        st.title("🚀 ADAPTIVE SAFE LIVE V7 TOP-ACTION")
+        st.title("🚀 ADAPTIVE SAFE LIVE V8 COMPACT")
         st.caption("OPERATOR UI | ADAPTIVE ACTUAL BET/SKIP | ENGINE CORE UNCHANGED | NO CACHE")
         st.caption("LEGEND: ENGINE = strategy calculation | FRONTIER = old engine journal audit only | ADAPTIVE = actual BET/SKIP layer")
 
@@ -3084,13 +3084,13 @@ class Dashboard:
             _raw_age = float(getattr(self.ctx, "live_raw_observed_age_seconds", 0.0) or 0.0)
             _raw_stale = bool(getattr(self.ctx, "live_raw_is_stale", False))
             st.caption(
-                "LIVE CHECKSUM: "
-                f"RAW={_short_hash(getattr(self.ctx,'live_raw_signature',''))} | "
-                f"HIST={_short_hash(getattr(self.ctx,'live_history_signature',''))} | "
-                f"ENGINE={_short_hash(getattr(self.ctx,'live_engine_signature',''))} | "
-                f"ADAPT={_short_hash(getattr(self.ctx,'live_adaptive_choice_signature',''))} | "
-                f"RAW AGE≈{int(_raw_age)}s | "
-                f"HISTORY REPLAY={'REUSED-VERIFIED' if bool(getattr(self.ctx,'live_history_replay_reused',False)) else 'FRESH'}"
+                "STATUS: "
+                f"RAW OK ({_short_hash(getattr(self.ctx,'live_raw_signature',''))}) | "
+                f"HIST OK ({_short_hash(getattr(self.ctx,'live_history_signature',''))}) | "
+                f"ENGINE OK ({_short_hash(getattr(self.ctx,'live_engine_signature',''))}) | "
+                f"ADAPT OK ({_short_hash(getattr(self.ctx,'live_adaptive_choice_signature',''))}) | "
+                f"AGE {int(_raw_age)}s | "
+                f"HIST {'REUSED' if bool(getattr(self.ctx,'live_history_replay_reused',False)) else 'FRESH'}"
             )
 
             if _raw_stale:
@@ -5589,95 +5589,96 @@ class EngineManager:
             # daily_profit_lock_override, not daily_profit_lock.
             self.ctx.daily_profit_lock_override = float(_live_dynamic_target)
             self.ctx.daily_profit_lock = float(_live_dynamic_target)
-            st.caption(
-                f"LIVE DAILY TARGET: +{float(_live_dynamic_target):.1f} "
-                + (
-                    "| previous day negative => WIN-AND-STOP"
-                    if float(_live_dynamic_target) <= 2.5
-                    else "| normal target"
-                )
-            )
-            if replayed_seed:
-                st.info(
-                    "RAW HISTORY REPLAY SEED: "
-                    + ", ".join(
-                        (
-                            (
-                                f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
-                                + (
-                                    f"[FRONTIER={float(x.get('physical_profit')):+.1f}]"
-                                    if x.get("physical_profit", None) is not None
-                                    else ""
-                                )
-                                + (
-                                    f"[ADAPT={float(x.get('adaptive_bet_profit')):+.1f}]"
-                                    if x.get("adaptive_bet_profit", None) is not None
-                                    else ""
-                                )
-                            )
-                            + (
-                                "[REC]"
-                                if str(x.get("source", "")).startswith("RECOVERED_LOGICAL")
-                                else ""
-                            )
-                            + (
-                                (
-                                    f"[T={int((x.get('diag') or {}).get('trade_count', 0) or 0)}"
-                                    f",G={int((x.get('diag') or {}).get('gate_count', 0) or 0)}"
-                                    f",GE={1 if bool((x.get('diag') or {}).get('gate_eligible', False)) else 0}"
-                                    f",F={(x.get('diag') or {}).get('frontier_count', 'L')}"
-                                    + (
-                                        f",LOG={float(x.get('logical_profit')):+.1f}"
-                                        if x.get('logical_profit', None) is not None
-                                        else ""
-                                    )
-                                    + "]"
-                                )
-                                if abs(float(x.get('profit', 0.0) or 0.0)) < 1e-9
-                                else ""
-                            )
-                        )
-                        for x in replayed_seed
+            with st.expander("Audit / History", expanded=False):
+                st.caption(
+                    f"LIVE DAILY TARGET: +{float(_live_dynamic_target):.1f} "
+                    + (
+                        "| previous day negative => WIN-AND-STOP"
+                        if float(_live_dynamic_target) <= 2.5
+                        else "| normal target"
                     )
-                    + " | daily_profit column ignored"
                 )
-
-                _zero_days = [
-                    x for x in replayed_seed
-                    if abs(float(x.get("profit", 0.0) or 0.0)) < 1e-9
-                ]
-                for _z in _zero_days:
-                    _d = dict(_z.get("diag", {}) or {})
-                    st.warning(
-                        f"ZERO PROFIT AUDIT D{int(_z.get('day_seq', 0) or 0)}: "
-                        f"source={str(_z.get('source', '') or '')}, "
-                        f"raw_len={int(_d.get('raw_len', 0) or 0)}, "
-                        f"frontiers={_d.get('frontier_count', 'NA')}, "
-                        f"trades={int(_d.get('trade_count', 0) or 0)}, "
-                        f"gate_count={int(_d.get('gate_count', 0) or 0)}, "
-                        f"gate_eligible={1 if bool(_d.get('gate_eligible', False)) else 0}, "
-                        f"gate_round={int(_d.get('gate_round', 0) or 0)}, "
-                        f"last_state={str(_d.get('last_decision_state', '') or '')}, "
-                        f"reason={str(_d.get('protection_reason', '') or '')}"
-                    )
-
-                _dual = [
-                    x for x in replayed_seed
-                    if x.get("logical_profit", None) is not None
-                ]
-                if _dual:
+                if replayed_seed:
                     st.info(
-                        "ENGINE STRATEGY vs FRONTIER JOURNAL vs ADAPTIVE BET (AUDIT ONLY): "
+                        "RAW HISTORY REPLAY SEED: "
                         + ", ".join(
                             (
-                                f"D{int(x.get('day_seq', 0) or 0)} "
-                                f"ENGINE={float(x.get('profit', 0.0) or 0.0):+.1f} "
-                                f"| FRONTIER={float(x.get('physical_profit', 0.0) or 0.0):+.1f} "
-                                f"| ADAPT={float(x.get('adaptive_bet_profit', 0.0) or 0.0):+.1f}"
+                                (
+                                    f"D{int(x['day_seq'])}={float(x['profit']):+.1f}"
+                                    + (
+                                        f"[FRONTIER={float(x.get('physical_profit')):+.1f}]"
+                                        if x.get("physical_profit", None) is not None
+                                        else ""
+                                    )
+                                    + (
+                                        f"[ADAPT={float(x.get('adaptive_bet_profit')):+.1f}]"
+                                        if x.get("adaptive_bet_profit", None) is not None
+                                        else ""
+                                    )
+                                )
+                                + (
+                                    "[REC]"
+                                    if str(x.get("source", "")).startswith("RECOVERED_LOGICAL")
+                                    else ""
+                                )
+                                + (
+                                    (
+                                        f"[T={int((x.get('diag') or {}).get('trade_count', 0) or 0)}"
+                                        f",G={int((x.get('diag') or {}).get('gate_count', 0) or 0)}"
+                                        f",GE={1 if bool((x.get('diag') or {}).get('gate_eligible', False)) else 0}"
+                                        f",F={(x.get('diag') or {}).get('frontier_count', 'L')}"
+                                        + (
+                                            f",LOG={float(x.get('logical_profit')):+.1f}"
+                                            if x.get('logical_profit', None) is not None
+                                            else ""
+                                        )
+                                        + "]"
+                                    )
+                                    if abs(float(x.get('profit', 0.0) or 0.0)) < 1e-9
+                                    else ""
+                                )
                             )
-                            for x in _dual
+                            for x in replayed_seed
                         )
+                        + " | daily_profit column ignored"
                     )
+
+                    _zero_days = [
+                        x for x in replayed_seed
+                        if abs(float(x.get("profit", 0.0) or 0.0)) < 1e-9
+                    ]
+                    for _z in _zero_days:
+                        _d = dict(_z.get("diag", {}) or {})
+                        st.warning(
+                            f"ZERO PROFIT AUDIT D{int(_z.get('day_seq', 0) or 0)}: "
+                            f"source={str(_z.get('source', '') or '')}, "
+                            f"raw_len={int(_d.get('raw_len', 0) or 0)}, "
+                            f"frontiers={_d.get('frontier_count', 'NA')}, "
+                            f"trades={int(_d.get('trade_count', 0) or 0)}, "
+                            f"gate_count={int(_d.get('gate_count', 0) or 0)}, "
+                            f"gate_eligible={1 if bool(_d.get('gate_eligible', False)) else 0}, "
+                            f"gate_round={int(_d.get('gate_round', 0) or 0)}, "
+                            f"last_state={str(_d.get('last_decision_state', '') or '')}, "
+                            f"reason={str(_d.get('protection_reason', '') or '')}"
+                        )
+
+                    _dual = [
+                        x for x in replayed_seed
+                        if x.get("logical_profit", None) is not None
+                    ]
+                    if _dual:
+                        st.info(
+                            "ENGINE STRATEGY vs FRONTIER JOURNAL vs ADAPTIVE BET (AUDIT ONLY): "
+                            + ", ".join(
+                                (
+                                    f"D{int(x.get('day_seq', 0) or 0)} "
+                                    f"ENGINE={float(x.get('profit', 0.0) or 0.0):+.1f} "
+                                    f"| FRONTIER={float(x.get('physical_profit', 0.0) or 0.0):+.1f} "
+                                    f"| ADAPT={float(x.get('adaptive_bet_profit', 0.0) or 0.0):+.1f}"
+                                )
+                                for x in _dual
+                            )
+                        )
 
             # Explicit day-level deployment gate.  With cutover=0 V70 is baseline-only.
             self.ctx.v70_switch_enabled = False
@@ -6944,21 +6945,24 @@ class EngineManager:
             self.dashboard.render_header()
             self.dashboard.render_adaptive_operator_action()
 
-        st.divider()
-        st.caption("ENGINE / AUDIT DETAILS — diagnostic only")
-        self.dashboard.render_signal(signal, confidence_score)
-        self.dashboard.render_market(signal)
-        self.dashboard.render_profit()
-        self.dashboard.render_risk()
-        self.dashboard.render_last_result()
-        self.dashboard.render_current_trade()
-        self.dashboard.render_profit_config()
-        self.dashboard.render_top_windows()
-        self.dashboard.render_window_debug()
-        self.dashboard.render_real_stats_summary()
-        self.render_live_source_debug()
-        self.dashboard.render_trade_history()
-        self.dashboard.render_equity()
+        if int(getattr(self.ctx, "last_length", 0) or 0) < MAX_ROUNDS_PER_DAY:
+            st.divider()
+            st.caption("ENGINE / AUDIT DETAILS — diagnostic only")
+            self.dashboard.render_signal(signal, confidence_score)
+            self.dashboard.render_market(signal)
+            self.dashboard.render_profit()
+            self.dashboard.render_risk()
+            self.dashboard.render_last_result()
+            self.dashboard.render_current_trade()
+            self.dashboard.render_profit_config()
+            self.dashboard.render_top_windows()
+            self.dashboard.render_window_debug()
+            self.dashboard.render_real_stats_summary()
+            self.render_live_source_debug()
+            self.dashboard.render_trade_history()
+            self.dashboard.render_equity()
+        else:
+            st.caption("Day complete. Engine diagnostic panels hidden until the next DaySeq.")
 
         st.caption(
             f"""
@@ -7672,13 +7676,14 @@ _live_top_slot = st.empty()
 
 manager = EngineManager()
 
-st.success(
-    "ADAPTIVE SAFE V7 | TOP ACTION | VERIFIED HISTORY REPLAY | CURRENT DAY FRESH | LIVE SELF-CHECK"
+st.caption(
+    "V8 COMPACT | VERIFIED HISTORY REPLAY | CURRENT DAY FRESH | LIVE SELF-CHECK"
 )
 
 try:
     manager.run()
-    render_v70_historical_audit(manager)
+    with st.expander("Advanced historical audit", expanded=False):
+        render_v70_historical_audit(manager)
 except Exception as e:
     st.error(f"Engine Error: {e}")
     import traceback
