@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.9 FAST HISTORY-LIVE | VERIFIED MEMO | SAFE CONT G2 CONF60 | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.10 FAST JOIN-RESCUE | VERIFIED MEMO | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7305,6 +7305,19 @@ HISTORY_LIVE_CONTINUATION_ENABLED = True
 HISTORY_LIVE_CONTINUATION_GROUP = 2
 HISTORY_LIVE_CONTINUATION_CONF_MIN = 0.60
 
+# V10.10 quality JOIN/RESCUE after ENGINE target while physical P/L is still
+# below target. At most ONE extra rescue BET per day beyond the existing safe
+# G2 CONF>=0.60 continuation. Frozen after D1-D40 selection and D41-D58
+# validation/holdout. This reduces zero days without increasing negative days.
+HISTORY_LIVE_RESCUE_ENABLED = True
+HISTORY_LIVE_RESCUE_MAX_EXTRA = 1
+HISTORY_LIVE_RESCUE_G4_CONF_MIN = 0.52
+HISTORY_LIVE_RESCUE_G4_P20_MIN = 8.0
+HISTORY_LIVE_RESCUE_G4_STABILITY_MIN = 0.60
+HISTORY_LIVE_RESCUE_G2_CONF_MIN = 0.52
+HISTORY_LIVE_RESCUE_G2_P20_MIN = 8.0
+HISTORY_LIVE_RESCUE_G2_STABILITY_MIN = 0.65
+
 
 class StopOffHistoryLiveTradeEngine(TradeEngine):
     """Disposable authoritative replay TradeEngine with only fixed DAILY_STOP_LOSS removed."""
@@ -7478,6 +7491,7 @@ def _history_live_apply_hybrid_continuation(
     physical_pnl = 0.0
     prev_negative = float(prev_physical_profit or 0.0) < 0.0
     g2_eligible_seen = 0
+    rescue_used = 0
     out = []
 
     for t in sorted(
@@ -7531,14 +7545,43 @@ def _history_live_apply_hybrid_continuation(
             elif not HISTORY_LIVE_CONTINUATION_ENABLED:
                 allowed = False
                 reasons.append("HL_CONTINUATION_DISABLED")
-            elif group != int(HISTORY_LIVE_CONTINUATION_GROUP):
-                allowed = False
-                reasons.append("HL_CONTINUATION_G2_ONLY")
-            elif confidence < float(HISTORY_LIVE_CONTINUATION_CONF_MIN):
-                allowed = False
-                reasons.append("HL_CONTINUATION_CONF_FILTER")
             else:
-                reasons.append("HL_SAFE_CONTINUATION_G2_CONF_OK")
+                # Baseline continuation remains unchanged: G2 CONF>=0.60.
+                baseline_continuation_ok = (
+                    group == int(HISTORY_LIVE_CONTINUATION_GROUP)
+                    and confidence >= float(HISTORY_LIVE_CONTINUATION_CONF_MIN)
+                )
+
+                # V10.10: at most one additional quality rescue after engine
+                # target, only while physical target is still unmet.
+                g4_rescue_ok = (
+                    HISTORY_LIVE_RESCUE_ENABLED
+                    and rescue_used < int(HISTORY_LIVE_RESCUE_MAX_EXTRA)
+                    and group == 4
+                    and confidence >= float(HISTORY_LIVE_RESCUE_G4_CONF_MIN)
+                    and p20 >= float(HISTORY_LIVE_RESCUE_G4_P20_MIN)
+                    and stability >= float(HISTORY_LIVE_RESCUE_G4_STABILITY_MIN)
+                )
+                g2_rescue_ok = (
+                    HISTORY_LIVE_RESCUE_ENABLED
+                    and rescue_used < int(HISTORY_LIVE_RESCUE_MAX_EXTRA)
+                    and group == 2
+                    and confidence >= float(HISTORY_LIVE_RESCUE_G2_CONF_MIN)
+                    and p20 >= float(HISTORY_LIVE_RESCUE_G2_P20_MIN)
+                    and stability >= float(HISTORY_LIVE_RESCUE_G2_STABILITY_MIN)
+                )
+
+                if baseline_continuation_ok:
+                    reasons.append("HL_SAFE_CONTINUATION_G2_CONF_OK")
+                elif g4_rescue_ok:
+                    rescue_used += 1
+                    reasons.append("HL_JOIN_RESCUE_G4_QUALITY_OK")
+                elif g2_rescue_ok:
+                    rescue_used += 1
+                    reasons.append("HL_JOIN_RESCUE_G2_QUALITY_OK")
+                else:
+                    allowed = False
+                    reasons.append("HL_POST_TARGET_QUALITY_FILTER")
 
         status = str(getattr(t, "status", "") or "").upper()
         settled = status in {"WIN", "LOSS"}
@@ -7574,7 +7617,7 @@ def _history_live_apply_hybrid_continuation(
 def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
     """Build independent STOP-OFF history from raw D1..D(N-1), causally.
 
-    V10.9 FAST keeps strategy identical but memoizes the fully verified prior
+    V10.10 FAST keeps the verified memo optimization and adds the frozen quality rescue; it memoizes the fully verified prior
     history inside the current Streamlit session. The memo is reused ONLY when
     the raw-history checksum and current DAY_SEQ are identical. Any history
     change invalidates it and triggers a full deterministic rebuild.
@@ -7598,8 +7641,8 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
         )
 
     history_sig = make_history_signature(days)
-    cache_key = "_v10_9_verified_history_live_prior"
-    cache_version = "V10_9_FAST_PRIOR_V1"
+    cache_key = "_v10_10_verified_history_live_prior"
+    cache_version = "V10_10_FAST_JOIN_RESCUE_PRIOR_V1"
     memo = st.session_state.get(cache_key)
     if (
         isinstance(memo, dict)
@@ -7692,7 +7735,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.9 FAST HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.10 FAST JOIN-RESCUE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7741,7 +7784,7 @@ def render_history_live_authoritative(manager) -> None:
         choices = _adaptive_select_choices(prior) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
         adaptive_rows = _adaptive_apply_bet_filter(ledger, prev_adaptive, choices)
 
-        # V10.9 FAST: current-day continuation replay is also conditional.
+        # V10.10 FAST: current-day continuation/rescue replay is conditional.
         # Before engine target, baseline overlay is sufficient and avoids a second
         # R1->current replay on every browser refresh.
         base_rows = _history_live_apply_overlay(ledger, adaptive_rows, prev_physical)
@@ -7790,7 +7833,7 @@ def render_history_live_authoritative(manager) -> None:
         hist_sig = make_history_signature(hist_days)
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
-            "rule": "V10_6_HL_SAFE_CONT_G2_CONF60",
+            "rule": "V10_10_HL_SAFE_CONT_PLUS_QUALITY_RESCUE",
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -7848,7 +7891,10 @@ def render_history_live_authoritative(manager) -> None:
             f"G3 KEEP_AFTER_WIN skip; G4 P20>={HISTORY_LIVE_G4_P20_MIN:.1f} "
             f"and STAB>={HISTORY_LIVE_G4_STABILITY_MIN:.2f}; "
             f"after negative day skip first {HISTORY_LIVE_PREV_NEG_G2_SKIP} eligible G2; "
-            f"after ENGINE target, continuation only G2 CONF>={HISTORY_LIVE_CONTINUATION_CONF_MIN:.2f} until physical target."
+            f"after ENGINE target: baseline G2 CONF>={HISTORY_LIVE_CONTINUATION_CONF_MIN:.2f}; "
+            f"plus max {HISTORY_LIVE_RESCUE_MAX_EXTRA} rescue: "
+            f"G4 CONF>={HISTORY_LIVE_RESCUE_G4_CONF_MIN:.2f}/P20>={HISTORY_LIVE_RESCUE_G4_P20_MIN:.1f}/STAB>={HISTORY_LIVE_RESCUE_G4_STABILITY_MIN:.2f} "
+            f"or G2 CONF>={HISTORY_LIVE_RESCUE_G2_CONF_MIN:.2f}/P20>={HISTORY_LIVE_RESCUE_G2_P20_MIN:.1f}/STAB>={HISTORY_LIVE_RESCUE_G2_STABILITY_MIN:.2f}, until physical target."
         )
 
         # V10.4 OPERATOR PANEL: ALWAYS show round/target/action/group before any
@@ -7875,7 +7921,7 @@ def render_history_live_authoritative(manager) -> None:
                 "POSITIVE PROFIT LOCK REACHED"
                 if _physical_lock_reached
                 else (
-                    "ENGINE TARGET REACHED — WAITING SAFE G2 CONTINUATION"
+                    "ENGINE TARGET REACHED — WAITING SAFE CONTINUATION / QUALITY RESCUE"
                     if _engine_positive_lock_reached
                     else "NO QUALIFYING PENDING HISTORY-LIVE TRADE"
                 )
@@ -8535,7 +8581,7 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.9 FAST HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | VERIFIED HISTORY MEMO | SAFE CONT G2 CONF>=0.60 | STOP-LOSS -2.5 OFF | "
+        "V10.10 FAST JOIN-RESCUE | AUTHORITATIVE LIVE ONLY | VERIFIED HISTORY MEMO | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
