@@ -7633,7 +7633,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.7 HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.8 HISTORY-LIVE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7848,7 +7848,7 @@ def render_history_live_authoritative(manager) -> None:
             _day_status = "WAITING SIGNAL"
             _next_trade_status = "WAITING FOR NEXT QUALIFYING SIGNAL"
 
-        # V10.7: operator-facing REALIZED BET P/L for TODAY.
+        # V10.8: operator-facing REALIZED BET P/L for TODAY.
         # This is the sum of settled rows where V10 action was BET. SKIP rows never
         # contribute. It equals the user's realized P/L only if the operator follows
         # every V10 BET instruction with the configured +2.5/-1 unit payoff.
@@ -7904,21 +7904,54 @@ def render_history_live_authoritative(manager) -> None:
         else:
             st.info("No V10 trade rows yet today.")
 
-        st.markdown("### 🗓️ RECENT V10 SIMULATED HISTORY")
+        # V10.8: full historical BET P/L visibility.
+        # This is the P/L that V10 would have produced if every historical BET
+        # instruction had been followed with the configured +2.5/-1 payoff.
+        _all_hist = list(prior or [])
+        _hist_bet_pnls = [
+            round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
+            for _d in _all_hist
+        ]
+        _hist_total = round(sum(_hist_bet_pnls), 2)
+        _hist_pos = sum(1 for _x in _hist_bet_pnls if _x > 0)
+        _hist_neg = sum(1 for _x in _hist_bet_pnls if _x < 0)
+        _hist_zero = sum(1 for _x in _hist_bet_pnls if abs(_x) < 1e-9)
+        _hist_neg_streak = 0
+        _hist_max_neg_streak = 0
+        for _x in _hist_bet_pnls:
+            if _x < 0:
+                _hist_neg_streak += 1
+                _hist_max_neg_streak = max(_hist_max_neg_streak, _hist_neg_streak)
+            else:
+                _hist_neg_streak = 0
+
+        st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
+        _h1, _h2, _h3, _h4, _h5 = st.columns(5)
+        _h1.metric("HISTORY BET P/L", f"{_hist_total:+.1f}")
+        _h2.metric("PROFIT DAYS", str(_hist_pos))
+        _h3.metric("LOSS DAYS", str(_hist_neg))
+        _h4.metric("ZERO DAYS", str(_hist_zero))
+        _h5.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
+
+        st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY")
         _daily_hist_rows = []
-        for _d in list(prior[-10:]):
+        _cum_bet = 0.0
+        for _d in _all_hist:
+            _day_bet = round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
+            _cum_bet = round(_cum_bet + _day_bet, 2)
             _daily_hist_rows.append({
                 "Day": f"D{int(_d.get('day_seq',0) or 0)}",
                 "Date": str(_d.get("day_id", "") or ""),
+                "BET P/L": _day_bet,
+                "Cumulative P/L": _cum_bet,
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
-                "V10 Simulated P/L": float(_d.get("history_live_physical_profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
             })
         if _daily_hist_rows:
-            st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True, height=430)
             st.caption(
-                "Historical V10 Simulated P/L is replay/backtest from raw Numbers. "
-                "It is NOT your actual past cash P/L unless V10 was already live and you followed every BET that day."
+                "BET P/L = simulated historical result if every V10 BET was followed. "
+                "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
             )
         else:
             st.info("No completed V10 simulated daily history yet.")
@@ -8426,7 +8459,7 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.6 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | SAFE CONT G2 CONF>=0.60 | STOP-LOSS -2.5 OFF | "
+        "V10.8 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | FULL HISTORY BET P/L | SAFE CONT G2 CONF>=0.60 | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
