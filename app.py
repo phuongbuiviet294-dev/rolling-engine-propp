@@ -7633,7 +7633,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.6 HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.7 HISTORY-LIVE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7740,7 +7740,7 @@ def render_history_live_authoritative(manager) -> None:
         _physical_lock_reached = float(pnl) >= float(lock)
         st.caption(
             f"D{seq} {day_date or ''} | R{current_round}/288 | HISTORY={replayed} days | "
-            f"V10 STRATEGY P/L={pnl:+.1f} | ENGINE={float(engine_profit):+.1f} | "
+            f"V10 REPLAY P/L={pnl:+.1f} | ENGINE={float(engine_profit):+.1f} | "
             f"PREV V10 PHYSICAL={float(prev_physical):+.1f} | POSITIVE TARGET={float(lock):+.1f}"
         )
         st.caption(
@@ -7756,7 +7756,7 @@ def render_history_live_authoritative(manager) -> None:
             )
         )
         st.caption(
-            "P/L NOTE: V10 STRATEGY P/L is the deterministic V10 replay from R1. "
+            "P/L NOTE: V10 REPLAY P/L is the deterministic V10 replay from R1. "
             "If V10 was deployed after earlier bets were already placed with V7, those pre-deploy real bets are NOT included in this V10 strategy P/L."
         )
         st.caption(
@@ -7833,7 +7833,7 @@ def render_history_live_authoritative(manager) -> None:
                 f"ACTION ID=D{seq}-R{_ui_target} | BET ONCE ONLY"
             )
 
-        # V10.5 DISPLAY ONLY: make live state unambiguous and keep history visible
+        # V10.7 DISPLAY: make live state unambiguous and keep history visible
         # even when the normal flow returns early for lock/wait/day-complete.
         if _physical_lock_reached:
             _day_status = "LOCKED FOR DAY"
@@ -7848,11 +7848,37 @@ def render_history_live_authoritative(manager) -> None:
             _day_status = "WAITING SIGNAL"
             _next_trade_status = "WAITING FOR NEXT QUALIFYING SIGNAL"
 
+        # V10.7: operator-facing REALIZED BET P/L for TODAY.
+        # This is the sum of settled rows where V10 action was BET. SKIP rows never
+        # contribute. It equals the user's realized P/L only if the operator follows
+        # every V10 BET instruction with the configured +2.5/-1 unit payoff.
+        _settled_bets = [
+            _r for _r in list(rows or [])
+            if str(_r.get("bet_action", "") or "").upper() == "BET"
+            and str(_r.get("status", "") or "").upper() in {"WIN", "LOSS"}
+        ]
+        _live_bet_pnl = round(sum(float(_r.get("bet_profit", 0.0) or 0.0) for _r in _settled_bets), 2)
+        _live_bet_wins = sum(1 for _r in _settled_bets if str(_r.get("status", "") or "").upper() == "WIN")
+        _live_bet_losses = sum(1 for _r in _settled_bets if str(_r.get("status", "") or "").upper() == "LOSS")
+        _live_bet_count = len(_settled_bets)
+        _skip_count = sum(1 for _r in list(rows or []) if str(_r.get("bet_action", "") or "").upper() == "SKIP")
+
+        st.markdown("### 💰 TODAY LIVE BET RESULT")
+        _p1, _p2, _p3, _p4 = st.columns(4)
+        _p1.metric("TODAY LIVE BET P/L", f"{_live_bet_pnl:+.1f}")
+        _p2.metric("SETTLED BETS", str(_live_bet_count))
+        _p3.metric("WIN / LOSS", f"{_live_bet_wins} / {_live_bet_losses}")
+        _p4.metric("SKIPPED SIGNALS", str(_skip_count))
+        st.caption(
+            "TODAY LIVE BET P/L = only settled V10 rows with Action=BET. "
+            "SKIP rows are never counted. This is the realized V10 result if you followed every displayed BET."
+        )
+
         st.markdown("### 📌 LIVE DAY STATUS")
         _s1, _s2, _s3 = st.columns(3)
         _s1.metric("DAY STATUS", _day_status)
         _s2.metric("NEXT TRADE", _next_trade_status)
-        _s3.metric("V10 STRATEGY P/L", f"{pnl:+.1f}")
+        _s3.metric("V10 REPLAY P/L", f"{pnl:+.1f}")
 
         st.markdown("### 📜 TODAY V10 TRADE HISTORY")
         _today_hist = []
@@ -7866,7 +7892,7 @@ def render_history_live_authoritative(manager) -> None:
                 "Action": str(_r.get("bet_action", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
                 "Settle R": _sr,
-                "V10 P/L": float(_r.get("bet_profit", 0.0) or 0.0),
+                "BET P/L": float(_r.get("bet_profit", 0.0) or 0.0),
                 "Engine P/L": float(_r.get("engine_profit", 0.0) or 0.0),
                 "Conf": round(float(_r.get("confidence", 0.0) or 0.0), 3),
                 "P20": round(float(_r.get("p20", 0.0) or 0.0), 1),
@@ -7878,20 +7904,24 @@ def render_history_live_authoritative(manager) -> None:
         else:
             st.info("No V10 trade rows yet today.")
 
-        st.markdown("### 🗓️ RECENT V10 DAILY HISTORY")
+        st.markdown("### 🗓️ RECENT V10 SIMULATED HISTORY")
         _daily_hist_rows = []
         for _d in list(prior[-10:]):
             _daily_hist_rows.append({
                 "Day": f"D{int(_d.get('day_seq',0) or 0)}",
                 "Date": str(_d.get("day_id", "") or ""),
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
-                "V10 Physical P/L": float(_d.get("history_live_physical_profit", 0.0) or 0.0),
+                "V10 Simulated P/L": float(_d.get("history_live_physical_profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
             })
         if _daily_hist_rows:
             st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True)
+            st.caption(
+                "Historical V10 Simulated P/L is replay/backtest from raw Numbers. "
+                "It is NOT your actual past cash P/L unless V10 was already live and you followed every BET that day."
+            )
         else:
-            st.info("No completed V10 daily history yet.")
+            st.info("No completed V10 simulated daily history yet.")
 
         if raw_stale:
             st.error(
@@ -7901,7 +7931,7 @@ def render_history_live_authoritative(manager) -> None:
             return
 
         if current_round >= MAX_ROUNDS_PER_DAY:
-            st.success(f"✅ DAY COMPLETE — WAIT FOR NEXT DAY | V10 STRATEGY P/L {pnl:+.1f}")
+            st.success(f"✅ DAY COMPLETE — WAIT FOR NEXT DAY | V10 REPLAY P/L {pnl:+.1f}")
             return
         if current_round < LIVE_START_ROUND:
             st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
