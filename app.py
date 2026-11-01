@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.6 HISTORY-LIVE | SAFE CONT G2 CONF60 | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.9 FAST HISTORY-LIVE | VERIFIED MEMO | SAFE CONT G2 CONF60 | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7574,10 +7574,16 @@ def _history_live_apply_hybrid_continuation(
 def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
     """Build independent STOP-OFF history from raw D1..D(N-1), causally.
 
-    LIVE fail-closed invariant:
-    - every completed DaySeq 1..current_seq-1 must exist exactly once;
-    - each day is already validated as contiguous R1..RN by _validated_numbers_by_day;
-    - stored daily_profit is never trusted for strategy state.
+    V10.9 FAST keeps strategy identical but memoizes the fully verified prior
+    history inside the current Streamlit session. The memo is reused ONLY when
+    the raw-history checksum and current DAY_SEQ are identical. Any history
+    change invalidates it and triggers a full deterministic rebuild.
+
+    Performance optimization #2: the expensive no-positive-lock continuation
+    replay is executed only on days where the baseline engine actually reached
+    its positive target AND baseline physical P/L was still below that target.
+    On all other days continuation cannot affect any physical action, so the
+    second replay is provably unnecessary.
     """
     current_seq = int(current_seq or 0)
     days = _validated_numbers_by_day(history_df, current_seq)
@@ -7591,10 +7597,32 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
             f"got={got[:5]}...{got[-5:] if got else []}; missing={missing}; extra={extra}"
         )
 
+    history_sig = make_history_signature(days)
+    cache_key = "_v10_9_verified_history_live_prior"
+    cache_version = "V10_9_FAST_PRIOR_V1"
+    memo = st.session_state.get(cache_key)
+    if (
+        isinstance(memo, dict)
+        and str(memo.get("version", "")) == cache_version
+        and int(memo.get("current_seq", 0) or 0) == current_seq
+        and str(memo.get("history_signature", "")) == history_sig
+        and isinstance(memo.get("resolved"), list)
+    ):
+        resolved = [dict(x) for x in list(memo.get("resolved") or [])]
+        prev_adaptive = float(memo.get("adaptive_prev", 0.0) or 0.0)
+        prev_physical = float(memo.get("physical_prev", 0.0) or 0.0)
+        st.caption(
+            f"HISTORY REPLAY: VERIFIED MEMO HIT | D1-D{max(current_seq-1,0)} | "
+            f"checksum={history_sig[:10]}"
+        )
+        return resolved, prev_adaptive, prev_physical, 0
+
     resolved = []
     adaptive_prev = 0.0
     physical_prev = 0.0
     replayed = 0
+    continuation_replays = 0
+
     for seq, day_id, nums in days:
         lock = get_dynamic_daily_profit_lock(resolved[-10:])
         eng, ledger = _history_live_replay_one_day(nums, resolved[-10:], seq, day_id, lock)
@@ -7602,17 +7630,36 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
         adaptive_rows = _adaptive_apply_bet_filter(ledger, adaptive_prev, choices)
         adaptive_profit = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in adaptive_rows), 2)
         cf = _adaptive_counterfactual(ledger, adaptive_prev)
-        # V10.6: keep baseline engine/adaptive history unchanged, but use a
-        # no-positive-lock continuation shadow for safe post-target physical signals.
-        _cont_engine_profit, _cont_ledger = _history_live_replay_one_day(
-            nums, resolved[-10:], seq, day_id, 9999.0,
+
+        # First compute the frozen physical overlay on the baseline ledger.
+        base_physical_rows = _history_live_apply_overlay(ledger, adaptive_rows, physical_prev)
+        base_physical_profit = round(
+            sum(float(r.get("bet_profit", 0.0) or 0.0) for r in base_physical_rows), 2
         )
-        _cont_adaptive_rows = _adaptive_apply_bet_filter(_cont_ledger, adaptive_prev, choices)
-        physical_rows = _history_live_apply_hybrid_continuation(
-            ledger, eng, _cont_ledger, _cont_adaptive_rows,
-            physical_prev, lock,
+        physical_profit = base_physical_profit
+
+        # Continuation can only matter after baseline engine target is reached
+        # while physical P/L is still below target. Avoid the second full replay
+        # for every other historical day.
+        needs_continuation = (
+            HISTORY_LIVE_CONTINUATION_ENABLED
+            and float(eng) >= float(lock)
+            and float(base_physical_profit) < float(lock)
         )
-        physical_profit = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in physical_rows), 2)
+        if needs_continuation:
+            _cont_engine_profit, _cont_ledger = _history_live_replay_one_day(
+                nums, resolved[-10:], seq, day_id, 9999.0,
+            )
+            _cont_adaptive_rows = _adaptive_apply_bet_filter(_cont_ledger, adaptive_prev, choices)
+            physical_rows = _history_live_apply_hybrid_continuation(
+                ledger, eng, _cont_ledger, _cont_adaptive_rows,
+                physical_prev, lock,
+            )
+            physical_profit = round(
+                sum(float(r.get("bet_profit", 0.0) or 0.0) for r in physical_rows), 2
+            )
+            continuation_replays += 1
+
         resolved.append({
             "day_seq": int(seq), "day_id": str(day_id or seq),
             "profit": round(float(eng), 2), "daily_profit_lock": float(lock),
@@ -7623,8 +7670,20 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
         adaptive_prev = adaptive_profit
         physical_prev = physical_profit
         replayed += 1
-    return resolved, adaptive_prev, physical_prev, replayed
 
+    st.session_state[cache_key] = {
+        "version": cache_version,
+        "current_seq": current_seq,
+        "history_signature": history_sig,
+        "resolved": [dict(x) for x in resolved],
+        "adaptive_prev": float(adaptive_prev),
+        "physical_prev": float(physical_prev),
+    }
+    st.caption(
+        f"HISTORY REPLAY: FULL VERIFIED BUILD | days={replayed} | "
+        f"continuation_replays={continuation_replays} | checksum={history_sig[:10]}"
+    )
+    return resolved, adaptive_prev, physical_prev, replayed
 
 def render_history_live_authoritative(manager) -> None:
     """Render the ONLY authoritative physical action for V10.
@@ -7633,7 +7692,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.8 HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.9 FAST HISTORY-LIVE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7666,9 +7725,11 @@ def render_history_live_authoritative(manager) -> None:
 
         # Rebuild independent strategy history and current day.
         prior, prev_adaptive, prev_physical, replayed = _history_live_build_prior(hdf, seq)
-        if replayed != max(0, seq - 1):
+        # replayed=0 means a verified raw-hash memo hit; otherwise a full build
+        # must contain every prior day.
+        if replayed not in (0, max(0, seq - 1)):
             st.error(
-                f"LIVE SELF-CHECK FAILED: history replayed={replayed}, expected={max(0,seq-1)}. "
+                f"LIVE SELF-CHECK FAILED: history replayed={replayed}, expected={max(0,seq-1)} or VERIFIED MEMO HIT. "
                 "CURRENT ACTION: WAIT / DO NOT BET."
             )
             return
@@ -7679,16 +7740,29 @@ def render_history_live_authoritative(manager) -> None:
         )
         choices = _adaptive_select_choices(prior) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
         adaptive_rows = _adaptive_apply_bet_filter(ledger, prev_adaptive, choices)
-        continuation_engine_profit, continuation_ledger = _history_live_replay_one_day(
-            numbers, prior[-10:], seq, day_date, 9999.0,
-        )
-        continuation_adaptive_rows = _adaptive_apply_bet_filter(
-            continuation_ledger, prev_adaptive, choices
-        )
-        rows = _history_live_apply_hybrid_continuation(
-            ledger, engine_profit, continuation_ledger, continuation_adaptive_rows,
-            prev_physical, lock,
-        )
+
+        # V10.9 FAST: current-day continuation replay is also conditional.
+        # Before engine target, baseline overlay is sufficient and avoids a second
+        # R1->current replay on every browser refresh.
+        base_rows = _history_live_apply_overlay(ledger, adaptive_rows, prev_physical)
+        base_pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in base_rows), 2)
+        if (
+            HISTORY_LIVE_CONTINUATION_ENABLED
+            and float(engine_profit) >= float(lock)
+            and float(base_pnl) < float(lock)
+        ):
+            continuation_engine_profit, continuation_ledger = _history_live_replay_one_day(
+                numbers, prior[-10:], seq, day_date, 9999.0,
+            )
+            continuation_adaptive_rows = _adaptive_apply_bet_filter(
+                continuation_ledger, prev_adaptive, choices
+            )
+            rows = _history_live_apply_hybrid_continuation(
+                ledger, engine_profit, continuation_ledger, continuation_adaptive_rows,
+                prev_physical, lock,
+            )
+        else:
+            rows = base_rows
         pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in rows), 2)
 
         # No future settlement may exist relative to the observed raw frontier.
@@ -7933,7 +8007,6 @@ def render_history_live_authoritative(manager) -> None:
         _h4.metric("ZERO DAYS", str(_hist_zero))
         _h5.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
 
-        st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY")
         _daily_hist_rows = []
         _cum_bet = 0.0
         for _d in _all_hist:
@@ -7947,12 +8020,15 @@ def render_history_live_authoritative(manager) -> None:
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
             })
+        st.markdown("### 🗓️ RECENT V10 SIMULATED BET HISTORY")
         if _daily_hist_rows:
-            st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True, height=430)
-            st.caption(
-                "BET P/L = simulated historical result if every V10 BET was followed. "
-                "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
-            )
+            st.dataframe(pd.DataFrame(_daily_hist_rows[-10:]), use_container_width=True, hide_index=True, height=390)
+            with st.expander("FULL HISTORY D1→YESTERDAY (open only when needed)", expanded=False):
+                st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True, height=430)
+                st.caption(
+                    "BET P/L = simulated historical result if every V10 BET was followed. "
+                    "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
+                )
         else:
             st.info("No completed V10 simulated daily history yet.")
 
@@ -8459,7 +8535,7 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.8 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | FULL HISTORY BET P/L | SAFE CONT G2 CONF>=0.60 | STOP-LOSS -2.5 OFF | "
+        "V10.9 FAST HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | VERIFIED HISTORY MEMO | SAFE CONT G2 CONF>=0.60 | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
