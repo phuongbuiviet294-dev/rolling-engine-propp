@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.5 HISTORY-LIVE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.6 HISTORY-LIVE | SAFE CONT G2 CONF60 | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7297,6 +7297,13 @@ HISTORY_LIVE_G4_P20_MIN = 5.5
 HISTORY_LIVE_G4_STABILITY_MIN = 0.50
 HISTORY_LIVE_PREV_NEG_G2_SKIP = 2
 HISTORY_LIVE_G3_KEEP_REASON = "KEEP_AFTER_WIN_5R"
+# V10.6 safe post-target continuation. Baseline engine/adaptive history stays
+# unchanged. Only after the baseline ENGINE positive target has been reached,
+# while physical P/L is still below target, a continuation shadow may BET
+# high-confidence G2 signals. Historical sensitivity plateau: CONF 0.59..0.64.
+HISTORY_LIVE_CONTINUATION_ENABLED = True
+HISTORY_LIVE_CONTINUATION_GROUP = 2
+HISTORY_LIVE_CONTINUATION_CONF_MIN = 0.60
 
 
 class StopOffHistoryLiveTradeEngine(TradeEngine):
@@ -7433,6 +7440,137 @@ def _history_live_apply_overlay(
     return out
 
 
+def _history_live_apply_hybrid_continuation(
+    baseline_ledger: list[TradeRecord],
+    baseline_engine_profit: float,
+    continuation_ledger: list[TradeRecord],
+    continuation_adaptive_rows: list[dict],
+    prev_physical_profit: float,
+    positive_target: float,
+) -> list[dict]:
+    """V10.6 causal safe continuation after the baseline ENGINE target.
+
+    Before the baseline engine reaches its positive target, behavior is exactly
+    the frozen V10.5 physical overlay.  At/after the settlement frontier that
+    caused the baseline engine to lock, physical play may continue ONLY while
+    physical P/L is still below target, and ONLY for G2 with CONF>=0.60.
+
+    The baseline engine/adaptive history remains authoritative for next-day
+    selector state; continuation is a physical-action extension only.
+    """
+    amap = {
+        (int(r.get("open_round", 0) or 0), int(r.get("group", 0) or 0)): r
+        for r in list(continuation_adaptive_rows or [])
+    }
+
+    lock_round = None
+    if float(baseline_engine_profit or 0.0) >= float(positive_target):
+        settles = [
+            int(getattr(t, "settle_round", 0) or 0)
+            for t in list(baseline_ledger or [])
+            if str(getattr(t, "status", "") or "").upper() in {"WIN", "LOSS"}
+            and getattr(t, "settle_round", None) is not None
+        ]
+        if settles:
+            lock_round = max(settles)
+
+    engine_pnl = 0.0
+    physical_pnl = 0.0
+    prev_negative = float(prev_physical_profit or 0.0) < 0.0
+    g2_eligible_seen = 0
+    out = []
+
+    for t in sorted(
+        list(continuation_ledger or []),
+        key=lambda x: (
+            int(getattr(x, "round_id", 0) or 0),
+            int(getattr(x, "settle_round", 10**9) or 10**9),
+        ),
+    ):
+        open_round = int(getattr(t, "round_id", 0) or 0)
+        group = int(getattr(t, "predict", 0) or 0)
+        base = dict(amap.get((open_round, group), {}) or {})
+        allowed = bool(base.get("bet_allowed", False))
+        reasons = [str(base.get("bet_skip_reason", "") or "")]
+
+        if allowed and group == 2:
+            g2_eligible_seen += 1
+            if prev_negative and g2_eligible_seen <= HISTORY_LIVE_PREV_NEG_G2_SKIP:
+                allowed = False
+                reasons.append(f"HL_G2_AFTER_NEG_SKIP_{g2_eligible_seen}")
+
+        confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
+        p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
+        stability = float(getattr(t, "open_stability", 0.0) or 0.0)
+        lock_reason = str(getattr(t, "open_lock_reason", "") or "")
+
+        if allowed and group == 3 and lock_reason == HISTORY_LIVE_G3_KEEP_REASON:
+            allowed = False
+            reasons.append("HL_G3_KEEP_AFTER_WIN_SKIP")
+
+        if allowed and group == 4 and (
+            p20 < HISTORY_LIVE_G4_P20_MIN
+            or stability < HISTORY_LIVE_G4_STABILITY_MIN
+        ):
+            allowed = False
+            reasons.append("HL_G4_P20_STABILITY_FILTER")
+
+        recovery_mode = (
+            engine_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
+            or physical_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
+        )
+        if allowed and recovery_mode and confidence < HISTORY_LIVE_RECOVERY_CONF_MIN:
+            allowed = False
+            reasons.append("HL_RECOVERY_CONF_FILTER")
+
+        after_engine_lock = bool(lock_round is not None and open_round >= lock_round)
+        if allowed and after_engine_lock:
+            if physical_pnl >= float(positive_target):
+                allowed = False
+                reasons.append("HL_PHYSICAL_PROFIT_LOCK")
+            elif not HISTORY_LIVE_CONTINUATION_ENABLED:
+                allowed = False
+                reasons.append("HL_CONTINUATION_DISABLED")
+            elif group != int(HISTORY_LIVE_CONTINUATION_GROUP):
+                allowed = False
+                reasons.append("HL_CONTINUATION_G2_ONLY")
+            elif confidence < float(HISTORY_LIVE_CONTINUATION_CONF_MIN):
+                allowed = False
+                reasons.append("HL_CONTINUATION_CONF_FILTER")
+            else:
+                reasons.append("HL_SAFE_CONTINUATION_G2_CONF_OK")
+
+        status = str(getattr(t, "status", "") or "").upper()
+        settled = status in {"WIN", "LOSS"}
+        engine_profit = float(getattr(t, "profit", 0.0) or 0.0)
+        bet_profit = engine_profit if allowed and settled else 0.0
+
+        out.append({
+            "open_round": open_round,
+            "settle_round": getattr(t, "settle_round", None),
+            "group": group,
+            "status": status,
+            "bet_action": "BET" if allowed else "SKIP",
+            "bet_allowed": bool(allowed),
+            "bet_profit": round(float(bet_profit), 2),
+            "engine_profit": round(float(engine_profit), 2),
+            "confidence": confidence,
+            "p20": p20,
+            "stability": stability,
+            "lock_reason": lock_reason,
+            "engine_pnl_before": round(engine_pnl, 2),
+            "physical_pnl_before": round(physical_pnl, 2),
+            "after_engine_lock": after_engine_lock,
+            "reason": "|".join(x for x in reasons if x),
+        })
+
+        if settled:
+            engine_pnl += engine_profit
+            physical_pnl += bet_profit
+
+    return out
+
+
 def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
     """Build independent STOP-OFF history from raw D1..D(N-1), causally.
 
@@ -7464,7 +7602,16 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
         adaptive_rows = _adaptive_apply_bet_filter(ledger, adaptive_prev, choices)
         adaptive_profit = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in adaptive_rows), 2)
         cf = _adaptive_counterfactual(ledger, adaptive_prev)
-        physical_rows = _history_live_apply_overlay(ledger, adaptive_rows, physical_prev)
+        # V10.6: keep baseline engine/adaptive history unchanged, but use a
+        # no-positive-lock continuation shadow for safe post-target physical signals.
+        _cont_engine_profit, _cont_ledger = _history_live_replay_one_day(
+            nums, resolved[-10:], seq, day_id, 9999.0,
+        )
+        _cont_adaptive_rows = _adaptive_apply_bet_filter(_cont_ledger, adaptive_prev, choices)
+        physical_rows = _history_live_apply_hybrid_continuation(
+            ledger, eng, _cont_ledger, _cont_adaptive_rows,
+            physical_prev, lock,
+        )
         physical_profit = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in physical_rows), 2)
         resolved.append({
             "day_seq": int(seq), "day_id": str(day_id or seq),
@@ -7486,7 +7633,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.5 HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.6 HISTORY-LIVE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7532,7 +7679,16 @@ def render_history_live_authoritative(manager) -> None:
         )
         choices = _adaptive_select_choices(prior) if ADAPTIVE_SAFE_ENABLED else _adaptive_defaults()
         adaptive_rows = _adaptive_apply_bet_filter(ledger, prev_adaptive, choices)
-        rows = _history_live_apply_overlay(ledger, adaptive_rows, prev_physical)
+        continuation_engine_profit, continuation_ledger = _history_live_replay_one_day(
+            numbers, prior[-10:], seq, day_date, 9999.0,
+        )
+        continuation_adaptive_rows = _adaptive_apply_bet_filter(
+            continuation_ledger, prev_adaptive, choices
+        )
+        rows = _history_live_apply_hybrid_continuation(
+            ledger, engine_profit, continuation_ledger, continuation_adaptive_rows,
+            prev_physical, lock,
+        )
         pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in rows), 2)
 
         # No future settlement may exist relative to the observed raw frontier.
@@ -7560,7 +7716,7 @@ def render_history_live_authoritative(manager) -> None:
         hist_sig = make_history_signature(hist_days)
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
-            "rule": "V10_HL_D1_40_FROZEN",
+            "rule": "V10_6_HL_SAFE_CONT_G2_CONF60",
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -7580,7 +7736,8 @@ def render_history_live_authoritative(manager) -> None:
         hist_streak = _negative_day_streak(hist_physical)
         hist_dd = _equity_max_drawdown(hist_physical)
 
-        _positive_lock_reached = float(engine_profit) >= float(lock)
+        _engine_positive_lock_reached = float(engine_profit) >= float(lock)
+        _physical_lock_reached = float(pnl) >= float(lock)
         st.caption(
             f"D{seq} {day_date or ''} | R{current_round}/288 | HISTORY={replayed} days | "
             f"V10 STRATEGY P/L={pnl:+.1f} | ENGINE={float(engine_profit):+.1f} | "
@@ -7590,8 +7747,12 @@ def render_history_live_authoritative(manager) -> None:
             "RISK STATE: STOP-LOSS -2.5 = OFF | "
             + (
                 f"POSITIVE PROFIT LOCK = REACHED ({float(engine_profit):+.1f} >= {float(lock):+.1f})"
-                if _positive_lock_reached
-                else f"POSITIVE PROFIT LOCK = OPEN ({float(engine_profit):+.1f} < {float(lock):+.1f})"
+                if _physical_lock_reached
+                else (
+                    f"ENGINE TARGET REACHED; PHYSICAL CONTINUATION OPEN ({float(pnl):+.1f} < {float(lock):+.1f})"
+                    if _engine_positive_lock_reached
+                    else f"POSITIVE PROFIT LOCK = OPEN (ENGINE {float(engine_profit):+.1f} < {float(lock):+.1f})"
+                )
             )
         )
         st.caption(
@@ -7612,7 +7773,8 @@ def render_history_live_authoritative(manager) -> None:
             f"requires CONF>={HISTORY_LIVE_RECOVERY_CONF_MIN:.2f}; "
             f"G3 KEEP_AFTER_WIN skip; G4 P20>={HISTORY_LIVE_G4_P20_MIN:.1f} "
             f"and STAB>={HISTORY_LIVE_G4_STABILITY_MIN:.2f}; "
-            f"after negative day skip first {HISTORY_LIVE_PREV_NEG_G2_SKIP} eligible G2."
+            f"after negative day skip first {HISTORY_LIVE_PREV_NEG_G2_SKIP} eligible G2; "
+            f"after ENGINE target, continuation only G2 CONF>={HISTORY_LIVE_CONTINUATION_CONF_MIN:.2f} until physical target."
         )
 
         # V10.4 OPERATOR PANEL: ALWAYS show round/target/action/group before any
@@ -7637,8 +7799,12 @@ def render_history_live_authoritative(manager) -> None:
         elif pending is None:
             _ui_reason = (
                 "POSITIVE PROFIT LOCK REACHED"
-                if _positive_lock_reached
-                else "NO QUALIFYING PENDING HISTORY-LIVE TRADE"
+                if _physical_lock_reached
+                else (
+                    "ENGINE TARGET REACHED — WAITING SAFE G2 CONTINUATION"
+                    if _engine_positive_lock_reached
+                    else "NO QUALIFYING PENDING HISTORY-LIVE TRADE"
+                )
             )
         else:
             _pending_target = int(pending.get("open_round", 0) or 0) + 1
@@ -7669,7 +7835,7 @@ def render_history_live_authoritative(manager) -> None:
 
         # V10.5 DISPLAY ONLY: make live state unambiguous and keep history visible
         # even when the normal flow returns early for lock/wait/day-complete.
-        if _positive_lock_reached:
+        if _physical_lock_reached:
             _day_status = "LOCKED FOR DAY"
             _next_trade_status = "NO MORE TRADE TODAY"
         elif pending is not None:
@@ -7741,10 +7907,10 @@ def render_history_live_authoritative(manager) -> None:
             st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
             return
         if pending is None:
-            if _positive_lock_reached:
+            if _physical_lock_reached:
                 st.success(
                     f"🔒 CURRENT ACTION: WAIT / NO BET → R{current_round + 1} | "
-                    f"POSITIVE PROFIT LOCK REACHED | ENGINE {float(engine_profit):+.1f} "
+                    f"POSITIVE PROFIT LOCK REACHED | V10 PHYSICAL {float(pnl):+.1f} "
                     f">= TARGET {float(lock):+.1f}. STOP-LOSS -2.5 remains OFF."
                 )
             else:
@@ -8230,7 +8396,7 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.5 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | STOP-LOSS -2.5 OFF | "
+        "V10.6 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | SAFE CONT G2 CONF>=0.60 | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
