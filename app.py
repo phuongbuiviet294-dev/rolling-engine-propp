@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.3 HISTORY-LIVE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.5 HISTORY-LIVE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7486,7 +7486,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.4 HISTORY-LIVE — LIVE ACTION")
+    st.markdown("# 🚀 V10.5 HISTORY-LIVE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • NO CACHE • FROZEN RULE"
@@ -7666,6 +7666,66 @@ def render_history_live_authoritative(manager) -> None:
                 f"CONF={_ui_conf:.3f} | P20={_ui_p20:+.1f} | STAB={_ui_stab:.3f} | "
                 f"ACTION ID=D{seq}-R{_ui_target} | BET ONCE ONLY"
             )
+
+        # V10.5 DISPLAY ONLY: make live state unambiguous and keep history visible
+        # even when the normal flow returns early for lock/wait/day-complete.
+        if _positive_lock_reached:
+            _day_status = "LOCKED FOR DAY"
+            _next_trade_status = "NO MORE TRADE TODAY"
+        elif pending is not None:
+            _day_status = "ACTION READY"
+            _next_trade_status = (
+                f"{str(pending.get('bet_action','SKIP') or 'SKIP').upper()} "
+                f"G{int(pending.get('group',0) or 0)} -> R{current_round + 1}"
+            )
+        else:
+            _day_status = "WAITING SIGNAL"
+            _next_trade_status = "WAITING FOR NEXT QUALIFYING SIGNAL"
+
+        st.markdown("### 📌 LIVE DAY STATUS")
+        _s1, _s2, _s3 = st.columns(3)
+        _s1.metric("DAY STATUS", _day_status)
+        _s2.metric("NEXT TRADE", _next_trade_status)
+        _s3.metric("V10 STRATEGY P/L", f"{pnl:+.1f}")
+
+        st.markdown("### 📜 TODAY V10 TRADE HISTORY")
+        _today_hist = []
+        for _r in list(rows or []):
+            _or = int(_r.get("open_round", 0) or 0)
+            _sr = _r.get("settle_round", None)
+            _today_hist.append({
+                "Open R": _or,
+                "Target R": (_or + 1 if _or > 0 else None),
+                "Group": (f"G{int(_r.get('group',0) or 0)}" if int(_r.get('group',0) or 0) > 0 else "—"),
+                "Action": str(_r.get("bet_action", "") or ""),
+                "Result": str(_r.get("status", "") or ""),
+                "Settle R": _sr,
+                "V10 P/L": float(_r.get("bet_profit", 0.0) or 0.0),
+                "Engine P/L": float(_r.get("engine_profit", 0.0) or 0.0),
+                "Conf": round(float(_r.get("confidence", 0.0) or 0.0), 3),
+                "P20": round(float(_r.get("p20", 0.0) or 0.0), 1),
+                "Stab": round(float(_r.get("stability", 0.0) or 0.0), 3),
+                "Reason": str(_r.get("reason", "") or ""),
+            })
+        if _today_hist:
+            st.dataframe(pd.DataFrame(_today_hist).tail(30), use_container_width=True, hide_index=True)
+        else:
+            st.info("No V10 trade rows yet today.")
+
+        st.markdown("### 🗓️ RECENT V10 DAILY HISTORY")
+        _daily_hist_rows = []
+        for _d in list(prior[-10:]):
+            _daily_hist_rows.append({
+                "Day": f"D{int(_d.get('day_seq',0) or 0)}",
+                "Date": str(_d.get("day_id", "") or ""),
+                "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
+                "V10 Physical P/L": float(_d.get("history_live_physical_profit", 0.0) or 0.0),
+                "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
+            })
+        if _daily_hist_rows:
+            st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No completed V10 daily history yet.")
 
         if raw_stale:
             st.error(
@@ -8170,7 +8230,7 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.3 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | STOP-LOSS -2.5 OFF | "
+        "V10.5 HISTORY-LIVE | AUTHORITATIVE LIVE ONLY | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
