@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.1 SAFE LIVE BUGFIX | 112211 STAKE GUARD | VERIFIED MEMO | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.5 FAST TRUE NO CACHE | FULL HISTORY | MAX1 X2 SAFE | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7168,31 +7168,36 @@ HISTORY_LIVE_RESCUE_G2_STABILITY_MIN = 0.65
 # raw dataset was recorded.
 HISTORY_LIVE_STRICT_PREV_COMPLETE_CUTOVER_DAY_SEQ = 59
 
-# V10.12 SAFE STAKE — money-management only; NEVER feeds back into strategy.
-# Anti-overfit design:
-# - Previous completed UNIT V10 day < 0: only the FIRST BET next day is x2, then x1.
-# - Otherwise use the fixed repeating stake schedule 1,1,2,2,1,1 across BET actions.
-# - Risk guard: if realized PLAY P/L before an x2 slot is negative, downgrade x2 -> x1.
-# - SKIP/WAIT never consume a stake slot. Pending BET receives its deterministic stake immediately.
+# V10.12.5 SAFE STAKE — money-management only; NEVER feeds back into strategy.
+# Anti-overfit / live-risk design:
+# - HARD CAP: at most ONE actual x2 BET per day. Never x2 -> x2 consecutively.
+# - Previous completed UNIT V10 day < 0: only the FIRST BET next day is x2, then all later BETs x1.
+# - Otherwise only the THIRD BET action of the day is eligible for x2; all other BETs are x1.
+# - Risk guard: if realized PLAY P/L before that x2 slot is negative, downgrade it to x1 and do NOT chase a later x2.
+# - SKIP/WAIT never consume a BET index. Pending BET receives its deterministic stake immediately.
 # - No group/conf/P20/stability filter is added to the stake layer. Those were rejected as overfit.
 SAFE_STAKE_ENABLED = True
-SAFE_STAKE_PATTERN = (1.0, 1.0, 2.0, 2.0, 1.0, 1.0)
 SAFE_STAKE_X2_MIN_PLAY_PNL = 0.0
 SAFE_STAKE_AFTER_NEG_MULTIPLIER = 2.0
 SAFE_STAKE_NORMAL_MULTIPLIER = 1.0
-SAFE_STAKE_AFTER_NEG_MAX_X2_BETS = 1
+SAFE_STAKE_MAX_X2_PER_DAY = 1
+SAFE_STAKE_NORMAL_X2_BET_INDEX = 3
 
 
 def _history_live_apply_balanced_stake(rows: list[dict], prev_day_physical_profit: float) -> list[dict]:
-    """Apply the V10.12 deterministic stake layer without changing V10 strategy.
+    """Apply V10.12.5 MAX1-X2 stake sizing without changing V10 strategy.
 
-    The trigger uses previous-day UNIT V10 P/L, never leveraged PLAY P/L.
-    On normal days the pattern is 112211 over BET actions only.  Proposed x2
-    is downgraded to x1 whenever already-settled PLAY P/L is below zero.
+    Trigger uses previous-day UNIT V10 P/L, never leveraged PLAY P/L.
+    HARD CAP: at most one actual x2 BET per day.
+      - Previous UNIT day < 0: first BET is x2, all later BETs x1.
+      - Otherwise: only BET #3 is eligible for x2. If PLAY P/L before BET #3
+        is negative, that slot is downgraded to x1 and no later x2 is chased.
+    SKIP/WAIT rows do not consume a BET index. Stake never feeds back into
+    V10 signal/group/window/target/recovery logic.
     """
     prev_negative = float(prev_day_physical_profit or 0.0) < 0.0
     bet_count = 0
-    after_neg_x2_used = 0
+    x2_used = 0
     play_pnl = 0.0
     out = []
     for raw in sorted(
@@ -7206,23 +7211,28 @@ def _history_live_apply_balanced_stake(rows: list[dict], prev_day_physical_profi
         if is_bet:
             bet_count += 1
             mult = float(SAFE_STAKE_NORMAL_MULTIPLIER)
-            if SAFE_STAKE_ENABLED and prev_negative:
-                if after_neg_x2_used < int(SAFE_STAKE_AFTER_NEG_MAX_X2_BETS):
-                    mult = float(SAFE_STAKE_AFTER_NEG_MULTIPLIER)
-                    after_neg_x2_used += 1
-                    stake_reason = "PREV_NEG_FIRST_BET_X2"
-                else:
-                    stake_reason = "PREV_NEG_LATER_BET_X1"
-            elif SAFE_STAKE_ENABLED:
-                pos = (bet_count - 1) % len(SAFE_STAKE_PATTERN)
-                proposed = float(SAFE_STAKE_PATTERN[pos])
-                mult = proposed
-                stake_reason = f"PATTERN_112211_POS{pos + 1}"
-                if proposed > 1.0 and float(play_pnl) < float(SAFE_STAKE_X2_MIN_PLAY_PNL):
-                    mult = 1.0
-                    stake_reason += "_DOWNGRADE_NEG_PLAY_PNL"
-            else:
+            if not SAFE_STAKE_ENABLED:
                 stake_reason = "STAKE_DISABLED_X1"
+            elif prev_negative:
+                if bet_count == 1 and x2_used < int(SAFE_STAKE_MAX_X2_PER_DAY):
+                    mult = float(SAFE_STAKE_AFTER_NEG_MULTIPLIER)
+                    x2_used += 1
+                    stake_reason = "PREV_NEG_FIRST_BET_X2_MAX1"
+                else:
+                    stake_reason = "PREV_NEG_LATER_BET_X1_MAX1"
+            else:
+                if bet_count == int(SAFE_STAKE_NORMAL_X2_BET_INDEX):
+                    if x2_used >= int(SAFE_STAKE_MAX_X2_PER_DAY):
+                        stake_reason = "NORMAL_BET3_X1_MAX1_ALREADY_USED"
+                    elif float(play_pnl) < float(SAFE_STAKE_X2_MIN_PLAY_PNL):
+                        # Fail conservative: do not chase another x2 later today.
+                        stake_reason = "NORMAL_BET3_X1_DOWNGRADE_NEG_PLAY_PNL"
+                    else:
+                        mult = 2.0
+                        x2_used += 1
+                        stake_reason = "NORMAL_BET3_X2_MAX1"
+                else:
+                    stake_reason = "NORMAL_X1_MAX1"
 
         r["stake_multiplier"] = mult if is_bet else 0.0
         r["stake_label"] = (
@@ -7232,6 +7242,7 @@ def _history_live_apply_balanced_stake(rows: list[dict], prev_day_physical_profi
         )
         r["stake_reason"] = stake_reason
         r["stake_bet_index"] = bet_count if is_bet else None
+        r["stake_x2_used_today"] = int(x2_used)
         r["play_pnl_before"] = round(float(play_pnl), 2)
         settled = str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}
         play_profit = (
@@ -7794,7 +7805,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.12.3 FAST TRUE NO CACHE + 112211 STAKE GUARD — LIVE ACTION")
+    st.markdown("# 🚀 V10.12.5 FAST TRUE NO CACHE + FULL HISTORY + MAX1 X2 SAFE — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
@@ -7899,7 +7910,7 @@ def render_history_live_authoritative(manager) -> None:
         # Deterministic source/action signatures shown to operator.
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
-            "rule": "V10_12_HL_SAFE_CONT_RESCUE_112211_STAKE_GUARD",
+            "rule": "V10_12_5_HL_SAFE_CONT_RESCUE_MAX1_X2",
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -8062,17 +8073,27 @@ def render_history_live_authoritative(manager) -> None:
         _live_bet_losses = sum(1 for _r in _settled_bets if str(_r.get("status", "") or "").upper() == "LOSS")
         _live_bet_count = len(_settled_bets)
         _skip_count = sum(1 for _r in list(rows or []) if str(_r.get("bet_action", "") or "").upper() == "SKIP")
+        # Count assigned x2 BETs including a current pending BET. This is an
+        # operator guard only; the deterministic stake function already hard-caps x2.
+        _x2_used_today = sum(
+            1 for _r in list(rows or [])
+            if str(_r.get("bet_action", "") or "").upper() == "BET"
+            and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
+        )
 
         st.markdown("### 💰 TODAY LIVE BET RESULT")
-        _p1, _p2, _p3, _p4, _p5 = st.columns(5)
+        _p1, _p2, _p3, _p4, _p5, _p6 = st.columns(6)
         _p1.metric("UNIT V10 P/L", f"{_live_bet_pnl:+.1f}")
         _p2.metric("SAFE PLAY P/L", f"{balanced_play_pnl:+.1f}")
         _p3.metric("SETTLED BETS", str(_live_bet_count))
         _p4.metric("WIN / LOSS", f"{_live_bet_wins} / {_live_bet_losses}")
         _p5.metric("SKIPPED", str(_skip_count))
+        _p6.metric("X2 USED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
+        if _x2_used_today >= int(SAFE_STAKE_MAX_X2_PER_DAY):
+            st.info("🔒 MAX1 X2 LOCK — x2 has already been used today. ALL LATER BETS are x1.")
         st.caption(
             "UNIT V10 P/L uses x1 strategy units only. SAFE PLAY P/L applies the displayed stake: "
-            "after a negative UNIT V10 day only the first BET next day is x2; otherwise use 112211, with x2 downgraded to x1 whenever settled PLAY P/L is negative. "
+            "after a negative UNIT V10 day only the first BET next day is x2; otherwise only BET #3 may be x2, and only when settled PLAY P/L before it is >= 0. HARD CAP: max 1 x2 per day. "
             "Stake sizing NEVER feeds back into V10 signal/target logic."
         )
 
@@ -8818,11 +8839,11 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.12.3 FAST TRUE NO CACHE + 112211 STAKE GUARD | AUTHORITATIVE LIVE ONLY | FULL RAW HISTORY REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
+        "V10.12.5 FAST TRUE NO CACHE + FULL HISTORY + MAX1 X2 SAFE | AUTHORITATIVE LIVE ONLY | FULL RAW HISTORY REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
-    st.error(f"V10.3 LIVE ERROR: {e}")
+    st.error(f"V10.12.4.1 LIVE ERROR: {e}")
     import traceback
     st.code(traceback.format_exc())
     live_manager = None
