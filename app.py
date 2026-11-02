@@ -57,7 +57,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.5 FAST TRUE NO CACHE | FULL HISTORY | MAX1 X2 SAFE | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.9 FAST TRUE NO CACHE | FULL HISTORY | 112211+111 CONFIRM | FIRST-BET X2 ONLY | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7168,71 +7168,89 @@ HISTORY_LIVE_RESCUE_G2_STABILITY_MIN = 0.65
 # raw dataset was recorded.
 HISTORY_LIVE_STRICT_PREV_COMPLETE_CUTOVER_DAY_SEQ = 59
 
-# V10.12.5 SAFE STAKE — money-management only; NEVER feeds back into strategy.
-# Anti-overfit / live-risk design:
-# - HARD CAP: at most ONE actual x2 BET per day. Never x2 -> x2 consecutively.
-# - Previous completed UNIT V10 day < 0: only the FIRST BET next day is x2, then all later BETs x1.
-# - Otherwise only the THIRD BET action of the day is eligible for x2; all other BETs are x1.
-# - Risk guard: if realized PLAY P/L before that x2 slot is negative, downgrade it to x1 and do NOT chase a later x2.
-# - SKIP/WAIT never consume a BET index. Pending BET receives its deterministic stake immediately.
-# - No group/conf/P20/stability filter is added to the stake layer. Those were rejected as overfit.
+# V10.12.7 SAFE STAKE — money-management only; NEVER feeds back into strategy.
+# - Previous completed UNIT V10 day < 0: only the FIRST BET next day is x2.
+# - All later BETs that day are x1.
+# - Previous completed UNIT V10 day >= 0: ALL BETs are x1.
+# - SKIP/WAIT never consume the first-BET slot.
+# - 112211 is a BET-outcome SHADOW pattern only; it is NOT a stake schedule.
 SAFE_STAKE_ENABLED = True
-SAFE_STAKE_X2_MIN_PLAY_PNL = 0.0
 SAFE_STAKE_AFTER_NEG_MULTIPLIER = 2.0
 SAFE_STAKE_NORMAL_MULTIPLIER = 1.0
 SAFE_STAKE_MAX_X2_PER_DAY = 1
-SAFE_STAKE_NORMAL_X2_BET_INDEX = 3
+
+# 112211 SHADOW AUDIT. Encoding is over settled physical BETs only:
+#   1 = BET WIN, 2 = BET LOSS.
+# The prefix 11221 means: W,W,L,L,W. The next settled V10 BET is evaluated
+# as the sixth symbol; 1 would complete 112211. This layer is diagnostic only.
+PATTERN_112211_SHADOW_ENABLED = True
+PATTERN_112211_PREFIX = "11221"
+PATTERN_112211_MIN_SAMPLES_FOR_CONSIDERATION = 10
+PATTERN_112211_MIN_WR_FOR_CONSIDERATION = 0.60
+PATTERN_112211_CUTOVER_DAY_SEQ = 59
+
+# V10.12.8 112211 EXECUTION CONFIRMATION. This is deliberately downstream
+# of the frozen V10 strategy: it NEVER changes engine/adaptive/physical
+# strategy state, window selection, recovery, target, or next-day selector.
+# It only decides whether the operator should EXECUTE a V10 BET. The pattern
+# is built from baseline V10 BET outcomes, so a skipped execution still
+# advances the virtual pattern after that signal settles. This prevents a
+# self-referential pattern loop.
+PATTERN_112211_CONFIRM_ENABLED = True
+PATTERN_112211_CONFIRM_CONF_MIN = HISTORY_LIVE_RECOVERY_CONF_MIN  # existing 0.56, not newly tuned
+# Additional simple confirmation found in the exhaustive 2..6-bit audit:
+# 111 = three consecutive baseline V10 WINs. Only the NEXT baseline V10 BET
+# is filtered, using the SAME existing 0.56 confidence threshold. No rescue.
+PATTERN_111_CONFIRM_ENABLED = True
+PATTERN_111_PREFIX = "111"
+PATTERN_111_CONFIRM_CONF_MIN = HISTORY_LIVE_RECOVERY_CONF_MIN
 
 
 def _history_live_apply_balanced_stake(rows: list[dict], prev_day_physical_profit: float) -> list[dict]:
-    """Apply V10.12.5 MAX1-X2 stake sizing without changing V10 strategy.
+    """Apply V10.12.8 FIRST-BET-X2-ONLY sizing without changing V10 strategy.
 
-    Trigger uses previous-day UNIT V10 P/L, never leveraged PLAY P/L.
-    HARD CAP: at most one actual x2 BET per day.
-      - Previous UNIT day < 0: first BET is x2, all later BETs x1.
-      - Otherwise: only BET #3 is eligible for x2. If PLAY P/L before BET #3
-        is negative, that slot is downgraded to x1 and no later x2 is chased.
-    SKIP/WAIT rows do not consume a BET index. Stake never feeds back into
-    V10 signal/group/window/target/recovery logic.
+    Rule:
+      - Previous completed UNIT V10 day < 0: first BET today is x2, all later BETs x1.
+      - Previous completed UNIT V10 day >= 0: every BET today is x1.
+      - SKIP/WAIT do not consume the first-BET slot.
+      - HARD CAP: max one x2 BET per day.
+      - Stake never feeds back into signal, target, recovery, or locking logic.
+      - 112211 is NOT a stake schedule.
     """
     prev_negative = float(prev_day_physical_profit or 0.0) < 0.0
+    out = []
     bet_count = 0
     x2_used = 0
     play_pnl = 0.0
-    out = []
-    for raw in sorted(
-        list(rows or []),
-        key=lambda r: (int(r.get("open_round", 0) or 0), int(r.get("settle_round", 10**9) or 10**9)),
-    ):
-        r = dict(raw)
-        is_bet = str(r.get("bet_action", "") or "").upper() == "BET"
-        mult = 0.0
+
+    for row in list(rows or []):
+        r = dict(row)
+        # Final operator execution may be filtered by 112211 confirmation.
+        # Fall back to the unit V10 action when no execution layer is present.
+        execution_action = str(r.get("play_action", r.get("bet_action", "")) or "").upper()
+        is_bet = execution_action == "BET"
+        mult = float(SAFE_STAKE_NORMAL_MULTIPLIER)
         stake_reason = "NO_BET"
+
         if is_bet:
             bet_count += 1
-            mult = float(SAFE_STAKE_NORMAL_MULTIPLIER)
-            if not SAFE_STAKE_ENABLED:
-                stake_reason = "STAKE_DISABLED_X1"
-            elif prev_negative:
-                if bet_count == 1 and x2_used < int(SAFE_STAKE_MAX_X2_PER_DAY):
-                    mult = float(SAFE_STAKE_AFTER_NEG_MULTIPLIER)
-                    x2_used += 1
-                    stake_reason = "PREV_NEG_FIRST_BET_X2_MAX1"
-                else:
-                    stake_reason = "PREV_NEG_LATER_BET_X1_MAX1"
+            if (
+                SAFE_STAKE_ENABLED
+                and prev_negative
+                and bet_count == 1
+                and x2_used < int(SAFE_STAKE_MAX_X2_PER_DAY)
+            ):
+                mult = float(SAFE_STAKE_AFTER_NEG_MULTIPLIER)
+                x2_used += 1
+                stake_reason = "PREV_NEG_FIRST_BET_X2_ONLY"
             else:
-                if bet_count == int(SAFE_STAKE_NORMAL_X2_BET_INDEX):
-                    if x2_used >= int(SAFE_STAKE_MAX_X2_PER_DAY):
-                        stake_reason = "NORMAL_BET3_X1_MAX1_ALREADY_USED"
-                    elif float(play_pnl) < float(SAFE_STAKE_X2_MIN_PLAY_PNL):
-                        # Fail conservative: do not chase another x2 later today.
-                        stake_reason = "NORMAL_BET3_X1_DOWNGRADE_NEG_PLAY_PNL"
-                    else:
-                        mult = 2.0
-                        x2_used += 1
-                        stake_reason = "NORMAL_BET3_X2_MAX1"
+                mult = float(SAFE_STAKE_NORMAL_MULTIPLIER)
+                if not SAFE_STAKE_ENABLED:
+                    stake_reason = "STAKE_DISABLED_X1"
+                elif prev_negative:
+                    stake_reason = "PREV_NEG_LATER_BET_X1_ONLY"
                 else:
-                    stake_reason = "NORMAL_X1_MAX1"
+                    stake_reason = "NORMAL_ALL_X1_ONLY"
 
         r["stake_multiplier"] = mult if is_bet else 0.0
         r["stake_label"] = (
@@ -7244,36 +7262,139 @@ def _history_live_apply_balanced_stake(rows: list[dict], prev_day_physical_profi
         r["stake_bet_index"] = bet_count if is_bet else None
         r["stake_x2_used_today"] = int(x2_used)
         r["play_pnl_before"] = round(float(play_pnl), 2)
+
         settled = str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}
         play_profit = (
-            round(float(r.get("bet_profit", 0.0) or 0.0) * mult, 2)
+            round(float(r.get("play_unit_profit", r.get("bet_profit", 0.0)) or 0.0) * float(mult), 2)
             if is_bet and settled
             else 0.0
         )
         r["play_profit"] = play_profit
-        if is_bet and settled:
+        if settled:
             play_pnl = round(float(play_pnl) + float(play_profit), 2)
+        r["play_running_profit"] = round(float(play_pnl), 2)
         out.append(r)
+
     return out
 
+def _pattern112211_shadow_stats(rows: list[dict]) -> dict:
+    """Causal day-local audit for 11221 -> next BET WIN (112211).
 
-class StopOffHistoryLiveTradeEngine(TradeEngine):
-    """Disposable authoritative replay TradeEngine with only fixed DAILY_STOP_LOSS removed."""
-    def daily_stop_status(self) -> tuple[bool, str]:
-        loss_streak = self.get_loss_streak()
-        drawdown = self.get_drawdown()
-        pullback = self.get_daily_pullback_from_peak()
-        if loss_streak >= DAILY_MAX_LOSS_STREAK:
-            return True, "DAILY_MAX_LOSS_STREAK"
-        if drawdown <= DAILY_MAX_DRAWDOWN or pullback <= DAILY_MAX_DRAWDOWN:
-            return True, "DAILY_MAX_DRAWDOWN"
-        daily_profit_lock = float(getattr(self.ctx, "daily_profit_lock_override", DAILY_PROFIT_LOCK))
-        if self.get_total_profit() >= daily_profit_lock:
-            # This is a POSITIVE target lock, not the removed -2.5 stop-loss.
-            return True, "POSITIVE_PROFIT_LOCK"
-        return False, ""
+    Only settled rows with physical action BET are encoded. SKIP/WAIT rows do
+    not consume a pattern symbol. The pattern resets every DAY_SEQ. This is
+    intentionally SHADOW-ONLY: it never changes bet_action, group, stake,
+    target, recovery, or locking.
+    """
+    settled_bets = [
+        dict(r) for r in list(rows or [])
+        if str(r.get("bet_action", "") or "").upper() == "BET"
+        and str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}
+    ]
+    bits = "".join(
+        "1" if str(r.get("status", "") or "").upper() == "WIN" else "2"
+        for r in settled_bets
+    )
+    samples = wins = losses = 0
+    events = []
+    L = len(PATTERN_112211_PREFIX)
+    for i in range(L, len(settled_bets)):
+        if bits[i-L:i] != PATTERN_112211_PREFIX:
+            continue
+        r = settled_bets[i]
+        is_win = str(r.get("status", "") or "").upper() == "WIN"
+        samples += 1
+        wins += int(is_win)
+        losses += int(not is_win)
+        events.append({
+            "open_round": int(r.get("open_round", 0) or 0),
+            "status": str(r.get("status", "") or "").upper(),
+            "group": int(r.get("group", 0) or 0),
+            "confidence": float(r.get("confidence", 0.0) or 0.0),
+            "p20": float(r.get("p20", 0.0) or 0.0),
+            "stability": float(r.get("stability", 0.0) or 0.0),
+        })
+    profit = round(wins * WIN_GROUP + losses * LOSS_GROUP, 2)
+    wr = round(wins / samples, 4) if samples else 0.0
+    ready = bool(bits.endswith(PATTERN_112211_PREFIX))
+    return {
+        "bits": bits,
+        "tail5": bits[-5:] if bits else "",
+        "ready": ready,
+        "samples": samples,
+        "wins": wins,
+        "losses": losses,
+        "wr": wr,
+        "profit": profit,
+        "events": events,
+    }
 
 
+def _pattern112211_apply_execution_filter(rows: list[dict]) -> list[dict]:
+    """Apply 112211 only as a downstream execution confirmation.
+
+    Encoding is based on BASELINE V10 settled BET signals:
+      1 = baseline V10 BET WIN, 2 = baseline V10 BET LOSS.
+    When the previous five baseline V10 BET outcomes are 11221, exactly the
+    next baseline V10 BET is confirmed only when its OPEN confidence is at
+    least PATTERN_112211_CONFIRM_CONF_MIN. The current result is never used
+    to decide the current action. After settlement, its virtual V10 outcome
+    advances the pattern even when physical execution was skipped.
+
+    This layer never modifies bet_action/bet_profit, so V10 strategy state is
+    frozen and deterministic. It writes play_action/play_unit_profit only.
+    """
+    bits = ""
+    out = []
+    for row in list(rows or []):
+        r = dict(row)
+        base_action = str(r.get("bet_action", "") or "").upper()
+        status = str(r.get("status", "") or "").upper()
+        settled = status in {"WIN", "LOSS"}
+        ready_11221 = bool(bits.endswith(PATTERN_112211_PREFIX))
+        ready_111 = bool(bits.endswith(PATTERN_111_PREFIX))
+        matched_prefix = (
+            PATTERN_112211_PREFIX if ready_11221 and PATTERN_112211_CONFIRM_ENABLED
+            else (PATTERN_111_PREFIX if ready_111 and PATTERN_111_CONFIRM_ENABLED else "")
+        )
+        play_action = base_action
+        confirm_pass = None
+        confirm_reason = "PATTERN_NOT_READY"
+
+        if base_action == "BET" and matched_prefix:
+            conf = float(r.get("confidence", 0.0) or 0.0)
+            conf_min = (
+                float(PATTERN_112211_CONFIRM_CONF_MIN)
+                if matched_prefix == PATTERN_112211_PREFIX
+                else float(PATTERN_111_CONFIRM_CONF_MIN)
+            )
+            confirm_pass = bool(conf >= conf_min)
+            if confirm_pass:
+                play_action = "BET"
+                confirm_reason = f"P{matched_prefix}_CONF_PASS"
+            else:
+                play_action = "SKIP"
+                confirm_reason = f"P{matched_prefix}_LOW_CONF_SKIP"
+
+        r["play_action"] = play_action
+        r["play_allowed"] = bool(play_action == "BET")
+        r["pattern112211_ready_before"] = bool(ready_11221)
+        r["pattern111_ready_before"] = bool(ready_111)
+        r["pattern_confirm_prefix"] = matched_prefix
+        r["pattern112211_confirm_pass"] = confirm_pass
+        r["pattern112211_confirm_reason"] = confirm_reason
+        r["pattern112211_virtual_tail_before"] = bits[-5:] if bits else ""
+        r["play_unit_profit"] = (
+            round(float(r.get("bet_profit", 0.0) or 0.0), 2)
+            if play_action == "BET" and settled else 0.0
+        )
+        out.append(r)
+
+        # Advance with the BASELINE V10 signal outcome, not the execution action.
+        # Decision above was already made from prior bits, so no future leak.
+        if base_action == "BET" and settled:
+            bits += "1" if status == "WIN" else "2"
+
+    return out
 
 
 def _fast_profit_from_hits(hits) -> float:
@@ -7390,6 +7511,23 @@ def _history_live_baseline_from_unlocked(
         if str(getattr(t, "status", "") or "").upper() in {"WIN", "LOSS"}
     ), 2)
     return profit, baseline, stop_round
+
+
+
+class StopOffHistoryLiveTradeEngine(TradeEngine):
+    """Disposable authoritative replay engine with only fixed -2.5 stop-loss removed."""
+    def daily_stop_status(self) -> tuple[bool, str]:
+        loss_streak = self.get_loss_streak()
+        drawdown = self.get_drawdown()
+        pullback = self.get_daily_pullback_from_peak()
+        if loss_streak >= DAILY_MAX_LOSS_STREAK:
+            return True, "DAILY_MAX_LOSS_STREAK"
+        if drawdown <= DAILY_MAX_DRAWDOWN or pullback <= DAILY_MAX_DRAWDOWN:
+            return True, "DAILY_MAX_DRAWDOWN"
+        daily_profit_lock = float(getattr(self.ctx, "daily_profit_lock_override", DAILY_PROFIT_LOCK))
+        if self.get_total_profit() >= daily_profit_lock:
+            return True, "POSITIVE_PROFIT_LOCK"
+        return False, ""
 
 def _history_live_replay_one_day(
     numbers: list[int], prior_history: list[dict], day_seq: int, day_id: str,
@@ -7774,11 +7912,17 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
             final_physical_rows = list(physical_rows)
             continuation_replays += 1
 
-        balanced_rows = _history_live_apply_balanced_stake(final_physical_rows, physical_prev)
+        execution_rows = _pattern112211_apply_execution_filter(final_physical_rows)
+        pattern_play_profit = round(
+            sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in execution_rows
+                if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
+        )
+        balanced_rows = _history_live_apply_balanced_stake(execution_rows, physical_prev)
         balanced_stake_profit = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in balanced_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
+        pattern112211 = _pattern112211_shadow_stats(final_physical_rows)
 
         resolved.append({
             "day_seq": int(seq), "day_id": str(day_id or seq),
@@ -7786,7 +7930,12 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
             "adaptive_bet_profit": adaptive_profit,
             "adaptive_choices": dict(choices), "adaptive_cf": dict(cf),
             "history_live_physical_profit": physical_profit,
+            "history_live_pattern_play_profit": pattern_play_profit,
             "history_live_balanced_stake_profit": balanced_stake_profit,
+            "pattern112211_samples": int(pattern112211.get("samples", 0) or 0),
+            "pattern112211_wins": int(pattern112211.get("wins", 0) or 0),
+            "pattern112211_losses": int(pattern112211.get("losses", 0) or 0),
+            "pattern112211_profit": float(pattern112211.get("profit", 0.0) or 0.0),
         })
         adaptive_prev = adaptive_profit
         physical_prev = physical_profit
@@ -7805,7 +7954,7 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.12.5 FAST TRUE NO CACHE + FULL HISTORY + MAX1 X2 SAFE — LIVE ACTION")
+    st.markdown("# 🚀 V10.12.9 FAST TRUE NO CACHE + FULL HISTORY + 112211/111 CONFIRM + FIRST-BET X2 ONLY — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
@@ -7881,6 +8030,11 @@ def render_history_live_authoritative(manager) -> None:
         else:
             rows = base_rows
         pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in rows), 2)
+        rows = _pattern112211_apply_execution_filter(rows)
+        pattern_play_pnl = round(
+            sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in rows
+                if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
+        )
         rows = _history_live_apply_balanced_stake(rows, prev_physical)
         balanced_play_pnl = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in rows
@@ -7910,7 +8064,7 @@ def render_history_live_authoritative(manager) -> None:
         # Deterministic source/action signatures shown to operator.
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
-            "rule": "V10_12_5_HL_SAFE_CONT_RESCUE_MAX1_X2",
+            "rule": "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2",
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -7925,6 +8079,7 @@ def render_history_live_authoritative(manager) -> None:
         ).hexdigest()
 
         hist_physical = [float(x.get("history_live_physical_profit", 0.0) or 0.0) for x in prior]
+        hist_pattern_play = [float(x.get("history_live_pattern_play_profit", x.get("history_live_physical_profit", 0.0)) or 0.0) for x in prior]
         hist_total = round(sum(hist_physical), 2)
         hist_neg = sum(1 for x in hist_physical if x < 0.0)
         hist_streak = _negative_day_streak(hist_physical)
@@ -8018,9 +8173,13 @@ def render_history_live_authoritative(manager) -> None:
             _pending_target = int(pending.get("open_round", 0) or 0) + 1
             if _pending_target == current_round + 1 and _pending_target <= MAX_ROUNDS_PER_DAY:
                 _ui_target = _pending_target
-                _ui_action = str(pending.get("bet_action", "SKIP") or "SKIP").upper()
+                _ui_action = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
                 _ui_group = f"G{int(pending.get('group', 0) or 0)}"
                 _ui_reason = str(pending.get("reason", "") or "")
+                if str(pending.get("pattern_confirm_prefix", "") or ""):
+                    _ui_reason = (
+                        _ui_reason + "|" + str(pending.get("pattern112211_confirm_reason", "") or "")
+                    ).strip("|")
                 _ui_conf = float(pending.get("confidence", 0.0) or 0.0)
                 _ui_p20 = float(pending.get("p20", 0.0) or 0.0)
                 _ui_stab = float(pending.get("stability", 0.0) or 0.0)
@@ -8046,13 +8205,16 @@ def render_history_live_authoritative(manager) -> None:
 
         # V10.7 DISPLAY: make live state unambiguous and keep history visible
         # even when the normal flow returns early for lock/wait/day-complete.
-        if _physical_lock_reached:
+        if current_round >= MAX_ROUNDS_PER_DAY:
+            _day_status = "DAY COMPLETE"
+            _next_trade_status = "NEXT DAY"
+        elif _physical_lock_reached:
             _day_status = "LOCKED FOR DAY"
             _next_trade_status = "NO MORE TRADE TODAY"
         elif pending is not None:
             _day_status = "ACTION READY"
             _next_trade_status = (
-                f"{str(pending.get('bet_action','SKIP') or 'SKIP').upper()} "
+                f"{str(pending.get('play_action', pending.get('bet_action','SKIP')) or 'SKIP').upper()} "
                 f"G{int(pending.get('group',0) or 0)} -> R{current_round + 1}"
             )
         else:
@@ -8069,32 +8231,86 @@ def render_history_live_authoritative(manager) -> None:
             and str(_r.get("status", "") or "").upper() in {"WIN", "LOSS"}
         ]
         _live_bet_pnl = round(sum(float(_r.get("bet_profit", 0.0) or 0.0) for _r in _settled_bets), 2)
-        _live_bet_wins = sum(1 for _r in _settled_bets if str(_r.get("status", "") or "").upper() == "WIN")
-        _live_bet_losses = sum(1 for _r in _settled_bets if str(_r.get("status", "") or "").upper() == "LOSS")
-        _live_bet_count = len(_settled_bets)
-        _skip_count = sum(1 for _r in list(rows or []) if str(_r.get("bet_action", "") or "").upper() == "SKIP")
+        _executed_bets = [
+            _r for _r in list(rows or [])
+            if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "BET"
+            and str(_r.get("status", "") or "").upper() in {"WIN", "LOSS"}
+        ]
+        _exec_wins = sum(1 for _r in _executed_bets if str(_r.get("status", "") or "").upper() == "WIN")
+        _exec_losses = sum(1 for _r in _executed_bets if str(_r.get("status", "") or "").upper() == "LOSS")
+        _live_bet_count = len(_executed_bets)
+        _pattern_skips = sum(
+            1 for _r in list(rows or [])
+            if str(_r.get("bet_action", "") or "").upper() == "BET"
+            and str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "SKIP"
+        )
+        _skip_count = sum(1 for _r in list(rows or []) if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "SKIP")
         # Count assigned x2 BETs including a current pending BET. This is an
         # operator guard only; the deterministic stake function already hard-caps x2.
         _x2_used_today = sum(
             1 for _r in list(rows or [])
-            if str(_r.get("bet_action", "") or "").upper() == "BET"
+            if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "BET"
             and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
         )
 
         st.markdown("### 💰 TODAY LIVE BET RESULT")
-        _p1, _p2, _p3, _p4, _p5, _p6 = st.columns(6)
+        _p1, _p2, _p3, _p4, _p5, _p6, _p7 = st.columns(7)
         _p1.metric("UNIT V10 P/L", f"{_live_bet_pnl:+.1f}")
-        _p2.metric("SAFE PLAY P/L", f"{balanced_play_pnl:+.1f}")
-        _p3.metric("SETTLED BETS", str(_live_bet_count))
-        _p4.metric("WIN / LOSS", f"{_live_bet_wins} / {_live_bet_losses}")
-        _p5.metric("SKIPPED", str(_skip_count))
-        _p6.metric("X2 USED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
+        _p2.metric("PATTERN PLAY P/L", f"{pattern_play_pnl:+.1f}")
+        _p3.metric("SAFE PLAY P/L", f"{balanced_play_pnl:+.1f}")
+        _p4.metric("PLAYED BETS", str(_live_bet_count))
+        _p5.metric("PLAY W / L", f"{_exec_wins} / {_exec_losses}")
+        _p6.metric("PATTERN SKIP", str(_pattern_skips))
+        _p7.metric("X2 USED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
         if _x2_used_today >= int(SAFE_STAKE_MAX_X2_PER_DAY):
-            st.info("🔒 MAX1 X2 LOCK — x2 has already been used today. ALL LATER BETS are x1.")
+            st.info("🔒 FIRST-BET X2 USED — ALL LATER BETS TODAY are x1.")
         st.caption(
-            "UNIT V10 P/L uses x1 strategy units only. SAFE PLAY P/L applies the displayed stake: "
-            "after a negative UNIT V10 day only the first BET next day is x2; otherwise only BET #3 may be x2, and only when settled PLAY P/L before it is >= 0. HARD CAP: max 1 x2 per day. "
+            "UNIT V10 P/L is the frozen V10 strategy. PATTERN PLAY P/L applies the 11221 and 111 confirmation filters at x1. SAFE PLAY P/L then applies the displayed stake: "
+            "after a negative UNIT V10 day only the first BET next day is x2; every later BET is x1. If the previous UNIT V10 day is non-negative, every BET today is x1. HARD CAP: max 1 x2 per day. "
             "Stake sizing NEVER feeds back into V10 signal/target logic."
+        )
+
+        # 112211 SHADOW: diagnostic only; never changes the authoritative action.
+        _p112 = _pattern112211_shadow_stats(rows)
+        _hist_p112_samples = sum(int(_d.get("pattern112211_samples", 0) or 0) for _d in list(prior or []))
+        _hist_p112_wins = sum(int(_d.get("pattern112211_wins", 0) or 0) for _d in list(prior or []))
+        _hist_p112_losses = sum(int(_d.get("pattern112211_losses", 0) or 0) for _d in list(prior or []))
+        _hist_p112_profit = round(sum(float(_d.get("pattern112211_profit", 0.0) or 0.0) for _d in list(prior or [])), 2)
+        _hist_p112_wr = (float(_hist_p112_wins) / float(_hist_p112_samples)) if _hist_p112_samples else 0.0
+        _oos_p112_samples = sum(
+            int(_d.get("pattern112211_samples", 0) or 0)
+            for _d in list(prior or [])
+            if int(_d.get("day_seq", 0) or 0) >= int(PATTERN_112211_CUTOVER_DAY_SEQ)
+        )
+        _oos_p112_wins = sum(
+            int(_d.get("pattern112211_wins", 0) or 0)
+            for _d in list(prior or [])
+            if int(_d.get("day_seq", 0) or 0) >= int(PATTERN_112211_CUTOVER_DAY_SEQ)
+        )
+        _oos_p112_wr = (float(_oos_p112_wins) / float(_oos_p112_samples)) if _oos_p112_samples else 0.0
+
+        st.markdown("### 🧩 112211 BET PATTERN — CONFIRMATION ACTIVE")
+        _q1, _q2, _q3, _q4, _q5 = st.columns(5)
+        _q1.metric("TODAY BET TAIL", _p112.get("tail5", "") or "—")
+        _q2.metric("PATTERN READY", "YES" if bool(_p112.get("ready", False)) else "NO")
+        _q3.metric("HIST SAMPLES", str(_hist_p112_samples))
+        _q4.metric("HIST W / L", f"{_hist_p112_wins} / {_hist_p112_losses}")
+        _q5.metric("HIST WR", f"{_hist_p112_wr*100:.1f}%")
+        if bool(_p112.get("ready", False)):
+            st.warning(
+                "112211 READY: the last five baseline V10 BET outcomes are 11221 (W,W,L,L,W). "
+                "The NEXT baseline V10 BET is confirmed by CONF only; this pattern never creates an extra BET."
+            )
+        else:
+            st.caption(
+                "Encoding: 1=settled BET WIN, 2=settled BET LOSS; pattern resets each day. "
+                f"112211 is NOT stake sizing. It confirms only the next baseline V10 BET with CONF>={PATTERN_112211_CONFIRM_CONF_MIN:.2f}; low-confidence next BET is skipped for execution only. V10 strategy state is unchanged."
+            )
+        st.caption(
+            f"Historical shadow profit={_hist_p112_profit:+.1f}. Post-cutover D{PATTERN_112211_CUTOVER_DAY_SEQ}+ samples="
+            f"{_oos_p112_samples}, WR={_oos_p112_wr*100:.1f}%. "
+            f"Do not consider activation before >= {PATTERN_112211_MIN_SAMPLES_FOR_CONSIDERATION} post-cutover samples "
+            f"and WR >= {PATTERN_112211_MIN_WR_FOR_CONSIDERATION*100:.0f}%."
         )
 
         st.markdown("### 📌 LIVE DAY STATUS")
@@ -8112,7 +8328,8 @@ def render_history_live_authoritative(manager) -> None:
                 "Open R": _or,
                 "Target R": (_or + 1 if _or > 0 else None),
                 "Group": (f"G{int(_r.get('group',0) or 0)}" if int(_r.get('group',0) or 0) > 0 else "—"),
-                "Action": str(_r.get("bet_action", "") or ""),
+                "V10 Action": str(_r.get("bet_action", "") or ""),
+                "Play Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
                 "Stake": str(_r.get("stake_label", "—") or "—"),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
@@ -8182,6 +8399,10 @@ def render_history_live_authoritative(manager) -> None:
                 "Cum Safe P/L": _cum_play,
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
+                "112211 Shadow": (
+                    f"{int(_d.get('pattern112211_wins',0) or 0)}W/{int(_d.get('pattern112211_losses',0) or 0)}L"
+                    if int(_d.get("pattern112211_samples",0) or 0) > 0 else ""
+                ),
             })
         st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY — D1→YESTERDAY")
         if _daily_hist_rows:
@@ -8839,11 +9060,11 @@ try:
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
     st.success(
-        "V10.12.5 FAST TRUE NO CACHE + FULL HISTORY + MAX1 X2 SAFE | AUTHORITATIVE LIVE ONLY | FULL RAW HISTORY REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
+        "V10.12.9 FAST TRUE NO CACHE + FULL HISTORY + 112211+111 CONFIRM + FIRST-BET X2 ONLY | AUTHORITATIVE LIVE ONLY | FULL RAW HISTORY REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
-    st.error(f"V10.12.4.1 LIVE ERROR: {e}")
+    st.error(f"V10.12.8 LIVE ERROR: {e}")
     import traceback
     st.code(traceback.format_exc())
     live_manager = None
