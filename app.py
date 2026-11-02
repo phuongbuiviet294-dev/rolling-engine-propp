@@ -8162,15 +8162,22 @@ def render_history_live_authoritative(manager) -> None:
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
             })
-        st.markdown("### 🗓️ RECENT V10 SIMULATED BET HISTORY")
+        st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY — D1→YESTERDAY")
         if _daily_hist_rows:
-            st.dataframe(pd.DataFrame(_daily_hist_rows[-10:]), use_container_width=True, hide_index=True, height=390)
-            with st.expander("FULL HISTORY D1→YESTERDAY (open only when needed)", expanded=False):
-                st.dataframe(pd.DataFrame(_daily_hist_rows), use_container_width=True, hide_index=True, height=430)
-                st.caption(
-                    "BET P/L = simulated historical result if every V10 BET was followed. "
-                    "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
-                )
+            # UI-only: render one full table instead of a duplicated recent table + expander.
+            # This does not participate in strategy/replay and avoids the extra duplicate dataframe render.
+            _hist_df = pd.DataFrame(_daily_hist_rows)
+            _hist_height = min(max(430, 35 * (len(_hist_df) + 1)), 1200)
+            st.dataframe(
+                _hist_df,
+                use_container_width=True,
+                hide_index=True,
+                height=_hist_height,
+            )
+            st.caption(
+                "BET P/L = simulated historical result if every V10 BET was followed. "
+                "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
+            )
         else:
             st.info("No completed V10 simulated daily history yet.")
 
