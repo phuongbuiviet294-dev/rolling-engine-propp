@@ -19,8 +19,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional, Any
 
 import pandas as pd
+import io
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 
 # ============================================================
@@ -57,7 +60,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.9 FAST TRUE NO CACHE | FULL HISTORY | 112211+111 CONFIRM | FIRST-BET X2 ONLY | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.9 V187 NO-CACHE V8.2 PRETRADE ARM | FAST TRUE NO CACHE | FULL HISTORY | 112211+111 CONFIRM | FIRST-BET X2 ONLY | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -704,7 +707,13 @@ MAX_ROUNDS_PER_DAY = 288
 # on every refresh. Only completed-history replay may be reused when its raw
 # fingerprint is byte-for-byte identical.
 VERIFIED_HISTORY_REPLAY_MEMO = False
-LIVE_STALE_SECONDS = int(os.environ.get("LIVE_STALE_SECONDS", "720") or 720)
+# No-cache means no derived history memo. It does not guarantee Google has
+# published a fresh round; treat a source unchanged for >7min as unavailable.
+# Cap any operator-supplied timeout to one 5-minute round + 2min jitter.
+try:
+    LIVE_STALE_SECONDS = max(120, min(420, int(os.environ.get("LIVE_STALE_SECONDS", "420") or 420)))
+except (TypeError, ValueError):
+    LIVE_STALE_SECONDS = 420
 VERIFIED_REPLAY_VERSION = "V6_HISTORY_RAW_HASH_1"
 
 
@@ -715,55 +724,96 @@ def _sheet_csv_url(sheet_name: str) -> str:
     )
 
 
-def _load_live_sheet_df() -> pd.DataFrame:
-    """Read ONLY the current-day `data` tab.
+def _read_google_sheet_csv_no_cache(sheet_name: str) -> pd.DataFrame:
+    """Get fresh CSV bytes via HTTP. Timeout and no-store headers are explicit.
 
-    Contract: data contains header + at most 288 round rows. Historical rows
-    must never be mixed into the live Number stream.
+    Google may still publish data late; unchanged raw snapshots are separately
+    rejected by the durable, fingerprint-based freshness guard.
     """
+    timeout = (5, 25)
+    headers = {
+        "Accept": "text/csv",
+        "Cache-Control": "no-cache, no-store, max-age=0",
+        "Pragma": "no-cache",
+    }
+    response = requests.get(_sheet_csv_url(sheet_name), headers=headers, timeout=timeout)
+    response.raise_for_status()
+    if not response.content:
+        raise ValueError(f"Google Sheet {sheet_name!r} returned empty CSV")
+    data = pd.read_csv(io.BytesIO(response.content))
+    if data.empty and sheet_name == HISTORY_SHEET_NAME:
+        raise ValueError("Historical sheet is empty")
+    if len(data.columns) < 3:
+        raise ValueError(f"Google Sheet {sheet_name!r} returned unexpected columns")
+    return data
+
+
+def _load_live_sheet_df() -> pd.DataFrame:
+    """Read ONLY current-day data. No memo, no decorator, no source cache."""
     if INPUT_CSV_PATH:
         try:
             return pd.read_csv(INPUT_CSV_PATH)
         except Exception as e:
-            st.error(f"Load local CSV error: {e}")
+            st.error(f"Load local CSV error: {e}. CURRENT ACTION: WAIT / NO BET.")
             st.stop()
     try:
-        df = pd.read_csv(_sheet_csv_url(DATA_SHEET_NAME))
+        df = _read_google_sheet_csv_no_cache(DATA_SHEET_NAME)
     except Exception as e:
-        st.error(f"Load Sheet tab '{DATA_SHEET_NAME}' error: {e}")
+        st.error(f"Google Sheet DATA timeout/read error: {e}. WAIT / NO BET.")
         st.stop()
     if len(df) > MAX_ROUNDS_PER_DAY + 5:
         st.error(
             f"LIVE DATA ERROR: tab '{DATA_SHEET_NAME}' has {len(df)} rows. "
-            f"Expected at most {MAX_ROUNDS_PER_DAY + 5}. Do not put history in data."
+            "Expected at most 293 rows. Do not put history in data. WAIT / NO BET."
         )
         st.stop()
     return df
 
 
 def _load_history_sheet_df() -> pd.DataFrame:
-    """Read historical days separately; never used as live Number input."""
+    """Read ALL completed days each refresh; no cache, fail closed on error."""
     if INPUT_CSV_PATH:
         return pd.DataFrame()
     try:
-        return pd.read_csv(_sheet_csv_url(HISTORY_SHEET_NAME))
+        return _read_google_sheet_csv_no_cache(HISTORY_SHEET_NAME)
     except Exception as e:
-        st.warning(f"History tab '{HISTORY_SHEET_NAME}' unavailable: {e}")
-        return pd.DataFrame()
+        st.error(f"Google Sheet HISTORY timeout/read error: {e}. WAIT / NO BET.")
+        st.stop()
 
+
+def _raw_cell_blank(raw: Any) -> bool:
+    if raw is None:
+        return True
+    try:
+        if bool(pd.isna(raw)):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(raw).strip().lower() in {"", "nan", "nat", "none", "null"}
+
+
+def _strict_positive_int(raw: Any) -> Optional[int]:
+    """Return a positive integer only if the cell is EXACTLY integral.
+
+    Reject 1.5, 63.5, Infinity, and mixed text instead of truncating. Accept
+    numerically integral Sheets/Excel representations such as 1, 1.0, '1,0'.
+    """
+    if _raw_cell_blank(raw) or isinstance(raw, bool):
+        return None
+    try:
+        from decimal import Decimal, InvalidOperation
+        value = Decimal(str(raw).strip().replace(",", "."))
+        if not value.is_finite() or value != value.to_integral_value():
+            return None
+        out = int(value)
+        return out if out > 0 else None
+    except (ValueError, ArithmeticError, InvalidOperation):
+        return None
 
 
 def _parse_number_value(raw: Any) -> Optional[int]:
-    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-        return None
-    s = str(raw).strip()
-    if not s or s.lower() in {"nan", "nat", "none"}:
-        return None
-    try:
-        x = int(float(s.replace(",", ".")))
-    except Exception:
-        return None
-    return x if 1 <= x <= 12 else None
+    x = _strict_positive_int(raw)
+    return x if x is not None and 1 <= x <= 12 else None
 
 
 def _parse_profit_value(raw: Any) -> Optional[float]:
@@ -976,16 +1026,7 @@ def _read_contiguous_number_column(df: pd.DataFrame, col_idx: int, skip_first_da
 
 
 def _normalize_day_seq(raw: Any) -> Optional[int]:
-    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-        return None
-    s = str(raw).strip()
-    if not s or s.lower() in {"nan", "nat", "none"}:
-        return None
-    try:
-        x = int(float(s.replace(",", ".")))
-    except Exception:
-        return None
-    return x if x >= 1 else None
+    return _strict_positive_int(raw)
 
 
 def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
@@ -997,7 +1038,6 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
       C = day_seq (1,2,3,... monotonic)
       D = date
       E = daily_profit
-
     The highest valid day_seq is the live/current day. Historical rows remain
     in the Sheet and are never used as the current Number stream.
     """
@@ -1012,7 +1052,14 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
     c_seq = df.iloc[:, 2]
     c_date = df.iloc[:, 3]
 
-    seqs = [_normalize_day_seq(x) for x in c_seq.tolist()]
+    raw_seqs = c_seq.tolist()
+    seqs = [_normalize_day_seq(x) for x in raw_seqs]
+    bad_seq_rows = [i+2 for i, (raw, seq) in enumerate(zip(raw_seqs, seqs))
+                    if not _raw_cell_blank(raw) and seq is None]
+    if bad_seq_rows:
+        st.error(f"LIVE DATA ERROR: invalid DaySeq at Sheet row(s) {bad_seq_rows[:12]}. "
+                 "CURRENT ACTION: WAIT / DO NOT BET.")
+        st.stop()
     valid = [x for x in seqs if x is not None]
     if not valid:
         st.warning("Waiting DAY_SEQ data...")
@@ -1033,10 +1080,7 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
     for pos, i in enumerate(idxs, start=1):
         raw_r = c_round.iloc[i]
         raw_n = c_number.iloc[i]
-        try:
-            rr = int(float(str(raw_r).replace(",", ".")))
-        except Exception:
-            rr = -1
+        rr = _strict_positive_int(raw_r)
         n = _parse_number_value(raw_n)
         if rr != pos:
             st.error(
@@ -1045,18 +1089,17 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
             )
             st.stop()
         if n is None:
-            # A blank tail is normal. A blank/invalid row followed by any valid
-            # Number in the same DAY_SEQ is a data gap and must fail-stop rather
-            # than silently treating the earlier row as the live frontier.
-            later_valid = False
-            for j in idxs[pos:]:
-                if _parse_number_value(c_number.iloc[j]) is not None:
-                    later_valid = True
-                    break
-            if later_valid:
+            # Only a truly blank trailing cell may terminate the live prefix.
+            # A numeric typo such as 1.5 or 13 MUST NOT silently roll back the
+            # frontier, as doing so could repeat a previous BET action.
+            if not _raw_cell_blank(raw_n):
+                st.error(f"LIVE INVALID NUMBER DaySeq {current_seq} R{pos}: {raw_n!r}. "
+                         "CURRENT ACTION: WAIT / DO NOT BET.")
+                st.stop()
+            if any(not _raw_cell_blank(c_number.iloc[j]) for j in idxs[pos:]):
                 st.error(
-                    f"LIVE DATA GAP DaySeq {current_seq}: round {pos} is blank/invalid "
-                    "but a later round has a Number. Engine stopped."
+                    f"LIVE DATA GAP DaySeq {current_seq}: round {pos} blank "
+                    "but a later round contains a Number/invalid value. Engine stopped."
                 )
                 st.stop()
             break
@@ -1094,18 +1137,17 @@ def _extract_day_seq_snapshot_from_df(df: pd.DataFrame, target_seq: int) -> tupl
     dates: list[str] = []
     for pos, i in enumerate(idxs, start=1):
         raw_r = df.iloc[i, 0]
-        try:
-            rr = int(float(str(raw_r).replace(",", ".")))
-        except Exception:
-            rr = -1
+        rr = _strict_positive_int(raw_r)
         if rr != pos:
             st.error(f"DAY BOUNDARY ERROR DaySeq {target_seq}: expected round {pos}, found {raw_r!r}.")
             st.stop()
         n = _parse_number_value(df.iloc[i, 1])
         if n is None:
-            later_valid = any(_parse_number_value(df.iloc[j, 1]) is not None for j in idxs[pos:])
-            if later_valid:
-                st.error(f"DAY BOUNDARY GAP DaySeq {target_seq}: round {pos} blank/invalid but later Number exists.")
+            if not _raw_cell_blank(df.iloc[i, 1]):
+                st.error(f"DAY BOUNDARY INVALID NUMBER DaySeq {target_seq} R{pos}.")
+                st.stop()
+            if any(not _raw_cell_blank(df.iloc[j, 1]) for j in idxs[pos:]):
+                st.error(f"DAY BOUNDARY GAP DaySeq {target_seq}: round {pos} blank but later value exists.")
                 st.stop()
             break
         nums.append(n)
@@ -2997,7 +3039,6 @@ class ProtectionEngine:
         self.ctx.last_risk_trigger_trade_count = trade_count
         self.ctx.protection_reason = reason
         return True
-
     def cooldown_engine(self) -> bool:
         loss_streak = self.trade_engine.get_loss_streak()
 
@@ -4997,7 +5038,6 @@ def reset_live_state_button() -> None:
             st.session_state.v50_true_live_ctx = blank_ctx
             st.session_state.v50_true_live_window_state = {w: WindowRecord() for w in WINDOWS}
             st.rerun()
-
         if st.button("Reset Live State"):
             old_ctx_for_history = ensure_ctx_fields(get_live_ctx())
             carry_history = carry_forward_daily_profit_history(old_ctx_for_history)
@@ -6861,8 +6901,11 @@ def _validated_numbers_by_day(history_df: pd.DataFrame, current_seq: int) -> lis
     sc = cols.get("day_seq", history_df.columns[2])
     dc = cols.get("date", history_df.columns[3] if history_df.shape[1] > 3 else history_df.columns[0])
     tmp = history_df[[rc, nc, sc, dc]].copy()
-    tmp["_seq"] = pd.to_numeric(tmp[sc], errors="coerce")
-    tmp["_round"] = pd.to_numeric(tmp[rc], errors="coerce")
+    tmp["_seq"] = tmp[sc].map(_strict_positive_int)
+    bad_history_seq = tmp[sc].map(lambda x: not _raw_cell_blank(x)) & tmp["_seq"].isna()
+    if bool(bad_history_seq.any()):
+        raise ValueError("HISTORY DATA INVALID: DaySeq contains a non-integer/invalid value")
+    tmp["_round"] = tmp[rc].map(_strict_positive_int)
     tmp = tmp[(tmp["_seq"] > 0) & (tmp["_seq"] < int(current_seq or 0))]
     out = []
     for seq, g in tmp.groupby("_seq", sort=True):
@@ -7168,6 +7211,104 @@ HISTORY_LIVE_RESCUE_G2_STABILITY_MIN = 0.65
 # raw dataset was recorded.
 HISTORY_LIVE_STRICT_PREV_COMPLETE_CUTOVER_DAY_SEQ = 59
 
+# V187 FULL_HISTORY: the SAME V187 physical/execution policy is replayed from
+# D1 through yesterday and used for today's advisory action.  No legacy D1-D62
+# strategy split. Historical actions remain SIMULATED and are not real wagers.
+# First deployment may arm BEFORE the first possible live BET (R180),
+# at any observed raw round R1..R179, with a dedicated marker. If the
+# application first starts at R180 or later, fail closed until the next day.
+# This NEVER authorizes switching policies after a live action could exist.
+V187_MODE = os.environ.get("V187_MODE", "FULL_HISTORY").strip().upper()
+try:
+    V187_START_DAY_SEQ = int(os.environ.get("V187_START_DAY_SEQ", "1") or "0")
+except (TypeError, ValueError):
+    V187_START_DAY_SEQ = -1
+try:
+    V187_END_DAY_SEQ = int(os.environ.get("V187_END_DAY_SEQ", "0") or "0")
+except (TypeError, ValueError):
+    V187_END_DAY_SEQ = -1
+if (V187_MODE not in {"BASELINE", "CANDIDATE", "FULL_HISTORY"} or V187_START_DAY_SEQ < 0
+        or V187_END_DAY_SEQ < 0
+        or (V187_END_DAY_SEQ > 0 and V187_END_DAY_SEQ < V187_START_DAY_SEQ)):
+    st.error("INVALID V187 CONFIG: check MODE, START_DAY_SEQ and END_DAY_SEQ")
+    st.stop()
+if V187_MODE == "CANDIDATE" and V187_START_DAY_SEQ < 63:
+    st.error("V187 CUTOVER MODE: start must be >=63.")
+    st.stop()
+if V187_MODE == "FULL_HISTORY" and (V187_START_DAY_SEQ != 1 or V187_END_DAY_SEQ != 0):
+    st.error("V187 FULL_HISTORY requires V187_START_DAY_SEQ=1 and V187_END_DAY_SEQ=0. WAIT.")
+    st.stop()
+# Default to a NEW durable safety witness for this policy. Never reuse the
+# baseline/cutover marker or erase it to force a policy switch.
+if V187_MODE == "FULL_HISTORY" and not os.environ.get("V10_RAW_OBSERVATION_FILE", "").strip():
+    RAW_OBSERVATION_FILE = STATE_FILE + ".v187_full_history.raw_observation.json"
+# V8.3: resolve one deterministic path. Explicit env path remains authoritative;
+# never silently create/replace a marker if it belongs to a different policy.
+RAW_OBSERVATION_FILE = os.path.abspath(os.path.expanduser(RAW_OBSERVATION_FILE))
+
+V187_G4_P20_MIN = 6.0
+V187_G4_CONF_MIN = 0.50
+V187_G4_STAB_MIN = 0.50
+V187_G1_P20_MIN = 6.0
+V187_G1_CONF_MIN = 0.56
+V187_G1_STAB_MIN = 0.50
+V187_RECOVERY_CONF_MIN = 0.60
+
+
+def _v187_first_arm_before_live_trading(round_id: int) -> bool:
+    """A first FULL_HISTORY marker is safe only before any possible LIVE BET.
+
+    R1..R179 warm up the engine but no BET may be emitted (LIVE_START_ROUND=180).
+    At R180+ never backdate a first deployment; wait for a new day instead.
+    """
+    try:
+        r = int(round_id)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return 1 <= r < int(LIVE_START_ROUND)
+
+
+def _v187_day_active(day_seq: int) -> bool:
+    seq = int(day_seq or 0)
+    if seq < 1:
+        return False
+    if V187_MODE == "FULL_HISTORY":
+        return True
+    return (V187_MODE == "CANDIDATE"
+            and V187_START_DAY_SEQ >= 63
+            and seq >= V187_START_DAY_SEQ
+            and (V187_END_DAY_SEQ == 0 or seq <= V187_END_DAY_SEQ))
+
+
+def _v187_try_promote(base: dict, group: int, p20: float,
+                      confidence: float, stability: float,
+                      prev_physical: float, physical_bits: str,
+                      g4_used: int, g1_used: int) -> tuple[bool,str]:
+    """Promote adaptive-SKIP only. Guard, continuation and confirmation still apply.
+
+    Bits include only PREVIOUS settled PHYSICAL BET outcomes, not execution
+    results. The candidate's own WIN/LOSS is appended after its decision.
+    Counters are consumed at candidate selection time (even if a later guard vetoes).
+    """
+    reason = str(base.get("bet_skip_reason", "") or "")
+    if bool(base.get("bet_allowed", False)):
+        return False, ""
+    if group == 4 and g4_used == 0:
+        if (reason in {"G4_CONFIDENCE_FILTER", "G4_P17_FILTER", "G4_P21_FILTER"}
+                and p20 >= V187_G4_P20_MIN
+                and confidence >= V187_G4_CONF_MIN
+                and stability >= V187_G4_STAB_MIN
+                and not str(physical_bits).endswith("111")):
+            return True, "V187_ADDED_G4"
+    if group == 1 and g1_used == 0:
+        if (reason.endswith("_FILTER")
+                and float(prev_physical) > 0.0
+                and p20 >= V187_G1_P20_MIN
+                and confidence >= V187_G1_CONF_MIN
+                and stability >= V187_G1_STAB_MIN):
+            return True, "V187_ADDED_G1_PREV_POS"
+    return False, ""
+
 # V10.12.7 SAFE STAKE — money-management only; NEVER feeds back into strategy.
 # - Previous completed UNIT V10 day < 0: only the FIRST BET next day is x2.
 # - All later BETs that day are x1.
@@ -7329,7 +7470,7 @@ def _pattern112211_shadow_stats(rows: list[dict]) -> dict:
     }
 
 
-def _pattern112211_apply_execution_filter(rows: list[dict]) -> list[dict]:
+def _pattern112211_apply_execution_filter(rows: list[dict], day_seq: int = 0) -> list[dict]:
     """Apply 112211 only as a downstream execution confirmation.
 
     Encoding is based on BASELINE V10 settled BET signals:
@@ -7367,6 +7508,8 @@ def _pattern112211_apply_execution_filter(rows: list[dict]) -> list[dict]:
                 if matched_prefix == PATTERN_112211_PREFIX
                 else float(PATTERN_111_CONFIRM_CONF_MIN)
             )
+            if _v187_day_active(day_seq):
+                conf_min = V187_RECOVERY_CONF_MIN
             confirm_pass = bool(conf >= conf_min)
             if confirm_pass:
                 play_action = "BET"
@@ -7571,6 +7714,7 @@ def _history_live_replay_one_day(
 
 def _history_live_apply_overlay(
     ledger: list[TradeRecord], adaptive_rows: list[dict], prev_physical_profit: float,
+    day_seq: int = 0,
 ) -> list[dict]:
     """Frozen causal physical overlay selected on D1-D40 only."""
     amap = {
@@ -7581,6 +7725,8 @@ def _history_live_apply_overlay(
     physical_pnl = 0.0
     prev_negative = float(prev_physical_profit or 0.0) < 0.0
     g2_eligible_seen = 0
+    g4_v187_used = g1_v187_used = 0
+    physical_bits = ""
     out = []
     for t in sorted(
         list(ledger or []),
@@ -7591,17 +7737,26 @@ def _history_live_apply_overlay(
         base = dict(amap.get((open_round, group), {}) or {})
         allowed = bool(base.get("bet_allowed", False))
         reasons = [str(base.get("bet_skip_reason", "") or "")]
+        confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
+        p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
+        stability = float(getattr(t, "open_stability", 0.0) or 0.0)
+        lock_reason = str(getattr(t, "open_lock_reason", "") or "")
+        if _v187_day_active(day_seq) and not allowed:
+            promoted, why = _v187_try_promote(
+                base, group, p20, confidence, stability,
+                prev_physical_profit, physical_bits, g4_v187_used, g1_v187_used,
+            )
+            if promoted:
+                allowed = True
+                reasons.append(why)
+                if group == 4: g4_v187_used += 1
+                if group == 1: g1_v187_used += 1
 
         if allowed and group == 2:
             g2_eligible_seen += 1
             if prev_negative and g2_eligible_seen <= HISTORY_LIVE_PREV_NEG_G2_SKIP:
                 allowed = False
                 reasons.append(f"HL_G2_AFTER_NEG_SKIP_{g2_eligible_seen}")
-
-        confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
-        p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
-        stability = float(getattr(t, "open_stability", 0.0) or 0.0)
-        lock_reason = str(getattr(t, "open_lock_reason", "") or "")
 
         if allowed and group == 3 and lock_reason == HISTORY_LIVE_G3_KEEP_REASON:
             allowed = False
@@ -7617,7 +7772,9 @@ def _history_live_apply_overlay(
             engine_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
             or physical_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
         )
-        if allowed and recovery_mode and confidence < HISTORY_LIVE_RECOVERY_CONF_MIN:
+        recovery_conf = (V187_RECOVERY_CONF_MIN if _v187_day_active(day_seq)
+                         else HISTORY_LIVE_RECOVERY_CONF_MIN)
+        if allowed and recovery_mode and confidence < recovery_conf:
             allowed = False
             reasons.append("HL_RECOVERY_CONF_FILTER")
 
@@ -7651,6 +7808,8 @@ def _history_live_apply_overlay(
         if settled:
             engine_pnl += engine_profit
             physical_pnl += bet_profit
+            if allowed:
+                physical_bits += "1" if status == "WIN" else "2"
     return out
 
 
@@ -7661,6 +7820,7 @@ def _history_live_apply_hybrid_continuation(
     continuation_adaptive_rows: list[dict],
     prev_physical_profit: float,
     positive_target: float,
+    day_seq: int = 0,
 ) -> list[dict]:
     """V10.6 causal safe continuation after the baseline ENGINE target.
 
@@ -7693,6 +7853,8 @@ def _history_live_apply_hybrid_continuation(
     prev_negative = float(prev_physical_profit or 0.0) < 0.0
     g2_eligible_seen = 0
     rescue_used = 0
+    g4_v187_used = g1_v187_used = 0
+    physical_bits = ""
     out = []
 
     for t in sorted(
@@ -7707,17 +7869,26 @@ def _history_live_apply_hybrid_continuation(
         base = dict(amap.get((open_round, group), {}) or {})
         allowed = bool(base.get("bet_allowed", False))
         reasons = [str(base.get("bet_skip_reason", "") or "")]
+        confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
+        p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
+        stability = float(getattr(t, "open_stability", 0.0) or 0.0)
+        lock_reason = str(getattr(t, "open_lock_reason", "") or "")
+        if _v187_day_active(day_seq) and not allowed:
+            promoted, why = _v187_try_promote(
+                base, group, p20, confidence, stability,
+                prev_physical_profit, physical_bits, g4_v187_used, g1_v187_used,
+            )
+            if promoted:
+                allowed = True
+                reasons.append(why)
+                if group == 4: g4_v187_used += 1
+                if group == 1: g1_v187_used += 1
 
         if allowed and group == 2:
             g2_eligible_seen += 1
             if prev_negative and g2_eligible_seen <= HISTORY_LIVE_PREV_NEG_G2_SKIP:
                 allowed = False
                 reasons.append(f"HL_G2_AFTER_NEG_SKIP_{g2_eligible_seen}")
-
-        confidence = float(getattr(t, "open_confidence", 0.0) or 0.0)
-        p20 = float(getattr(t, "open_shadow_profit20", 0.0) or 0.0)
-        stability = float(getattr(t, "open_stability", 0.0) or 0.0)
-        lock_reason = str(getattr(t, "open_lock_reason", "") or "")
 
         if allowed and group == 3 and lock_reason == HISTORY_LIVE_G3_KEEP_REASON:
             allowed = False
@@ -7734,7 +7905,9 @@ def _history_live_apply_hybrid_continuation(
             engine_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
             or physical_pnl <= HISTORY_LIVE_RECOVERY_TRIGGER
         )
-        if allowed and recovery_mode and confidence < HISTORY_LIVE_RECOVERY_CONF_MIN:
+        recovery_conf = (V187_RECOVERY_CONF_MIN if _v187_day_active(day_seq)
+                         else HISTORY_LIVE_RECOVERY_CONF_MIN)
+        if allowed and recovery_mode and confidence < recovery_conf:
             allowed = False
             reasons.append("HL_RECOVERY_CONF_FILTER")
 
@@ -7817,6 +7990,8 @@ def _history_live_apply_hybrid_continuation(
         if settled:
             engine_pnl += engine_profit
             physical_pnl += bet_profit
+            if allowed:
+                physical_bits += "1" if status == "WIN" else "2"
 
     return out
 
@@ -7884,7 +8059,7 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
         cf = _adaptive_counterfactual(ledger, adaptive_prev)
 
         # First compute the frozen physical overlay on the baseline ledger.
-        base_physical_rows = _history_live_apply_overlay(ledger, adaptive_rows, physical_prev)
+        base_physical_rows = _history_live_apply_overlay(ledger, adaptive_rows, physical_prev, day_seq=seq)
         base_physical_profit = round(
             sum(float(r.get("bet_profit", 0.0) or 0.0) for r in base_physical_rows), 2
         )
@@ -7904,7 +8079,7 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
             _cont_adaptive_rows = _adaptive_apply_bet_filter(_cont_ledger, adaptive_prev, choices)
             physical_rows = _history_live_apply_hybrid_continuation(
                 ledger, eng, _cont_ledger, _cont_adaptive_rows,
-                physical_prev, lock,
+                physical_prev, lock, day_seq=seq,
             )
             physical_profit = round(
                 sum(float(r.get("bet_profit", 0.0) or 0.0) for r in physical_rows), 2
@@ -7912,7 +8087,7 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
             final_physical_rows = list(physical_rows)
             continuation_replays += 1
 
-        execution_rows = _pattern112211_apply_execution_filter(final_physical_rows)
+        execution_rows = _pattern112211_apply_execution_filter(final_physical_rows, day_seq=seq)
         pattern_play_profit = round(
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in execution_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
@@ -7954,11 +8129,29 @@ def render_history_live_authoritative(manager) -> None:
     current day only through the observed frontier. Any integrity uncertainty
     fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.12.9 FAST TRUE NO CACHE + FULL HISTORY + 112211/111 CONFIRM + FIRST-BET X2 ONLY — LIVE ACTION")
+    st.markdown("# 🚀 V187 FULL HISTORY — NO CACHE LIVE ACTION" if V187_MODE == "FULL_HISTORY" else
+                "# 🚀 V10.12.9 BASELINE / V187 CUTOVER-CONTROLLED — LIVE ACTION")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
     )
+
+    # V8.1: visible manual refresh in the main LIVE ACTION area.
+    # Streamlit buttons AUTOMATICALLY rerun the full script on click.  Do not
+    # call st.rerun() here: doing so would duplicate the Google Sheet fetch
+    # and the no-cache history replay (and add unnecessary latency).
+    _refresh_col, _refresh_explain_col = st.columns([1, 3])
+    with _refresh_col:
+        _manual_refresh_clicked = st.button(
+            "🔄 Refresh Now",
+            key="v187_main_refresh_now",
+            use_container_width=True,
+            help="Read Google Sheet data + history again, rerun V187 D1→today, then show the latest live decision.",
+        )
+    with _refresh_explain_col:
+        st.caption("Bấm để tải lại Google Sheet và replay ngay. Auto refresh vẫn hoạt động; không dùng cache.")
+    if _manual_refresh_clicked:
+        st.caption("🔄 Manual refresh: nguồn và chiến lược đã được tính lại trong lần chạy này.")
 
     if not HISTORY_LIVE_LIVE_ENABLED:
         st.error("HISTORY-LIVE LIVE is disabled. CURRENT ACTION: WAIT / DO NOT BET.")
@@ -7997,7 +8190,6 @@ def render_history_live_authoritative(manager) -> None:
                 "TRUE NO CACHE requires full raw replay. CURRENT ACTION: WAIT / DO NOT BET."
             )
             return
-
         lock = get_dynamic_daily_profit_lock(prior[-10:])
         _unlocked_engine_profit, _unlocked_current_ledger = _history_live_replay_one_day(
             numbers, prior[-10:], seq, day_date, 9999.0,
@@ -8011,7 +8203,7 @@ def render_history_live_authoritative(manager) -> None:
         # V10.10 FAST: current-day continuation/rescue replay is conditional.
         # Before engine target, baseline overlay is sufficient and avoids a second
         # R1->current replay on every browser refresh.
-        base_rows = _history_live_apply_overlay(ledger, adaptive_rows, prev_physical)
+        base_rows = _history_live_apply_overlay(ledger, adaptive_rows, prev_physical, day_seq=seq)
         base_pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in base_rows), 2)
         if (
             HISTORY_LIVE_CONTINUATION_ENABLED
@@ -8025,12 +8217,12 @@ def render_history_live_authoritative(manager) -> None:
             )
             rows = _history_live_apply_hybrid_continuation(
                 ledger, engine_profit, continuation_ledger, continuation_adaptive_rows,
-                prev_physical, lock,
+                prev_physical, lock, day_seq=seq,
             )
         else:
             rows = base_rows
         pnl = round(sum(float(r.get("bet_profit", 0.0) or 0.0) for r in rows), 2)
-        rows = _pattern112211_apply_execution_filter(rows)
+        rows = _pattern112211_apply_execution_filter(rows, day_seq=seq)
         pattern_play_pnl = round(
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
@@ -8040,6 +8232,14 @@ def render_history_live_authoritative(manager) -> None:
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
+
+        # TRUE NO CACHE: verify snapshot was still recent AFTER doing the full
+        # history/current replay. Historical replay may be slow on a small VM.
+        _source_compute_age = max(0.0, time.time() - float(getattr(manager.ctx, "live_raw_read_at", 0.0) or 0.0))
+        if _source_compute_age > 120.0:
+            st.error(f"LIVE SELF-CHECK FAILED: replay took {_source_compute_age:.1f}s "
+                     "after source fetch (>120s). CURRENT ACTION: WAIT / DO NOT BET.")
+            return
 
         # No future settlement may exist relative to the observed raw frontier.
         future_rows = [
@@ -8061,10 +8261,31 @@ def render_history_live_authoritative(manager) -> None:
             return
         pending = pending_rows[0] if pending_rows else None
 
+        # Independent execution safety: a physical BET may carry x2 only once
+        # in the entire day; the pending BET consumes that slot as well.
+        executed_x2 = [r for r in rows
+                       if str(r.get("play_action", r.get("bet_action", "")) or "").upper() == "BET"
+                       and abs(float(r.get("stake_multiplier", 0.0) or 0.0)-2.0)<1e-9]
+        if len(executed_x2) > 1:
+            st.error("LIVE SELF-CHECK FAILED: more than one x2 BET in the day. WAIT / NO BET.")
+            return
+        if pending is not None:
+            final_action = str(pending.get("play_action", pending.get("bet_action", "")) or "").upper()
+            if final_action not in {"BET", "SKIP"}:
+                st.error("LIVE SELF-CHECK FAILED: invalid final action. WAIT / NO BET.")
+                return
+            if final_action == "BET" and float(pending.get("stake_multiplier", 0.0) or 0.0) not in (1.0, 2.0):
+                st.error("LIVE SELF-CHECK FAILED: invalid live stake multiplier. WAIT / NO BET.")
+                return
+
         # Deterministic source/action signatures shown to operator.
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
             "rule": "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2",
+            "v187_mode": V187_MODE,
+            "v187_start_day_seq": V187_START_DAY_SEQ,
+            "v187_end_day_seq": V187_END_DAY_SEQ,
+            "v187_active_today": _v187_day_active(seq),
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -8087,11 +8308,25 @@ def render_history_live_authoritative(manager) -> None:
 
         _engine_positive_lock_reached = float(engine_profit) >= float(lock)
         _physical_lock_reached = float(pnl) >= float(lock)
+        if _physical_lock_reached and pending is not None and str(pending.get("play_action", "") or "").upper() == "BET":
+            st.error("LIVE SELF-CHECK FAILED: BET pending despite positive physical profit lock. WAIT / NO BET.")
+            return
         st.caption(
             f"D{seq} {day_date or ''} | R{current_round}/288 | HISTORY={replayed} days | "
             f"V10 REPLAY P/L={pnl:+.1f} | ENGINE={float(engine_profit):+.1f} | "
             f"PREV V10 PHYSICAL={float(prev_physical):+.1f} | POSITIVE TARGET={float(lock):+.1f}"
         )
+        if V187_MODE == "FULL_HISTORY":
+            st.info("V187 FULL HISTORY ACTIVE: replay D1→today with ONE V187 policy. "
+                    "Historical BET/P&L is simulated, not a record of real wagers. "
+                    "Do not switch policy during an active day.")
+        elif _v187_day_active(seq):
+            st.warning(f"V187 EXPERIMENTAL CANDIDATE ACTIVE FROM D{V187_START_DAY_SEQ} | RECOVERY CONF=0.60 | "
+                       "HISTORIC +187 IS NOT A VERIFIED LIVE EXPECTATION. DO NOT CHANGE MODE MID-DAY.")
+        else:
+            st.caption(f"V187 CONFIG: mode={V187_MODE} | cutover=D{V187_START_DAY_SEQ or 'OFF'} "
+                       f"| end=D{V187_END_DAY_SEQ or 'OPEN'} | "
+                       "CURRENT ACTION USES ORIGINAL V10.12.9 BASELINE")
         st.caption(
             "RISK STATE: STOP-LOSS -2.5 = OFF | "
             + (
@@ -8105,8 +8340,9 @@ def render_history_live_authoritative(manager) -> None:
             )
         )
         st.caption(
-            "P/L NOTE: V10 REPLAY P/L is the deterministic V10 replay from R1. "
-            "If V10 was deployed after earlier bets were already placed with V7, those pre-deploy real bets are NOT included in this V10 strategy P/L."
+            "P/L NOTE: strategy profit is simulated from raw Numbers under the current replay policy; "
+            "it does NOT prove those historical bets were actually placed. "
+            "Use the platform's actual bet ledger for money reconciliation."
         )
         st.caption(
             f"HISTORY CHECK: total={hist_total:+.1f} | negative days={hist_neg} | "
@@ -8115,11 +8351,11 @@ def render_history_live_authoritative(manager) -> None:
         )
         st.caption(
             f"CHECKSUM RAW={_short_hash(raw_sig)} | HIST={_short_hash(hist_sig)} | "
-            f"ACTION={_short_hash(action_sig)} | SELF-CHECK=PASS"
+            f"ACTION={_short_hash(action_sig)} | REPLAY=PASS (source guard checked below)"
         )
         st.caption(
             f"FROZEN RULE: recovery if Engine/Physical <= {HISTORY_LIVE_RECOVERY_TRIGGER:+.1f} "
-            f"requires CONF>={HISTORY_LIVE_RECOVERY_CONF_MIN:.2f}; "
+            f"requires CONF>={(V187_RECOVERY_CONF_MIN if _v187_day_active(seq) else HISTORY_LIVE_RECOVERY_CONF_MIN):.2f}; "
             f"G3 KEEP_AFTER_WIN skip; G4 P20>={HISTORY_LIVE_G4_P20_MIN:.1f} "
             f"and STAB>={HISTORY_LIVE_G4_STABILITY_MIN:.2f}; "
             f"after negative day skip first {HISTORY_LIVE_PREV_NEG_G2_SKIP} eligible G2; "
@@ -8136,6 +8372,7 @@ def render_history_live_authoritative(manager) -> None:
         raw_warmup = bool(getattr(manager.ctx, "live_raw_observation_warmup_required", False))
         raw_regressed = bool(getattr(manager.ctx, "live_raw_snapshot_regressed", False))
         raw_revised_same_frontier = bool(getattr(manager.ctx, "live_raw_snapshot_revised_same_frontier", False))
+        raw_revised_historical_prefix = bool(getattr(manager.ctx, "live_raw_snapshot_revised_historical_prefix", False))
         raw_prev_round_count = int(getattr(manager.ctx, "live_raw_previous_round_count", 0) or 0)
 
         _ui_target = None if current_round >= MAX_ROUNDS_PER_DAY else current_round + 1
@@ -8150,7 +8387,9 @@ def render_history_live_authoritative(manager) -> None:
         if raw_regressed:
             _ui_reason = f"REGRESSED SOURCE SNAPSHOT R{current_round} < LAST GOOD R{raw_prev_round_count}"
         elif raw_revised_same_frontier:
-            _ui_reason = f"RAW NUMBER CHANGED AT SAME FRONTIER R{current_round} — WAIT FOR NEXT ROUND"
+            _ui_reason = f"RAW NUMBER CHANGED AT SAME FRONTIER R{current_round} — STOP / INSPECT DATA"
+        elif raw_revised_historical_prefix:
+            _ui_reason = "OLD ROUND REVISED WHILE NEW ROUND APPENDED — STOP / INSPECT DATA"
         elif raw_warmup:
             _ui_reason = "RESTART/FRESH-DEPLOY WARMUP — WAIT FOR ONE RAW ROUND CHANGE"
         elif raw_stale:
@@ -8187,6 +8426,24 @@ def render_history_live_authoritative(manager) -> None:
             else:
                 _ui_reason = "INVALID TARGET ROUND — FAIL CLOSED"
 
+        # V7 final-source fence: a second no-cache Google Sheet read is made
+        # ONLY if we are about to display an actionable BET. This prevents a
+        # long replay/other tab from emitting an instruction for an old round.
+        if _ui_action == "BET":
+            _latest_marker = _load_raw_observation_marker()
+            if not isinstance(_latest_marker, dict):
+                st.error("FINAL BET RECHECK FAILED: missing marker. CURRENT ACTION: WAIT / NO BET.")
+                return
+            _ok, _why = _v187_final_bet_recheck(
+                seq, day_date, numbers,
+                dict(getattr(manager.ctx, "live_history_hashes", {}) or {}),
+            )
+            if not _ok:
+                st.error(f"FINAL BET RECHECK FAILED: {_why}. CURRENT ACTION: WAIT / NO BET.")
+                return
+            st.caption("V7 FINAL BET RECHECK: two no-cache reads + durable frontier match. "
+                       "Recheck does not guarantee the next round has not yet started.")
+
         st.markdown("## 🎯 LIVE DECISION")
         _c1, _c2, _c3, _c4, _c5 = st.columns(5)
         _c1.metric("CURRENT ROUND", f"R{current_round}")
@@ -8211,12 +8468,15 @@ def render_history_live_authoritative(manager) -> None:
         elif _physical_lock_reached:
             _day_status = "LOCKED FOR DAY"
             _next_trade_status = "NO MORE TRADE TODAY"
-        elif pending is not None:
+        elif _ui_action in {"BET", "SKIP"}:
             _day_status = "ACTION READY"
             _next_trade_status = (
-                f"{str(pending.get('play_action', pending.get('bet_action','SKIP')) or 'SKIP').upper()} "
+                f"{_ui_action} "
                 f"G{int(pending.get('group',0) or 0)} -> R{current_round + 1}"
             )
+        elif _ui_action == "WAIT":
+            _day_status = "WAIT / SOURCE NOT READY"
+            _next_trade_status = "WAIT / NO BET"
         else:
             _day_status = "WAITING SIGNAL"
             _next_trade_status = "WAITING FOR NEXT QUALIFYING SIGNAL"
@@ -8347,9 +8607,8 @@ def render_history_live_authoritative(manager) -> None:
         else:
             st.info("No V10 trade rows yet today.")
 
-        # V10.8: full historical BET P/L visibility.
-        # This is the P/L that V10 would have produced if every historical BET
-        # instruction had been followed with the configured +2.5/-1 payoff.
+        # Full historical policy P/L (V187 in FULL_HISTORY mode).
+        # Simulated outcome from the selected rules, NOT a real-wager ledger.
         _all_hist = list(prior or [])
         _hist_bet_pnls = [
             round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
@@ -8373,7 +8632,8 @@ def render_history_live_authoritative(manager) -> None:
             else:
                 _hist_neg_streak = 0
 
-        st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
+        st.markdown("### 📊 V187 FULL HISTORY BET P/L SUMMARY" if V187_MODE == "FULL_HISTORY"
+                    else "### 📊 V10 HISTORICAL BET P/L SUMMARY")
         _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
         _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
         _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
@@ -8432,7 +8692,14 @@ def render_history_live_authoritative(manager) -> None:
         if raw_revised_same_frontier:
             st.error(
                 f"RAW CORRECTION/MIXED SNAPSHOT AT R{current_round}: Number history changed without frontier advancing. "
-                "CURRENT ACTION: WAIT / DO NOT BET until the next round; last good marker was preserved."
+                "CURRENT ACTION: WAIT / DO NOT BET until data integrity is reconciled."
+            )
+            return
+        if raw_revised_historical_prefix:
+            st.error(
+                f"LIVE HISTORY REVISED: rounds before R{current_round} changed while newer rounds were appended. "
+                "This can alter prior BET/SKIP. CURRENT ACTION: WAIT / DO NOT BET; "
+                "check raw Sheet and last accepted snapshot before resuming."
             )
             return
         if raw_warmup:
@@ -8470,9 +8737,12 @@ def render_history_live_authoritative(manager) -> None:
             st.error("LIVE SELF-CHECK FAILED: invalid target round. CURRENT ACTION: WAIT / DO NOT BET.")
             return
 
-        action = str(pending.get("bet_action", "SKIP") or "SKIP").upper()
+        action = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
         group = int(pending.get("group", 0) or 0)
         reason = str(pending.get("reason", "") or "")
+        confirm_reason = str(pending.get("pattern112211_confirm_reason", "") or "")
+        if confirm_reason and str(pending.get("pattern_confirm_prefix", "") or ""):
+            reason = (reason + "|" + confirm_reason).strip("|")
         conf = float(pending.get("confidence", 0.0) or 0.0)
         p20 = float(pending.get("p20", 0.0) or 0.0)
         stab = float(pending.get("stability", 0.0) or 0.0)
@@ -8905,27 +9175,198 @@ def _load_raw_observation_marker() -> dict:
         return {}
 
 
-def _save_raw_observation_marker(data: dict) -> bool:
-    """Atomic best-effort save of stale-data metadata."""
+def _save_raw_observation_marker(data: dict, raw_numbers: Optional[list[int]] = None) -> bool:
+    """Persist ONLY safety metadata, atomically and with a single writer.
+
+    Multi-tab racing snapshots cannot roll the accepted DaySeq/Round backward.
+    Windows/Linux use their native advisory file locks. If the state file is
+    unavailable/corrupt or the lock cannot be acquired, fail closed.
+    """
+    import tempfile
     try:
         path = os.path.abspath(RAW_OBSERVATION_FILE)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(dict(data or {}), f, ensure_ascii=False, sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        return True
+        lock_path = path + ".lock"
+        with open(lock_path, "a+b") as lock_f:
+            if os.name == "nt":
+                import msvcrt
+                if os.path.getsize(lock_path) == 0:
+                    lock_f.write(b"0")
+                    lock_f.flush()
+                lock_f.seek(0)
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                existing = _load_raw_observation_marker()
+                if os.path.exists(path) and not existing:
+                    # Do not overwrite a corrupted or unreadable accepted file.
+                    return False
+                old_seq = int(existing.get("day_seq", 0) or 0)
+                old_count = int(existing.get("round_count", 0) or 0)
+                new_seq = int(data.get("day_seq", 0) or 0)
+                new_count = int(data.get("round_count", 0) or 0)
+                if old_seq > new_seq or (old_seq == new_seq and old_count > new_count):
+                    return False
+                if old_seq == new_seq and old_count == new_count and existing:
+                    if existing.get("raw_signature") != data.get("raw_signature"):
+                        return False
+                if old_seq == new_seq and old_count < new_count and existing:
+                    if (raw_numbers is None or len(raw_numbers) < old_count
+                            or make_numbers_signature(raw_numbers[:old_count])
+                            != existing.get("raw_signature")):
+                        return False
+                old_policy = (existing.get("v187_mode", "BASELINE"),
+                              existing.get("v187_start", 0),
+                              existing.get("v187_end", 0))
+                new_policy = (data.get("v187_mode", "BASELINE"),
+                              data.get("v187_start", 0),
+                              data.get("v187_end", 0))
+                if existing and old_policy != new_policy and (
+                    str(old_policy[0]).upper() == "FULL_HISTORY" or
+                    str(new_policy[0]).upper() == "FULL_HISTORY"
+                ):
+                    # V8.3: no policy overwrite even if a different app/tab
+                    # advanced DaySeq between source read and atomic commit.
+                    return False
+                if old_seq == new_seq and existing and old_policy != new_policy:
+                    # A candidate may be armed on an EXISTING baseline day,
+                    # provided its start is a future day. Never change an
+                    # already-active candidate's policy within the same day.
+                    new_start = int(data.get("v187_start", 0) or 0)
+                    allow_arm_future = (str(old_policy[0]).upper() == "BASELINE"
+                                        and str(new_policy[0]).upper() == "CANDIDATE"
+                                        and new_start > new_seq)
+                    allow_arm_round1 = (str(old_policy[0]).upper() == "BASELINE"
+                                        and str(new_policy[0]).upper() == "CANDIDATE"
+                                        and new_start == new_seq and new_count == 1
+                                        and old_count <= 1)
+                    if not (allow_arm_future or allow_arm_round1):
+                        return False
+                for k, old_hash in (existing.get("history_hashes") or {}).items():
+                    if (data.get("history_hashes") or {}).get(k) != old_hash:
+                        return False
+                payload = dict(data)
+                fd, tmp_name = tempfile.mkstemp(prefix=".v187_raw_obs_", suffix=".tmp", dir=parent)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, ensure_ascii=False, sort_keys=True)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_name, path)
+                finally:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+                return True
+            finally:
+                if os.name == "nt":
+                    lock_f.seek(0)
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
     except Exception:
         return False
+
+
+
+def _v187_final_bet_recheck(expected_seq: int, expected_date: str,
+                             expected_numbers: list[int],
+                             expected_history_hashes: dict) -> tuple[bool, str]:
+    """Last-second no-cache read before a BET can be shown to the operator.
+
+    This does NOT change strategy, replay, or ledger. The second source read is
+    deliberately independent from the original snapshot. Race/change => WAIT.
+    No betting API is called; this only verifies an advisory signal.
+    """
+    expected_sig = make_numbers_signature(expected_numbers)
+    def marker_ok() -> bool:
+        observed = _load_raw_observation_marker()
+        if not observed or int(observed.get("day_seq", 0) or 0) != int(expected_seq):
+            return False
+        if int(observed.get("round_count", 0) or 0) != len(expected_numbers):
+            return False
+        if str(observed.get("raw_signature", "")) != expected_sig:
+            return False
+        if (observed.get("history_hashes") or {}) != expected_history_hashes:
+            return False
+        if not bool(observed.get("freshness_established", False)):
+            return False
+        if time.time() - float(observed.get("changed_at", 0.0) or 0.0) > float(LIVE_STALE_SECONDS):
+            return False
+        if float(observed.get("changed_at", 0.0) or 0.0) > time.time() + 15.0:
+            return False  # wall clock jumped backwards or marker timestamp is corrupt
+        if str(observed.get("v187_mode", "BASELINE")).upper() != V187_MODE:
+            return False
+        if (int(observed.get("v187_start", 0) or 0) != V187_START_DAY_SEQ or
+                int(observed.get("v187_end", 0) or 0) != V187_END_DAY_SEQ):
+            return False
+        return True
+
+    try:
+        if not marker_ok():
+            return False, "durable marker changed/invalid before BET"
+        t0 = time.monotonic()
+        fresh = _read_google_sheet_csv_no_cache(DATA_SHEET_NAME)
+        if time.monotonic() - t0 > 15.0:
+            return False, "final source re-fetch exceeded 15 seconds"
+        if fresh.shape[1] < 5:
+            return False, "final source missing required A:E columns"
+        rawseq = fresh.iloc[:, 2].tolist()
+        seqs = [_strict_positive_int(x) for x in rawseq]
+        if any(x is None and not _raw_cell_blank(y) for x,y in zip(seqs, rawseq)):
+            return False, "invalid DaySeq in final source"
+        valid = [x for x in seqs if x is not None]
+        if not valid or max(valid) != int(expected_seq):
+            return False, "DaySeq changed during calculation"
+        indexes = [i for i, x in enumerate(seqs) if x == int(expected_seq)]
+        numbers=[]
+        dates=set()
+        seen_blank=False
+        if len(indexes) > MAX_ROUNDS_PER_DAY:
+            return False, "more than 288 rows in final source"
+        for r, idx in enumerate(indexes, start=1):
+            if _strict_positive_int(fresh.iloc[idx, 0]) != r:
+                return False, "final source round gap/order changed"
+            raw_num=fresh.iloc[idx, 1]
+            if _raw_cell_blank(raw_num):
+                seen_blank=True
+                continue
+            if seen_blank:
+                return False, "final source has a gap before a number"
+            num=_parse_number_value(raw_num)
+            if num is None:
+                return False, "final source number invalid"
+            numbers.append(num)
+            raw_dt=fresh.iloc[idx, 3]
+            dt=_parse_date_value(raw_dt)
+            if dt is not None:
+                dates.add(dt.isoformat())
+        if dates != {expected_date}:
+            return False, "date changed/missing in final source"
+        if numbers != list(expected_numbers):
+            return False, "number prefix or current round changed after replay"
+        if not marker_ok():
+            return False, "marker advanced during final source re-fetch"
+        return True, "second no-cache snapshot & durable marker match"
+    except Exception as exc:
+        return False, f"final source recheck failed: {type(exc).__name__}: {exc}"
 
 
 class HistoryLiveSourceManager:
     def __init__(self) -> None:
         raw_df, seq, day_date, raw_numbers = _load_day_seq_sheet_snapshot()
+        # Capture the source-fetch frontier time BEFORE downloading history or
+        # performing any replay; otherwise a slow history fetch can hide stale data.
+        snapshot_fetched_at = time.time()
+        local_date = datetime.now(ZoneInfo("Asia/Phnom_Penh")).date().isoformat()
+        if not day_date or str(day_date) != local_date:
+            st.error(f"LIVE DATE CHECK FAILED: Sheet date={day_date or 'MISSING'}, "
+                     f"Cambodia local date={local_date}. "
+                     "Fix input date / stale Sheet before BET. CURRENT ACTION: WAIT / DO NOT BET.")
+            st.stop()
         if int(seq or 0) <= 0:
             st.error("V10.3 SOURCE ERROR: invalid DAY_SEQ. CURRENT ACTION: WAIT / DO NOT BET.")
             st.stop()
@@ -8946,13 +9387,38 @@ class HistoryLiveSourceManager:
         self.ctx.live_day_date = str(day_date or "")
         self.ctx.live_day_id = self.ctx.live_day_date
 
+        # V6: attest every completed day in the same raw history snapshot.
+        # Hashes are safety metadata ONLY; strategic replay still rebuilds all
+        # completed days from raw Numbers without using these stored hashes.
+        # No history content is fed to the strategy from the marker.
+        history_raw_days = (_validated_numbers_by_day(self.history_df, int(seq))
+                            if self.round_id >= LIVE_START_ROUND else [])
+        history_hashes = {
+            str(int(hseq)): hashlib.sha256(
+                json.dumps([str(hdate), list(hnums)], separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            for hseq, hdate, hnums in history_raw_days
+        }
+        if self.round_id >= LIVE_START_ROUND and len(history_raw_days) != int(seq) - 1:
+            st.error(f"V187 HISTORY INTEGRITY: only {len(history_raw_days)} complete days "
+                     f"for D{seq}; expected {int(seq)-1}. WAIT / NO BET.")
+            st.stop()
+
         # Restart-safe observation guard. Strategy never reads this metadata.
         # Session state gives fast in-process tracking; the durable marker keeps
         # age across process restarts. If neither source can establish freshness,
         # fail closed until the raw snapshot changes once.
         raw_sig = make_numbers_signature(self.numbers)
-        now = time.time()
-        key = "_v10_12_raw_observation"
+        now = snapshot_fetched_at
+        # V8.3: session observation belongs to ONE policy + ONE durable marker.
+        # The legacy generic key leaked BASELINE/CANDIDATE state into V187 even
+        # when the operator correctly configured a dedicated FULL_HISTORY file.
+        # This is an in-process safety witness, never a cache of BET/profit.
+        policy_state_id = hashlib.sha256(
+            (V187_MODE + "|" + os.path.normcase(RAW_OBSERVATION_FILE)).encode("utf-8")
+        ).hexdigest()[:20]
+        key = "_v187_raw_observation_" + policy_state_id
         session_prev = st.session_state.get(key)
         disk_prev = _load_raw_observation_marker()
 
@@ -8977,6 +9443,109 @@ class HistoryLiveSourceManager:
         prev_valid = isinstance(prev, dict) and bool(prev)
         prev_seq = int(prev.get("day_seq", 0) or 0) if prev_valid else 0
         prev_count = int(prev.get("round_count", 0) or 0) if prev_valid else 0
+        prev_history_hashes = prev.get("history_hashes", {}) if prev_valid else {}
+        if not isinstance(prev_history_hashes, dict):
+            st.error("V187 HISTORY MARKER INVALID. WAIT / NO BET.")
+            st.stop()
+        history_revised = False
+        if self.round_id >= LIVE_START_ROUND:
+            for hseq, old_hash in prev_history_hashes.items():
+                if hseq not in history_hashes or history_hashes[hseq] != old_hash:
+                    history_revised = True
+                    break
+        if history_revised:
+            st.error("V187 HISTORICAL NUMBER/DATE REVISION DETECTED. "
+                     "Previously accepted completed days changed. "
+                     "WAIT / NO BET; reconcile source before proceeding.")
+            st.stop()
+        # Carry yesterday's accepted live prefix across ALL refreshes before
+        # R180. Without this witness, R1..R179 would erase the evidence of
+        # yesterday before historical replay starts at R180.
+        prev_day_live = prev.get("prev_day_live", {}) if prev_valid else {}
+        if not isinstance(prev_day_live, dict):
+            st.error("V187 INVALID PREVIOUS-DAY MARKER. WAIT / NO BET.")
+            st.stop()
+        if prev_valid and prev_seq == int(seq) - 1 and prev_count > 0:
+            prev_day_live = {
+                "day_seq": prev_seq, "round_count": prev_count,
+                "raw_signature": str(prev.get("raw_signature", "")),
+            }
+        witness_seq = int(prev_day_live.get("day_seq", 0) or 0)
+        witness_count = int(prev_day_live.get("round_count", 0) or 0)
+        if (self.round_id >= LIVE_START_ROUND and witness_seq == int(seq) - 1
+                and witness_count > 0):
+            yesterday = next((nums for hseq, _date, nums in history_raw_days
+                              if hseq == witness_seq), None)
+            if (yesterday is None or len(yesterday) < witness_count
+                    or make_numbers_signature(yesterday[:witness_count])
+                    != str(prev_day_live.get("raw_signature", ""))):
+                st.error("V187 OVERNIGHT HISTORY MISMATCH: yesterday's completed "
+                         "Numbers do not agree with last accepted live prefix. "
+                         "WAIT / NO BET.")
+                st.stop()
+        # Policy cutover integrity. V187 may only be armed on/before its first
+        # day, never activated halfway through a day with already-observed data.
+        # Existing active policy must remain attached to ALL historical days.
+        prev_policy_mode = str(prev.get("v187_mode", "BASELINE") or "BASELINE").upper()
+        prev_policy_start = int(prev.get("v187_start", 0) or 0)
+        prev_policy_end = int(prev.get("v187_end", 0) or 0)
+        prev_candidate = prev_policy_mode == "CANDIDATE" and prev_policy_start >= 63
+        prev_full_history = prev_policy_mode == "FULL_HISTORY" and prev_policy_start == 1
+        if V187_MODE == "FULL_HISTORY":
+            # One immutable policy, never a hidden baseline/cutover reset.
+            # With a dedicated marker, first arm only in the pre-BET warmup
+            # window R1..R179. Earlier rounds have no authorized live BET.
+            if prev_valid and not prev_full_history:
+                # Never adopt old BASELINE/CANDIDATE marker. Show actionable
+                # diagnostics instead of repeatedly displaying generic WAIT.
+                observed_mode = prev_policy_mode or "UNKNOWN"
+                st.error(
+                    "V187 FULL_HISTORY POLICY MISMATCH: configured marker is "
+                    f"associated with {observed_mode} (start={prev_policy_start}, "
+                    f"end={prev_policy_end}). Marker path: {RAW_OBSERVATION_FILE}. "
+                    "WAIT / NO BET. Keep this marker intact and configure a "
+                    "SEPARATE dedicated FULL_HISTORY marker path. First arming "
+                    f"is allowed only during R1..R{LIVE_START_ROUND-1} "
+                    "of a day with no prior live BET. Do not erase or rename the "
+                    "old marker to bypass this guard."
+                )
+                st.stop()
+            if prev_full_history and (prev_policy_end != 0 or V187_START_DAY_SEQ != 1):
+                st.error("V187 FULL_HISTORY MARKER CONFIG MISMATCH. WAIT.")
+                st.stop()
+            if not prev_full_history and not _v187_first_arm_before_live_trading(self.round_id):
+                st.error(
+                    "V187 FULL_HISTORY NOT ARMED: initial start is allowed only "
+                    f"during R1..R{LIVE_START_ROUND-1} before the FIRST possible live BET. "
+                    f"Current round=R{self.round_id}. CURRENT ACTION: WAIT / NO BET. "
+                    "Keep the dedicated marker and Auto refresh ON; retry on the next "
+                    "live day before R180. Never delete a marker to bypass this guard."
+                )
+                st.stop()
+        else:
+            if prev_full_history:
+                st.error("V187 FULL_HISTORY is already armed. Cannot switch policy "
+                         "with the same marker; WAIT.")
+                st.stop()
+            if prev_candidate and V187_MODE != "CANDIDATE" and int(seq) >= prev_policy_start:
+                st.error("V187 POLICY INTEGRITY ERROR: cannot switch MODE=BASELINE after "
+                         "the V187 start day. Keep MODE=CANDIDATE and set END on a FUTURE day. WAIT.")
+                st.stop()
+            if prev_candidate and V187_MODE == "CANDIDATE" and V187_START_DAY_SEQ != prev_policy_start:
+                st.error("V187 POLICY INTEGRITY ERROR: cannot change V187_START_DAY_SEQ after arming. WAIT.")
+                st.stop()
+            if prev_candidate and V187_END_DAY_SEQ != prev_policy_end:
+                if not (prev_policy_end == 0 and V187_END_DAY_SEQ >= prev_seq > 0
+                        and int(seq) > prev_seq):
+                    st.error("V187 POLICY INTEGRITY ERROR: END may only be set for a later "
+                             "day, preserving all observed candidate days. WAIT.")
+                    st.stop()
+            if _v187_day_active(int(seq)) and not prev_candidate:
+                if not (int(seq) == V187_START_DAY_SEQ and self.round_id == 1):
+                    st.error("V187 NOT ARMED: candidate policy was not observed "
+                             "before this day or at its first round. Cannot start "
+                             "mid-day or after loss of durable safety marker. WAIT.")
+                    st.stop()
         same_day = prev_valid and prev_seq == int(seq)
         same_sig = same_day and str(prev.get("raw_signature", "")) == raw_sig
 
@@ -8995,8 +9564,13 @@ class HistoryLiveSourceManager:
             and int(self.round_id) == prev_count
             and str(prev.get("raw_signature", "")) != raw_sig
         )
+        snapshot_revised_historical_prefix = bool(
+            prev_valid and int(seq) == prev_seq and prev_count > 0
+            and int(self.round_id) > prev_count
+            and str(prev.get("raw_signature", "")) != make_numbers_signature(self.numbers[:prev_count])
+        )
 
-        if snapshot_regressed or snapshot_revised_same_frontier:
+        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revised_historical_prefix:
             changed_at = float(prev.get("changed_at", now) or now)
             freshness_established = bool(prev.get("freshness_established", False))
         elif same_sig:
@@ -9033,23 +9607,75 @@ class HistoryLiveSourceManager:
             "changed_at": float(changed_at),
             "observed_at": float(now),
             "freshness_established": bool(freshness_established),
+            "v187_mode": V187_MODE,
+            "v187_start": int(V187_START_DAY_SEQ),
+            "v187_end": int(V187_END_DAY_SEQ),
+            "history_hashes": history_hashes if self.round_id >= LIVE_START_ROUND else prev_history_hashes,
+            "prev_day_live": prev_day_live,
         }
-        if snapshot_regressed or snapshot_revised_same_frontier:
+        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revised_historical_prefix:
             # Keep the last accepted marker intact so a transient stale/regressed
             # or same-frontier corrected response cannot become the new baseline.
             marker_saved = True
         else:
-            st.session_state[key] = dict(marker)
-            marker_saved = _save_raw_observation_marker(marker)
+            marker_saved = _save_raw_observation_marker(marker, self.numbers)
+            if marker_saved:
+                st.session_state[key] = dict(marker)
 
+        if not marker_saved and self.round_id < MAX_ROUNDS_PER_DAY:
+            warmup_required = True
+        if (self.round_id >= LIVE_START_ROUND and self.round_id < MAX_ROUNDS_PER_DAY
+                and not prev_history_hashes):
+            # First V6 run adds a historical witness. The NEXT verified refresh
+            # may emit an action, but never the first run with unattested history.
+            warmup_required = True
+        # V7: commit the EXACT historical witness used by this replay.
+        # The final BET fence compares the disk marker against these bytes,
+        # never against a newer marker loaded after replay.
+        self.ctx.live_history_hashes = dict(history_hashes if self.round_id >= LIVE_START_ROUND else prev_history_hashes)
         self.ctx.live_raw_signature = raw_sig
         self.ctx.live_raw_observed_age_seconds = float(age)
         self.ctx.live_raw_is_stale = bool(stale)
         self.ctx.live_raw_observation_warmup_required = bool(warmup_required)
         self.ctx.live_raw_snapshot_regressed = bool(snapshot_regressed)
         self.ctx.live_raw_snapshot_revised_same_frontier = bool(snapshot_revised_same_frontier)
+        self.ctx.live_raw_snapshot_revised_historical_prefix = bool(snapshot_revised_historical_prefix)
         self.ctx.live_raw_previous_round_count = int(prev_count)
+        self.ctx.live_raw_read_at = float(now)
         self.ctx.live_raw_observation_marker_saved = bool(marker_saved)
+
+
+# V6 browser-side refresh is installed BEFORE any source/renderer st.stop().
+# This means timeout, stale data, wrong Sheet date and day transitions can
+# recover automatically without manual browser reload. A browser tab must
+# remain open; there is no background job and no automatic bet placement.
+with st.sidebar:
+    st.divider()
+    st.caption("NO-CACHE live: source fetched fresh with HTTP timeouts and "
+               "history replayed from raw Numbers on each refresh.")
+    # Native Streamlit click already reruns the script exactly once.
+    # No explicit st.rerun(), which would double-fetch the no-cache source.
+    st.button("🔄 Refresh Now (sidebar)", key="v187_sidebar_refresh_now",
+              use_container_width=True,
+              help="Manual no-cache refresh; works even with Auto refresh OFF.")
+    auto_refresh_enabled = st.checkbox(
+        "Auto refresh", value=True, key="v187_refresh_enabled",
+        help="Default ON. Reload the source and replay all history every cycle."
+    )
+    refresh_seconds = st.number_input(
+        "Refresh seconds", min_value=30, max_value=120, value=60,
+        step=15, disabled=not auto_refresh_enabled,
+        key="v187_refresh_seconds",
+    )
+    if auto_refresh_enabled:
+        st.caption(f"Refresh every {int(refresh_seconds)}s, including WAIT "
+                   "and after R288 to detect the next DaySeq.")
+
+if auto_refresh_enabled:
+    # One frontend timer, native Streamlit rerun (not iframe parent reload).
+    # Installed as a normal dependency in requirements.txt.
+    st_autorefresh(interval=int(refresh_seconds)*1000, limit=None,
+                   key="v187_no_cache_source_refresh")
 
 
 # Reserve the first visible position exclusively for V10.3 authoritative action.
@@ -9059,64 +9685,17 @@ try:
     live_manager = HistoryLiveSourceManager()
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
-    st.success(
-        "V10.12.9 FAST TRUE NO CACHE + FULL HISTORY + 112211+111 CONFIRM + FIRST-BET X2 ONLY | AUTHORITATIVE LIVE ONLY | FULL RAW HISTORY REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
-        "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
+    # The renderer can intentionally return WAIT when source / history is
+    # incomplete. Never show a green success status unconditionally here.
+    st.caption(
+        "V187 NO-CACHE V8.1: Refresh Now / Auto both reload the source; ONLY the CURRENT "
+        "ACTION panel above determines BET / SKIP / WAIT. "
+        "A loaded app is not proof the current action is BET-ready."
     )
 except Exception as e:
-    st.error(f"V10.12.8 LIVE ERROR: {e}")
+    st.error(f"V187 NO-CACHE LIVE ERROR: {e} | CURRENT ACTION: WAIT / DO NOT BET")
     import traceback
     st.code(traceback.format_exc())
     live_manager = None
 
 
-# ============================================================
-# AUTO REFRESH - BROWSER SIDE ONLY
-# ============================================================
-# Do NOT use:
-#     time.sleep(5)
-#     st.rerun()
-# on Streamlit Cloud. It keeps the server script thread alive and can crash
-# the app when mobile/browser sessions reconnect repeatedly.
-#
-# This JS refresh runs in the browser, releases the Python script after render,
-# and is much more stable for Streamlit Community Cloud.
-
-with st.sidebar:
-    st.divider()
-    st.caption("Refresh control — TRUE NO CACHE: raw history is replayed once from source on every refresh.")
-    if st.button("🔄 Refresh now", use_container_width=True):
-        st.rerun()
-
-    auto_refresh_enabled = st.checkbox(
-        "Auto refresh",
-        value=False,
-        help="OFF by default so the UI stays stable for inspection. When ON, the whole Streamlit page reloads."
-    )
-    refresh_seconds = st.number_input(
-        "Refresh seconds",
-        min_value=15,
-        max_value=120,
-        value=30,
-        step=15,
-        disabled=not auto_refresh_enabled,
-    )
-
-_current_round_for_refresh = int(getattr(live_manager, "round_id", 0) or 0) if live_manager is not None else 0
-if auto_refresh_enabled and _current_round_for_refresh < 288:
-    st.sidebar.info(
-        f"Auto refresh ON: every {int(refresh_seconds)}s. "
-        "Turn it OFF while reviewing the dashboard."
-    )
-    components.html(
-        f"""
-        <script>
-        setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {int(refresh_seconds) * 1000});
-        </script>
-        """,
-        height=0,
-    )
-elif auto_refresh_enabled and _current_round_for_refresh >= 288:
-    st.sidebar.success("Day complete at R288 — auto refresh paused.")
