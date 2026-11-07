@@ -60,7 +60,7 @@ LIVE_START_ROUND = 180
 # V4.4: calculation is stateless. Every refresh replays R1..current from the
 # fresh immutable Google snapshot, exactly like the Excel/backtest path.
 STATELESS_REPLAY_LIVE = True
-BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.9 V187 NO-CACHE V8.2 PRETRADE ARM | FAST TRUE NO CACHE | FULL HISTORY | 112211+111 CONFIRM | FIRST-BET X2 ONLY | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
+BUILD_TAG = "V71.18.2 | LIVE101 | V10.12.9 V187 NO-CACHE V8.7 REPLAY ANY ROUND | FAST TRUE NO CACHE | FULL HISTORY | 112211+111 CONFIRM | FIRST-BET X2 ONLY | RESTART STALE GUARD | DATE FIX | SAFE CONT + QUALITY RESCUE | STOPLOSS-OFF | TARGET 2.5/12.5 | LIVE-ONLY"
 
 # V70 causal switch: evaluated only after the just-settled REAL/CANDIDATE trade is LOSS.
 # Uses only window statistics available at the current round after update_one_round().
@@ -7244,10 +7244,10 @@ HISTORY_LIVE_STRICT_PREV_COMPLETE_CUTOVER_DAY_SEQ = 59
 # V187 FULL_HISTORY: the SAME V187 physical/execution policy is replayed from
 # D1 through yesterday and used for today's advisory action.  No legacy D1-D62
 # strategy split. Historical actions remain SIMULATED and are not real wagers.
-# First deployment may arm BEFORE the first possible live BET (R180),
-# at any observed raw round R1..R179, with a dedicated marker. If the
-# application first starts at R180 or later, fail closed until the next day.
-# This NEVER authorizes switching policies after a live action could exist.
+# First deployment may REPLAY at ANY raw round with a dedicated marker.
+# At R180+ first observation is WAIT; a subsequent new raw round must establish
+# freshness before any forward-only advisory BET. Historical replays NEVER
+# represent physical wagers and do not change an old marker's policy.
 V187_MODE = os.environ.get("V187_MODE", "FULL_HISTORY").strip().upper()
 try:
     V187_START_DAY_SEQ = int(os.environ.get("V187_START_DAY_SEQ", "1") or "0")
@@ -7286,10 +7286,10 @@ V187_RECOVERY_CONF_MIN = 0.60
 
 
 def _v187_first_arm_before_live_trading(round_id: int) -> bool:
-    """A first FULL_HISTORY marker is safe only before any possible LIVE BET.
+    """Legacy pre-trade classification, no longer a replay startup blocker.
 
-    R1..R179 warm up the engine but no BET may be emitted (LIVE_START_ROUND=180).
-    At R180+ never backdate a first deployment; wait for a new day instead.
+    V8.7 can rebuild the FULL_HISTORY display at R180+ without any retroactive
+    physical BET. Freshness must still be established before a forward action.
     """
     try:
         r = int(round_id)
@@ -8161,7 +8161,7 @@ def render_history_live_authoritative(manager) -> None:
     """
     st.markdown("# 🚀 V187 FULL HISTORY — NO CACHE LIVE ACTION" if V187_MODE == "FULL_HISTORY" else
                 "# 🚀 V10.12.9 BASELINE / V187 CUTOVER-CONTROLLED — LIVE ACTION")
-    st.caption("SAFETY BUILD V8.5 • dedicated durable marker required • FULL_HISTORY R1→live • NO CACHE")
+    st.caption("SAFETY BUILD V8.7 • replay any round • first observation is NO BET • FULL_HISTORY R1→live • NO CACHE")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
@@ -8347,6 +8347,14 @@ def render_history_live_authoritative(manager) -> None:
             f"V10 REPLAY P/L={pnl:+.1f} | ENGINE={float(engine_profit):+.1f} | "
             f"PREV V10 PHYSICAL={float(prev_physical):+.1f} | POSITIVE TARGET={float(lock):+.1f}"
         )
+        if bool(getattr(manager.ctx, "live_late_replay_bootstrap", False)):
+            st.caption(
+                "REPLAY BOOTSTRAP: initial observed Google Sheet frontier="
+                f"D{int(getattr(manager.ctx, 'live_replay_bootstrap_day_seq', 0) or 0)} "
+                f"R{int(getattr(manager.ctx, 'live_replay_bootstrap_round', 0) or 0)}. "
+                "Earlier BET/Profit are SIMULATED, not physically executed; "
+                "only newly observed frontier decisions can be treated as live advisories."
+            )
         if V187_MODE == "FULL_HISTORY":
             st.info("V187 FULL HISTORY ACTIVE: replay D1→today with ONE V187 policy. "
                     "Historical BET/P&L is simulated, not a record of real wagers. "
@@ -9603,15 +9611,14 @@ class HistoryLiveSourceManager:
             if prev_full_history and (prev_policy_end != 0 or V187_START_DAY_SEQ != 1):
                 st.error("V187 FULL_HISTORY MARKER CONFIG MISMATCH. WAIT.")
                 st.stop()
-            if not prev_full_history and not _v187_first_arm_before_live_trading(self.round_id):
-                st.error(
-                    "V187 FULL_HISTORY NOT ARMED: initial start is allowed only "
-                    f"during R1..R{LIVE_START_ROUND-1} before the FIRST possible live BET. "
-                    f"Current round=R{self.round_id}. CURRENT ACTION: WAIT / NO BET. "
-                    "Keep the dedicated marker and Auto refresh ON; retry on the next "
-                    "live day before R180. Never delete a marker to bypass this guard."
-                )
-                st.stop()
+            # V8.7: A newly uploaded app may REPLAY every existing raw round at
+            # any frontier (including R180..R288). Replaying history is NOT
+            # evidence that any historical simulated BET was placed physically.
+            # On the first observation we create a durable, UNKNOWN-FRESHNESS
+            # marker; no live BET is authorized until an actual new round arrives.
+            # We never adopt/overwrite an older BASELINE or CANDIDATE marker.
+            # Display the bootstrap origin after the full replay, not here:
+            # source-manager tests and headless deployments do not need UI.
         else:
             if prev_full_history:
                 st.error("V187 FULL_HISTORY is already armed. Cannot switch policy "
@@ -9689,8 +9696,20 @@ class HistoryLiveSourceManager:
             and not freshness_established
         )
 
+        # Late upload: record the frontier at which this process first observed
+        # this policy. Previous round decisions remain REPLAY_ONLY. This field
+        # is observation metadata and must never feed strategy choices.
+        bootstrap_day_seq = (int(prev.get("replay_bootstrap_day_seq", 0) or 0)
+                             if prev_valid else int(seq))
+        bootstrap_round = (int(prev.get("replay_bootstrap_round", 0) or 0)
+                           if prev_valid else int(self.round_id))
+        late_bootstrap = (bool(prev.get("late_replay_bootstrap", False))
+                          if prev_valid else self.round_id >= LIVE_START_ROUND)
         marker = {
             "version": "V10_12_2_RAW_OBS_V1",
+            "replay_bootstrap_day_seq": bootstrap_day_seq,
+            "replay_bootstrap_round": bootstrap_round,
+            "late_replay_bootstrap": late_bootstrap,
             "day_seq": int(seq),
             "round_count": int(self.round_id),
             "raw_signature": raw_sig,
@@ -9738,6 +9757,9 @@ class HistoryLiveSourceManager:
         self.ctx.live_raw_previous_round_count = int(prev_count)
         self.ctx.live_raw_read_at = float(now)
         self.ctx.live_raw_observation_marker_saved = bool(marker_saved)
+        self.ctx.live_replay_bootstrap_day_seq = int(bootstrap_day_seq)
+        self.ctx.live_replay_bootstrap_round = int(bootstrap_round)
+        self.ctx.live_late_replay_bootstrap = bool(late_bootstrap)
 
 
 # V6 browser-side refresh is installed BEFORE any source/renderer st.stop().
