@@ -8161,7 +8161,7 @@ def render_history_live_authoritative(manager) -> None:
     """
     st.markdown("# 🚀 V187 FULL HISTORY — NO CACHE LIVE ACTION" if V187_MODE == "FULL_HISTORY" else
                 "# 🚀 V10.12.9 BASELINE / V187 CUTOVER-CONTROLLED — LIVE ACTION")
-    st.caption("SAFETY BUILD V8.7 • replay any round • first observation is NO BET • FULL_HISTORY R1→live • NO CACHE")
+    st.caption("SAFETY BUILD V8.8 • double-source witness • replay any round • first observation is NO BET • FULL_HISTORY R1→live • NO CACHE")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
@@ -8480,7 +8480,7 @@ def render_history_live_authoritative(manager) -> None:
             if not _ok:
                 st.error(f"FINAL BET RECHECK FAILED: {_why}. CURRENT ACTION: WAIT / NO BET.")
                 return
-            st.caption("V7 FINAL BET RECHECK: two no-cache reads + durable frontier match. "
+            st.caption("V8.8 FINAL BET RECHECK: fresh DATA + HISTORY witnesses + durable frontier match. "
                        "Recheck does not guarantee the next round has not yet started.")
 
         st.markdown("## 🎯 LIVE DECISION")
@@ -9388,9 +9388,33 @@ def _v187_final_bet_recheck(expected_seq: int, expected_date: str,
             return False, "date changed/missing in final source"
         if numbers != list(expected_numbers):
             return False, "number prefix or current round changed after replay"
+        # V8.8: re-fetch HISTORY independently AFTER replay and the DATA
+        # recheck. A marker hash only attests the first history snapshot; it
+        # cannot detect an edit published remotely while the replay runs.
+        # Before any BET is displayed, both Google Sheet tabs must still match.
+        if int(expected_seq) > 1:
+            if not expected_history_hashes or len(expected_history_hashes) != int(expected_seq) - 1:
+                return False, "expected historical witness missing/incomplete"
+            fresh_history = _read_google_sheet_csv_no_cache(HISTORY_SHEET_NAME)
+            fresh_days = _validated_numbers_by_day(fresh_history, int(expected_seq))
+            if len(fresh_days) != int(expected_seq) - 1:
+                return False, "history day count changed during replay"
+            fresh_history_hashes = {
+                str(int(hseq)): hashlib.sha256(
+                    json.dumps([str(hdate), list(hnums)], separators=(",", ":"),
+                               ensure_ascii=False).encode("utf-8")
+                ).hexdigest()
+                for hseq, hdate, hnums in fresh_days
+            }
+            if fresh_history_hashes != expected_history_hashes:
+                return False, "HISTORY source changed since initial replay (fresh witness mismatch)"
+        elif expected_history_hashes:
+            return False, "unexpected historical witness on first day"
+        if time.monotonic() - t0 > 30.0:
+            return False, "DATA+HISTORY final recheck exceeded 30 seconds"
         if not marker_ok():
             return False, "marker advanced during final source re-fetch"
-        return True, "second no-cache snapshot & durable marker match"
+        return True, "DATA+HISTORY double no-cache re-fetch & durable marker match"
     except Exception as exc:
         return False, f"final source recheck failed: {type(exc).__name__}: {exc}"
 
@@ -9805,7 +9829,7 @@ try:
     # The renderer can intentionally return WAIT when source / history is
     # incomplete. Never show a green success status unconditionally here.
     st.caption(
-        "V187 NO-CACHE V8.5: Refresh Now / Auto both reload the source; ONLY the CURRENT "
+        "V187 NO-CACHE V8.8: Refresh Now / Auto both reload the source; ONLY the CURRENT "
         "ACTION panel above determines BET / SKIP / WAIT. "
         "A loaded app is not proof the current action is BET-ready."
     )
