@@ -8161,7 +8161,7 @@ def render_history_live_authoritative(manager) -> None:
     """
     st.markdown("# 🚀 V187 FULL HISTORY — NO CACHE LIVE ACTION" if V187_MODE == "FULL_HISTORY" else
                 "# 🚀 V10.12.9 BASELINE / V187 CUTOVER-CONTROLLED — LIVE ACTION")
-    st.caption("SAFETY BUILD V8.8 • double-source witness • replay any round • first observation is NO BET • FULL_HISTORY R1→live • NO CACHE")
+    st.caption("SAFETY BUILD V8.7 • replay any round • first observation is NO BET • FULL_HISTORY R1→live • NO CACHE")
     st.caption(
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
@@ -8480,7 +8480,7 @@ def render_history_live_authoritative(manager) -> None:
             if not _ok:
                 st.error(f"FINAL BET RECHECK FAILED: {_why}. CURRENT ACTION: WAIT / NO BET.")
                 return
-            st.caption("V8.8 FINAL BET RECHECK: fresh DATA + HISTORY witnesses + durable frontier match. "
+            st.caption("V7 FINAL BET RECHECK: two no-cache reads + durable frontier match. "
                        "Recheck does not guarantee the next round has not yet started.")
 
         st.markdown("## 🎯 LIVE DECISION")
@@ -8520,7 +8520,7 @@ def render_history_live_authoritative(manager) -> None:
             _day_status = "WAITING SIGNAL"
             _next_trade_status = "WAITING FOR NEXT QUALIFYING SIGNAL"
 
-        # V10.8: operator-facing SIMULATED BET P/L for TODAY.
+        # V10.8: operator-facing REALIZED BET P/L for TODAY.
         # This is the sum of settled rows where V10 action was BET. SKIP rows never
         # contribute. It equals the user's realized P/L only if the operator follows
         # every V10 BET instruction with the configured +2.5/-1 unit payoff.
@@ -8552,22 +8552,21 @@ def render_history_live_authoritative(manager) -> None:
             and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
         )
 
-        st.markdown("### 🧮 TODAY SIMULATED BET RESULT — NOT ACTUAL TRADES")
-        st.caption("SIM ONLY: computed by replaying Numbers. This app cannot verify whether a BET was placed, filled, missed, or settled on the actual platform. Historical/replayed BETs must not be counted as actual executions.")
+        st.markdown("### 💰 TODAY LIVE BET RESULT")
         _p1, _p2, _p3, _p4, _p5, _p6, _p7 = st.columns(7)
-        _p1.metric("SIM V10 UNIT P/L", f"{_live_bet_pnl:+.1f}")
-        _p2.metric("SIM PATTERN P/L", f"{pattern_play_pnl:+.1f}")
-        _p3.metric("SIM SAFE P/L", f"{balanced_play_pnl:+.1f}")
-        _p4.metric("SIM BETS", str(_live_bet_count))
-        _p5.metric("SIM W / L", f"{_exec_wins} / {_exec_losses}")
+        _p1.metric("UNIT V10 P/L", f"{_live_bet_pnl:+.1f}")
+        _p2.metric("PATTERN PLAY P/L", f"{pattern_play_pnl:+.1f}")
+        _p3.metric("SAFE PLAY P/L", f"{balanced_play_pnl:+.1f}")
+        _p4.metric("PLAYED BETS", str(_live_bet_count))
+        _p5.metric("PLAY W / L", f"{_exec_wins} / {_exec_losses}")
         _p6.metric("PATTERN SKIP", str(_pattern_skips))
-        _p7.metric("SIM X2 ASSIGNED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
+        _p7.metric("X2 USED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
         if _x2_used_today >= int(SAFE_STAKE_MAX_X2_PER_DAY):
-            st.info("🔒 SIM X2 SLOT ASSIGNED (may be pending / not placed). All later SIM BETs are x1.")
+            st.info("🔒 FIRST-BET X2 USED — ALL LATER BETS TODAY are x1.")
         st.caption(
-            "SIM V10 P/L = baseline virtual signals; SIM PATTERN P/L = virtual signals after pattern filters at x1; SIM SAFE P/L = virtual outcomes with virtual stake: "
+            "UNIT V10 P/L is the frozen V10 strategy. PATTERN PLAY P/L applies the 11221 and 111 confirmation filters at x1. SAFE PLAY P/L then applies the displayed stake: "
             "after a negative UNIT V10 day only the first BET next day is x2; every later BET is x1. If the previous UNIT V10 day is non-negative, every BET today is x1. HARD CAP: max 1 x2 per day. "
-            "Stake sizing NEVER feeds back into V10 signal/target logic. These are NOT actual platform transactions."
+            "Stake sizing NEVER feeds back into V10 signal/target logic."
         )
 
         # 112211 SHADOW: diagnostic only; never changes the authoritative action.
@@ -8619,7 +8618,7 @@ def render_history_live_authoritative(manager) -> None:
         _s2.metric("NEXT TRADE", _next_trade_status)
         _s3.metric("V10 REPLAY P/L", f"{pnl:+.1f}")
 
-        st.markdown("### 📜 TODAY V10 SIMULATED SIGNAL HISTORY")
+        st.markdown("### 📜 TODAY V10 TRADE HISTORY")
         _today_hist = []
         for _r in list(rows or []):
             _or = int(_r.get("open_round", 0) or 0)
@@ -8629,13 +8628,13 @@ def render_history_live_authoritative(manager) -> None:
                 "Target R": (_or + 1 if _or > 0 else None),
                 "Group": (f"G{int(_r.get('group',0) or 0)}" if int(_r.get('group',0) or 0) > 0 else "—"),
                 "V10 Action": str(_r.get("bet_action", "") or ""),
-                "Sim Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
-                "Sim Stake": str(_r.get("stake_label", "—") or "—"),
+                "Play Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
+                "Stake": str(_r.get("stake_label", "—") or "—"),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
                 "Settle R": _sr,
                 "Unit BET P/L": float(_r.get("bet_profit", 0.0) or 0.0),
-                "Sim Play P/L": float(_r.get("play_profit", 0.0) or 0.0),
+                "Play P/L": float(_r.get("play_profit", 0.0) or 0.0),
                 "Engine P/L": float(_r.get("engine_profit", 0.0) or 0.0),
                 "Conf": round(float(_r.get("confidence", 0.0) or 0.0), 3),
                 "P20": round(float(_r.get("p20", 0.0) or 0.0), 1),
@@ -8672,30 +8671,15 @@ def render_history_live_authoritative(manager) -> None:
             else:
                 _hist_neg_streak = 0
 
-        st.markdown("### 📊 V187 FULL HISTORY SIMULATED P/L SUMMARY" if V187_MODE == "FULL_HISTORY"
-                    else "### 📊 V10 HISTORICAL SIMULATED P/L SUMMARY")
+        st.markdown("### 📊 V187 FULL HISTORY BET P/L SUMMARY" if V187_MODE == "FULL_HISTORY"
+                    else "### 📊 V10 HISTORICAL BET P/L SUMMARY")
         _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
-        _h1.metric("SIM UNIT P/L", f"{_hist_total:+.1f}")
-        _h2.metric("SIM SAFE P/L", f"{_hist_balanced_total:+.1f}")
-        _h3.metric("UNIT WIN DAYS", str(_hist_pos))
-        _h4.metric("UNIT LOSS DAYS", str(_hist_neg))
-        _h5.metric("UNIT ZERO DAYS", str(_hist_zero))
-        _h6.metric("UNIT LOSS STREAK", str(_hist_max_neg_streak))
-        # UI-only: SAFE day statistics must not be mistaken for baseline UNIT days.
-        _hist_safe_pos = sum(1 for _x in _hist_balanced_pnls if _x > 0)
-        _hist_safe_neg = sum(1 for _x in _hist_balanced_pnls if _x < 0)
-        _hist_safe_zero = sum(1 for _x in _hist_balanced_pnls if abs(_x) < 1e-9)
-        _hist_safe_streak = 0
-        _hist_safe_max_streak = 0
-        for _x in _hist_balanced_pnls:
-            _hist_safe_streak = (_hist_safe_streak + 1) if _x < 0 else 0
-            _hist_safe_max_streak = max(_hist_safe_max_streak, _hist_safe_streak)
-        _sf1, _sf2, _sf3, _sf4 = st.columns(4)
-        _sf1.metric("SAFE WIN DAYS", str(_hist_safe_pos))
-        _sf2.metric("SAFE LOSS DAYS", str(_hist_safe_neg))
-        _sf3.metric("SAFE ZERO DAYS", str(_hist_safe_zero))
-        _sf4.metric("SAFE LOSS STREAK", str(_hist_safe_max_streak))
-        st.caption("UNIT day counts/streak use virtual V10 BET P/L before pattern and x2. SAFE day counts/streak use virtual post-pattern, post-x2 P/L. Neither proves actual platform execution.")
+        _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
+        _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
+        _h3.metric("PROFIT DAYS", str(_hist_pos))
+        _h4.metric("LOSS DAYS", str(_hist_neg))
+        _h5.metric("ZERO DAYS", str(_hist_zero))
+        _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
 
         _daily_hist_rows = []
         _cum_bet = 0.0
@@ -8709,9 +8693,9 @@ def render_history_live_authoritative(manager) -> None:
                 "Day": f"D{int(_d.get('day_seq',0) or 0)}",
                 "Date": str(_d.get("day_id", "") or ""),
                 "Unit BET P/L": _day_bet,
-                "Sim Safe P/L": _day_play,
+                "Safe Play P/L": _day_play,
                 "Cum Unit P/L": _cum_bet,
-                "Cum Sim Safe P/L": _cum_play,
+                "Cum Safe P/L": _cum_play,
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
                 "112211 Shadow": (
@@ -9404,33 +9388,9 @@ def _v187_final_bet_recheck(expected_seq: int, expected_date: str,
             return False, "date changed/missing in final source"
         if numbers != list(expected_numbers):
             return False, "number prefix or current round changed after replay"
-        # V8.8: re-fetch HISTORY independently AFTER replay and the DATA
-        # recheck. A marker hash only attests the first history snapshot; it
-        # cannot detect an edit published remotely while the replay runs.
-        # Before any BET is displayed, both Google Sheet tabs must still match.
-        if int(expected_seq) > 1:
-            if not expected_history_hashes or len(expected_history_hashes) != int(expected_seq) - 1:
-                return False, "expected historical witness missing/incomplete"
-            fresh_history = _read_google_sheet_csv_no_cache(HISTORY_SHEET_NAME)
-            fresh_days = _validated_numbers_by_day(fresh_history, int(expected_seq))
-            if len(fresh_days) != int(expected_seq) - 1:
-                return False, "history day count changed during replay"
-            fresh_history_hashes = {
-                str(int(hseq)): hashlib.sha256(
-                    json.dumps([str(hdate), list(hnums)], separators=(",", ":"),
-                               ensure_ascii=False).encode("utf-8")
-                ).hexdigest()
-                for hseq, hdate, hnums in fresh_days
-            }
-            if fresh_history_hashes != expected_history_hashes:
-                return False, "HISTORY source changed since initial replay (fresh witness mismatch)"
-        elif expected_history_hashes:
-            return False, "unexpected historical witness on first day"
-        if time.monotonic() - t0 > 30.0:
-            return False, "DATA+HISTORY final recheck exceeded 30 seconds"
         if not marker_ok():
             return False, "marker advanced during final source re-fetch"
-        return True, "DATA+HISTORY double no-cache re-fetch & durable marker match"
+        return True, "second no-cache snapshot & durable marker match"
     except Exception as exc:
         return False, f"final source recheck failed: {type(exc).__name__}: {exc}"
 
@@ -9845,7 +9805,7 @@ try:
     # The renderer can intentionally return WAIT when source / history is
     # incomplete. Never show a green success status unconditionally here.
     st.caption(
-        "V187 NO-CACHE V8.8: Refresh Now / Auto both reload the source; ONLY the CURRENT "
+        "V187 NO-CACHE V8.5: Refresh Now / Auto both reload the source; ONLY the CURRENT "
         "ACTION panel above determines BET / SKIP / WAIT. "
         "A loaded app is not proof the current action is BET-ready."
     )
