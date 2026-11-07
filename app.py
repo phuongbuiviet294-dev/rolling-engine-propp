@@ -9393,11 +9393,15 @@ class HistoryLiveSourceManager:
         # Capture the source-fetch frontier time BEFORE downloading history or
         # performing any replay; otherwise a slow history fetch can hide stale data.
         snapshot_fetched_at = time.time()
-        local_date = datetime.now(ZoneInfo("Asia/Phnom_Penh")).date().isoformat()
-        if not day_date or str(day_date) != local_date:
-            st.error(f"LIVE DATE CHECK FAILED: Sheet date={day_date or 'MISSING'}, "
-                     f"Cambodia local date={local_date}. "
-                     "Fix input date / stale Sheet before BET. CURRENT ACTION: WAIT / DO NOT BET.")
+        # V8.6: Google Sheet is the ONLY source of the day label. Do NOT
+        # compare data.date with the runtime's Cambodia calendar date: the
+        # input pipeline may legitimately publish the next DaySeq later.
+        # Source freshness is STILL established from real Number advances and
+        # the durable marker; day/round/history checks remain mandatory.
+        if not day_date:
+            st.error("V187 GOOGLE SHEET DATE MISSING/INVALID: "
+                     "data must contain one consistent valid date for populated Numbers. "
+                     "CURRENT ACTION: WAIT / DO NOT BET.")
             st.stop()
         if int(seq or 0) <= 0:
             st.error("V10.3 SOURCE ERROR: invalid DAY_SEQ. CURRENT ACTION: WAIT / DO NOT BET.")
@@ -9418,6 +9422,7 @@ class HistoryLiveSourceManager:
         self.ctx.live_day_seq = int(seq)
         self.ctx.live_day_date = str(day_date or "")
         self.ctx.live_day_id = self.ctx.live_day_date
+        self.ctx.live_date_validation_source = "GOOGLE_SHEET_ONLY"
 
         # V6: attest every completed day in the same raw history snapshot.
         # Hashes are safety metadata ONLY; strategic replay still rebuilds all
