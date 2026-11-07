@@ -9221,6 +9221,16 @@ def _save_raw_observation_marker(data: dict, raw_numbers: Optional[list[int]] = 
     Windows/Linux use their native advisory file locks. If the state file is
     unavailable/corrupt or the lock cannot be acquired, fail closed.
     """
+    def _marker_reject(code: str, explanation: str = "") -> bool:
+        # Diagnostics ONLY. Never modify/recreate/overwrite the accepted marker.
+        try:
+            st.session_state["_v187_marker_failure_detail"] = (
+                str(code) + (" | " + str(explanation) if explanation else "")
+            )
+        except Exception:
+            pass
+        return False
+
     import tempfile
     try:
         path = os.path.abspath(RAW_OBSERVATION_FILE)
@@ -9243,21 +9253,21 @@ def _save_raw_observation_marker(data: dict, raw_numbers: Optional[list[int]] = 
                 existing = _load_raw_observation_marker()
                 if os.path.exists(path) and not existing:
                     # Do not overwrite a corrupted or unreadable accepted file.
-                    return False
+                    return _marker_reject("MARKER_UNREADABLE", f"exists but JSON is not a readable nonempty dict: {path}")
                 old_seq = int(existing.get("day_seq", 0) or 0)
                 old_count = int(existing.get("round_count", 0) or 0)
                 new_seq = int(data.get("day_seq", 0) or 0)
                 new_count = int(data.get("round_count", 0) or 0)
                 if old_seq > new_seq or (old_seq == new_seq and old_count > new_count):
-                    return False
+                    return _marker_reject("DISK_FRONTIER_AHEAD", f"disk=D{old_seq}/R{old_count} source=D{new_seq}/R{new_count}")
                 if old_seq == new_seq and old_count == new_count and existing:
                     if existing.get("raw_signature") != data.get("raw_signature"):
-                        return False
+                        return _marker_reject("SAME_ROUND_NUMBER_CHANGED", f"D{new_seq} R{new_count} disk_sig={str(existing.get('raw_signature',''))[:12]} new_sig={str(data.get('raw_signature',''))[:12]}")
                 if old_seq == new_seq and old_count < new_count and existing:
                     if (raw_numbers is None or len(raw_numbers) < old_count
                             or make_numbers_signature(raw_numbers[:old_count])
                             != existing.get("raw_signature")):
-                        return False
+                        return _marker_reject("ACCEPTED_NUMBER_PREFIX_CHANGED", f"D{new_seq} previous_count={old_count} new_count={new_count}; first {old_count} Numbers do not match disk")
                 old_policy = (existing.get("v187_mode", "BASELINE"),
                               existing.get("v187_start", 0),
                               existing.get("v187_end", 0))
@@ -9270,7 +9280,7 @@ def _save_raw_observation_marker(data: dict, raw_numbers: Optional[list[int]] = 
                 ):
                     # V8.3: no policy overwrite even if a different app/tab
                     # advanced DaySeq between source read and atomic commit.
-                    return False
+                    return _marker_reject("FULL_HISTORY_POLICY_MISMATCH", f"disk={old_policy} requested={new_policy}")
                 if old_seq == new_seq and existing and old_policy != new_policy:
                     # A candidate may be armed on an EXISTING baseline day,
                     # provided its start is a future day. Never change an
@@ -9284,10 +9294,10 @@ def _save_raw_observation_marker(data: dict, raw_numbers: Optional[list[int]] = 
                                         and new_start == new_seq and new_count == 1
                                         and old_count <= 1)
                     if not (allow_arm_future or allow_arm_round1):
-                        return False
+                        return _marker_reject("POLICY_CHANGE_NOT_AUTHORIZED", f"disk={old_policy} requested={new_policy} at D{new_seq}/R{new_count}")
                 for k, old_hash in (existing.get("history_hashes") or {}).items():
                     if (data.get("history_hashes") or {}).get(k) != old_hash:
-                        return False
+                        return _marker_reject("HISTORY_DAY_HASH_CHANGED", f"archived DaySeq={k} disk_hash={str(old_hash)[:12]} source_hash={str((data.get('history_hashes') or {}).get(k))[:12]}")
                 payload = dict(data)
                 fd, tmp_name = tempfile.mkstemp(prefix=".v187_raw_obs_", suffix=".tmp", dir=parent)
                 try:
@@ -9306,8 +9316,8 @@ def _save_raw_observation_marker(data: dict, raw_numbers: Optional[list[int]] = 
                     msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        return False
+    except Exception as exc:
+        return _marker_reject("FILE_IO_OR_LOCK_ERROR", f"{type(exc).__name__}: {exc}")
 
 
 
@@ -9727,11 +9737,17 @@ class HistoryLiveSourceManager:
             # or same-frontier corrected response cannot become the new baseline.
             marker_saved = True
         else:
+            # Reset prior display reason; each failure must explain THIS attempt.
+            st.session_state.pop("_v187_marker_failure_detail", None)
             marker_saved = _save_raw_observation_marker(marker, self.numbers)
             if marker_saved:
                 st.session_state[key] = dict(marker)
 
         if not marker_saved:
+            st.error("V187 MARKER REASON: " + str(
+                st.session_state.get("_v187_marker_failure_detail", "UNKNOWN_FAILURE")
+            ))
+            st.caption("V187 MARKER FILE: " + str(RAW_OBSERVATION_FILE))
             st.error(
                 "V187 DURABLE MARKER WRITE/LOCK FAILED. WAIT / NO BET. "
                 "Check that the state directory is writable and only one "
