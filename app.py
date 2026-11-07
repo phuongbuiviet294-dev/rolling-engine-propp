@@ -8520,7 +8520,7 @@ def render_history_live_authoritative(manager) -> None:
             _day_status = "WAITING SIGNAL"
             _next_trade_status = "WAITING FOR NEXT QUALIFYING SIGNAL"
 
-        # V10.8: operator-facing REALIZED BET P/L for TODAY.
+        # V10.8: operator-facing SIMULATED BET P/L for TODAY.
         # This is the sum of settled rows where V10 action was BET. SKIP rows never
         # contribute. It equals the user's realized P/L only if the operator follows
         # every V10 BET instruction with the configured +2.5/-1 unit payoff.
@@ -8552,21 +8552,22 @@ def render_history_live_authoritative(manager) -> None:
             and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
         )
 
-        st.markdown("### 💰 TODAY LIVE BET RESULT")
+        st.markdown("### 🧮 TODAY SIMULATED BET RESULT — NOT ACTUAL TRADES")
+        st.caption("SIM ONLY: computed by replaying Numbers. This app cannot verify whether a BET was placed, filled, missed, or settled on the actual platform. Historical/replayed BETs must not be counted as actual executions.")
         _p1, _p2, _p3, _p4, _p5, _p6, _p7 = st.columns(7)
-        _p1.metric("UNIT V10 P/L", f"{_live_bet_pnl:+.1f}")
-        _p2.metric("PATTERN PLAY P/L", f"{pattern_play_pnl:+.1f}")
-        _p3.metric("SAFE PLAY P/L", f"{balanced_play_pnl:+.1f}")
-        _p4.metric("PLAYED BETS", str(_live_bet_count))
-        _p5.metric("PLAY W / L", f"{_exec_wins} / {_exec_losses}")
+        _p1.metric("SIM V10 UNIT P/L", f"{_live_bet_pnl:+.1f}")
+        _p2.metric("SIM PATTERN P/L", f"{pattern_play_pnl:+.1f}")
+        _p3.metric("SIM SAFE P/L", f"{balanced_play_pnl:+.1f}")
+        _p4.metric("SIM BETS", str(_live_bet_count))
+        _p5.metric("SIM W / L", f"{_exec_wins} / {_exec_losses}")
         _p6.metric("PATTERN SKIP", str(_pattern_skips))
-        _p7.metric("X2 USED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
+        _p7.metric("SIM X2 ASSIGNED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
         if _x2_used_today >= int(SAFE_STAKE_MAX_X2_PER_DAY):
-            st.info("🔒 FIRST-BET X2 USED — ALL LATER BETS TODAY are x1.")
+            st.info("🔒 SIM X2 SLOT ASSIGNED (may be pending / not placed). All later SIM BETs are x1.")
         st.caption(
-            "UNIT V10 P/L is the frozen V10 strategy. PATTERN PLAY P/L applies the 11221 and 111 confirmation filters at x1. SAFE PLAY P/L then applies the displayed stake: "
+            "SIM V10 P/L = baseline virtual signals; SIM PATTERN P/L = virtual signals after pattern filters at x1; SIM SAFE P/L = virtual outcomes with virtual stake: "
             "after a negative UNIT V10 day only the first BET next day is x2; every later BET is x1. If the previous UNIT V10 day is non-negative, every BET today is x1. HARD CAP: max 1 x2 per day. "
-            "Stake sizing NEVER feeds back into V10 signal/target logic."
+            "Stake sizing NEVER feeds back into V10 signal/target logic. These are NOT actual platform transactions."
         )
 
         # 112211 SHADOW: diagnostic only; never changes the authoritative action.
@@ -8618,7 +8619,7 @@ def render_history_live_authoritative(manager) -> None:
         _s2.metric("NEXT TRADE", _next_trade_status)
         _s3.metric("V10 REPLAY P/L", f"{pnl:+.1f}")
 
-        st.markdown("### 📜 TODAY V10 TRADE HISTORY")
+        st.markdown("### 📜 TODAY V10 SIMULATED SIGNAL HISTORY")
         _today_hist = []
         for _r in list(rows or []):
             _or = int(_r.get("open_round", 0) or 0)
@@ -8628,13 +8629,13 @@ def render_history_live_authoritative(manager) -> None:
                 "Target R": (_or + 1 if _or > 0 else None),
                 "Group": (f"G{int(_r.get('group',0) or 0)}" if int(_r.get('group',0) or 0) > 0 else "—"),
                 "V10 Action": str(_r.get("bet_action", "") or ""),
-                "Play Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
-                "Stake": str(_r.get("stake_label", "—") or "—"),
+                "Sim Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
+                "Sim Stake": str(_r.get("stake_label", "—") or "—"),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
                 "Settle R": _sr,
                 "Unit BET P/L": float(_r.get("bet_profit", 0.0) or 0.0),
-                "Play P/L": float(_r.get("play_profit", 0.0) or 0.0),
+                "Sim Play P/L": float(_r.get("play_profit", 0.0) or 0.0),
                 "Engine P/L": float(_r.get("engine_profit", 0.0) or 0.0),
                 "Conf": round(float(_r.get("confidence", 0.0) or 0.0), 3),
                 "P20": round(float(_r.get("p20", 0.0) or 0.0), 1),
@@ -8671,15 +8672,30 @@ def render_history_live_authoritative(manager) -> None:
             else:
                 _hist_neg_streak = 0
 
-        st.markdown("### 📊 V187 FULL HISTORY BET P/L SUMMARY" if V187_MODE == "FULL_HISTORY"
-                    else "### 📊 V10 HISTORICAL BET P/L SUMMARY")
+        st.markdown("### 📊 V187 FULL HISTORY SIMULATED P/L SUMMARY" if V187_MODE == "FULL_HISTORY"
+                    else "### 📊 V10 HISTORICAL SIMULATED P/L SUMMARY")
         _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
-        _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
-        _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
-        _h3.metric("PROFIT DAYS", str(_hist_pos))
-        _h4.metric("LOSS DAYS", str(_hist_neg))
-        _h5.metric("ZERO DAYS", str(_hist_zero))
-        _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
+        _h1.metric("SIM UNIT P/L", f"{_hist_total:+.1f}")
+        _h2.metric("SIM SAFE P/L", f"{_hist_balanced_total:+.1f}")
+        _h3.metric("UNIT WIN DAYS", str(_hist_pos))
+        _h4.metric("UNIT LOSS DAYS", str(_hist_neg))
+        _h5.metric("UNIT ZERO DAYS", str(_hist_zero))
+        _h6.metric("UNIT LOSS STREAK", str(_hist_max_neg_streak))
+        # UI-only: SAFE day statistics must not be mistaken for baseline UNIT days.
+        _hist_safe_pos = sum(1 for _x in _hist_balanced_pnls if _x > 0)
+        _hist_safe_neg = sum(1 for _x in _hist_balanced_pnls if _x < 0)
+        _hist_safe_zero = sum(1 for _x in _hist_balanced_pnls if abs(_x) < 1e-9)
+        _hist_safe_streak = 0
+        _hist_safe_max_streak = 0
+        for _x in _hist_balanced_pnls:
+            _hist_safe_streak = (_hist_safe_streak + 1) if _x < 0 else 0
+            _hist_safe_max_streak = max(_hist_safe_max_streak, _hist_safe_streak)
+        _sf1, _sf2, _sf3, _sf4 = st.columns(4)
+        _sf1.metric("SAFE WIN DAYS", str(_hist_safe_pos))
+        _sf2.metric("SAFE LOSS DAYS", str(_hist_safe_neg))
+        _sf3.metric("SAFE ZERO DAYS", str(_hist_safe_zero))
+        _sf4.metric("SAFE LOSS STREAK", str(_hist_safe_max_streak))
+        st.caption("UNIT day counts/streak use virtual V10 BET P/L before pattern and x2. SAFE day counts/streak use virtual post-pattern, post-x2 P/L. Neither proves actual platform execution.")
 
         _daily_hist_rows = []
         _cum_bet = 0.0
@@ -8693,9 +8709,9 @@ def render_history_live_authoritative(manager) -> None:
                 "Day": f"D{int(_d.get('day_seq',0) or 0)}",
                 "Date": str(_d.get("day_id", "") or ""),
                 "Unit BET P/L": _day_bet,
-                "Safe Play P/L": _day_play,
+                "Sim Safe P/L": _day_play,
                 "Cum Unit P/L": _cum_bet,
-                "Cum Safe P/L": _cum_play,
+                "Cum Sim Safe P/L": _cum_play,
                 "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
                 "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
                 "112211 Shadow": (
