@@ -8025,6 +8025,23 @@ def render_history_live_authoritative(manager) -> None:
                 "CURRENT ACTION: WAIT / DO NOT BET."
             )
             return
+        if current_round == 0:
+            # Visible dashboard at the start of a new day, even before R1.
+            # Do not call strategy/replay, change marker or display BET.
+            day_col, round_col, target_col, action_col = st.columns(4)
+            day_col.metric("DAY SEQ", f"D{seq}")
+            round_col.metric("CURRENT ROUND", "R0")
+            target_col.metric("NEXT INPUT", "R1")
+            action_col.metric("LIVE ACTION", "WAIT / NO BET")
+            st.info(
+                f"D{seq} is ready, but Number R1 has not been entered. "
+                "The dashboard remains open; refresh after R1 is available."
+            )
+            st.caption(
+                "NO NUMBER → NO REPLAY / NO BET / NO MARKER WRITE. "
+                f"Live evaluation still starts from R{LIVE_START_ROUND}."
+            )
+            return
         if current_round < LIVE_START_ROUND:
             st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
             return
@@ -9040,9 +9057,9 @@ class HistoryLiveSourceManager:
         if int(seq or 0) <= 0:
             st.error("V10.3 SOURCE ERROR: invalid DAY_SEQ. CURRENT ACTION: WAIT / DO NOT BET.")
             st.stop()
-        if not raw_numbers:
-            st.warning(f"DaySeq {int(seq)} detected but round 1 Number is not ready. CURRENT ACTION: WAIT.")
-            st.stop()
+        # D72/R0 (or any new DaySeq with blank R1) is a normal day-start state.
+        # Create a read-only WAIT dashboard; do not stop the Streamlit script.
+        # Crucially, no Number means no replay, no BET and no marker write.
         self.numbers = list(raw_numbers)
         self.round_id = len(self.numbers)
         # Before LIVE_START_ROUND the only valid action is WAIT, so do not pay
@@ -9056,6 +9073,14 @@ class HistoryLiveSourceManager:
         self.ctx.live_day_seq = int(seq)
         self.ctx.live_day_date = str(day_date or "")
         self.ctx.live_day_id = self.ctx.live_day_date
+
+        if self.round_id == 0:
+            # WAIT UI only. No fresh observation of R1 exists yet, so preserve
+            # the previous durable marker and its freshness/monotonicity checks.
+            self.ctx.live_raw_is_stale = True
+            self.ctx.live_raw_observation_warmup_required = True
+            self.ctx.live_raw_observation_marker_saved = False
+            return
 
         # Restart-safe observation guard. Strategy never reads this metadata.
         # Session state gives fast in-process tracking; the durable marker keeps
