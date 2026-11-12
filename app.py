@@ -7991,6 +7991,123 @@ def _v10_verify_source_before_bet(day_seq: int, day_date: str, numbers: list[int
     except Exception as exc:
         return False, f"FINAL SOURCE RECHECK FAILED: {type(exc).__name__}: {exc}"
 
+def _render_v10_historical_report(prior: list[dict]) -> None:
+    """Historical UI only. Same code path at R0, R1..179 and live R180+.
+
+    No marker writes, no BET authorization, no current-day settlement.
+    """
+    # V10.8: full historical BET P/L visibility.
+    # This is the P/L that V10 would have produced if every historical BET
+    # instruction had been followed with the configured +2.5/-1 payoff.
+    _all_hist = list(prior or [])
+    _hist_bet_pnls = [
+        round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
+        for _d in _all_hist
+    ]
+    _hist_total = round(sum(_hist_bet_pnls), 2)
+    _hist_pos = sum(1 for _x in _hist_bet_pnls if _x > 0)
+    _hist_neg = sum(1 for _x in _hist_bet_pnls if _x < 0)
+    _hist_zero = sum(1 for _x in _hist_bet_pnls if abs(_x) < 1e-9)
+    _hist_balanced_pnls = [
+        round(float(_d.get("history_live_balanced_stake_profit", _d.get("history_live_physical_profit", 0.0)) or 0.0), 2)
+        for _d in _all_hist
+    ]
+    _hist_balanced_total = round(sum(_hist_balanced_pnls), 2)
+    _hist_neg_streak = 0
+    _hist_max_neg_streak = 0
+    for _x in _hist_bet_pnls:
+        if _x < 0:
+            _hist_neg_streak += 1
+            _hist_max_neg_streak = max(_hist_max_neg_streak, _hist_neg_streak)
+        else:
+            _hist_neg_streak = 0
+
+    st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
+    _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
+    _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
+    _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
+    _h3.metric("PROFIT DAYS", str(_hist_pos))
+    _h4.metric("LOSS DAYS", str(_hist_neg))
+    _h5.metric("ZERO DAYS", str(_hist_zero))
+    _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
+
+    _daily_hist_rows = []
+    _cum_bet = 0.0
+    _cum_play = 0.0
+    for _d in _all_hist:
+        _day_bet = round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
+        _day_play = round(float(_d.get("history_live_balanced_stake_profit", _day_bet) or 0.0), 2)
+        _cum_bet = round(_cum_bet + _day_bet, 2)
+        _cum_play = round(_cum_play + _day_play, 2)
+        _daily_hist_rows.append({
+            "Day": f"D{int(_d.get('day_seq',0) or 0)}",
+            "Date": str(_d.get("day_id", "") or ""),
+            "Unit BET P/L": _day_bet,
+            "Safe Play P/L": _day_play,
+            "Cum Unit P/L": _cum_bet,
+            "Cum Safe P/L": _cum_play,
+            "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
+            "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
+            "112211 Shadow": (
+                f"{int(_d.get('pattern112211_wins',0) or 0)}W/{int(_d.get('pattern112211_losses',0) or 0)}L"
+                if int(_d.get("pattern112211_samples",0) or 0) > 0 else ""
+            ),
+        })
+    st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY — D1→YESTERDAY")
+    if _daily_hist_rows:
+        # UI-only: render one full table instead of a duplicated recent table + expander.
+        # This does not participate in strategy/replay and avoids the extra duplicate dataframe render.
+        _hist_df = pd.DataFrame(_daily_hist_rows)
+        _hist_height = min(max(430, 35 * (len(_hist_df) + 1)), 1200)
+        st.dataframe(
+            _hist_df,
+            use_container_width=True,
+            hide_index=True,
+            height=_hist_height,
+        )
+        st.caption(
+            "BET P/L = simulated historical result if every V10 BET was followed. "
+            "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
+        )
+    else:
+        st.info("No completed V10 simulated daily history yet.")
+
+
+
+def _render_v10_wait_history(manager, seq: int) -> None:
+    """Read-only historical report while current day has fewer than R180 Numbers.
+
+    Rebuild completed DaySeq 1..N-1 from raw history on EVERY refresh; never
+    touch the live marker, current-day ledger or authorization.
+    """
+    st.markdown("### 📜 FULL HISTORY — PREVIOUS COMPLETED DAYS")
+    if int(seq) <= 1:
+        st.info("DaySeq 1 has no completed previous-day history yet.")
+        return
+    hdf = getattr(manager, "history_df", None)
+    if hdf is None or hdf.empty:
+        st.warning(
+            f"HISTORY NOT READY: tab history was not available for D1–D{int(seq)-1}. "
+            "LIVE ACTION: WAIT / NO BET; no historical totals are invented."
+        )
+        return
+    try:
+        prior, _adaptive, _physical, replayed, hist_sig = _history_live_build_prior(hdf, int(seq))
+        if replayed != int(seq)-1:
+            raise ValueError(f"history replayed={replayed}, expected={int(seq)-1}")
+        st.caption(
+            f"HISTORY D1–D{int(seq)-1} | days={replayed} | "
+            f"RAW CHECKSUM={_short_hash(hist_sig)} | TRUE NO CACHE | "
+            "READ ONLY — no bet and no marker writes"
+        )
+        _render_v10_historical_report(prior)
+    except Exception as exc:
+        st.error(
+            f"HISTORY REPLAY NOT READY: {type(exc).__name__}: {exc}. "
+            "Live remains WAIT / NO BET; marker was not changed by this report."
+        )
+
+
 def render_history_live_authoritative(manager) -> None:
     """Render the ONLY authoritative physical action for V10.
 
@@ -8038,12 +8155,15 @@ def render_history_live_authoritative(manager) -> None:
                 "The dashboard remains open; refresh after R1 is available."
             )
             st.caption(
-                "NO NUMBER → NO REPLAY / NO BET / NO MARKER WRITE. "
+                "NO NUMBER → NO CURRENT-DAY REPLAY / NO BET / NO MARKER WRITE. "
                 f"Live evaluation still starts from R{LIVE_START_ROUND}."
             )
+            _render_v10_wait_history(manager, seq)
             return
         if current_round < LIVE_START_ROUND:
             st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
+            st.caption(f"CURRENT ROUND R{current_round} → TARGET R{current_round + 1}: WAIT / NO BET")
+            _render_v10_wait_history(manager, seq)
             return
         if hdf is None or hdf.empty:
             st.error("LIVE SELF-CHECK FAILED: raw history unavailable. CURRENT ACTION: WAIT / DO NOT BET.")
@@ -8432,81 +8552,7 @@ def render_history_live_authoritative(manager) -> None:
         else:
             st.info("No V10 trade rows yet today.")
 
-        # V10.8: full historical BET P/L visibility.
-        # This is the P/L that V10 would have produced if every historical BET
-        # instruction had been followed with the configured +2.5/-1 payoff.
-        _all_hist = list(prior or [])
-        _hist_bet_pnls = [
-            round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
-            for _d in _all_hist
-        ]
-        _hist_total = round(sum(_hist_bet_pnls), 2)
-        _hist_pos = sum(1 for _x in _hist_bet_pnls if _x > 0)
-        _hist_neg = sum(1 for _x in _hist_bet_pnls if _x < 0)
-        _hist_zero = sum(1 for _x in _hist_bet_pnls if abs(_x) < 1e-9)
-        _hist_balanced_pnls = [
-            round(float(_d.get("history_live_balanced_stake_profit", _d.get("history_live_physical_profit", 0.0)) or 0.0), 2)
-            for _d in _all_hist
-        ]
-        _hist_balanced_total = round(sum(_hist_balanced_pnls), 2)
-        _hist_neg_streak = 0
-        _hist_max_neg_streak = 0
-        for _x in _hist_bet_pnls:
-            if _x < 0:
-                _hist_neg_streak += 1
-                _hist_max_neg_streak = max(_hist_max_neg_streak, _hist_neg_streak)
-            else:
-                _hist_neg_streak = 0
-
-        st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
-        _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
-        _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
-        _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
-        _h3.metric("PROFIT DAYS", str(_hist_pos))
-        _h4.metric("LOSS DAYS", str(_hist_neg))
-        _h5.metric("ZERO DAYS", str(_hist_zero))
-        _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
-
-        _daily_hist_rows = []
-        _cum_bet = 0.0
-        _cum_play = 0.0
-        for _d in _all_hist:
-            _day_bet = round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
-            _day_play = round(float(_d.get("history_live_balanced_stake_profit", _day_bet) or 0.0), 2)
-            _cum_bet = round(_cum_bet + _day_bet, 2)
-            _cum_play = round(_cum_play + _day_play, 2)
-            _daily_hist_rows.append({
-                "Day": f"D{int(_d.get('day_seq',0) or 0)}",
-                "Date": str(_d.get("day_id", "") or ""),
-                "Unit BET P/L": _day_bet,
-                "Safe Play P/L": _day_play,
-                "Cum Unit P/L": _cum_bet,
-                "Cum Safe P/L": _cum_play,
-                "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
-                "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
-                "112211 Shadow": (
-                    f"{int(_d.get('pattern112211_wins',0) or 0)}W/{int(_d.get('pattern112211_losses',0) or 0)}L"
-                    if int(_d.get("pattern112211_samples",0) or 0) > 0 else ""
-                ),
-            })
-        st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY — D1→YESTERDAY")
-        if _daily_hist_rows:
-            # UI-only: render one full table instead of a duplicated recent table + expander.
-            # This does not participate in strategy/replay and avoids the extra duplicate dataframe render.
-            _hist_df = pd.DataFrame(_daily_hist_rows)
-            _hist_height = min(max(430, 35 * (len(_hist_df) + 1)), 1200)
-            st.dataframe(
-                _hist_df,
-                use_container_width=True,
-                hide_index=True,
-                height=_hist_height,
-            )
-            st.caption(
-                "BET P/L = simulated historical result if every V10 BET was followed. "
-                "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
-            )
-        else:
-            st.info("No completed V10 simulated daily history yet.")
+        _render_v10_historical_report(prior)
 
         if not raw_marker_saved:
             st.error(
@@ -9062,11 +9108,11 @@ class HistoryLiveSourceManager:
         # Crucially, no Number means no replay, no BET and no marker write.
         self.numbers = list(raw_numbers)
         self.round_id = len(self.numbers)
-        # Before LIVE_START_ROUND the only valid action is WAIT, so do not pay
-        # the network/replay cost of loading completed history yet.
+        # Keep the completed-day history visible at R0 and during R1..R179.
+        # This is read-only and is never used to authorize an early BET.
         self.history_df = (
             _load_history_sheet_df()
-            if self.round_id >= LIVE_START_ROUND
+            if int(seq) > 1 or self.round_id >= LIVE_START_ROUND
             else pd.DataFrame()
         )
         self.ctx = ensure_ctx_fields(EngineContext())
