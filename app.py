@@ -8552,6 +8552,18 @@ def render_history_live_authoritative(manager) -> None:
         _c4.metric("GROUP", _ui_group)
         _c5.metric("STAKE", _ui_stake)
         st.caption(f"REASON: {_ui_reason or '—'}")
+        if raw_regressed:
+            _round_gap = max(0, int(raw_prev_round_count) - int(current_round))
+            st.error(
+                f"LIVE BLOCKED — SOURCE ROLLBACK: D{seq} currently supplies R{current_round}, "
+                f"but the last accepted source already reached R{raw_prev_round_count} "
+                f"({_round_gap} fewer Numbers). Any BET/x2/PENDING shown in TODAY TRADE HISTORY "
+                "is a REPLAY CANDIDATE, not an authorized live action. "
+                "Re-entering or editing today's Numbers recalculates replay without cache, "
+                "but DOES NOT reset the last-good frontier or authorize betting on an earlier Round. "
+                "Check the actual DaySeq and Number rows in Google Sheet. "
+                "Live stays WAIT until a genuinely newer valid frontier is verified."
+            )
 
         if _ui_conf is not None:
             st.caption(
@@ -8605,11 +8617,18 @@ def render_history_live_authoritative(manager) -> None:
             and str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "SKIP"
         )
         _skip_count = sum(1 for _r in list(rows or []) if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "SKIP")
-        # Count assigned x2 BETs including a current pending BET. This is an
-        # operator guard only; the deterministic stake function already hard-caps x2.
-        _x2_used_today = sum(
+        # PENDING is only a hypothetical replay signal. A PENDING x2 must not
+        # be called USED: no settlement and no external wager confirmation.
+        _x2_settled_today = sum(
             1 for _r in list(rows or [])
             if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "BET"
+            and str(_r.get("status", "") or "").upper() in {"WIN", "LOSS"}
+            and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
+        )
+        _x2_pending_today = sum(
+            1 for _r in list(rows or [])
+            if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "BET"
+            and str(_r.get("status", "") or "").upper() == "PENDING"
             and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
         )
 
@@ -8621,9 +8640,22 @@ def render_history_live_authoritative(manager) -> None:
         _p4.metric("SIMULATED BETS", str(_live_bet_count))
         _p5.metric("SIM W / L", f"{_exec_wins} / {_exec_losses}")
         _p6.metric("PATTERN SKIP", str(_pattern_skips))
-        _p7.metric("SIM X2", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
-        if _x2_used_today >= int(SAFE_STAKE_MAX_X2_PER_DAY):
-            st.info("🔒 FIRST-BET X2 USED — ALL LATER BETS TODAY are x1.")
+        _p7.metric("SIM X2 SETTLED / PENDING", f"{_x2_settled_today} / {_x2_pending_today}")
+        if _x2_settled_today:
+            st.info(
+                "X2 SETTLED IN REPLAY — subsequent replay BETs are x1. "
+                "This does not prove any external wager was placed."
+            )
+        elif _x2_pending_today and _ui_action == "WAIT":
+            st.warning(
+                "X2 PENDING IN REPLAY, LIVE BLOCKED — no x2 BET has settled "
+                "and the live instruction is WAIT / NO BET."
+            )
+        elif _x2_pending_today:
+            st.info(
+                "X2 PENDING REPLAY SIGNAL — not yet settled or confirmed placed. "
+                "Use only LIVE DECISION for the current instruction."
+            )
         st.caption(
             "UNIT V10 P/L is the frozen V10 strategy. PATTERN PLAY P/L applies the 11221 and 111 confirmation filters at x1. SAFE PLAY P/L then applies the displayed stake: "
             "after a negative UNIT V10 day only the first BET next day is x2; every later BET is x1. If the previous UNIT V10 day is non-negative, every BET today is x1. HARD CAP: max 1 x2 per day. "
@@ -8680,17 +8712,32 @@ def render_history_live_authoritative(manager) -> None:
         _s3.metric("V10 REPLAY P/L", f"{pnl:+.1f}")
 
         st.markdown("### 📜 TODAY V10 TRADE HISTORY")
+        st.caption(
+            "TRADE HISTORY BELOW IS REPLAY ONLY, NOT A LEDGER OF PLACED BETS. "
+            "For the current PENDING row, Live Action follows the LIVE DECISION "
+            "safety guard above. A simulated BET/x2 can be blocked by source checks."
+        )
         _today_hist = []
         for _r in list(rows or []):
             _or = int(_r.get("open_round", 0) or 0)
             _sr = _r.get("settle_round", None)
+            _status = str(_r.get("status", "") or "").upper()
+            _replay_play = str(_r.get("play_action", _r.get("bet_action", "")) or "").upper()
+            _frontier_pending = _status == "PENDING" and _or == current_round
+            _live_row_action = (
+                "WAIT / NO BET" if _frontier_pending and _ui_action == "WAIT"
+                else (_ui_action + " SIGNAL (NOT PLACED)" if _frontier_pending else "REPLAY ONLY")
+            )
             _today_hist.append({
                 "Open R": _or,
                 "Target R": (_or + 1 if _or > 0 else None),
                 "Group": (f"G{int(_r.get('group',0) or 0)}" if int(_r.get('group',0) or 0) > 0 else "—"),
                 "V10 Action": str(_r.get("bet_action", "") or ""),
-                "Play Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
-                "Stake": str(_r.get("stake_label", "—") or "—"),
+                "Replay Play": _replay_play,
+                "Live Action": _live_row_action,
+                "Play Action": "WAIT / NO BET" if _frontier_pending and _ui_action == "WAIT" else _replay_play,
+                "Stake": "—" if _frontier_pending and _ui_action == "WAIT" else str(_r.get("stake_label", "—") or "—"),
+                "Replay Stake": str(_r.get("stake_label", "—") or "—"),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
                 "Settle R": _sr,
