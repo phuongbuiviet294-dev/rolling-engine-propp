@@ -8263,6 +8263,42 @@ def _render_v10_wait_history(manager, seq: int) -> None:
         )
 
 
+def _v10_no_cache_frontier_signal(pending, current_round: int) -> dict:
+    """Read the ALREADY-FRESH current-day replay, regardless of durable marker.
+
+    This pure function never authorizes a wager and never reads or writes markers.
+    An incomplete current Round can have a computed BET candidate for R+1.
+    """
+    r = int(current_round)
+    target = r + 1 if 0 <= r < int(MAX_ROUNDS_PER_DAY) else None
+    result = {"round": r, "target": target, "action": "WAIT", "group": "—",
+              "stake": "—", "reason": "NO PENDING SIGNAL", "is_candidate": False}
+    if target is None or r < int(LIVE_START_ROUND) or pending is None:
+        if target is None:
+            result["reason"] = "DAY FINISHED"
+        elif r < int(LIVE_START_ROUND):
+            result["reason"] = f"BEFORE R{int(LIVE_START_ROUND)}"
+        return result
+    if str(pending.get("status", "") or "").upper() != "PENDING":
+        result["reason"] = "TRADE NOT PENDING"
+        return result
+    if int(pending.get("open_round", -1) or -1) != r:
+        result["reason"] = "PENDING ROUND DOES NOT MATCH SOURCE"
+        return result
+    act = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
+    if act not in {"BET", "SKIP"}:
+        result["reason"] = "INVALID REPLAY ACTION"
+        return result
+    g = int(pending.get("group", 0) or 0)
+    if act == "BET" and g not in (1, 2, 3, 4):
+        result["reason"] = "INVALID REPLAY GROUP"
+        return result
+    result.update(action=act, group=f"G{g}" if g in (1, 2, 3, 4) else "—",
+                  stake=str(pending.get("stake_label", "—") or "—") if act == "BET" else "—",
+                  reason=str(pending.get("reason", "") or "—"), is_candidate=(act == "BET"))
+    return result
+
+
 def render_history_live_authoritative(manager) -> None:
     """Render the ONLY authoritative physical action for V10.
 
@@ -8434,7 +8470,7 @@ def render_history_live_authoritative(manager) -> None:
             _cg = int(pending.get("group", 0) or 0)
             _cs = str(pending.get("stake_label", "—") or "—")
             st.caption(
-                f"CURRENT REPLAY CANDIDATE (NOT AN AUTHORIZED BET): "
+                f"FRESH NO-CACHE CANDIDATE (check EXECUTION STATUS separately): "
                 f"R{current_round}→R{current_round+1}, {_cp}, G{_cg}, {_cs}. "
                 "See LIVE DECISION below for whether any action is permitted."
             )
@@ -8503,37 +8539,9 @@ def render_history_live_authoritative(manager) -> None:
         # could not be stored. Does not alter replay/profit or bet selection.
         raw_marker_saved = bool(getattr(manager.ctx, "live_raw_observation_marker_saved", False))
 
-        if raw_regressed or raw_revised_same_frontier:
-            st.warning(
-                f"D{seq}/R{current_round} HAS BEEN FULLY REPLAYED from today's corrected Numbers. "
-                "The old live frontier is NOT automatically reset because the app "
-                "cannot know which prior BETs you actually placed. "
-                "You can explicitly synchronize the checked current source below "
-                "instead of waiting for the old high-water Round."
-            )
-            _confirm_rebase = st.checkbox(
-                "I confirm this Sheet frontier matches the ACTUAL current game, "
-                "the next Target Round has NOT finished, and I will not repeat "
-                "any bet already placed.",
-                value=False,
-                key=f"v10_rebase_confirm_D{seq}_R{current_round}_{raw_sig[:12]}",
-            )
-            if st.button(
-                f"♻️ SYNC LIVE to D{seq}/R{current_round} (verify Google Sheet)",
-                disabled=not _confirm_rebase,
-                key=f"v10_rebase_button_D{seq}_R{current_round}_{raw_sig[:12]}",
-            ):
-                ok, reason = _v10_verified_rebase_today(seq, day_date, numbers, hist_sig)
-                if ok:
-                    st.success(reason)
-                    st.rerun()
-                else:
-                    st.error("SYNC NOT COMPLETED: " + reason + ". LIVE REMAINS WAIT.")
-        elif raw_revoked:
-            st.error(
-                "STALE TAB/SOURCE: this older Number snapshot was explicitly superseded "
-                "by a verified correction. LIVE WAIT. Refresh the Google Sheet first."
-            )
+        # Display NEVER requires a SYNC click. Recalculated signal is shown
+        # from the just-replayed R1..current numbers below. This marker is only
+        # for the independent external-bet/duplicate safety decision.
 
         # The second read is conditional: only a candidate BET needs a pre-BET
         # cross-source check. SKIP/WAIT never incur this extra network read.
@@ -8563,7 +8571,7 @@ def render_history_live_authoritative(manager) -> None:
         elif prebet_block_reason:
             _ui_reason = f"FINAL PRE-BET SOURCE VERIFY: {prebet_block_reason} — WAIT / NO BET"
         elif raw_regressed:
-            _ui_reason = f"SOURCE ROLLBACK R{current_round} < LAST GOOD R{raw_prev_round_count}; VERIFIED SAME-DAY SYNC AVAILABLE ABOVE"
+            _ui_reason = f"EXTERNAL BET LOCK: SOURCE R{current_round} < PREVIOUSLY SEEN R{raw_prev_round_count}"
         elif raw_revoked:
             _ui_reason = "SUPERSEDED NUMBER SNAPSHOT: LIVE WAIT UNTIL ACTUAL CURRENT DATA"
         elif raw_revised_same_frontier:
@@ -8604,28 +8612,35 @@ def render_history_live_authoritative(manager) -> None:
             else:
                 _ui_reason = "INVALID TARGET ROUND — FAIL CLOSED"
 
-        st.markdown("## 🎯 LIVE DECISION")
-        _c1, _c2, _c3, _c4, _c5 = st.columns(5)
-        _c1.metric("CURRENT ROUND", f"R{current_round}")
-        _c2.metric("TARGET ROUND", f"R{_ui_target}" if _ui_target is not None else "NEXT DAY")
-        _c3.metric("ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
-        _c4.metric("GROUP", _ui_group)
-        _c5.metric("STAKE", _ui_stake)
-        st.caption(f"REASON: {_ui_reason or '—'}")
+        # Top line is ALWAYS computed from the CURRENT raw Numbers, never
+        # from last-good marker or a previous browser session.
+        fresh = _v10_no_cache_frontier_signal(pending, current_round)
+        st.markdown("## 🎯 NO-CACHE SIGNAL — CALCULATED FROM CURRENT NUMBERS")
+        _f1, _f2, _f3, _f4, _f5 = st.columns(5)
+        _f1.metric("CURRENT ROUND", f"R{current_round}")
+        _f2.metric("TARGET ROUND", f"R{fresh['target']}" if fresh['target'] is not None else "NEXT DAY")
+        _f3.metric("CALCULATED ACTION", fresh["action"])
+        _f4.metric("CALCULATED GROUP", fresh["group"])
+        _f5.metric("CALCULATED STAKE", fresh["stake"])
+        st.caption(
+            f"FRESH REPLAY: D{seq} R1–R{current_round} | REASON: {fresh['reason']} | "
+            f"INPUT HASH {raw_sig[:12]} | computed signal is not confirmation of a placed wager."
+        )
+
+        # Execution permission is deliberately separate. Seeing a candidate
+        # BET is not the same as permission to repeat an earlier settled round.
+        st.markdown("### 🔐 LIVE EXECUTION STATUS")
+        _c1, _c2, _c3 = st.columns(3)
+        _c1.metric("EXECUTION ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
+        _c2.metric("EXECUTION TARGET", f"R{_ui_target}" if _ui_target is not None else "NEXT DAY")
+        _c3.metric("EXECUTION STAKE", _ui_stake)
+        st.caption(f"EXECUTION CHECK: {_ui_reason or '—'}")
         if raw_regressed:
-            _round_gap = max(0, int(raw_prev_round_count) - int(current_round))
-            st.error(
-                f"LIVE BLOCKED — SOURCE ROLLBACK: D{seq} currently supplies R{current_round}, "
-                f"but the last accepted source already reached R{raw_prev_round_count} "
-                f"({_round_gap} fewer Numbers). Any BET/x2/PENDING shown in TODAY TRADE HISTORY "
-                "is a REPLAY CANDIDATE, not an authorized live action. "
-                f"TODAY REPLAY *HAS BEEN RECALCULATED* from R1 to R{current_round}, "
-                "including the latest simulated P/L and x1/x2, with no current-day cache. "
-                "This is separate from LIVE AUTHORIZATION: the old marker is retained "
-                "to avoid duplicate betting at an earlier target Round. "
-                "Check the live DaySeq and Number rows in Google Sheet. "
-                "To resume live on the CORRECTED current Round, explicitly verify and SYNC "
-                "the current source using the control above. No need to wait for R287."
+            st.warning(
+                f"Number D{seq} hiện đến R{current_round}; dấu mốc đã từng thấy R{raw_prev_round_count}. "
+                "TÍN HIỆU ở trên đã được tính lại đầy đủ, không cache. "
+                "Chỉ khóa thực hiện cược cũ để tránh lệnh trùng; không phải lỗi tính toán. "
+                "Nếu game thực sự đã chạy qua Round đích thì không được cược lại Round đó."
             )
 
         if _ui_conf is not None:
@@ -8713,9 +8728,9 @@ def render_history_live_authoritative(manager) -> None:
                 "This does not prove any external wager was placed."
             )
         elif _x2_pending_today and _ui_action == "WAIT":
-            st.warning(
-                "X2 PENDING IN REPLAY, LIVE BLOCKED — no x2 BET has settled "
-                "and the live instruction is WAIT / NO BET."
+            st.info(
+                "X2 PENDING in the fully recalculated Number history; no x2 has settled. "
+                "External execution is independently blocked by the source/duplicate guard."
             )
         elif _x2_pending_today:
             st.info(
@@ -8780,8 +8795,8 @@ def render_history_live_authoritative(manager) -> None:
         st.markdown("### 📜 TODAY V10 TRADE HISTORY")
         st.caption(
             "TRADE HISTORY BELOW IS REPLAY ONLY, NOT A LEDGER OF PLACED BETS. "
-            "For the current PENDING row, Live Action follows the LIVE DECISION "
-            "safety guard above. A simulated BET/x2 can be blocked by source checks."
+            "Play Action / Stake = FRESH REPLAY (NO CACHE). Live Action = independent "
+            "EXECUTION STATUS. Replaying an old BET does not confirm or repeat a cash wager."
         )
         _today_hist = []
         for _r in list(rows or []):
@@ -8801,8 +8816,8 @@ def render_history_live_authoritative(manager) -> None:
                 "V10 Action": str(_r.get("bet_action", "") or ""),
                 "Replay Play": _replay_play,
                 "Live Action": _live_row_action,
-                "Play Action": "WAIT / NO BET" if _frontier_pending and _ui_action == "WAIT" else _replay_play,
-                "Stake": "—" if _frontier_pending and _ui_action == "WAIT" else str(_r.get("stake_label", "—") or "—"),
+                "Play Action": _replay_play,
+                "Stake": str(_r.get("stake_label", "—") or "—"),
                 "Replay Stake": str(_r.get("stake_label", "—") or "—"),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
@@ -8843,10 +8858,8 @@ def render_history_live_authoritative(manager) -> None:
             )
             return
         if raw_regressed or raw_revoked:
-            st.error(
-                f"REGRESSED/SUPERSEDED SOURCE SNAPSHOT: received R{current_round} after last accepted R{raw_prev_round_count}. "
-                "CURRENT ACTION: WAIT / DO NOT BET; last good marker was preserved."
-            )
+            # The calculated NO-CACHE signal and all replay rows are already
+            # visible above; do not repeat a second alarming rollback banner.
             return
         if raw_revised_same_frontier:
             st.error(
