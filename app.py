@@ -1,3 +1,6 @@
+# AUTO LIVE FILTER (D1+): after a settled retained LOSS, modal RED Color24
+# skips subsequent G3 BETs, with x2 reallocated to first retained BET.
+# This file does NOT place wagers via any external exchange/API.
 # ============================================================
 # APP V50 SINGLE CLEAN
 # Refactor from uploaded app_v50_fix_v7 source
@@ -5382,7 +5385,7 @@ def frontier_list_for_replay(
 # day R1..Rcurrent is NEVER memoized. Every refresh still fetches and validates
 # historical raw data (small O(N) checksum work), but avoids costly replay of
 # every completed day when that raw input is byte-identical.
-_COMPLETED_HISTORY_MEMO_SCHEMA = "APP36_COMPLETED_HISTORY_VERIFY_20261113_V1"
+_COMPLETED_HISTORY_MEMO_SCHEMA = "APP36_COMPLETED_HISTORY_VERIFY_COLOR_D1_V2"
 
 def _server_cache_completed_only(fn):
     """Share VERIFIED completed-day replay across full-page browser reloads.
@@ -7917,6 +7920,236 @@ def _history_live_apply_hybrid_continuation(
     return out
 
 
+
+# Color24/G3 SHADOW: independent, read-only diagnostic layer.
+# It is NEVER passed back into the V10 strategy, marker, window, daily lock,
+# physical P/L, actual execution permission, or x2 allocation of live bets.
+COLOR24_G3_SHADOW_WINDOW = 24
+_COLOR24_NAME = ("RED", "GREEN", "BLUE")
+
+
+def _color24_g3_shadow(rows: list[dict], numbers: list[int], prev_day_unit_profit: float) -> tuple[dict, dict]:
+    """Causal post-filter comparison with baseline final BET rows, no lookahead.
+
+    The color predicted at Open R is the modal Color of today's Numbers
+    R(max(1, Open-23))..R(Open), never Number at target (Open+1).
+    Number 1..4=RED, 5..8=GREEN, 9..12=BLUE. Ties use RED, GREEN, BLUE.
+    Only baseline G3 BETs are shadow-skipped when predicted Color is RED.
+    Under shadow, first retained BET is x2 iff yesterday's BASELINE UNIT
+    profit < 0; this includes the case where Color removed the original
+    first x2 BET. This is a frozen-baseline, post-filter what-if, NOT an
+    independent replay of the engine with changed state/window decisions.
+    """
+    colors = []
+    for raw in list(numbers or []):
+        n = int(raw)
+        if n < 1 or n > 12:
+            raise ValueError("Color24 shadow requires valid Number 1..12")
+        colors.append(0 if n <= 4 else (1 if n <= 8 else 2))
+    first_kept = True
+    previous_negative = float(prev_day_unit_profit or 0.0) < 0
+    annotated = {}
+    baseline_pnl = 0.0
+    shadow_pnl = 0.0
+    filtered = 0
+    g3_bets = 0
+    original_bets = 0
+    retained = 0
+    shadow_pending = 0
+    for r in list(rows or []):
+        opening = int(r.get("open_round", 0) or 0)
+        if opening < 1 or opening > len(colors):
+            raise ValueError(f"Color24 shadow invalid open Round={opening}, source={len(colors)}")
+        last24 = colors[max(0, opening - COLOR24_G3_SHADOW_WINDOW):opening]
+        counts = [last24.count(i) for i in range(3)]
+        pred = max(range(3), key=lambda i: (counts[i], -i)) if last24 else -1
+        group = int(r.get("group", 0) or 0)
+        original_action = str(r.get("play_action", r.get("bet_action", "")) or "").upper()
+        actual_base_bet = original_action == "BET"
+        status = str(r.get("status", "") or "").upper()
+        settled = status in ("WIN", "LOSS")
+        keep = actual_base_bet and not (group == 3 and pred == 0)
+        if actual_base_bet:
+            original_bets += 1
+            g3_bets += int(group == 3)
+            if not keep:
+                filtered += 1
+        re_stake = (2.0 if previous_negative and first_kept else 1.0) if keep else 0.0
+        if keep:
+            retained += 1
+            first_kept = False
+            shadow_pending += int(status == "PENDING")
+        # Final execution filter already decided whether baseline has a BET.
+        unit = float(r.get("play_unit_profit", r.get("bet_profit", 0.0)) or 0.0)
+        original_gain = float(r.get("play_profit", 0.0) or 0.0) if actual_base_bet and settled else 0.0
+        shadow_gain = round(unit * re_stake, 2) if keep and settled else 0.0
+        baseline_pnl += original_gain
+        shadow_pnl += shadow_gain
+        annotated[opening] = {
+            "pred": _COLOR24_NAME[pred] if pred >= 0 else "—",
+            "shadow_action": ("BASE SKIP" if not actual_base_bet else ("KEEP" if keep else "FILTER G3")),
+            "shadow_stake": (f"x{int(re_stake)}" if keep else "—"),
+            "shadow_play_pnl": shadow_gain,
+            "shadow_pending": bool(keep and status == "PENDING"),
+            "filtered": bool(actual_base_bet and not keep),
+        }
+    summary = {
+        "original_bets": original_bets,
+        "g3_bets": g3_bets,
+        "filtered_g3": filtered,
+        "shadow_bets": retained,
+        "shadow_pending": shadow_pending,
+        "baseline_pnl": round(baseline_pnl, 2),
+        "shadow_pnl": round(shadow_pnl, 2),
+        "delta": round(shadow_pnl - baseline_pnl, 2),
+    }
+    return annotated, summary
+
+
+# ADDITIONAL EXPERIMENTAL SHADOW (READ ONLY): Color24 filters G3 ONLY
+# after >=1 settled LOSS on a BET the candidate shadow actually retained today.
+# 1–4 RED, 5–8 GREEN, 9–12 BLUE. No effect on live/marker/window/stop/stake.
+
+def _color24_after_loss_g3_shadow(rows: list[dict], numbers: list[int], prev_day_unit_profit: float) -> tuple[dict, dict]:
+    """Causal post-filter of existing APP36 final BETs; no engine rerun.
+
+    A baseline G3 BET is rejected only if (a) an earlier retained, SETTLED
+    shadow BET already lost today and (b) the modal color in R(open-23)..R(open)
+    is RED. All other final baseline BETs remain as-is. FILTERed LOSSes do
+    not count as shadow losses; no use of the future R(open+1) Number.
+    Shadow x2 follows the first retained BET rule based on previous baseline
+    unit day. The returned values are simulated WHAT-IF only.
+    """
+    color_numbers = []
+    for n0 in list(numbers or []):
+        n = int(n0)
+        if n < 1 or n > 12:
+            raise ValueError("Color-after-loss shadow requires Number in 1..12")
+        color_numbers.append(0 if n <= 4 else (1 if n <= 8 else 2))
+    rows_sorted = sorted(list(rows or []), key=lambda r: int(r.get("open_round", 0) or 0))
+    first_kept = True
+    prev_negative = float(prev_day_unit_profit or 0.0) < 0
+    seen_loss = False
+    annotated = {}
+    original_bets = kept_bets = filtered = filtered_wins = filtered_losses = pending = x2_retained = 0
+    base_pnl = shadow_pnl = 0.0
+    previous_settled_open = 0
+    for r in rows_sorted:
+        opening = int(r.get("open_round", 0) or 0)
+        if not (1 <= opening <= len(color_numbers)):
+            raise ValueError(f"After-loss shadow opening={opening}, available={len(color_numbers)}")
+        grp = int(r.get("group", 0) or 0)
+        orig_action = str(r.get("play_action", r.get("bet_action", "")) or "").upper()
+        base_bet = orig_action == "BET"
+        status = str(r.get("status", "") or "").upper()
+        settled = status in ("WIN", "LOSS")
+        if base_bet and settled:
+            base_pnl += float(r.get("play_profit", 0.0) or 0.0)
+        last24 = color_numbers[max(0, opening - 24):opening]
+        counts = [last24.count(i) for i in range(3)]
+        pred = max(range(3), key=lambda i: (counts[i], -i)) if last24 else -1
+        lose_before = bool(seen_loss)
+        is_filtered = bool(base_bet and grp == 3 and lose_before and pred == 0)
+        keep = bool(base_bet and not is_filtered)
+        re_stake = (2.0 if first_kept and prev_negative else 1.0) if keep else 0.0
+        play_pnl = 0.0
+        if base_bet:
+            original_bets += 1
+        if is_filtered:
+            filtered += 1
+            filtered_wins += int(status == "WIN")
+            filtered_losses += int(status == "LOSS")
+        if keep:
+            if status in ("WIN", "LOSS") and previous_settled_open and opening <= previous_settled_open:
+                raise ValueError("After-loss shadow cannot read the future outcome of prior BET")
+            first_kept = False
+            kept_bets += 1
+            x2_retained += int(re_stake == 2.0)
+            pending += int(status == "PENDING")
+            unit = float(r.get("play_unit_profit", r.get("bet_profit", 0.0)) or 0.0)
+            if settled:
+                play_pnl = round(unit * re_stake, 2)
+                shadow_pnl += play_pnl
+                seen_loss = seen_loss or (status == "LOSS")
+                previous_settled_open = opening
+        annotated[opening] = {
+            "pred": _COLOR24_NAME[pred] if pred >= 0 else "—",
+            "shadow_action": "BASE SKIP" if not base_bet else ("FILTER AFTER LOSS" if is_filtered else "KEEP"),
+            "shadow_stake": f"x{int(re_stake)}" if keep else "—",
+            "shadow_play_pnl": float(play_pnl),
+            "seen_loss_before": lose_before,
+            "filtered": is_filtered,
+            "pending": bool(keep and status == "PENDING"),
+        }
+    summary = dict(
+        baseline_pnl=round(base_pnl, 2), shadow_pnl=round(shadow_pnl, 2),
+        delta=round(shadow_pnl-base_pnl, 2),
+        original_bets=original_bets, shadow_bets=kept_bets, filtered=filtered,
+        filtered_win=filtered_wins, filtered_loss=filtered_losses,
+        shadow_pending=pending, shadow_x2=x2_retained,
+    )
+    return annotated, summary
+
+
+# AFTER-LOSS COLOR24 G3: AUTOMATIC EXECUTION FILTER for ALL DAYSEQ >= 1.
+# COMPLETED HISTORY is re-simulated with Color (not a record of earlier wagers).
+# The rule is applied to
+# confirmed/pending baseline execution rows after the 112211/111 filter and
+# BEFORE FIRST-BET-x2 allocation. No cached current-day Numbers are used.
+COLOR_AFTER_LOSS24_LIVE_FROM_DAY_SEQ = 1
+COLOR_AFTER_LOSS24_LIVE_ENABLED = True
+
+
+def _color_after_loss24_live_apply(
+    pattern_rows: list[dict], numbers: list[int], prev_physical: float, day_seq: int
+) -> tuple[list[dict], list[dict], dict, dict, bool]:
+    """Return (live_rows, baseline_balanced_rows, diagnostics, summary, active).
+
+    The color decision is based on Numbers through each Open R, plus only
+    earlier retained, settled LOSS rows. It cannot inspect the Target Number.
+    Historical engine/window and prior day's V10 physical UNIT P/L are frozen;
+    only final operator play_action and x1/x2 sizing can be changed.
+    """
+    baseline_rows = _history_live_apply_balanced_stake(pattern_rows, prev_physical)
+    detail, summary = _color24_after_loss_g3_shadow(baseline_rows, numbers, prev_physical)
+    active = bool(COLOR_AFTER_LOSS24_LIVE_ENABLED and int(day_seq) >= COLOR_AFTER_LOSS24_LIVE_FROM_DAY_SEQ)
+    if not active:
+        return baseline_rows, baseline_rows, detail, summary, False
+
+    adjusted = []
+    for row in list(pattern_rows or []):
+        r = dict(row)
+        opening = int(r.get('open_round', 0) or 0)
+        d = detail.get(opening)
+        if d is None:
+            raise RuntimeError(f'COLOR LIVE missing prediction for open R{opening}')
+        r['afterloss_color24_pred'] = str(d.get('pred', '—'))
+        r['afterloss_color24_active'] = True
+        r['afterloss_color24_filtered'] = bool(d.get('filtered', False))
+        if r['afterloss_color24_filtered']:
+            if str(r.get('play_action', '')).upper() != 'BET' or int(r.get('group', 0) or 0) != 3:
+                raise RuntimeError(f'COLOR LIVE invalid G3 filter at R{opening}')
+            r['play_action'] = 'SKIP'
+            r['play_allowed'] = False
+            r['play_unit_profit'] = 0.0
+            r['reason'] = (str(r.get('reason', '') or '') + '|COLOR24_G3_AFTER_RETAINED_LOSS_RED_SKIP').strip('|')
+        adjusted.append(r)
+
+    live_rows = _history_live_apply_balanced_stake(adjusted, prev_physical)
+    # Fail closed on any mismatch between the causal shadow simulation and
+    # the now-active execution path.  This catches x2 allocation regressions.
+    total = round(sum(float(r.get('play_profit', 0.0) or 0.0) for r in live_rows), 2)
+    if total != round(float(summary['shadow_pnl']), 2):
+        raise RuntimeError(f'COLOR LIVE P/L mismatch {total} != {summary["shadow_pnl"]}')
+    for r in live_rows:
+        d = detail[int(r['open_round'])]
+        if str(r.get('stake_label', '—')) != str(d['shadow_stake']):
+            raise RuntimeError(f'COLOR LIVE x2 mismatch at R{r["open_round"]}')
+        if round(float(r.get('play_profit', 0.0) or 0.0), 2) != round(float(d['shadow_play_pnl']), 2):
+            raise RuntimeError(f'COLOR LIVE row P/L mismatch at R{r["open_round"]}')
+    return live_rows, baseline_rows, detail, summary, True
+
+
 def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force_replay: bool = False):
     """Build independent STOP-OFF history from raw D1..D(N-1), causally.
 
@@ -8039,7 +8272,9 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in execution_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        balanced_rows = _history_live_apply_balanced_stake(execution_rows, physical_prev)
+        balanced_rows, _baseline_balanced_rows, _al_details, _al_summary, _color_live_active = (
+            _color_after_loss24_live_apply(execution_rows, nums, physical_prev, seq)
+        )
         balanced_stake_profit = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in balanced_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
@@ -8060,6 +8295,11 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in x2_settled_rows), 2
         )
         pattern112211 = _pattern112211_shadow_stats(final_physical_rows)
+        # Read-only Color comparison computed ONCE for each completed DaySeq;
+        # cache invalidates if DaySeq, Numbers checksum, or app version changes.
+        _c24_details, _c24_summary = _color24_g3_shadow(_baseline_balanced_rows, nums, physical_prev)
+        # AFTER-LOSS statistics are measured against the frozen baseline even
+        # on dates when the same policy is already active as the live filter.
 
         resolved.append({
             "day_seq": int(seq), "day_id": str(day_id or seq),
@@ -8069,10 +8309,20 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             "history_live_physical_profit": physical_profit,
             "history_live_pattern_play_profit": pattern_play_profit,
             "history_live_balanced_stake_profit": balanced_stake_profit,
+            "afterloss24_live_active": bool(_color_live_active),
             "history_live_x2_bet_count": int(x2_bet_count),
             "history_live_x2_wins": int(x2_wins),
             "history_live_x2_losses": int(x2_losses),
             "history_live_x2_play_profit": float(x2_play_profit),
+            "color24_g3_shadow_pnl": float(_c24_summary["shadow_pnl"]),
+            "color24_g3_shadow_delta": float(_c24_summary["delta"]),
+            "color24_g3_shadow_filtered": int(_c24_summary["filtered_g3"]),
+            "color24_g3_shadow_bets": int(_c24_summary["shadow_bets"]),
+            "afterloss24_shadow_pnl": float(_al_summary["shadow_pnl"]),
+            "afterloss24_shadow_delta": float(_al_summary["delta"]),
+            "afterloss24_shadow_filtered": int(_al_summary["filtered"]),
+            "afterloss24_shadow_filtered_win": int(_al_summary["filtered_win"]),
+            "afterloss24_shadow_filtered_loss": int(_al_summary["filtered_loss"]),
             "pattern112211_samples": int(pattern112211.get("samples", 0) or 0),
             "pattern112211_wins": int(pattern112211.get("wins", 0) or 0),
             "pattern112211_losses": int(pattern112211.get("losses", 0) or 0),
@@ -8151,6 +8401,15 @@ def _render_v10_historical_report(prior: list[dict]) -> None:
         for _d in _all_hist
     ]
     _hist_balanced_total = round(sum(_hist_balanced_pnls), 2)
+    _hist_safe_loss_days = sum(v < 0 for v in _hist_balanced_pnls)
+    _hist_safe_win_days = sum(v > 0 for v in _hist_balanced_pnls)
+    _hist_safe_zero_days = sum(v == 0 for v in _hist_balanced_pnls)
+    _hist_color_baseline_total = round(sum(
+        float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0)
+        - float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0)
+        for _d in _all_hist
+    ), 2)
+
     _hist_neg_streak = 0
     _hist_max_neg_streak = 0
     for _x in _hist_bet_pnls:
@@ -8160,14 +8419,28 @@ def _render_v10_historical_report(prior: list[dict]) -> None:
         else:
             _hist_neg_streak = 0
 
+    st.info(
+        "COLOR AFTER-LOSS24 ACTIVE FROM D1: completed-day SAFE P/L is RE-SIMULATED "
+        "with the Color filter for comparison. This does NOT rewrite or confirm "
+        "bets that were actually placed in earlier days."
+    )
     st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
     _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
     _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
     _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
     _h3.metric("PROFIT DAYS", str(_hist_pos))
-    _h4.metric("LOSS DAYS", str(_hist_neg))
+    _h4.metric("UNIT LOSS DAYS", str(_hist_neg))
     _h5.metric("ZERO DAYS", str(_hist_zero))
     _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
+    st.caption(
+        f"SAFE POLICY (COLOR) D1–D{len(_all_hist)}: "
+        f"P/L={_hist_balanced_total:+.1f}, "
+        f"WIN DAYS={_hist_safe_win_days}, LOSS DAYS={_hist_safe_loss_days}, "
+        f"ZERO DAYS={_hist_safe_zero_days}. "
+        f"BASELINE SAFE WITHOUT COLOR={_hist_color_baseline_total:+.1f}. "
+        "Unit metrics above refer to the unmodified V10 underlying model, "
+        "not the filtered SAFE result."
+    )
 
     _daily_hist_rows = []
     _cum_bet = 0.0
@@ -8189,6 +8462,17 @@ def _render_v10_historical_report(prior: list[dict]) -> None:
                 if int(_d.get("history_live_x2_bet_count", 0) or 0) else "—"
             ),
             "X2 Play P/L": round(float(_d.get("history_live_x2_play_profit", 0.0) or 0.0), 2),
+            "Color24 G3 Shadow P/L": round(float(_d.get("color24_g3_shadow_pnl", 0.0) or 0.0), 2),
+            "Color24 G3 Delta": round(float(_d.get("color24_g3_shadow_delta", 0.0) or 0.0), 2),
+            "Color24 G3 Filtered": int(_d.get("color24_g3_shadow_filtered", 0) or 0),
+            "AfterLoss24 Active": "REPLAY COLOR" if _d.get("afterloss24_live_active", False) else "SHADOW",
+            "Baseline Safe P/L (No Color)": round(
+                float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0)
+                - float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0), 2
+            ),
+            "AfterLoss24 Simulated P/L": round(float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0), 2),
+            "AfterLoss24 Delta": round(float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0), 2),
+            "AfterLoss24 Filtered": int(_d.get("afterloss24_shadow_filtered", 0) or 0),
             "Cum Unit P/L": _cum_bet,
             "Cum Safe P/L": _cum_play,
             "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
@@ -8219,6 +8503,28 @@ def _render_v10_historical_report(prior: list[dict]) -> None:
             f"{_x2_wins} WIN / {_x2_losses} LOSS | X2 Play P/L {_x2_profit:+.1f}. "
             "X2 P/L is already INCLUDED in Safe Stake P/L; do NOT add it again. "
             "These results are simulations, not confirmed cash wagers."
+        )
+        _color_shadow_hist_total = round(sum(float(_d.get("color24_g3_shadow_pnl", 0.0) or 0.0) for _d in _all_hist), 2)
+        _color_shadow_hist_delta = round(_color_shadow_hist_total - _hist_balanced_total, 2)
+        _color_shadow_hist_filtered = sum(int(_d.get("color24_g3_shadow_filtered", 0) or 0) for _d in _all_hist)
+        st.caption(
+            f"COLOR24 G3 SHADOW (HISTORICAL WHAT-IF): {_color_shadow_hist_total:+.1f} | "
+            f"delta vs baseline {_color_shadow_hist_delta:+.1f} | filtered G3 BETs {_color_shadow_hist_filtered}. "
+            "Only a diagnostic after V10; it does NOT change live action or daily V10 state. "
+            "Shadow x2 moves to the first RETAINED BET when previous baseline unit day was negative."
+        )
+        _afterloss_hist_total = round(sum(float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0) for _d in _all_hist), 2)
+        # Compare with NO-COLOR baseline. Comparing against the active COLOR SAFE
+        # column would ALWAYS show a misleading zero delta when COLOR is enabled.
+        _afterloss_hist_delta = round(sum(float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0) for _d in _all_hist), 2)
+        _afterloss_filtered = sum(int(_d.get("afterloss24_shadow_filtered", 0) or 0) for _d in _all_hist)
+        st.caption(
+            f"AFTER-LOSS COLOR24 G3 {'ACTIVE POLICY' if COLOR_AFTER_LOSS24_LIVE_ENABLED else 'SHADOW'}: "
+            f"{_afterloss_hist_total:+.1f} | delta vs NO-COLOR baseline "
+            f"{_afterloss_hist_delta:+.1f} | filtered {_afterloss_filtered} BETs. "
+            "Historical WHAT-IF simulation from D1: not proof of actual past wagers. "
+            "The current-day LIVE calculation uses this Color rule when enabled; "
+            "source and marker guards still control whether a BET may be executed."
         )
         st.caption(
             "BET P/L = simulated historical result if every V10 BET was followed. "
@@ -8408,7 +8714,12 @@ def render_history_live_authoritative(manager) -> None:
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        rows = _history_live_apply_balanced_stake(rows, prev_physical)
+        rows, _baseline_color_rows, afterloss_rows, afterloss_sum, color_live_active = (
+            _color_after_loss24_live_apply(rows, numbers, prev_physical, seq)
+        )
+        # The regular Color24 G3 control remains an independent diagnostic of
+        # the unmodified baseline, NOT a second filter on today's live rows.
+        color24_rows, color24_sum = _color24_g3_shadow(_baseline_color_rows, numbers, prev_physical)
         balanced_play_pnl = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
@@ -8437,7 +8748,10 @@ def render_history_live_authoritative(manager) -> None:
         # Deterministic source/action signatures shown to operator.
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
-            "rule": "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2",
+            "rule": (
+                "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2_COLOR_AFTERLOSS24_D1"
+                if color_live_active else "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2"
+            ),
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -8629,6 +8943,47 @@ def render_history_live_authoritative(manager) -> None:
 
         # Execution permission is deliberately separate. Seeing a candidate
         # BET is not the same as permission to repeat an earlier settled round.
+        # Color24 on TODAY Numbers is recalculated on EACH refresh (no cache).
+        # A shadow KEEP/FILTER is NEVER an instruction to place or skip a wager.
+        _pending_color = color24_rows.get(int(current_round), {}) if pending is not None else {}
+        st.markdown("### 🎨 COLOR24 G3 SHADOW — READ ONLY")
+        _cc1, _cc2, _cc3, _cc4 = st.columns(4)
+        _cc1.metric("COLOR24 PRED", _pending_color.get("pred", "—"))
+        _cc2.metric("G3 SHADOW DECISION", _pending_color.get("shadow_action", "NO SIGNAL"))
+        _cc3.metric("TODAY SHADOW P/L", f"{color24_sum['shadow_pnl']:+.1f}")
+        _cc4.metric("TODAY VS BASELINE", f"{color24_sum['delta']:+.1f}")
+        st.caption(
+            f"SHADOW ONLY: predicted most frequent Color of previous {COLOR24_G3_SHADOW_WINDOW} Numbers "
+            f"(RED=1–4, GREEN=5–8, BLUE=9–12). "
+            f"G3 filtered={color24_sum['filtered_g3']}/{color24_sum['g3_bets']} | "
+            f"retained={color24_sum['shadow_bets']}/{color24_sum['original_bets']} | "
+            f"pending shadow BETs={color24_sum['shadow_pending']}. "
+            "Historical comparison, NOT independent engine replay; no effect on LIVE EXECUTION STATUS, marker, or stake."
+        )
+
+        _current_afterloss = afterloss_rows.get(int(current_round), {}) if pending is not None else {}
+        st.markdown(
+            "### ✅ AFTER-LOSS COLOR24 G3 — AUTO LIVE FILTER"
+            if color_live_active else
+            "### 🔍 AFTER-LOSS COLOR24 G3 — HISTORICAL SHADOW / NOT YET ACTIVE"
+        )
+        _a1, _a2, _a3, _a4 = st.columns(4)
+        _a1.metric("AFTER-LOSS ACTION", _current_afterloss.get("shadow_action", "NO SIGNAL"))
+        _a2.metric("COLOR24 PRED", _current_afterloss.get("pred", "—"))
+        _a3.metric("TODAY SHADOW P/L", f"{afterloss_sum['shadow_pnl']:+.1f}")
+        _a4.metric("DELTA VS BASELINE", f"{afterloss_sum['delta']:+.1f}")
+        st.caption(
+            f"ACTIVE={color_live_active} from D{COLOR_AFTER_LOSS24_LIVE_FROM_DAY_SEQ} | "
+            f"Retained BETs={afterloss_sum['shadow_bets']}/{afterloss_sum['original_bets']} | "
+            f"filtered={afterloss_sum['filtered']} | "
+            f"retrospective filtered LOSS={afterloss_sum['filtered_loss']} "
+            f"WIN={afterloss_sum['filtered_win']} | "
+            f"PENDING={afterloss_sum['shadow_pending']}. "
+            "After one earlier retained, SETTLED LOSS today, RED modal Color24 filters later G3 BETs. "
+            "When active this modifies play_action BEFORE x2 sizing, but never overrides source/marker/pre-BET guards. "
+            "P/L remains a replay, not a ledger of actual wagers."
+        )
+
         st.markdown("### 🔐 LIVE EXECUTION STATUS")
         _c1, _c2, _c3 = st.columns(3)
         _c1.metric("EXECUTION ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
@@ -8809,6 +9164,8 @@ def render_history_live_authoritative(manager) -> None:
                 "WAIT / NO BET" if _frontier_pending and _ui_action == "WAIT"
                 else (_ui_action + " SIGNAL (NOT PLACED)" if _frontier_pending else "REPLAY ONLY")
             )
+            _color_r = color24_rows.get(_or, {})
+            _afterloss_r = afterloss_rows.get(_or, {})
             _today_hist.append({
                 "Open R": _or,
                 "Target R": (_or + 1 if _or > 0 else None),
@@ -8819,6 +9176,14 @@ def render_history_live_authoritative(manager) -> None:
                 "Play Action": _replay_play,
                 "Stake": str(_r.get("stake_label", "—") or "—"),
                 "Replay Stake": str(_r.get("stake_label", "—") or "—"),
+                "Color24 Pred": _color_r.get("pred", "—"),
+                "Color24 G3 Shadow": _color_r.get("shadow_action", "—"),
+                "Color24 Shadow Stake": _color_r.get("shadow_stake", "—"),
+                "Color24 Shadow P/L": float(_color_r.get("shadow_play_pnl", 0.0)),
+                "AfterLoss24 Policy": "LIVE" if color_live_active else "SHADOW",
+                "AfterLoss24 Decision": _afterloss_r.get("shadow_action", "—"),
+                "AfterLoss24 Expected Stake": _afterloss_r.get("shadow_stake", "—"),
+                "AfterLoss24 Expected P/L": float(_afterloss_r.get("shadow_play_pnl", 0.0)),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
                 "Settle R": _sr,
@@ -9668,8 +10033,8 @@ with st.sidebar:
 
     auto_refresh_enabled = st.checkbox(
         "Auto refresh",
-        value=False,
-        help="OFF by default so the UI stays stable for inspection. When ON, the whole Streamlit page reloads."
+        value=True,
+        help="ON by default (30 seconds) for automatic source refresh while this browser tab is open. Turn OFF to inspect static results. Browser refresh does not place wagers."
     )
     refresh_seconds = st.number_input(
         "Refresh seconds",
@@ -9681,20 +10046,29 @@ with st.sidebar:
     )
 
 _current_round_for_refresh = int(getattr(live_manager, "round_id", 0) or 0) if live_manager is not None else 0
-if auto_refresh_enabled and _current_round_for_refresh < 288:
-    st.sidebar.info(
-        f"Auto refresh ON: every {int(refresh_seconds)}s. "
-        "Turn it OFF while reviewing the dashboard."
-    )
+if auto_refresh_enabled:
+    # R288 completes a DAY, not the application. Keep polling at a lower
+    # frequency so that a browser left open can detect the NEXT DAY_SEQ/R0/R1.
+    # Previously auto refresh stopped forever at R288 until manual reload.
+    _refresh_interval = (int(refresh_seconds) if _current_round_for_refresh < 288
+                         else max(120, int(refresh_seconds)))
+    if _current_round_for_refresh >= 288:
+        st.sidebar.info(
+            f"R288 complete — checking for the next DaySeq every {_refresh_interval}s "
+            "while this browser tab remains open."
+        )
+    else:
+        st.sidebar.info(
+            f"Auto refresh ON: every {_refresh_interval}s. "
+            "Turn it OFF while reviewing the dashboard."
+        )
     components.html(
         f"""
         <script>
         setTimeout(function() {{
             window.parent.location.reload();
-        }}, {int(refresh_seconds) * 1000});
+        }}, {_refresh_interval * 1000});
         </script>
         """,
         height=0,
     )
-elif auto_refresh_enabled and _current_round_for_refresh >= 288:
-    st.sidebar.success("Day complete at R288 — auto refresh paused.")
