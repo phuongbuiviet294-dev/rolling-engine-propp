@@ -8270,8 +8270,9 @@ def render_history_live_authoritative(manager) -> None:
     current-day Numbers R1..observed frontier. Completed-day replay is reused
     only when raw source+DaySeq+policy match. Any uncertainty fails closed.
     """
-    st.markdown("# 🚀 V10.12.9 TODAY NO CACHE + VERIFIED COMPLETED HISTORY + 112211/111 CONFIRM — LIVE ACTION")
+    st.markdown("# 🚀 V10.12.9 TODAY FULL REPLAY + VERIFIED HISTORY + SAME-DAY LIVE SOURCE SYNC")
     st.caption(
+        "FRESH REPLAY OF TODAY'S R1→CURRENT ON EVERY REFRESH; COMPLETED HISTORY MEMOIZED IF UNCHANGED. "
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
         "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TODAY R1→CURRENT ALWAYS FRESH • HISTORY VERIFIED MEMO • FROZEN RULE"
     )
@@ -8315,11 +8316,11 @@ def render_history_live_authoritative(manager) -> None:
             )
             _render_v10_wait_history(manager, seq)
             return
-        if current_round < LIVE_START_ROUND:
-            st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
-            st.caption(f"CURRENT ROUND R{current_round} → TARGET R{current_round + 1}: WAIT / NO BET")
-            _render_v10_wait_history(manager, seq)
-            return
+        # TODAY ALWAYS NO CACHE: even before the first eligible live Round,
+        # replay the complete observed R1..Rcurrent prefix from source. Before
+        # R180 this is informational and cannot produce an authorized BET.
+        # Never return early here: a same-day Number edit must update TODAY
+        # diagnostics even at R1..R179.
         if hdf is None or hdf.empty:
             st.error("LIVE SELF-CHECK FAILED: raw history unavailable. CURRENT ACTION: WAIT / DO NOT BET.")
             return
@@ -8414,6 +8415,30 @@ def render_history_live_authoritative(manager) -> None:
             json.dumps(action_payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
 
+        # A fresh calculation marker -- NOT a durable live marker and NOT an
+        # authorization to bet. This runs after the full TODAY replay, hence
+        # every Refresh shows exactly which source prefix was just calculated.
+        st.markdown("### 🔄 TODAY NO CACHE — FRESH REPLAY")
+        _nr1, _nr2, _nr3 = st.columns(3)
+        _nr1.metric("DAY / SOURCE FRONTIER", f"D{seq} / R{current_round}")
+        _nr2.metric("TODAY REPLAY SAFE P/L", f"{balanced_play_pnl:+.1f}")
+        _nr3.metric("TODAY REPLAY TRADE ROWS", str(len(rows)))
+        st.caption(
+            f"JUST REPLAYED R1–R{current_round} FROM CURRENT NUMBERS | "
+            f"RAW SHA-256={raw_sig[:16]} | HIST SHA-256={hist_sig[:16]} | "
+            "TODAY REPLAY: NO CACHE ON EVERY REFRESH. "
+            "LIVE PERMISSION IS AN INDEPENDENT SOURCE/ORDER SAFETY CHECK."
+        )
+        if pending is not None:
+            _cp = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
+            _cg = int(pending.get("group", 0) or 0)
+            _cs = str(pending.get("stake_label", "—") or "—")
+            st.caption(
+                f"CURRENT REPLAY CANDIDATE (NOT AN AUTHORIZED BET): "
+                f"R{current_round}→R{current_round+1}, {_cp}, G{_cg}, {_cs}. "
+                "See LIVE DECISION below for whether any action is permitted."
+            )
+
         hist_physical = [float(x.get("history_live_physical_profit", 0.0) or 0.0) for x in prior]
         hist_pattern_play = [float(x.get("history_live_pattern_play_profit", x.get("history_live_physical_profit", 0.0)) or 0.0) for x in prior]
         hist_total = round(sum(hist_physical), 2)
@@ -8472,16 +8497,49 @@ def render_history_live_authoritative(manager) -> None:
         raw_warmup = bool(getattr(manager.ctx, "live_raw_observation_warmup_required", False))
         raw_regressed = bool(getattr(manager.ctx, "live_raw_snapshot_regressed", False))
         raw_revised_same_frontier = bool(getattr(manager.ctx, "live_raw_snapshot_revised_same_frontier", False))
+        raw_revoked = bool(getattr(manager.ctx, "live_raw_snapshot_revoked", False))
         raw_prev_round_count = int(getattr(manager.ctx, "live_raw_previous_round_count", 0) or 0)
         # Operational safety only: no LIVE action if the durable source witness
         # could not be stored. Does not alter replay/profit or bet selection.
         raw_marker_saved = bool(getattr(manager.ctx, "live_raw_observation_marker_saved", False))
 
+        if raw_regressed or raw_revised_same_frontier:
+            st.warning(
+                f"D{seq}/R{current_round} HAS BEEN FULLY REPLAYED from today's corrected Numbers. "
+                "The old live frontier is NOT automatically reset because the app "
+                "cannot know which prior BETs you actually placed. "
+                "You can explicitly synchronize the checked current source below "
+                "instead of waiting for the old high-water Round."
+            )
+            _confirm_rebase = st.checkbox(
+                "I confirm this Sheet frontier matches the ACTUAL current game, "
+                "the next Target Round has NOT finished, and I will not repeat "
+                "any bet already placed.",
+                value=False,
+                key=f"v10_rebase_confirm_D{seq}_R{current_round}_{raw_sig[:12]}",
+            )
+            if st.button(
+                f"♻️ SYNC LIVE to D{seq}/R{current_round} (verify Google Sheet)",
+                disabled=not _confirm_rebase,
+                key=f"v10_rebase_button_D{seq}_R{current_round}_{raw_sig[:12]}",
+            ):
+                ok, reason = _v10_verified_rebase_today(seq, day_date, numbers, hist_sig)
+                if ok:
+                    st.success(reason)
+                    st.rerun()
+                else:
+                    st.error("SYNC NOT COMPLETED: " + reason + ". LIVE REMAINS WAIT.")
+        elif raw_revoked:
+            st.error(
+                "STALE TAB/SOURCE: this older Number snapshot was explicitly superseded "
+                "by a verified correction. LIVE WAIT. Refresh the Google Sheet first."
+            )
+
         # The second read is conditional: only a candidate BET needs a pre-BET
         # cross-source check. SKIP/WAIT never incur this extra network read.
         prebet_block_reason = ""
         if (
-            raw_marker_saved and not raw_regressed and not raw_revised_same_frontier
+            raw_marker_saved and not raw_regressed and not raw_revised_same_frontier and not raw_revoked
             and not raw_warmup and not raw_stale
             and pending is not None and current_round < MAX_ROUNDS_PER_DAY
             and int(pending.get("open_round", -1) or -1) == current_round
@@ -8505,7 +8563,9 @@ def render_history_live_authoritative(manager) -> None:
         elif prebet_block_reason:
             _ui_reason = f"FINAL PRE-BET SOURCE VERIFY: {prebet_block_reason} — WAIT / NO BET"
         elif raw_regressed:
-            _ui_reason = f"REGRESSED SOURCE SNAPSHOT R{current_round} < LAST GOOD R{raw_prev_round_count}"
+            _ui_reason = f"SOURCE ROLLBACK R{current_round} < LAST GOOD R{raw_prev_round_count}; VERIFIED SAME-DAY SYNC AVAILABLE ABOVE"
+        elif raw_revoked:
+            _ui_reason = "SUPERSEDED NUMBER SNAPSHOT: LIVE WAIT UNTIL ACTUAL CURRENT DATA"
         elif raw_revised_same_frontier:
             _ui_reason = f"RAW NUMBER CHANGED AT SAME FRONTIER R{current_round} — WAIT FOR NEXT ROUND"
         elif raw_warmup:
@@ -8559,10 +8619,13 @@ def render_history_live_authoritative(manager) -> None:
                 f"but the last accepted source already reached R{raw_prev_round_count} "
                 f"({_round_gap} fewer Numbers). Any BET/x2/PENDING shown in TODAY TRADE HISTORY "
                 "is a REPLAY CANDIDATE, not an authorized live action. "
-                "Re-entering or editing today's Numbers recalculates replay without cache, "
-                "but DOES NOT reset the last-good frontier or authorize betting on an earlier Round. "
-                "Check the actual DaySeq and Number rows in Google Sheet. "
-                "Live stays WAIT until a genuinely newer valid frontier is verified."
+                f"TODAY REPLAY *HAS BEEN RECALCULATED* from R1 to R{current_round}, "
+                "including the latest simulated P/L and x1/x2, with no current-day cache. "
+                "This is separate from LIVE AUTHORIZATION: the old marker is retained "
+                "to avoid duplicate betting at an earlier target Round. "
+                "Check the live DaySeq and Number rows in Google Sheet. "
+                "To resume live on the CORRECTED current Round, explicitly verify and SYNC "
+                "the current source using the control above. No need to wait for R287."
             )
 
         if _ui_conf is not None:
@@ -8577,7 +8640,10 @@ def render_history_live_authoritative(manager) -> None:
         if current_round >= MAX_ROUNDS_PER_DAY:
             _day_status = "DAY COMPLETE"
             _next_trade_status = "NEXT DAY"
-        elif not raw_marker_saved or prebet_block_reason or raw_regressed or raw_revised_same_frontier or raw_warmup or raw_stale:
+        elif current_round < LIVE_START_ROUND:
+            _day_status = "WAIT / BEFORE LIVE START"
+            _next_trade_status = f"WAIT UNTIL R{LIVE_START_ROUND}"
+        elif not raw_marker_saved or prebet_block_reason or raw_regressed or raw_revoked or raw_revised_same_frontier or raw_warmup or raw_stale:
             _day_status = "WAIT / SOURCE NOT READY"
             _next_trade_status = "WAIT / NO BET"
         elif _physical_lock_reached:
@@ -8755,6 +8821,14 @@ def render_history_live_authoritative(manager) -> None:
             st.info("No V10 trade rows yet today.")
 
         _render_v10_historical_report(prior)
+        # Even if a marker is unavailable, pre-live rounds are informational.
+        # Current D1..R179 replay is still fresh, and no BET is ever permitted.
+        if current_round < LIVE_START_ROUND:
+            st.info(
+                f"CURRENT ACTION: WAIT / NO BET BEFORE R{LIVE_START_ROUND}. "
+                f"TODAY R1–R{current_round} WAS FULLY REPLAYED WITHOUT CACHE."
+            )
+            return
 
         if not raw_marker_saved:
             st.error(
@@ -8768,9 +8842,9 @@ def render_history_live_authoritative(manager) -> None:
                 "CURRENT ACTION: WAIT / DO NOT BET. Replay remains informational."
             )
             return
-        if raw_regressed:
+        if raw_regressed or raw_revoked:
             st.error(
-                f"REGRESSED SOURCE SNAPSHOT: received R{current_round} after last accepted R{raw_prev_round_count}. "
+                f"REGRESSED/SUPERSEDED SOURCE SNAPSHOT: received R{current_round} after last accepted R{raw_prev_round_count}. "
                 "CURRENT ACTION: WAIT / DO NOT BET; last good marker was preserved."
             )
             return
@@ -8795,6 +8869,13 @@ def render_history_live_authoritative(manager) -> None:
 
         if current_round >= MAX_ROUNDS_PER_DAY:
             st.success(f"✅ DAY COMPLETE — WAIT FOR NEXT DAY | V10 REPLAY P/L {pnl:+.1f}")
+            return
+        if current_round < LIVE_START_ROUND:
+            st.info(
+                f"CURRENT ACTION: WAIT / NO BET BEFORE R{LIVE_START_ROUND}. "
+                f"TODAY R1–R{current_round} WAS FULLY REPLAYED WITH NO CACHE; "
+                "history and today's simulated P/L above are current."
+            )
             return
         if pending is None:
             if _physical_lock_reached:
@@ -9247,8 +9328,11 @@ def _load_raw_observation_marker() -> dict:
         return {}
 
 
-def _save_raw_observation_marker(data: dict) -> bool:
-    """Monotonic, atomic local marker writer for concurrent Streamlit browser sessions.
+def _save_raw_observation_marker(
+    data: dict, *, verified_same_day_rebase: bool = False,
+    expected_previous: Optional[dict] = None,
+) -> bool:
+    """Atomically store the raw witness; explicit verified same-day corrections only.
 
     A newer accepted DaySeq/Round cannot be overwritten by a delayed older run.
     Failure always returns False so LIVE DECISION becomes WAIT. This does NOT
@@ -9277,10 +9361,57 @@ def _save_raw_observation_marker(data: dict) -> bool:
             new = dict(data or {})
             new_pos = (int(new.get("day_seq", 0) or 0), int(new.get("round_count", 0) or 0))
             old_pos = (int(prev.get("day_seq", 0) or 0), int(prev.get("round_count", 0) or 0))
-            if new_pos <= (0, 0) or old_pos > new_pos:
+            if new_pos <= (0, 0):
                 return False
-            if old_pos == new_pos and prev and str(prev.get("raw_signature", "")) != str(new.get("raw_signature", "")):
+            old_seq, old_round = old_pos
+            new_seq, new_round = new_pos
+            old_generation = int(prev.get("revision_generation", 0) or 0)
+            new_generation = int(new.get("revision_generation", 0) or 0)
+            revoked = list(prev.get("revoked_signatures", []) or [])
+            new_sig = str(new.get("raw_signature", "") or "")
+            if not new_sig:
                 return False
+            if verified_same_day_rebase:
+                # The button calls the two-source verification BEFORE this lock.
+                # Require an exact compare-and-swap of the previous marker: a
+                # second Streamlit session must not race us to a different frontier.
+                exp = expected_previous if isinstance(expected_previous, dict) else {}
+                if (old_seq != new_seq or not exp or not prev
+                    or old_round < new_round
+                    or old_round != int(exp.get("round_count", 0) or 0)
+                    or old_generation != int(exp.get("revision_generation", 0) or 0)
+                    or str(prev.get("raw_signature", "")) != str(exp.get("raw_signature", ""))
+                    or new_sig == str(prev.get("raw_signature", ""))
+                    or new_sig in revoked
+                    or not bool(new.get("freshness_established", False))):
+                    return False
+                if new_generation != old_generation + 1:
+                    return False
+                # Retain a bounded audit trail and blacklist the superseded
+                # full snapshot so an old browser tab cannot reapply it.
+                revoked.append(str(prev.get("raw_signature", "")))
+                new["revoked_signatures"] = list(dict.fromkeys(revoked))[-32:]
+                events = list(prev.get("same_day_rebase_events", []) or [])
+                events.append({
+                    "day_seq": new_seq, "from_round": old_round,
+                    "to_round": new_round, "at": new.get("observed_at"),
+                    "previous_sha": str(prev.get("raw_signature", ""))[:16],
+                    "new_sha": new_sig[:16],
+                    "operator_confirmed": True,
+                })
+                new["same_day_rebase_events"] = events[-20:]
+            else:
+                if old_pos > new_pos:
+                    return False
+                if new_pos == old_pos and prev and str(prev.get("raw_signature", "")) != new_sig:
+                    return False
+                if old_seq == new_seq and prev:
+                    if new_generation != old_generation or new_sig in revoked:
+                        return False
+                    # These fields belong to the existing generation, not to
+                    # a browser tab; preserve them across every new Round.
+                    new["revoked_signatures"] = list(revoked)
+                    new["same_day_rebase_events"] = list(prev.get("same_day_rebase_events", []) or [])
             fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=parent or None)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(new, f, ensure_ascii=False, sort_keys=True)
@@ -9297,6 +9428,46 @@ def _save_raw_observation_marker(data: dict) -> bool:
                 os.remove(tmp)
             except Exception:
                 pass
+
+
+def _v10_verified_rebase_today(day_seq: int, day_date: str, numbers: list[int], history_sig: str) -> tuple[bool, str]:
+    """Operator-confirmed resync for corrected current-day Numbers.
+
+    Does not execute any external wager. Only changes the source observation
+    frontier after the current data+history have passed a second remote read.
+    Historical replay cache and strategy parameters remain unchanged.
+    """
+    if int(day_seq) <= 0 or not numbers or len(numbers) >= MAX_ROUNDS_PER_DAY:
+        return False, "VALID ACTIVE DAY WITH 1..287 NUMBERS REQUIRED"
+    before = _load_raw_observation_marker()
+    if (int(before.get("day_seq", 0) or 0) != int(day_seq)
+        or int(before.get("round_count", 0) or 0) < len(numbers)):
+        return False, "DAY/FRONTIER CHANGED; REFRESH FIRST"
+    good, reason = _v10_verify_source_before_bet(day_seq, day_date, numbers, history_sig)
+    if not good:
+        return False, f"SECOND SOURCE VERIFICATION FAILED: {reason}"
+    now = time.time()
+    new_marker = {
+        "version": "V10_12_9_OPERATOR_VERIFIED_SAME_DAY_REBASE_V1",
+        "day_seq": int(day_seq),
+        "round_count": len(numbers),
+        "raw_signature": make_numbers_signature(numbers),
+        "changed_at": now,
+        "observed_at": now,
+        "freshness_established": True,
+        "revision_generation": int(before.get("revision_generation", 0) or 0) + 1,
+    }
+    ok = _save_raw_observation_marker(
+        new_marker, verified_same_day_rebase=True, expected_previous=before,
+    )
+    if not ok:
+        return False, "MARKER CHANGED DURING CONFIRMATION OR FAILED TO SAVE; REFRESH"
+    # The persisted marker is authoritative, not the browser's old R286 state.
+    try:
+        st.session_state["_v10_12_raw_observation"] = dict(_load_raw_observation_marker())
+    except Exception:
+        pass
+    return True, f"REBASED D{day_seq}: R{int(before.get('round_count',0) or 0)} → R{len(numbers)}; LIVE REPLAYS ON RERUN"
 
 
 class HistoryLiveSourceManager:
@@ -9340,9 +9511,9 @@ class HistoryLiveSourceManager:
         session_prev = st.session_state.get(key)
         disk_prev = _load_raw_observation_marker()
 
-        # Multiple browser sessions can coexist. Use the most advanced accepted
-        # marker, not blindly the current session copy, so an older tab cannot
-        # move the frontier backwards after another session has advanced it.
+        # Multiple sessions can coexist. A same-day correction increments a
+        # durable generation: NEWER GENERATION outranks OLD ROUND. An old tab
+        # must not resurrect R286 after the operator rebases to R244.
         _marker_candidates = [
             x for x in (session_prev, disk_prev)
             if isinstance(x, dict) and bool(x)
@@ -9352,6 +9523,7 @@ class HistoryLiveSourceManager:
                 _marker_candidates,
                 key=lambda x: (
                     int(x.get("day_seq", 0) or 0),
+                    int(x.get("revision_generation", 0) or 0),
                     int(x.get("round_count", 0) or 0),
                     float(x.get("observed_at", 0.0) or 0.0),
                 ),
@@ -9379,8 +9551,11 @@ class HistoryLiveSourceManager:
             and int(self.round_id) == prev_count
             and str(prev.get("raw_signature", "")) != raw_sig
         )
+        snapshot_revoked_source = bool(
+            same_day and raw_sig in list(prev.get("revoked_signatures", []) or [])
+        )
 
-        if snapshot_regressed or snapshot_revised_same_frontier:
+        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revoked_source:
             changed_at = float(prev.get("changed_at", now) or now)
             freshness_established = bool(prev.get("freshness_established", False))
         elif same_sig:
@@ -9417,8 +9592,9 @@ class HistoryLiveSourceManager:
             "changed_at": float(changed_at),
             "observed_at": float(now),
             "freshness_established": bool(freshness_established),
+            "revision_generation": int(prev.get("revision_generation", 0) or 0) if same_day else 0,
         }
-        if snapshot_regressed or snapshot_revised_same_frontier:
+        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revoked_source:
             # Keep the last accepted marker intact so a transient stale/regressed
             # or same-frontier corrected response cannot become the new baseline.
             marker_saved = True
@@ -9427,7 +9603,7 @@ class HistoryLiveSourceManager:
             # Never publish an uncommitted marker into session state: otherwise
             # an IO error could make future refreshes trust an ephemeral witness.
             if marker_saved:
-                st.session_state[key] = dict(marker)
+                st.session_state[key] = dict(_load_raw_observation_marker())
 
         self.ctx.live_raw_signature = raw_sig
         self.ctx.live_raw_observed_age_seconds = float(age)
@@ -9435,6 +9611,8 @@ class HistoryLiveSourceManager:
         self.ctx.live_raw_observation_warmup_required = bool(warmup_required)
         self.ctx.live_raw_snapshot_regressed = bool(snapshot_regressed)
         self.ctx.live_raw_snapshot_revised_same_frontier = bool(snapshot_revised_same_frontier)
+        self.ctx.live_raw_snapshot_revoked = bool(snapshot_revoked_source)
+        self.ctx.live_raw_revision_generation = int(marker["revision_generation"])
         self.ctx.live_raw_previous_round_count = int(prev_count)
         self.ctx.live_raw_observation_marker_saved = bool(marker_saved)
 
