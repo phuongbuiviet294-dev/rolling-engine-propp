@@ -1,6 +1,3 @@
-# AUTO LIVE FILTER (D1+): after a settled retained LOSS, modal RED Color24
-# skips subsequent G3 BETs, with x2 reallocated to first retained BET.
-# This file does NOT place wagers via any external exchange/API.
 # ============================================================
 # APP V50 SINGLE CLEAN
 # Refactor from uploaded app_v50_fix_v7 source
@@ -10,7 +7,6 @@ from __future__ import annotations
 
 import time
 import json
-import copy
 import dataclasses
 import os
 import math
@@ -758,17 +754,13 @@ def _load_history_sheet_df() -> pd.DataFrame:
 
 
 def _parse_number_value(raw: Any) -> Optional[int]:
-    # Reject fractional Numbers: int(float('4.9')) used to silently turn 4.9 into 4.
-    if raw is None or isinstance(raw, bool):
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return None
     s = str(raw).strip()
     if not s or s.lower() in {"nan", "nat", "none"}:
         return None
     try:
-        v = float(s.replace(",", "."))
-        if not math.isfinite(v) or not v.is_integer():
-            return None
-        x = int(v)
+        x = int(float(s.replace(",", ".")))
     except Exception:
         return None
     return x if 1 <= x <= 12 else None
@@ -984,17 +976,13 @@ def _read_contiguous_number_column(df: pd.DataFrame, col_idx: int, skip_first_da
 
 
 def _normalize_day_seq(raw: Any) -> Optional[int]:
-    # DaySeq must be a positive exact integer. Reject e.g. 67.9 as 67.
-    if raw is None or isinstance(raw, bool):
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return None
     s = str(raw).strip()
     if not s or s.lower() in {"nan", "nat", "none"}:
         return None
     try:
-        v = float(s.replace(",", "."))
-        if not math.isfinite(v) or not v.is_integer():
-            return None
-        x = int(v)
+        x = int(float(s.replace(",", ".")))
     except Exception:
         return None
     return x if x >= 1 else None
@@ -1046,8 +1034,7 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         raw_r = c_round.iloc[i]
         raw_n = c_number.iloc[i]
         try:
-            rv = float(str(raw_r).replace(",", "."))
-            rr = int(rv) if math.isfinite(rv) and rv.is_integer() else -1
+            rr = int(float(str(raw_r).replace(",", ".")))
         except Exception:
             rr = -1
         n = _parse_number_value(raw_n)
@@ -1058,9 +1045,6 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
             )
             st.stop()
         if n is None:
-            if raw_n is not None and str(raw_n).strip().lower() not in {"", "nan", "nat", "none"}:
-                st.error(f"LIVE DATA INVALID NUMBER DaySeq {current_seq} Round {pos}: {raw_n!r}. WAIT / NO BET.")
-                st.stop()
             # A blank tail is normal. A blank/invalid row followed by any valid
             # Number in the same DAY_SEQ is a data gap and must fail-stop rather
             # than silently treating the earlier row as the live frontier.
@@ -1079,10 +1063,7 @@ def _load_day_seq_sheet_snapshot() -> tuple[pd.DataFrame, int, str, list[int]]:
         rounds.append(rr)
         nums.append(n)
         d = _parse_date_value(c_date.iloc[i])
-        if d is None:
-            st.error(f"LIVE DATA INVALID DATE DaySeq {current_seq} Round {pos}: {c_date.iloc[i]!r}. WAIT / NO BET.")
-            st.stop()
-        dates.append(d.isoformat())
+        dates.append(d.isoformat() if d is not None else "")
 
     if nums:
         bad_dates = {d for d in dates if d}
@@ -1386,15 +1367,18 @@ def _historical_day_diagnostic_message(seq: int, check: dict) -> str:
 
 
 def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, frontier_journal: Optional[dict] = None) -> list[dict]:
-    """Return causal prior-day seed from validated raw inputs.
+    """Rebuild prior-day profit directly from raw Numbers on every refresh.
 
-    Completed days may reuse a verified session memo keyed by raw history,
-    DaySeq, prior physical journal and code identity; current day stays stateless.
+    NO-CACHE invariant:
+    - never read cached historical profit
+    - never write cached historical profit
+    - replay Day1..Day(N-1) causally from raw Numbers every refresh
+    - current day remains stateless R1->CURRENT
     """
     current_seq = int(current_seq or 0)
     if current_seq <= 1:
         try:
-            st.caption("COMPLETED HISTORY: NO PRIOR DAYS | TODAY: NO CACHE")
+            st.caption("HISTORY CACHE: DISABLED | one-pass raw replay every refresh")
         except Exception:
             pass
         return []
@@ -1413,27 +1397,11 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
             f"{missing}. LIVE is fail-closed."
         )
 
-    # Immutable historical seed: different history Numbers, DaySeq, old-day
-    # physical frontier journal or source code => full causal rebuild.
-    seed_sig = make_history_signature(raw_list)
-    seed_key = (
-        _COMPLETED_HISTORY_MEMO_SCHEMA, "ENGINE_SEED",
-        _completed_history_code_identity(), int(current_seq), seed_sig,
-        _completed_history_frontier_signature(frontier_journal or {}, current_seq),
-    )
-    seed_hit = _completed_history_memo_read("_app36_verified_engine_seed", seed_key)
-    if seed_hit is not None:
-        st.caption(
-            f"ENGINE COMPLETED HISTORY: VERIFIED REUSE | D1-D{current_seq-1} | "
-            f"checksum={seed_sig[:10]} | TODAY: FULL FRESH REPLAY"
-        )
-        return seed_hit
-
     resolved: list[dict] = []
     replayed_days = 0
     recovered_logical_days: list[int] = []
     # V117.5 betting-layer prior P/L is rebuilt inside this SAME raw replay.
-    # No second historical replay. Computed seed is memoized after verification.
+    # No second historical replay and no cache/session dependency.
     _v1175_prev_bet_profit = 0.0
     _adaptive_prev_bet_profit = 0.0
 
@@ -1560,15 +1528,13 @@ def _raw_history_seed_from_df(history_df: pd.DataFrame, current_seq: int, fronti
                 "continuous engine strategy is rebuilt from raw Numbers; adaptive actual BET/SKIP is unaffected."
             )
         st.caption(
-            f"COMPLETED HISTORY: FULL REBUILD | raw replayed={replayed_days} "
+            f"HISTORY CACHE: DISABLED | raw replayed={replayed_days} "
             f"| required={len(required)} | every refresh"
         )
     except Exception:
         pass
 
-    seed_result = resolved[-10:]
-    _completed_history_memo_write("_app36_verified_engine_seed", seed_key, seed_result)
-    return seed_result
+    return resolved[-10:]
 
 def group_of(n: int) -> int:
     if n <= 3:
@@ -5380,68 +5346,6 @@ def frontier_list_for_replay(
     ))
 
 
-
-# Completed days ONLY may use a verified per-session replay memo. The current
-# day R1..Rcurrent is NEVER memoized. Every refresh still fetches and validates
-# historical raw data (small O(N) checksum work), but avoids costly replay of
-# every completed day when that raw input is byte-identical.
-_COMPLETED_HISTORY_MEMO_SCHEMA = "APP36_COMPLETED_HISTORY_VERIFY_COLOR_D1_V2"
-
-def _server_cache_completed_only(fn):
-    """Share VERIFIED completed-day replay across full-page browser reloads.
-
-    Streamlit st.session_state may be lost on `window.parent.location.reload()`,
-    whereas st.cache_data survives across sessions within the same server
-    process. In offline tests without Streamlit it falls back to direct replay.
-    """
-    try:
-        factory = getattr(st, "cache_data", None)
-        if not callable(factory):
-            return fn
-        wrapped = factory(show_spinner=False, max_entries=4)(fn)
-        return wrapped if callable(wrapped) else fn
-    except (AttributeError, TypeError, RuntimeError):
-        return fn
-
-def _completed_history_code_identity() -> tuple:
-    """Invalidate historical memo on source deployment/change, not on new Round."""
-    path = str(globals().get("__file__", "") or "")
-    try:
-        info = os.stat(path)
-        return (int(info.st_size), int(info.st_mtime_ns))
-    except (OSError, ValueError):
-        return (str(globals().get("BUILD_TAG", "")), str(globals().get("STATE_VERSION", "")))
-
-def _completed_history_memo_read(slot: str, key: tuple):
-    try:
-        state = st.session_state
-        entry = state.get(slot, None)
-        if isinstance(entry, dict) and entry.get("key") == key:
-            # Never pass a mutable cached historical ledger to later code.
-            return copy.deepcopy(entry["value"])
-    except (AttributeError, KeyError, TypeError):
-        pass
-    return None
-
-def _completed_history_memo_write(slot: str, key: tuple, value) -> None:
-    try:
-        st.session_state[slot] = {"key": key, "value": copy.deepcopy(value)}
-    except (AttributeError, KeyError, TypeError):
-        # Conservative fallback: calculate from raw on every refresh.
-        pass
-
-def _completed_history_frontier_signature(journal: dict, current_seq: int) -> str:
-    """Only prior-day frontier records can affect completed-day replay.
-
-    The LIVE/current-day record increases on each Round and MUST NOT evict
-    completed-day memo. Do not include this day's record in its cache key.
-    """
-    raw = dict((journal or {}).get("days", {}) or {})
-    past = {str(k): v for k, v in raw.items()
-            if str(k).isdigit() and 1 <= int(k) < int(current_seq)}
-    packed = json.dumps(past, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(packed.encode("utf-8")).hexdigest()
-
 # ============================================================
 # ENGINE MANAGER
 # ============================================================
@@ -5504,8 +5408,8 @@ class EngineManager:
             # causally using baseline before cutover and V70 from cutover onward.
             _history_sig = make_history_signature(hist_days)
             self.history_signature = _history_sig
-            # Only completed historical replay may be reused after checksum/
-            # DaySeq/source-code validation. Current-day replay is never cached.
+            # TRUE NO CACHE: legacy/stateless path also rebuilds prior history
+            # directly from raw Numbers on every run. No session replay memo.
             try:
                 self.ctx.daily_profit_history = _raw_history_seed_from_df(
                     history_df,
@@ -5515,7 +5419,7 @@ class EngineManager:
             except ValueError as exc:
                 st.warning(str(exc))
                 st.stop()
-            self.history_replay_reused = False  # V10 operator view uses separate verified memo.
+            self.history_replay_reused = False
 
             # Only an engine-ready snapshot is trade-eligible.
             if int(sheet_day_seq or 0) >= FRONTIER_JOURNAL_CUTOVER_DAY_SEQ:
@@ -6965,17 +6869,14 @@ def _validated_numbers_by_day(history_df: pd.DataFrame, current_seq: int) -> lis
         g = g.sort_values("_round")
         nums=[]; expected=1; day_id=""
         for _, row in g.iterrows():
-            raw_rr = row["_round"]
-            rr = int(raw_rr) if pd.notna(raw_rr) and float(raw_rr).is_integer() else -1
-            raw_seq = _normalize_day_seq(row[sc])
+            rr = int(row["_round"]) if pd.notna(row["_round"]) else -1
             n = _parse_number_value(row[nc])
-            if raw_seq != int(seq) or rr != expected or n is None:
+            if rr != expected or n is None:
                 raise ValueError(f"Historical DaySeq {int(seq)} invalid at expected round {expected}: round={rr}, number={row[nc]}")
-            d = _parse_date_value(row[dc])
-            if d is None or (day_id and d.isoformat() != day_id):
-                raise ValueError(f"Historical DaySeq {int(seq)} has missing/mixed Date at R{rr}: {row[dc]!r}")
-            day_id = d.isoformat()
             nums.append(n); expected += 1
+            if not day_id:
+                d = _parse_date_value(row[dc])
+                day_id = d.isoformat() if d else f"DAYSEQ_{int(seq)}"
         if nums:
             out.append((int(seq), day_id, nums))
     return out
@@ -7920,242 +7821,12 @@ def _history_live_apply_hybrid_continuation(
     return out
 
 
-
-# Color24/G3 SHADOW: independent, read-only diagnostic layer.
-# It is NEVER passed back into the V10 strategy, marker, window, daily lock,
-# physical P/L, actual execution permission, or x2 allocation of live bets.
-COLOR24_G3_SHADOW_WINDOW = 24
-_COLOR24_NAME = ("RED", "GREEN", "BLUE")
-
-
-def _color24_g3_shadow(rows: list[dict], numbers: list[int], prev_day_unit_profit: float) -> tuple[dict, dict]:
-    """Causal post-filter comparison with baseline final BET rows, no lookahead.
-
-    The color predicted at Open R is the modal Color of today's Numbers
-    R(max(1, Open-23))..R(Open), never Number at target (Open+1).
-    Number 1..4=RED, 5..8=GREEN, 9..12=BLUE. Ties use RED, GREEN, BLUE.
-    Only baseline G3 BETs are shadow-skipped when predicted Color is RED.
-    Under shadow, first retained BET is x2 iff yesterday's BASELINE UNIT
-    profit < 0; this includes the case where Color removed the original
-    first x2 BET. This is a frozen-baseline, post-filter what-if, NOT an
-    independent replay of the engine with changed state/window decisions.
-    """
-    colors = []
-    for raw in list(numbers or []):
-        n = int(raw)
-        if n < 1 or n > 12:
-            raise ValueError("Color24 shadow requires valid Number 1..12")
-        colors.append(0 if n <= 4 else (1 if n <= 8 else 2))
-    first_kept = True
-    previous_negative = float(prev_day_unit_profit or 0.0) < 0
-    annotated = {}
-    baseline_pnl = 0.0
-    shadow_pnl = 0.0
-    filtered = 0
-    g3_bets = 0
-    original_bets = 0
-    retained = 0
-    shadow_pending = 0
-    for r in list(rows or []):
-        opening = int(r.get("open_round", 0) or 0)
-        if opening < 1 or opening > len(colors):
-            raise ValueError(f"Color24 shadow invalid open Round={opening}, source={len(colors)}")
-        last24 = colors[max(0, opening - COLOR24_G3_SHADOW_WINDOW):opening]
-        counts = [last24.count(i) for i in range(3)]
-        pred = max(range(3), key=lambda i: (counts[i], -i)) if last24 else -1
-        group = int(r.get("group", 0) or 0)
-        original_action = str(r.get("play_action", r.get("bet_action", "")) or "").upper()
-        actual_base_bet = original_action == "BET"
-        status = str(r.get("status", "") or "").upper()
-        settled = status in ("WIN", "LOSS")
-        keep = actual_base_bet and not (group == 3 and pred == 0)
-        if actual_base_bet:
-            original_bets += 1
-            g3_bets += int(group == 3)
-            if not keep:
-                filtered += 1
-        re_stake = (2.0 if previous_negative and first_kept else 1.0) if keep else 0.0
-        if keep:
-            retained += 1
-            first_kept = False
-            shadow_pending += int(status == "PENDING")
-        # Final execution filter already decided whether baseline has a BET.
-        unit = float(r.get("play_unit_profit", r.get("bet_profit", 0.0)) or 0.0)
-        original_gain = float(r.get("play_profit", 0.0) or 0.0) if actual_base_bet and settled else 0.0
-        shadow_gain = round(unit * re_stake, 2) if keep and settled else 0.0
-        baseline_pnl += original_gain
-        shadow_pnl += shadow_gain
-        annotated[opening] = {
-            "pred": _COLOR24_NAME[pred] if pred >= 0 else "—",
-            "shadow_action": ("BASE SKIP" if not actual_base_bet else ("KEEP" if keep else "FILTER G3")),
-            "shadow_stake": (f"x{int(re_stake)}" if keep else "—"),
-            "shadow_play_pnl": shadow_gain,
-            "shadow_pending": bool(keep and status == "PENDING"),
-            "filtered": bool(actual_base_bet and not keep),
-        }
-    summary = {
-        "original_bets": original_bets,
-        "g3_bets": g3_bets,
-        "filtered_g3": filtered,
-        "shadow_bets": retained,
-        "shadow_pending": shadow_pending,
-        "baseline_pnl": round(baseline_pnl, 2),
-        "shadow_pnl": round(shadow_pnl, 2),
-        "delta": round(shadow_pnl - baseline_pnl, 2),
-    }
-    return annotated, summary
-
-
-# ADDITIONAL EXPERIMENTAL SHADOW (READ ONLY): Color24 filters G3 ONLY
-# after >=1 settled LOSS on a BET the candidate shadow actually retained today.
-# 1–4 RED, 5–8 GREEN, 9–12 BLUE. No effect on live/marker/window/stop/stake.
-
-def _color24_after_loss_g3_shadow(rows: list[dict], numbers: list[int], prev_day_unit_profit: float) -> tuple[dict, dict]:
-    """Causal post-filter of existing APP36 final BETs; no engine rerun.
-
-    A baseline G3 BET is rejected only if (a) an earlier retained, SETTLED
-    shadow BET already lost today and (b) the modal color in R(open-23)..R(open)
-    is RED. All other final baseline BETs remain as-is. FILTERed LOSSes do
-    not count as shadow losses; no use of the future R(open+1) Number.
-    Shadow x2 follows the first retained BET rule based on previous baseline
-    unit day. The returned values are simulated WHAT-IF only.
-    """
-    color_numbers = []
-    for n0 in list(numbers or []):
-        n = int(n0)
-        if n < 1 or n > 12:
-            raise ValueError("Color-after-loss shadow requires Number in 1..12")
-        color_numbers.append(0 if n <= 4 else (1 if n <= 8 else 2))
-    rows_sorted = sorted(list(rows or []), key=lambda r: int(r.get("open_round", 0) or 0))
-    first_kept = True
-    prev_negative = float(prev_day_unit_profit or 0.0) < 0
-    seen_loss = False
-    annotated = {}
-    original_bets = kept_bets = filtered = filtered_wins = filtered_losses = pending = x2_retained = 0
-    base_pnl = shadow_pnl = 0.0
-    previous_settled_open = 0
-    for r in rows_sorted:
-        opening = int(r.get("open_round", 0) or 0)
-        if not (1 <= opening <= len(color_numbers)):
-            raise ValueError(f"After-loss shadow opening={opening}, available={len(color_numbers)}")
-        grp = int(r.get("group", 0) or 0)
-        orig_action = str(r.get("play_action", r.get("bet_action", "")) or "").upper()
-        base_bet = orig_action == "BET"
-        status = str(r.get("status", "") or "").upper()
-        settled = status in ("WIN", "LOSS")
-        if base_bet and settled:
-            base_pnl += float(r.get("play_profit", 0.0) or 0.0)
-        last24 = color_numbers[max(0, opening - 24):opening]
-        counts = [last24.count(i) for i in range(3)]
-        pred = max(range(3), key=lambda i: (counts[i], -i)) if last24 else -1
-        lose_before = bool(seen_loss)
-        is_filtered = bool(base_bet and grp == 3 and lose_before and pred == 0)
-        keep = bool(base_bet and not is_filtered)
-        re_stake = (2.0 if first_kept and prev_negative else 1.0) if keep else 0.0
-        play_pnl = 0.0
-        if base_bet:
-            original_bets += 1
-        if is_filtered:
-            filtered += 1
-            filtered_wins += int(status == "WIN")
-            filtered_losses += int(status == "LOSS")
-        if keep:
-            if status in ("WIN", "LOSS") and previous_settled_open and opening <= previous_settled_open:
-                raise ValueError("After-loss shadow cannot read the future outcome of prior BET")
-            first_kept = False
-            kept_bets += 1
-            x2_retained += int(re_stake == 2.0)
-            pending += int(status == "PENDING")
-            unit = float(r.get("play_unit_profit", r.get("bet_profit", 0.0)) or 0.0)
-            if settled:
-                play_pnl = round(unit * re_stake, 2)
-                shadow_pnl += play_pnl
-                seen_loss = seen_loss or (status == "LOSS")
-                previous_settled_open = opening
-        annotated[opening] = {
-            "pred": _COLOR24_NAME[pred] if pred >= 0 else "—",
-            "shadow_action": "BASE SKIP" if not base_bet else ("FILTER AFTER LOSS" if is_filtered else "KEEP"),
-            "shadow_stake": f"x{int(re_stake)}" if keep else "—",
-            "shadow_play_pnl": float(play_pnl),
-            "seen_loss_before": lose_before,
-            "filtered": is_filtered,
-            "pending": bool(keep and status == "PENDING"),
-        }
-    summary = dict(
-        baseline_pnl=round(base_pnl, 2), shadow_pnl=round(shadow_pnl, 2),
-        delta=round(shadow_pnl-base_pnl, 2),
-        original_bets=original_bets, shadow_bets=kept_bets, filtered=filtered,
-        filtered_win=filtered_wins, filtered_loss=filtered_losses,
-        shadow_pending=pending, shadow_x2=x2_retained,
-    )
-    return annotated, summary
-
-
-# AFTER-LOSS COLOR24 G3: AUTOMATIC EXECUTION FILTER for ALL DAYSEQ >= 1.
-# COMPLETED HISTORY is re-simulated with Color (not a record of earlier wagers).
-# The rule is applied to
-# confirmed/pending baseline execution rows after the 112211/111 filter and
-# BEFORE FIRST-BET-x2 allocation. No cached current-day Numbers are used.
-COLOR_AFTER_LOSS24_LIVE_FROM_DAY_SEQ = 1
-COLOR_AFTER_LOSS24_LIVE_ENABLED = True
-
-
-def _color_after_loss24_live_apply(
-    pattern_rows: list[dict], numbers: list[int], prev_physical: float, day_seq: int
-) -> tuple[list[dict], list[dict], dict, dict, bool]:
-    """Return (live_rows, baseline_balanced_rows, diagnostics, summary, active).
-
-    The color decision is based on Numbers through each Open R, plus only
-    earlier retained, settled LOSS rows. It cannot inspect the Target Number.
-    Historical engine/window and prior day's V10 physical UNIT P/L are frozen;
-    only final operator play_action and x1/x2 sizing can be changed.
-    """
-    baseline_rows = _history_live_apply_balanced_stake(pattern_rows, prev_physical)
-    detail, summary = _color24_after_loss_g3_shadow(baseline_rows, numbers, prev_physical)
-    active = bool(COLOR_AFTER_LOSS24_LIVE_ENABLED and int(day_seq) >= COLOR_AFTER_LOSS24_LIVE_FROM_DAY_SEQ)
-    if not active:
-        return baseline_rows, baseline_rows, detail, summary, False
-
-    adjusted = []
-    for row in list(pattern_rows or []):
-        r = dict(row)
-        opening = int(r.get('open_round', 0) or 0)
-        d = detail.get(opening)
-        if d is None:
-            raise RuntimeError(f'COLOR LIVE missing prediction for open R{opening}')
-        r['afterloss_color24_pred'] = str(d.get('pred', '—'))
-        r['afterloss_color24_active'] = True
-        r['afterloss_color24_filtered'] = bool(d.get('filtered', False))
-        if r['afterloss_color24_filtered']:
-            if str(r.get('play_action', '')).upper() != 'BET' or int(r.get('group', 0) or 0) != 3:
-                raise RuntimeError(f'COLOR LIVE invalid G3 filter at R{opening}')
-            r['play_action'] = 'SKIP'
-            r['play_allowed'] = False
-            r['play_unit_profit'] = 0.0
-            r['reason'] = (str(r.get('reason', '') or '') + '|COLOR24_G3_AFTER_RETAINED_LOSS_RED_SKIP').strip('|')
-        adjusted.append(r)
-
-    live_rows = _history_live_apply_balanced_stake(adjusted, prev_physical)
-    # Fail closed on any mismatch between the causal shadow simulation and
-    # the now-active execution path.  This catches x2 allocation regressions.
-    total = round(sum(float(r.get('play_profit', 0.0) or 0.0) for r in live_rows), 2)
-    if total != round(float(summary['shadow_pnl']), 2):
-        raise RuntimeError(f'COLOR LIVE P/L mismatch {total} != {summary["shadow_pnl"]}')
-    for r in live_rows:
-        d = detail[int(r['open_round'])]
-        if str(r.get('stake_label', '—')) != str(d['shadow_stake']):
-            raise RuntimeError(f'COLOR LIVE x2 mismatch at R{r["open_round"]}')
-        if round(float(r.get('play_profit', 0.0) or 0.0), 2) != round(float(d['shadow_play_pnl']), 2):
-            raise RuntimeError(f'COLOR LIVE row P/L mismatch at R{r["open_round"]}')
-    return live_rows, baseline_rows, detail, summary, True
-
-
-def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force_replay: bool = False):
+def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int):
     """Build independent STOP-OFF history from raw D1..D(N-1), causally.
 
-    Every refresh validates raw historical data and checks its checksum.
-    A completed-day result is reused only when DaySeq, checksum and code match.
-    The current day is always replayed fresh from R1 to observed frontier.
+    V10.12.3 FAST TRUE NO CACHE: prior history is rebuilt from raw Numbers on every
+    Streamlit refresh. No session memo, disk profit cache, or derived replay
+    cache is authoritative for this path.
 
     Performance optimization #2: the expensive no-positive-lock continuation
     replay is executed only on days where the baseline engine actually reached
@@ -8188,34 +7859,8 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             )
 
     history_sig = make_history_signature(days)
-    cache_key = (
-        _COMPLETED_HISTORY_MEMO_SCHEMA, "V10_STOP_OFF",
-        _completed_history_code_identity(), int(current_seq), history_sig,
-    )
-    if not _force_replay:
-        history_hit = _completed_history_memo_read("_app36_verified_v10_history", cache_key)
-        if history_hit is not None:
-            st.caption(
-                f"COMPLETED HISTORY: VERIFIED SESSION HIT | D1-D{current_seq-1} | "
-                f"checksum={history_sig[:10]} | TODAY: ALWAYS REPLAY R1->CURRENT"
-            )
-            return history_hit
-        # Full-page Auto refresh recreates the browser session. The server cache
-        # retains completed history across that reload; only the raw checksum,
-        # DaySeq and code identity are part of the server cache key. `_history_df`
-        # is intentionally excluded from hashing because it was just validated
-        # above and its content is represented by the SHA-256 history checksum.
-        result = _completed_history_v10_server_replay(
-            int(current_seq), history_sig, _completed_history_code_identity(),
-            _history_df=history_df,
-        )
-        _completed_history_memo_write("_app36_verified_v10_history", cache_key, result)
-        st.caption(
-            f"COMPLETED HISTORY: SERVER VERIFIED REUSE / REBUILD | D1-D{current_seq-1} | "
-            f"checksum={history_sig[:10]} | TODAY: NO CACHE"
-        )
-        return copy.deepcopy(result)
-    # On a cache miss, the following FULL replay executes only for completed days.
+    # TRUE NO CACHE: always rebuild prior history from raw Numbers.
+    # No st.session_state memo is read here.
     resolved = []
     adaptive_prev = 0.0
     physical_prev = 0.0
@@ -8272,34 +7917,12 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in execution_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        balanced_rows, _baseline_balanced_rows, _al_details, _al_summary, _color_live_active = (
-            _color_after_loss24_live_apply(execution_rows, nums, physical_prev, seq)
-        )
+        balanced_rows = _history_live_apply_balanced_stake(execution_rows, physical_prev)
         balanced_stake_profit = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in balanced_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        # HISTORICAL DISPLAY ONLY: summarize actual simulated x2 BET rows after
-        # final execution filters AND balanced stake sizing. These counts do NOT
-        # feed subsequent-day policy, live marker, live decision, or P/L logic.
-        x2_settled_rows = [
-            r for r in balanced_rows
-            if str(r.get("play_action", r.get("bet_action", "")) or "").upper() == "BET"
-            and str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}
-            and abs(float(r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
-        ]
-        x2_bet_count = len(x2_settled_rows)
-        x2_wins = sum(1 for r in x2_settled_rows if str(r.get("status", "")).upper() == "WIN")
-        x2_losses = x2_bet_count - x2_wins
-        x2_play_profit = round(
-            sum(float(r.get("play_profit", 0.0) or 0.0) for r in x2_settled_rows), 2
-        )
         pattern112211 = _pattern112211_shadow_stats(final_physical_rows)
-        # Read-only Color comparison computed ONCE for each completed DaySeq;
-        # cache invalidates if DaySeq, Numbers checksum, or app version changes.
-        _c24_details, _c24_summary = _color24_g3_shadow(_baseline_balanced_rows, nums, physical_prev)
-        # AFTER-LOSS statistics are measured against the frozen baseline even
-        # on dates when the same policy is already active as the live filter.
 
         resolved.append({
             "day_seq": int(seq), "day_id": str(day_id or seq),
@@ -8309,20 +7932,6 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             "history_live_physical_profit": physical_profit,
             "history_live_pattern_play_profit": pattern_play_profit,
             "history_live_balanced_stake_profit": balanced_stake_profit,
-            "afterloss24_live_active": bool(_color_live_active),
-            "history_live_x2_bet_count": int(x2_bet_count),
-            "history_live_x2_wins": int(x2_wins),
-            "history_live_x2_losses": int(x2_losses),
-            "history_live_x2_play_profit": float(x2_play_profit),
-            "color24_g3_shadow_pnl": float(_c24_summary["shadow_pnl"]),
-            "color24_g3_shadow_delta": float(_c24_summary["delta"]),
-            "color24_g3_shadow_filtered": int(_c24_summary["filtered_g3"]),
-            "color24_g3_shadow_bets": int(_c24_summary["shadow_bets"]),
-            "afterloss24_shadow_pnl": float(_al_summary["shadow_pnl"]),
-            "afterloss24_shadow_delta": float(_al_summary["delta"]),
-            "afterloss24_shadow_filtered": int(_al_summary["filtered"]),
-            "afterloss24_shadow_filtered_win": int(_al_summary["filtered_win"]),
-            "afterloss24_shadow_filtered_loss": int(_al_summary["filtered_loss"]),
             "pattern112211_samples": int(pattern112211.get("samples", 0) or 0),
             "pattern112211_wins": int(pattern112211.get("wins", 0) or 0),
             "pattern112211_losses": int(pattern112211.get("losses", 0) or 0),
@@ -8333,290 +7942,22 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
         replayed += 1
 
     st.caption(
-        f"COMPLETED HISTORY: FULL REBUILD (memo miss/new day/source changed) | days={replayed} | "
+        f"HISTORY REPLAY: TRUE NO CACHE FULL BUILD | days={replayed} | "
         f"single_replay_days={replayed} | continuation_reused={continuation_replays} | checksum={history_sig[:10]}"
     )
-    value = (resolved, adaptive_prev, physical_prev, replayed, history_sig)
-    _completed_history_memo_write("_app36_verified_v10_history", cache_key, value)
-    return value
-
-
-
-@_server_cache_completed_only
-def _completed_history_v10_server_replay(
-    current_seq: int, history_sig: str, code_identity: tuple, _history_df: pd.DataFrame
-):
-    """Streamlit process memo; only D1..D(seq-1) and NEVER current-day Numbers.
-
-    Cache inputs are `current_seq`, raw `history_sig`, `code_identity`.
-    `_history_df` is excluded from cache's key intentionally: it was freshly
-    validated and its raw content cryptographically hashed prior to this call.
-    """
-    return _history_live_build_prior(_history_df, current_seq, _force_replay=True)
-
-
-def _v10_verify_source_before_bet(day_seq: int, day_date: str, numbers: list[int], history_sig: str) -> tuple[bool, str]:
-    """READ ONLY; separate current+history fetch after replay, immediately before showing BET.
-
-    No bets are generated, and marker/strategy/state are never modified here.
-    A changed or unreachable source always blocks the operator BET display.
-    """
-    try:
-        _df, check_seq, check_date, check_nums = _load_day_seq_sheet_snapshot()
-        if int(check_seq or 0) != int(day_seq):
-            return False, f"DATA DAYSEQ CHANGED D{day_seq} -> D{check_seq}"
-        if str(check_date or "") != str(day_date or ""):
-            return False, f"DATA DATE CHANGED {day_date} -> {check_date}"
-        if list(check_nums or []) != list(numbers or []):
-            return False, "DATA NUMBER SNAPSHOT CHANGED BETWEEN REPLAY AND BET"
-        check_hdf = _load_history_sheet_df()
-        check_days = _validated_numbers_by_day(check_hdf, int(day_seq))
-        if [int(x[0]) for x in check_days] != list(range(1, int(day_seq))):
-            return False, "HISTORY DAYSEQ GAP DURING FINAL SOURCE CHECK"
-        if make_history_signature(check_days) != str(history_sig or ""):
-            return False, "HISTORY NUMBER/DAY SNAPSHOT CHANGED BETWEEN REPLAY AND BET"
-        return True, "FINAL DATA + HISTORY VERIFIED"
-    except Exception as exc:
-        return False, f"FINAL SOURCE RECHECK FAILED: {type(exc).__name__}: {exc}"
-
-def _render_v10_historical_report(prior: list[dict]) -> None:
-    """Historical UI only. Same code path at R0, R1..179 and live R180+.
-
-    No marker writes, no BET authorization, no current-day settlement.
-    """
-    # V10.8: full historical BET P/L visibility.
-    # This is the P/L that V10 would have produced if every historical BET
-    # instruction had been followed with the configured +2.5/-1 payoff.
-    _all_hist = list(prior or [])
-    _hist_bet_pnls = [
-        round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
-        for _d in _all_hist
-    ]
-    _hist_total = round(sum(_hist_bet_pnls), 2)
-    _hist_pos = sum(1 for _x in _hist_bet_pnls if _x > 0)
-    _hist_neg = sum(1 for _x in _hist_bet_pnls if _x < 0)
-    _hist_zero = sum(1 for _x in _hist_bet_pnls if abs(_x) < 1e-9)
-    _hist_balanced_pnls = [
-        round(float(_d.get("history_live_balanced_stake_profit", _d.get("history_live_physical_profit", 0.0)) or 0.0), 2)
-        for _d in _all_hist
-    ]
-    _hist_balanced_total = round(sum(_hist_balanced_pnls), 2)
-    _hist_safe_loss_days = sum(v < 0 for v in _hist_balanced_pnls)
-    _hist_safe_win_days = sum(v > 0 for v in _hist_balanced_pnls)
-    _hist_safe_zero_days = sum(v == 0 for v in _hist_balanced_pnls)
-    _hist_color_baseline_total = round(sum(
-        float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0)
-        - float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0)
-        for _d in _all_hist
-    ), 2)
-
-    _hist_neg_streak = 0
-    _hist_max_neg_streak = 0
-    for _x in _hist_bet_pnls:
-        if _x < 0:
-            _hist_neg_streak += 1
-            _hist_max_neg_streak = max(_hist_max_neg_streak, _hist_neg_streak)
-        else:
-            _hist_neg_streak = 0
-
-    st.info(
-        "COLOR AFTER-LOSS24 ACTIVE FROM D1: completed-day SAFE P/L is RE-SIMULATED "
-        "with the Color filter for comparison. This does NOT rewrite or confirm "
-        "bets that were actually placed in earlier days."
-    )
-    st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
-    _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
-    _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
-    _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
-    _h3.metric("PROFIT DAYS", str(_hist_pos))
-    _h4.metric("UNIT LOSS DAYS", str(_hist_neg))
-    _h5.metric("ZERO DAYS", str(_hist_zero))
-    _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
-    st.caption(
-        f"SAFE POLICY (COLOR) D1–D{len(_all_hist)}: "
-        f"P/L={_hist_balanced_total:+.1f}, "
-        f"WIN DAYS={_hist_safe_win_days}, LOSS DAYS={_hist_safe_loss_days}, "
-        f"ZERO DAYS={_hist_safe_zero_days}. "
-        f"BASELINE SAFE WITHOUT COLOR={_hist_color_baseline_total:+.1f}. "
-        "Unit metrics above refer to the unmodified V10 underlying model, "
-        "not the filtered SAFE result."
-    )
-
-    _daily_hist_rows = []
-    _cum_bet = 0.0
-    _cum_play = 0.0
-    for _d in _all_hist:
-        _day_bet = round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
-        _day_play = round(float(_d.get("history_live_balanced_stake_profit", _day_bet) or 0.0), 2)
-        _cum_bet = round(_cum_bet + _day_bet, 2)
-        _cum_play = round(_cum_play + _day_play, 2)
-        _daily_hist_rows.append({
-            "Day": f"D{int(_d.get('day_seq',0) or 0)}",
-            "Date": str(_d.get("day_id", "") or ""),
-            "Unit BET P/L": _day_bet,
-            "Safe Play P/L": _day_play,
-            "X2 BET Count": int(_d.get("history_live_x2_bet_count", 0) or 0),
-            "X2 Result (WIN/LOSS)": (
-                f"{int(_d.get('history_live_x2_wins', 0) or 0)}W/"
-                f"{int(_d.get('history_live_x2_losses', 0) or 0)}L"
-                if int(_d.get("history_live_x2_bet_count", 0) or 0) else "—"
-            ),
-            "X2 Play P/L": round(float(_d.get("history_live_x2_play_profit", 0.0) or 0.0), 2),
-            "Color24 G3 Shadow P/L": round(float(_d.get("color24_g3_shadow_pnl", 0.0) or 0.0), 2),
-            "Color24 G3 Delta": round(float(_d.get("color24_g3_shadow_delta", 0.0) or 0.0), 2),
-            "Color24 G3 Filtered": int(_d.get("color24_g3_shadow_filtered", 0) or 0),
-            "AfterLoss24 Active": "REPLAY COLOR" if _d.get("afterloss24_live_active", False) else "SHADOW",
-            "Baseline Safe P/L (No Color)": round(
-                float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0)
-                - float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0), 2
-            ),
-            "AfterLoss24 Simulated P/L": round(float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0), 2),
-            "AfterLoss24 Delta": round(float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0), 2),
-            "AfterLoss24 Filtered": int(_d.get("afterloss24_shadow_filtered", 0) or 0),
-            "Cum Unit P/L": _cum_bet,
-            "Cum Safe P/L": _cum_play,
-            "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
-            "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
-            "112211 Shadow": (
-                f"{int(_d.get('pattern112211_wins',0) or 0)}W/{int(_d.get('pattern112211_losses',0) or 0)}L"
-                if int(_d.get("pattern112211_samples",0) or 0) > 0 else ""
-            ),
-        })
-    st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY — D1→YESTERDAY")
-    if _daily_hist_rows:
-        # UI-only: render one full table instead of a duplicated recent table + expander.
-        # This does not participate in strategy/replay and avoids the extra duplicate dataframe render.
-        _hist_df = pd.DataFrame(_daily_hist_rows)
-        _hist_height = min(max(430, 35 * (len(_hist_df) + 1)), 1200)
-        st.dataframe(
-            _hist_df,
-            use_container_width=True,
-            hide_index=True,
-            height=_hist_height,
-        )
-        _x2_total = sum(int(_d.get("history_live_x2_bet_count", 0) or 0) for _d in _all_hist)
-        _x2_wins = sum(int(_d.get("history_live_x2_wins", 0) or 0) for _d in _all_hist)
-        _x2_losses = sum(int(_d.get("history_live_x2_losses", 0) or 0) for _d in _all_hist)
-        _x2_profit = round(sum(float(_d.get("history_live_x2_play_profit", 0.0) or 0.0) for _d in _all_hist), 2)
-        st.caption(
-            f"X2 REPLAY BREAKDOWN: {_x2_total} completed BET(s) | "
-            f"{_x2_wins} WIN / {_x2_losses} LOSS | X2 Play P/L {_x2_profit:+.1f}. "
-            "X2 P/L is already INCLUDED in Safe Stake P/L; do NOT add it again. "
-            "These results are simulations, not confirmed cash wagers."
-        )
-        _color_shadow_hist_total = round(sum(float(_d.get("color24_g3_shadow_pnl", 0.0) or 0.0) for _d in _all_hist), 2)
-        _color_shadow_hist_delta = round(_color_shadow_hist_total - _hist_balanced_total, 2)
-        _color_shadow_hist_filtered = sum(int(_d.get("color24_g3_shadow_filtered", 0) or 0) for _d in _all_hist)
-        st.caption(
-            f"COLOR24 G3 SHADOW (HISTORICAL WHAT-IF): {_color_shadow_hist_total:+.1f} | "
-            f"delta vs baseline {_color_shadow_hist_delta:+.1f} | filtered G3 BETs {_color_shadow_hist_filtered}. "
-            "Only a diagnostic after V10; it does NOT change live action or daily V10 state. "
-            "Shadow x2 moves to the first RETAINED BET when previous baseline unit day was negative."
-        )
-        _afterloss_hist_total = round(sum(float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0) for _d in _all_hist), 2)
-        # Compare with NO-COLOR baseline. Comparing against the active COLOR SAFE
-        # column would ALWAYS show a misleading zero delta when COLOR is enabled.
-        _afterloss_hist_delta = round(sum(float(_d.get("afterloss24_shadow_delta", 0.0) or 0.0) for _d in _all_hist), 2)
-        _afterloss_filtered = sum(int(_d.get("afterloss24_shadow_filtered", 0) or 0) for _d in _all_hist)
-        st.caption(
-            f"AFTER-LOSS COLOR24 G3 {'ACTIVE POLICY' if COLOR_AFTER_LOSS24_LIVE_ENABLED else 'SHADOW'}: "
-            f"{_afterloss_hist_total:+.1f} | delta vs NO-COLOR baseline "
-            f"{_afterloss_hist_delta:+.1f} | filtered {_afterloss_filtered} BETs. "
-            "Historical WHAT-IF simulation from D1: not proof of actual past wagers. "
-            "The current-day LIVE calculation uses this Color rule when enabled; "
-            "source and marker guards still control whether a BET may be executed."
-        )
-        st.caption(
-            "BET P/L = simulated historical result if every V10 BET was followed. "
-            "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
-        )
-    else:
-        st.info("No completed V10 simulated daily history yet.")
-
-
-
-def _render_v10_wait_history(manager, seq: int) -> None:
-    """Read-only historical report before R180 (including R0).
-
-    Historical raw input is verified on every refresh; completed-day replay
-    is reused only if unchanged. Never touch marker/authoritative live action.
-    """
-    st.markdown("### 📜 FULL HISTORY — PREVIOUS COMPLETED DAYS")
-    if int(seq) <= 1:
-        st.info("DaySeq 1 has no completed previous-day history yet.")
-        return
-    hdf = getattr(manager, "history_df", None)
-    if hdf is None or hdf.empty:
-        st.warning(
-            f"HISTORY NOT READY: tab history was not available for D1–D{int(seq)-1}. "
-            "LIVE ACTION: WAIT / NO BET; no historical totals are invented."
-        )
-        return
-    try:
-        prior, _adaptive, _physical, replayed, hist_sig = _history_live_build_prior(hdf, int(seq))
-        if replayed != int(seq)-1:
-            raise ValueError(f"history replayed={replayed}, expected={int(seq)-1}")
-        st.caption(
-            f"HISTORY D1–D{int(seq)-1} | days={replayed} | "
-            f"RAW CHECKSUM={_short_hash(hist_sig)} | TODAY NO CACHE | COMPLETED HISTORY VERIFIED MEMO | "
-            "READ ONLY — no bet and no marker writes"
-        )
-        _render_v10_historical_report(prior)
-    except Exception as exc:
-        st.error(
-            f"HISTORY REPLAY NOT READY: {type(exc).__name__}: {exc}. "
-            "Live remains WAIT / NO BET; marker was not changed by this report."
-        )
-
-
-def _v10_no_cache_frontier_signal(pending, current_round: int) -> dict:
-    """Read the ALREADY-FRESH current-day replay, regardless of durable marker.
-
-    This pure function never authorizes a wager and never reads or writes markers.
-    An incomplete current Round can have a computed BET candidate for R+1.
-    """
-    r = int(current_round)
-    target = r + 1 if 0 <= r < int(MAX_ROUNDS_PER_DAY) else None
-    result = {"round": r, "target": target, "action": "WAIT", "group": "—",
-              "stake": "—", "reason": "NO PENDING SIGNAL", "is_candidate": False}
-    if target is None or r < int(LIVE_START_ROUND) or pending is None:
-        if target is None:
-            result["reason"] = "DAY FINISHED"
-        elif r < int(LIVE_START_ROUND):
-            result["reason"] = f"BEFORE R{int(LIVE_START_ROUND)}"
-        return result
-    if str(pending.get("status", "") or "").upper() != "PENDING":
-        result["reason"] = "TRADE NOT PENDING"
-        return result
-    if int(pending.get("open_round", -1) or -1) != r:
-        result["reason"] = "PENDING ROUND DOES NOT MATCH SOURCE"
-        return result
-    act = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
-    if act not in {"BET", "SKIP"}:
-        result["reason"] = "INVALID REPLAY ACTION"
-        return result
-    g = int(pending.get("group", 0) or 0)
-    if act == "BET" and g not in (1, 2, 3, 4):
-        result["reason"] = "INVALID REPLAY GROUP"
-        return result
-    result.update(action=act, group=f"G{g}" if g in (1, 2, 3, 4) else "—",
-                  stake=str(pending.get("stake_label", "—") or "—") if act == "BET" else "—",
-                  reason=str(pending.get("reason", "") or "—"), is_candidate=(act == "BET"))
-    return result
-
+    return resolved, adaptive_prev, physical_prev, replayed, history_sig
 
 def render_history_live_authoritative(manager) -> None:
     """Render the ONLY authoritative physical action for V10.
 
-    Every refresh verifies completed-day source fingerprint and replays all
-    current-day Numbers R1..observed frontier. Completed-day replay is reused
-    only when raw source+DaySeq+policy match. Any uncertainty fails closed.
+    Every refresh reconstructs STOP-OFF history from raw Numbers and replays the
+    current day only through the observed frontier. Any integrity uncertainty
+    fails closed to WAIT / DO NOT BET.
     """
-    st.markdown("# 🚀 V10.12.9 TODAY FULL REPLAY + VERIFIED HISTORY + SAME-DAY LIVE SOURCE SYNC")
+    st.markdown("# 🚀 V10.12.9 FAST TRUE NO CACHE + FULL HISTORY + 112211/111 CONFIRM + FIRST-BET X2 ONLY — LIVE ACTION")
     st.caption(
-        "FRESH REPLAY OF TODAY'S R1→CURRENT ON EVERY REFRESH; COMPLETED HISTORY MEMOIZED IF UNCHANGED. "
         "AUTHORITATIVE PHYSICAL ACTION • raw history D1→yesterday + current R1→frontier • "
-        "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TODAY R1→CURRENT ALWAYS FRESH • HISTORY VERIFIED MEMO • FROZEN RULE"
+        "STOP-LOSS -2.5 OFF • POSITIVE PROFIT LOCK ON • TRUE NO CACHE • ONE-PASS RAW REPLAY EVERY REFRESH • FROZEN RULE"
     )
 
     if not HISTORY_LIVE_LIVE_ENABLED:
@@ -8640,40 +7981,20 @@ def render_history_live_authoritative(manager) -> None:
                 "CURRENT ACTION: WAIT / DO NOT BET."
             )
             return
-        if current_round == 0:
-            # Visible dashboard at the start of a new day, even before R1.
-            # Do not call strategy/replay, change marker or display BET.
-            day_col, round_col, target_col, action_col = st.columns(4)
-            day_col.metric("DAY SEQ", f"D{seq}")
-            round_col.metric("CURRENT ROUND", "R0")
-            target_col.metric("NEXT INPUT", "R1")
-            action_col.metric("LIVE ACTION", "WAIT / NO BET")
-            st.info(
-                f"D{seq} is ready, but Number R1 has not been entered. "
-                "The dashboard remains open; refresh after R1 is available."
-            )
-            st.caption(
-                "NO NUMBER → NO CURRENT-DAY REPLAY / NO BET / NO MARKER WRITE. "
-                f"Live evaluation still starts from R{LIVE_START_ROUND}."
-            )
-            _render_v10_wait_history(manager, seq)
+        if current_round < LIVE_START_ROUND:
+            st.info(f"⏸️ CURRENT ACTION: WAIT — live starts at R{LIVE_START_ROUND}.")
             return
-        # TODAY ALWAYS NO CACHE: even before the first eligible live Round,
-        # replay the complete observed R1..Rcurrent prefix from source. Before
-        # R180 this is informational and cannot produce an authorized BET.
-        # Never return early here: a same-day Number edit must update TODAY
-        # diagnostics even at R1..R179.
         if hdf is None or hdf.empty:
             st.error("LIVE SELF-CHECK FAILED: raw history unavailable. CURRENT ACTION: WAIT / DO NOT BET.")
             return
         # Rebuild independent strategy history and current day.
         prior, prev_adaptive, prev_physical, replayed, hist_sig = _history_live_build_prior(hdf, seq)
-        # All prior DaySeq must be present. Verified immutable history may be
-        # reused; current-day replay below always starts fresh at R1.
+        # TRUE NO CACHE invariant: every refresh must replay every completed
+        # prior day from raw history. A short/zero replay is never accepted.
         if replayed != max(0, seq - 1):
             st.error(
                 f"LIVE SELF-CHECK FAILED: history replayed={replayed}, expected={max(0,seq-1)}. "
-                "All historical days are required. CURRENT ACTION: WAIT / DO NOT BET."
+                "TRUE NO CACHE requires full raw replay. CURRENT ACTION: WAIT / DO NOT BET."
             )
             return
 
@@ -8714,12 +8035,7 @@ def render_history_live_authoritative(manager) -> None:
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        rows, _baseline_color_rows, afterloss_rows, afterloss_sum, color_live_active = (
-            _color_after_loss24_live_apply(rows, numbers, prev_physical, seq)
-        )
-        # The regular Color24 G3 control remains an independent diagnostic of
-        # the unmodified baseline, NOT a second filter on today's live rows.
-        color24_rows, color24_sum = _color24_g3_shadow(_baseline_color_rows, numbers, prev_physical)
+        rows = _history_live_apply_balanced_stake(rows, prev_physical)
         balanced_play_pnl = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
@@ -8748,10 +8064,7 @@ def render_history_live_authoritative(manager) -> None:
         # Deterministic source/action signatures shown to operator.
         raw_sig = make_numbers_signature(numbers)
         action_payload = {
-            "rule": (
-                "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2_COLOR_AFTERLOSS24_D1"
-                if color_live_active else "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2"
-            ),
+            "rule": "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2",
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -8764,30 +8077,6 @@ def render_history_live_authoritative(manager) -> None:
         action_sig = hashlib.sha256(
             json.dumps(action_payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-
-        # A fresh calculation marker -- NOT a durable live marker and NOT an
-        # authorization to bet. This runs after the full TODAY replay, hence
-        # every Refresh shows exactly which source prefix was just calculated.
-        st.markdown("### 🔄 TODAY NO CACHE — FRESH REPLAY")
-        _nr1, _nr2, _nr3 = st.columns(3)
-        _nr1.metric("DAY / SOURCE FRONTIER", f"D{seq} / R{current_round}")
-        _nr2.metric("TODAY REPLAY SAFE P/L", f"{balanced_play_pnl:+.1f}")
-        _nr3.metric("TODAY REPLAY TRADE ROWS", str(len(rows)))
-        st.caption(
-            f"JUST REPLAYED R1–R{current_round} FROM CURRENT NUMBERS | "
-            f"RAW SHA-256={raw_sig[:16]} | HIST SHA-256={hist_sig[:16]} | "
-            "TODAY REPLAY: NO CACHE ON EVERY REFRESH. "
-            "LIVE PERMISSION IS AN INDEPENDENT SOURCE/ORDER SAFETY CHECK."
-        )
-        if pending is not None:
-            _cp = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
-            _cg = int(pending.get("group", 0) or 0)
-            _cs = str(pending.get("stake_label", "—") or "—")
-            st.caption(
-                f"FRESH NO-CACHE CANDIDATE (check EXECUTION STATUS separately): "
-                f"R{current_round}→R{current_round+1}, {_cp}, G{_cg}, {_cs}. "
-                "See LIVE DECISION below for whether any action is permitted."
-            )
 
         hist_physical = [float(x.get("history_live_physical_profit", 0.0) or 0.0) for x in prior]
         hist_pattern_play = [float(x.get("history_live_pattern_play_profit", x.get("history_live_physical_profit", 0.0)) or 0.0) for x in prior]
@@ -8847,29 +8136,7 @@ def render_history_live_authoritative(manager) -> None:
         raw_warmup = bool(getattr(manager.ctx, "live_raw_observation_warmup_required", False))
         raw_regressed = bool(getattr(manager.ctx, "live_raw_snapshot_regressed", False))
         raw_revised_same_frontier = bool(getattr(manager.ctx, "live_raw_snapshot_revised_same_frontier", False))
-        raw_revoked = bool(getattr(manager.ctx, "live_raw_snapshot_revoked", False))
         raw_prev_round_count = int(getattr(manager.ctx, "live_raw_previous_round_count", 0) or 0)
-        # Operational safety only: no LIVE action if the durable source witness
-        # could not be stored. Does not alter replay/profit or bet selection.
-        raw_marker_saved = bool(getattr(manager.ctx, "live_raw_observation_marker_saved", False))
-
-        # Display NEVER requires a SYNC click. Recalculated signal is shown
-        # from the just-replayed R1..current numbers below. This marker is only
-        # for the independent external-bet/duplicate safety decision.
-
-        # The second read is conditional: only a candidate BET needs a pre-BET
-        # cross-source check. SKIP/WAIT never incur this extra network read.
-        prebet_block_reason = ""
-        if (
-            raw_marker_saved and not raw_regressed and not raw_revised_same_frontier and not raw_revoked
-            and not raw_warmup and not raw_stale
-            and pending is not None and current_round < MAX_ROUNDS_PER_DAY
-            and int(pending.get("open_round", -1) or -1) == current_round
-            and str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper() == "BET"
-        ):
-            verified, why = _v10_verify_source_before_bet(seq, day_date, numbers, hist_sig)
-            if not verified:
-                prebet_block_reason = str(why or "FINAL SOURCE RECHECK DID NOT PASS")
 
         _ui_target = None if current_round >= MAX_ROUNDS_PER_DAY else current_round + 1
         _ui_action = "WAIT"
@@ -8880,14 +8147,8 @@ def render_history_live_authoritative(manager) -> None:
         _ui_stab = None
         _ui_stake = "—"
 
-        if not raw_marker_saved:
-            _ui_reason = "RAW SOURCE MARKER WRITE FAILED — WAIT / NO BET"
-        elif prebet_block_reason:
-            _ui_reason = f"FINAL PRE-BET SOURCE VERIFY: {prebet_block_reason} — WAIT / NO BET"
-        elif raw_regressed:
-            _ui_reason = f"EXTERNAL BET LOCK: SOURCE R{current_round} < PREVIOUSLY SEEN R{raw_prev_round_count}"
-        elif raw_revoked:
-            _ui_reason = "SUPERSEDED NUMBER SNAPSHOT: LIVE WAIT UNTIL ACTUAL CURRENT DATA"
+        if raw_regressed:
+            _ui_reason = f"REGRESSED SOURCE SNAPSHOT R{current_round} < LAST GOOD R{raw_prev_round_count}"
         elif raw_revised_same_frontier:
             _ui_reason = f"RAW NUMBER CHANGED AT SAME FRONTIER R{current_round} — WAIT FOR NEXT ROUND"
         elif raw_warmup:
@@ -8926,77 +8187,14 @@ def render_history_live_authoritative(manager) -> None:
             else:
                 _ui_reason = "INVALID TARGET ROUND — FAIL CLOSED"
 
-        # Top line is ALWAYS computed from the CURRENT raw Numbers, never
-        # from last-good marker or a previous browser session.
-        fresh = _v10_no_cache_frontier_signal(pending, current_round)
-        st.markdown("## 🎯 NO-CACHE SIGNAL — CALCULATED FROM CURRENT NUMBERS")
-        _f1, _f2, _f3, _f4, _f5 = st.columns(5)
-        _f1.metric("CURRENT ROUND", f"R{current_round}")
-        _f2.metric("TARGET ROUND", f"R{fresh['target']}" if fresh['target'] is not None else "NEXT DAY")
-        _f3.metric("CALCULATED ACTION", fresh["action"])
-        _f4.metric("CALCULATED GROUP", fresh["group"])
-        _f5.metric("CALCULATED STAKE", fresh["stake"])
-        st.caption(
-            f"FRESH REPLAY: D{seq} R1–R{current_round} | REASON: {fresh['reason']} | "
-            f"INPUT HASH {raw_sig[:12]} | computed signal is not confirmation of a placed wager."
-        )
-
-        # Execution permission is deliberately separate. Seeing a candidate
-        # BET is not the same as permission to repeat an earlier settled round.
-        # Color24 on TODAY Numbers is recalculated on EACH refresh (no cache).
-        # A shadow KEEP/FILTER is NEVER an instruction to place or skip a wager.
-        _pending_color = color24_rows.get(int(current_round), {}) if pending is not None else {}
-        st.markdown("### 🎨 COLOR24 G3 SHADOW — READ ONLY")
-        _cc1, _cc2, _cc3, _cc4 = st.columns(4)
-        _cc1.metric("COLOR24 PRED", _pending_color.get("pred", "—"))
-        _cc2.metric("G3 SHADOW DECISION", _pending_color.get("shadow_action", "NO SIGNAL"))
-        _cc3.metric("TODAY SHADOW P/L", f"{color24_sum['shadow_pnl']:+.1f}")
-        _cc4.metric("TODAY VS BASELINE", f"{color24_sum['delta']:+.1f}")
-        st.caption(
-            f"SHADOW ONLY: predicted most frequent Color of previous {COLOR24_G3_SHADOW_WINDOW} Numbers "
-            f"(RED=1–4, GREEN=5–8, BLUE=9–12). "
-            f"G3 filtered={color24_sum['filtered_g3']}/{color24_sum['g3_bets']} | "
-            f"retained={color24_sum['shadow_bets']}/{color24_sum['original_bets']} | "
-            f"pending shadow BETs={color24_sum['shadow_pending']}. "
-            "Historical comparison, NOT independent engine replay; no effect on LIVE EXECUTION STATUS, marker, or stake."
-        )
-
-        _current_afterloss = afterloss_rows.get(int(current_round), {}) if pending is not None else {}
-        st.markdown(
-            "### ✅ AFTER-LOSS COLOR24 G3 — AUTO LIVE FILTER"
-            if color_live_active else
-            "### 🔍 AFTER-LOSS COLOR24 G3 — HISTORICAL SHADOW / NOT YET ACTIVE"
-        )
-        _a1, _a2, _a3, _a4 = st.columns(4)
-        _a1.metric("AFTER-LOSS ACTION", _current_afterloss.get("shadow_action", "NO SIGNAL"))
-        _a2.metric("COLOR24 PRED", _current_afterloss.get("pred", "—"))
-        _a3.metric("TODAY SHADOW P/L", f"{afterloss_sum['shadow_pnl']:+.1f}")
-        _a4.metric("DELTA VS BASELINE", f"{afterloss_sum['delta']:+.1f}")
-        st.caption(
-            f"ACTIVE={color_live_active} from D{COLOR_AFTER_LOSS24_LIVE_FROM_DAY_SEQ} | "
-            f"Retained BETs={afterloss_sum['shadow_bets']}/{afterloss_sum['original_bets']} | "
-            f"filtered={afterloss_sum['filtered']} | "
-            f"retrospective filtered LOSS={afterloss_sum['filtered_loss']} "
-            f"WIN={afterloss_sum['filtered_win']} | "
-            f"PENDING={afterloss_sum['shadow_pending']}. "
-            "After one earlier retained, SETTLED LOSS today, RED modal Color24 filters later G3 BETs. "
-            "When active this modifies play_action BEFORE x2 sizing, but never overrides source/marker/pre-BET guards. "
-            "P/L remains a replay, not a ledger of actual wagers."
-        )
-
-        st.markdown("### 🔐 LIVE EXECUTION STATUS")
-        _c1, _c2, _c3 = st.columns(3)
-        _c1.metric("EXECUTION ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
-        _c2.metric("EXECUTION TARGET", f"R{_ui_target}" if _ui_target is not None else "NEXT DAY")
-        _c3.metric("EXECUTION STAKE", _ui_stake)
-        st.caption(f"EXECUTION CHECK: {_ui_reason or '—'}")
-        if raw_regressed:
-            st.warning(
-                f"Number D{seq} hiện đến R{current_round}; dấu mốc đã từng thấy R{raw_prev_round_count}. "
-                "TÍN HIỆU ở trên đã được tính lại đầy đủ, không cache. "
-                "Chỉ khóa thực hiện cược cũ để tránh lệnh trùng; không phải lỗi tính toán. "
-                "Nếu game thực sự đã chạy qua Round đích thì không được cược lại Round đó."
-            )
+        st.markdown("## 🎯 LIVE DECISION")
+        _c1, _c2, _c3, _c4, _c5 = st.columns(5)
+        _c1.metric("CURRENT ROUND", f"R{current_round}")
+        _c2.metric("TARGET ROUND", f"R{_ui_target}" if _ui_target is not None else "NEXT DAY")
+        _c3.metric("ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
+        _c4.metric("GROUP", _ui_group)
+        _c5.metric("STAKE", _ui_stake)
+        st.caption(f"REASON: {_ui_reason or '—'}")
 
         if _ui_conf is not None:
             st.caption(
@@ -9010,12 +8208,6 @@ def render_history_live_authoritative(manager) -> None:
         if current_round >= MAX_ROUNDS_PER_DAY:
             _day_status = "DAY COMPLETE"
             _next_trade_status = "NEXT DAY"
-        elif current_round < LIVE_START_ROUND:
-            _day_status = "WAIT / BEFORE LIVE START"
-            _next_trade_status = f"WAIT UNTIL R{LIVE_START_ROUND}"
-        elif not raw_marker_saved or prebet_block_reason or raw_regressed or raw_revoked or raw_revised_same_frontier or raw_warmup or raw_stale:
-            _day_status = "WAIT / SOURCE NOT READY"
-            _next_trade_status = "WAIT / NO BET"
         elif _physical_lock_reached:
             _day_status = "LOCKED FOR DAY"
             _next_trade_status = "NO MORE TRADE TODAY"
@@ -9053,45 +8245,25 @@ def render_history_live_authoritative(manager) -> None:
             and str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "SKIP"
         )
         _skip_count = sum(1 for _r in list(rows or []) if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "SKIP")
-        # PENDING is only a hypothetical replay signal. A PENDING x2 must not
-        # be called USED: no settlement and no external wager confirmation.
-        _x2_settled_today = sum(
+        # Count assigned x2 BETs including a current pending BET. This is an
+        # operator guard only; the deterministic stake function already hard-caps x2.
+        _x2_used_today = sum(
             1 for _r in list(rows or [])
             if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "BET"
-            and str(_r.get("status", "") or "").upper() in {"WIN", "LOSS"}
-            and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
-        )
-        _x2_pending_today = sum(
-            1 for _r in list(rows or [])
-            if str(_r.get("play_action", _r.get("bet_action", "")) or "").upper() == "BET"
-            and str(_r.get("status", "") or "").upper() == "PENDING"
             and abs(float(_r.get("stake_multiplier", 0.0) or 0.0) - 2.0) < 1e-9
         )
 
-        st.markdown("### 💰 TODAY REPLAY BET RESULT (SIMULATED — NOT ACTUAL CASH)")
+        st.markdown("### 💰 TODAY LIVE BET RESULT")
         _p1, _p2, _p3, _p4, _p5, _p6, _p7 = st.columns(7)
         _p1.metric("UNIT V10 P/L", f"{_live_bet_pnl:+.1f}")
         _p2.metric("PATTERN PLAY P/L", f"{pattern_play_pnl:+.1f}")
         _p3.metric("SAFE PLAY P/L", f"{balanced_play_pnl:+.1f}")
-        _p4.metric("SIMULATED BETS", str(_live_bet_count))
-        _p5.metric("SIM W / L", f"{_exec_wins} / {_exec_losses}")
+        _p4.metric("PLAYED BETS", str(_live_bet_count))
+        _p5.metric("PLAY W / L", f"{_exec_wins} / {_exec_losses}")
         _p6.metric("PATTERN SKIP", str(_pattern_skips))
-        _p7.metric("SIM X2 SETTLED / PENDING", f"{_x2_settled_today} / {_x2_pending_today}")
-        if _x2_settled_today:
-            st.info(
-                "X2 SETTLED IN REPLAY — subsequent replay BETs are x1. "
-                "This does not prove any external wager was placed."
-            )
-        elif _x2_pending_today and _ui_action == "WAIT":
-            st.info(
-                "X2 PENDING in the fully recalculated Number history; no x2 has settled. "
-                "External execution is independently blocked by the source/duplicate guard."
-            )
-        elif _x2_pending_today:
-            st.info(
-                "X2 PENDING REPLAY SIGNAL — not yet settled or confirmed placed. "
-                "Use only LIVE DECISION for the current instruction."
-            )
+        _p7.metric("X2 USED", f"{_x2_used_today} / {int(SAFE_STAKE_MAX_X2_PER_DAY)}")
+        if _x2_used_today >= int(SAFE_STAKE_MAX_X2_PER_DAY):
+            st.info("🔒 FIRST-BET X2 USED — ALL LATER BETS TODAY are x1.")
         st.caption(
             "UNIT V10 P/L is the frozen V10 strategy. PATTERN PLAY P/L applies the 11221 and 111 confirmation filters at x1. SAFE PLAY P/L then applies the displayed stake: "
             "after a negative UNIT V10 day only the first BET next day is x2; every later BET is x1. If the previous UNIT V10 day is non-negative, every BET today is x1. HARD CAP: max 1 x2 per day. "
@@ -9148,42 +8320,17 @@ def render_history_live_authoritative(manager) -> None:
         _s3.metric("V10 REPLAY P/L", f"{pnl:+.1f}")
 
         st.markdown("### 📜 TODAY V10 TRADE HISTORY")
-        st.caption(
-            "TRADE HISTORY BELOW IS REPLAY ONLY, NOT A LEDGER OF PLACED BETS. "
-            "Play Action / Stake = FRESH REPLAY (NO CACHE). Live Action = independent "
-            "EXECUTION STATUS. Replaying an old BET does not confirm or repeat a cash wager."
-        )
         _today_hist = []
         for _r in list(rows or []):
             _or = int(_r.get("open_round", 0) or 0)
             _sr = _r.get("settle_round", None)
-            _status = str(_r.get("status", "") or "").upper()
-            _replay_play = str(_r.get("play_action", _r.get("bet_action", "")) or "").upper()
-            _frontier_pending = _status == "PENDING" and _or == current_round
-            _live_row_action = (
-                "WAIT / NO BET" if _frontier_pending and _ui_action == "WAIT"
-                else (_ui_action + " SIGNAL (NOT PLACED)" if _frontier_pending else "REPLAY ONLY")
-            )
-            _color_r = color24_rows.get(_or, {})
-            _afterloss_r = afterloss_rows.get(_or, {})
             _today_hist.append({
                 "Open R": _or,
                 "Target R": (_or + 1 if _or > 0 else None),
                 "Group": (f"G{int(_r.get('group',0) or 0)}" if int(_r.get('group',0) or 0) > 0 else "—"),
                 "V10 Action": str(_r.get("bet_action", "") or ""),
-                "Replay Play": _replay_play,
-                "Live Action": _live_row_action,
-                "Play Action": _replay_play,
+                "Play Action": str(_r.get("play_action", _r.get("bet_action", "")) or ""),
                 "Stake": str(_r.get("stake_label", "—") or "—"),
-                "Replay Stake": str(_r.get("stake_label", "—") or "—"),
-                "Color24 Pred": _color_r.get("pred", "—"),
-                "Color24 G3 Shadow": _color_r.get("shadow_action", "—"),
-                "Color24 Shadow Stake": _color_r.get("shadow_stake", "—"),
-                "Color24 Shadow P/L": float(_color_r.get("shadow_play_pnl", 0.0)),
-                "AfterLoss24 Policy": "LIVE" if color_live_active else "SHADOW",
-                "AfterLoss24 Decision": _afterloss_r.get("shadow_action", "—"),
-                "AfterLoss24 Expected Stake": _afterloss_r.get("shadow_stake", "—"),
-                "AfterLoss24 Expected P/L": float(_afterloss_r.get("shadow_play_pnl", 0.0)),
                 "Stake Rule": str(_r.get("stake_reason", "") or ""),
                 "Result": str(_r.get("status", "") or ""),
                 "Settle R": _sr,
@@ -9200,31 +8347,87 @@ def render_history_live_authoritative(manager) -> None:
         else:
             st.info("No V10 trade rows yet today.")
 
-        _render_v10_historical_report(prior)
-        # Even if a marker is unavailable, pre-live rounds are informational.
-        # Current D1..R179 replay is still fresh, and no BET is ever permitted.
-        if current_round < LIVE_START_ROUND:
-            st.info(
-                f"CURRENT ACTION: WAIT / NO BET BEFORE R{LIVE_START_ROUND}. "
-                f"TODAY R1–R{current_round} WAS FULLY REPLAYED WITHOUT CACHE."
-            )
-            return
+        # V10.8: full historical BET P/L visibility.
+        # This is the P/L that V10 would have produced if every historical BET
+        # instruction had been followed with the configured +2.5/-1 payoff.
+        _all_hist = list(prior or [])
+        _hist_bet_pnls = [
+            round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
+            for _d in _all_hist
+        ]
+        _hist_total = round(sum(_hist_bet_pnls), 2)
+        _hist_pos = sum(1 for _x in _hist_bet_pnls if _x > 0)
+        _hist_neg = sum(1 for _x in _hist_bet_pnls if _x < 0)
+        _hist_zero = sum(1 for _x in _hist_bet_pnls if abs(_x) < 1e-9)
+        _hist_balanced_pnls = [
+            round(float(_d.get("history_live_balanced_stake_profit", _d.get("history_live_physical_profit", 0.0)) or 0.0), 2)
+            for _d in _all_hist
+        ]
+        _hist_balanced_total = round(sum(_hist_balanced_pnls), 2)
+        _hist_neg_streak = 0
+        _hist_max_neg_streak = 0
+        for _x in _hist_bet_pnls:
+            if _x < 0:
+                _hist_neg_streak += 1
+                _hist_max_neg_streak = max(_hist_max_neg_streak, _hist_neg_streak)
+            else:
+                _hist_neg_streak = 0
 
-        if not raw_marker_saved:
-            st.error(
-                "DURABLE RAW MARKER NOT SAVED: refresh cannot establish a reliable live source witness. "
-                "CURRENT ACTION: WAIT / DO NOT BET. Historical BET rows are REPLAY ONLY."
+        st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
+        _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
+        _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
+        _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
+        _h3.metric("PROFIT DAYS", str(_hist_pos))
+        _h4.metric("LOSS DAYS", str(_hist_neg))
+        _h5.metric("ZERO DAYS", str(_hist_zero))
+        _h6.metric("MAX LOSS STREAK", str(_hist_max_neg_streak))
+
+        _daily_hist_rows = []
+        _cum_bet = 0.0
+        _cum_play = 0.0
+        for _d in _all_hist:
+            _day_bet = round(float(_d.get("history_live_physical_profit", 0.0) or 0.0), 2)
+            _day_play = round(float(_d.get("history_live_balanced_stake_profit", _day_bet) or 0.0), 2)
+            _cum_bet = round(_cum_bet + _day_bet, 2)
+            _cum_play = round(_cum_play + _day_play, 2)
+            _daily_hist_rows.append({
+                "Day": f"D{int(_d.get('day_seq',0) or 0)}",
+                "Date": str(_d.get("day_id", "") or ""),
+                "Unit BET P/L": _day_bet,
+                "Safe Play P/L": _day_play,
+                "Cum Unit P/L": _cum_bet,
+                "Cum Safe P/L": _cum_play,
+                "Engine P/L": float(_d.get("profit", 0.0) or 0.0),
+                "Positive Target": float(_d.get("daily_profit_lock", 0.0) or 0.0),
+                "112211 Shadow": (
+                    f"{int(_d.get('pattern112211_wins',0) or 0)}W/{int(_d.get('pattern112211_losses',0) or 0)}L"
+                    if int(_d.get("pattern112211_samples",0) or 0) > 0 else ""
+                ),
+            })
+        st.markdown("### 🗓️ FULL V10 SIMULATED BET HISTORY — D1→YESTERDAY")
+        if _daily_hist_rows:
+            # UI-only: render one full table instead of a duplicated recent table + expander.
+            # This does not participate in strategy/replay and avoids the extra duplicate dataframe render.
+            _hist_df = pd.DataFrame(_daily_hist_rows)
+            _hist_height = min(max(430, 35 * (len(_hist_df) + 1)), 1200)
+            st.dataframe(
+                _hist_df,
+                use_container_width=True,
+                hide_index=True,
+                height=_hist_height,
             )
-            return
-        if prebet_block_reason:
-            st.error(
-                f"FINAL SOURCE RECHECK BLOCKED LIVE BET: {prebet_block_reason}. "
-                "CURRENT ACTION: WAIT / DO NOT BET. Replay remains informational."
+            st.caption(
+                "BET P/L = simulated historical result if every V10 BET was followed. "
+                "Cumulative P/L = running total from D1. This is not past cash P/L before V10 was actually deployed."
             )
-            return
-        if raw_regressed or raw_revoked:
-            # The calculated NO-CACHE signal and all replay rows are already
-            # visible above; do not repeat a second alarming rollback banner.
+        else:
+            st.info("No completed V10 simulated daily history yet.")
+
+        if raw_regressed:
+            st.error(
+                f"REGRESSED SOURCE SNAPSHOT: received R{current_round} after last accepted R{raw_prev_round_count}. "
+                "CURRENT ACTION: WAIT / DO NOT BET; last good marker was preserved."
+            )
             return
         if raw_revised_same_frontier:
             st.error(
@@ -9248,13 +8451,6 @@ def render_history_live_authoritative(manager) -> None:
         if current_round >= MAX_ROUNDS_PER_DAY:
             st.success(f"✅ DAY COMPLETE — WAIT FOR NEXT DAY | V10 REPLAY P/L {pnl:+.1f}")
             return
-        if current_round < LIVE_START_ROUND:
-            st.info(
-                f"CURRENT ACTION: WAIT / NO BET BEFORE R{LIVE_START_ROUND}. "
-                f"TODAY R1–R{current_round} WAS FULLY REPLAYED WITH NO CACHE; "
-                "history and today's simulated P/L above are current."
-            )
-            return
         if pending is None:
             if _physical_lock_reached:
                 st.success(
@@ -9274,7 +8470,7 @@ def render_history_live_authoritative(manager) -> None:
             st.error("LIVE SELF-CHECK FAILED: invalid target round. CURRENT ACTION: WAIT / DO NOT BET.")
             return
 
-        action = str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper()
+        action = str(pending.get("bet_action", "SKIP") or "SKIP").upper()
         group = int(pending.get("group", 0) or 0)
         reason = str(pending.get("reason", "") or "")
         conf = float(pending.get("confidence", 0.0) or 0.0)
@@ -9282,14 +8478,17 @@ def render_history_live_authoritative(manager) -> None:
         stab = float(pending.get("stability", 0.0) or 0.0)
 
         action_id = f"D{seq}-R{target}"
-        # No second actionable BET/SKIP message. The LIVE DECISION panel above
-        # is the sole operator instruction; this block is audit information only.
-        st.caption(
-            f"REPLAY AUDIT ONLY | ACTION ID={action_id} | PLAY={action} | G{group} | "
-            f"CONF={conf:.3f} | P20={p20:+.1f} | STAB={stab:.3f} | {reason} | "
-            f"CHECKSUM={_short_hash(action_sig)}. "
-            "Use ONLY the LIVE DECISION panel above; this row is not an additional instruction."
-        )
+        st.caption(f"ACTION ID={action_id} | VALID FOR R{target} ONLY | OPEN R{current_round} | ACTION CHECKSUM={_short_hash(action_sig)} | BET ONCE ONLY")
+        if action == "BET":
+            st.success(
+                f"✅ CURRENT ACTION: BET G{group} → R{target} | STAKE {str(pending.get('stake_label','x1') or 'x1')} | BET ONCE ONLY | "
+                f"CONF={conf:.3f} | P20={p20:+.1f} | STAB={stab:.3f} | {reason}"
+            )
+        else:
+            st.warning(
+                f"⛔ CURRENT ACTION: SKIP G{group} → R{target} | "
+                f"CONF={conf:.3f} | P20={p20:+.1f} | STAB={stab:.3f} | {reason}"
+            )
     except Exception as exc:
         st.error(f"HISTORY-LIVE LIVE FAIL-CLOSED: {exc}")
         st.error("CURRENT ACTION: WAIT / DO NOT BET.")
@@ -9706,146 +8905,22 @@ def _load_raw_observation_marker() -> dict:
         return {}
 
 
-def _save_raw_observation_marker(
-    data: dict, *, verified_same_day_rebase: bool = False,
-    expected_previous: Optional[dict] = None,
-) -> bool:
-    """Atomically store the raw witness; explicit verified same-day corrections only.
-
-    A newer accepted DaySeq/Round cannot be overwritten by a delayed older run.
-    Failure always returns False so LIVE DECISION becomes WAIT. This does NOT
-    persist actual platform transactions or establish an external betting ledger.
-    """
-    import tempfile
-    path = os.path.abspath(RAW_OBSERVATION_FILE)
-    parent = os.path.dirname(path)
-    tmp = None
+def _save_raw_observation_marker(data: dict) -> bool:
+    """Atomic best-effort save of stale-data metadata."""
     try:
+        path = os.path.abspath(RAW_OBSERVATION_FILE)
+        parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        # Streamlit Cloud normally runs Linux; flock serializes local workers.
-        import fcntl
-        with open(path + ".lock", "a+b") as lockf:
-            fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
-            try:
-                with open(path, "r", encoding="utf-8") as prevf:
-                    previous = json.load(prevf)
-            except FileNotFoundError:
-                previous = {}
-            except Exception:
-                # Unknown/corrupt marker must not be silently overwritten.
-                return False
-            prev = previous if isinstance(previous, dict) else {}
-            new = dict(data or {})
-            new_pos = (int(new.get("day_seq", 0) or 0), int(new.get("round_count", 0) or 0))
-            old_pos = (int(prev.get("day_seq", 0) or 0), int(prev.get("round_count", 0) or 0))
-            if new_pos <= (0, 0):
-                return False
-            old_seq, old_round = old_pos
-            new_seq, new_round = new_pos
-            old_generation = int(prev.get("revision_generation", 0) or 0)
-            new_generation = int(new.get("revision_generation", 0) or 0)
-            revoked = list(prev.get("revoked_signatures", []) or [])
-            new_sig = str(new.get("raw_signature", "") or "")
-            if not new_sig:
-                return False
-            if verified_same_day_rebase:
-                # The button calls the two-source verification BEFORE this lock.
-                # Require an exact compare-and-swap of the previous marker: a
-                # second Streamlit session must not race us to a different frontier.
-                exp = expected_previous if isinstance(expected_previous, dict) else {}
-                if (old_seq != new_seq or not exp or not prev
-                    or old_round < new_round
-                    or old_round != int(exp.get("round_count", 0) or 0)
-                    or old_generation != int(exp.get("revision_generation", 0) or 0)
-                    or str(prev.get("raw_signature", "")) != str(exp.get("raw_signature", ""))
-                    or new_sig == str(prev.get("raw_signature", ""))
-                    or new_sig in revoked
-                    or not bool(new.get("freshness_established", False))):
-                    return False
-                if new_generation != old_generation + 1:
-                    return False
-                # Retain a bounded audit trail and blacklist the superseded
-                # full snapshot so an old browser tab cannot reapply it.
-                revoked.append(str(prev.get("raw_signature", "")))
-                new["revoked_signatures"] = list(dict.fromkeys(revoked))[-32:]
-                events = list(prev.get("same_day_rebase_events", []) or [])
-                events.append({
-                    "day_seq": new_seq, "from_round": old_round,
-                    "to_round": new_round, "at": new.get("observed_at"),
-                    "previous_sha": str(prev.get("raw_signature", ""))[:16],
-                    "new_sha": new_sig[:16],
-                    "operator_confirmed": True,
-                })
-                new["same_day_rebase_events"] = events[-20:]
-            else:
-                if old_pos > new_pos:
-                    return False
-                if new_pos == old_pos and prev and str(prev.get("raw_signature", "")) != new_sig:
-                    return False
-                if old_seq == new_seq and prev:
-                    if new_generation != old_generation or new_sig in revoked:
-                        return False
-                    # These fields belong to the existing generation, not to
-                    # a browser tab; preserve them across every new Round.
-                    new["revoked_signatures"] = list(revoked)
-                    new["same_day_rebase_events"] = list(prev.get("same_day_rebase_events", []) or [])
-            fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=parent or None)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(new, f, ensure_ascii=False, sort_keys=True)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-            tmp = None
-            return True
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(data or {}), f, ensure_ascii=False, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
     except Exception:
         return False
-    finally:
-        if tmp:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-
-
-def _v10_verified_rebase_today(day_seq: int, day_date: str, numbers: list[int], history_sig: str) -> tuple[bool, str]:
-    """Operator-confirmed resync for corrected current-day Numbers.
-
-    Does not execute any external wager. Only changes the source observation
-    frontier after the current data+history have passed a second remote read.
-    Historical replay cache and strategy parameters remain unchanged.
-    """
-    if int(day_seq) <= 0 or not numbers or len(numbers) >= MAX_ROUNDS_PER_DAY:
-        return False, "VALID ACTIVE DAY WITH 1..287 NUMBERS REQUIRED"
-    before = _load_raw_observation_marker()
-    if (int(before.get("day_seq", 0) or 0) != int(day_seq)
-        or int(before.get("round_count", 0) or 0) < len(numbers)):
-        return False, "DAY/FRONTIER CHANGED; REFRESH FIRST"
-    good, reason = _v10_verify_source_before_bet(day_seq, day_date, numbers, history_sig)
-    if not good:
-        return False, f"SECOND SOURCE VERIFICATION FAILED: {reason}"
-    now = time.time()
-    new_marker = {
-        "version": "V10_12_9_OPERATOR_VERIFIED_SAME_DAY_REBASE_V1",
-        "day_seq": int(day_seq),
-        "round_count": len(numbers),
-        "raw_signature": make_numbers_signature(numbers),
-        "changed_at": now,
-        "observed_at": now,
-        "freshness_established": True,
-        "revision_generation": int(before.get("revision_generation", 0) or 0) + 1,
-    }
-    ok = _save_raw_observation_marker(
-        new_marker, verified_same_day_rebase=True, expected_previous=before,
-    )
-    if not ok:
-        return False, "MARKER CHANGED DURING CONFIRMATION OR FAILED TO SAVE; REFRESH"
-    # The persisted marker is authoritative, not the browser's old R286 state.
-    try:
-        st.session_state["_v10_12_raw_observation"] = dict(_load_raw_observation_marker())
-    except Exception:
-        pass
-    return True, f"REBASED D{day_seq}: R{int(before.get('round_count',0) or 0)} → R{len(numbers)}; LIVE REPLAYS ON RERUN"
 
 
 class HistoryLiveSourceManager:
@@ -9854,30 +8929,22 @@ class HistoryLiveSourceManager:
         if int(seq or 0) <= 0:
             st.error("V10.3 SOURCE ERROR: invalid DAY_SEQ. CURRENT ACTION: WAIT / DO NOT BET.")
             st.stop()
-        # D72/R0 (or any new DaySeq with blank R1) is a normal day-start state.
-        # Create a read-only WAIT dashboard; do not stop the Streamlit script.
-        # Crucially, no Number means no replay, no BET and no marker write.
+        if not raw_numbers:
+            st.warning(f"DaySeq {int(seq)} detected but round 1 Number is not ready. CURRENT ACTION: WAIT.")
+            st.stop()
         self.numbers = list(raw_numbers)
         self.round_id = len(self.numbers)
-        # Keep the completed-day history visible at R0 and during R1..R179.
-        # This is read-only and is never used to authorize an early BET.
+        # Before LIVE_START_ROUND the only valid action is WAIT, so do not pay
+        # the network/replay cost of loading completed history yet.
         self.history_df = (
             _load_history_sheet_df()
-            if int(seq) > 1 or self.round_id >= LIVE_START_ROUND
+            if self.round_id >= LIVE_START_ROUND
             else pd.DataFrame()
         )
         self.ctx = ensure_ctx_fields(EngineContext())
         self.ctx.live_day_seq = int(seq)
         self.ctx.live_day_date = str(day_date or "")
         self.ctx.live_day_id = self.ctx.live_day_date
-
-        if self.round_id == 0:
-            # WAIT UI only. No fresh observation of R1 exists yet, so preserve
-            # the previous durable marker and its freshness/monotonicity checks.
-            self.ctx.live_raw_is_stale = True
-            self.ctx.live_raw_observation_warmup_required = True
-            self.ctx.live_raw_observation_marker_saved = False
-            return
 
         # Restart-safe observation guard. Strategy never reads this metadata.
         # Session state gives fast in-process tracking; the durable marker keeps
@@ -9889,9 +8956,9 @@ class HistoryLiveSourceManager:
         session_prev = st.session_state.get(key)
         disk_prev = _load_raw_observation_marker()
 
-        # Multiple sessions can coexist. A same-day correction increments a
-        # durable generation: NEWER GENERATION outranks OLD ROUND. An old tab
-        # must not resurrect R286 after the operator rebases to R244.
+        # Multiple browser sessions can coexist. Use the most advanced accepted
+        # marker, not blindly the current session copy, so an older tab cannot
+        # move the frontier backwards after another session has advanced it.
         _marker_candidates = [
             x for x in (session_prev, disk_prev)
             if isinstance(x, dict) and bool(x)
@@ -9901,7 +8968,6 @@ class HistoryLiveSourceManager:
                 _marker_candidates,
                 key=lambda x: (
                     int(x.get("day_seq", 0) or 0),
-                    int(x.get("revision_generation", 0) or 0),
                     int(x.get("round_count", 0) or 0),
                     float(x.get("observed_at", 0.0) or 0.0),
                 ),
@@ -9929,11 +8995,8 @@ class HistoryLiveSourceManager:
             and int(self.round_id) == prev_count
             and str(prev.get("raw_signature", "")) != raw_sig
         )
-        snapshot_revoked_source = bool(
-            same_day and raw_sig in list(prev.get("revoked_signatures", []) or [])
-        )
 
-        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revoked_source:
+        if snapshot_regressed or snapshot_revised_same_frontier:
             changed_at = float(prev.get("changed_at", now) or now)
             freshness_established = bool(prev.get("freshness_established", False))
         elif same_sig:
@@ -9970,18 +9033,14 @@ class HistoryLiveSourceManager:
             "changed_at": float(changed_at),
             "observed_at": float(now),
             "freshness_established": bool(freshness_established),
-            "revision_generation": int(prev.get("revision_generation", 0) or 0) if same_day else 0,
         }
-        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revoked_source:
+        if snapshot_regressed or snapshot_revised_same_frontier:
             # Keep the last accepted marker intact so a transient stale/regressed
             # or same-frontier corrected response cannot become the new baseline.
             marker_saved = True
         else:
+            st.session_state[key] = dict(marker)
             marker_saved = _save_raw_observation_marker(marker)
-            # Never publish an uncommitted marker into session state: otherwise
-            # an IO error could make future refreshes trust an ephemeral witness.
-            if marker_saved:
-                st.session_state[key] = dict(_load_raw_observation_marker())
 
         self.ctx.live_raw_signature = raw_sig
         self.ctx.live_raw_observed_age_seconds = float(age)
@@ -9989,8 +9048,6 @@ class HistoryLiveSourceManager:
         self.ctx.live_raw_observation_warmup_required = bool(warmup_required)
         self.ctx.live_raw_snapshot_regressed = bool(snapshot_regressed)
         self.ctx.live_raw_snapshot_revised_same_frontier = bool(snapshot_revised_same_frontier)
-        self.ctx.live_raw_snapshot_revoked = bool(snapshot_revoked_source)
-        self.ctx.live_raw_revision_generation = int(marker["revision_generation"])
         self.ctx.live_raw_previous_round_count = int(prev_count)
         self.ctx.live_raw_observation_marker_saved = bool(marker_saved)
 
@@ -10002,8 +9059,8 @@ try:
     live_manager = HistoryLiveSourceManager()
     with _live_top_slot.container():
         render_history_live_authoritative(live_manager)
-    st.caption(
-        "V10.12.9 TODAY NO CACHE + VERIFIED COMPLETED HISTORY + 112211+111 CONFIRM + FIRST-BET X2 ONLY | AUTHORITATIVE LIVE ONLY | CURRENT RAW R1-CURRENT FRESH REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
+    st.success(
+        "V10.12.9 FAST TRUE NO CACHE + FULL HISTORY + 112211+111 CONFIRM + FIRST-BET X2 ONLY | AUTHORITATIVE LIVE ONLY | FULL RAW HISTORY REPLAY EVERY REFRESH | RESTART STALE GUARD | SAFE CONT + QUALITY RESCUE | STOP-LOSS -2.5 OFF | "
         "DYNAMIC POSITIVE TARGET +2.5/+12.5 | RAW REPLAY | FAIL-CLOSED"
     )
 except Exception as e:
@@ -10027,14 +9084,14 @@ except Exception as e:
 
 with st.sidebar:
     st.divider()
-    st.caption("Refresh control — TODAY NO CACHE: R1→CURRENT recalculated every refresh; completed history replay reused only after raw checksum verification.")
+    st.caption("Refresh control — TRUE NO CACHE: raw history is replayed once from source on every refresh.")
     if st.button("🔄 Refresh now", use_container_width=True):
         st.rerun()
 
     auto_refresh_enabled = st.checkbox(
         "Auto refresh",
-        value=True,
-        help="ON by default (30 seconds) for automatic source refresh while this browser tab is open. Turn OFF to inspect static results. Browser refresh does not place wagers."
+        value=False,
+        help="OFF by default so the UI stays stable for inspection. When ON, the whole Streamlit page reloads."
     )
     refresh_seconds = st.number_input(
         "Refresh seconds",
@@ -10046,29 +9103,20 @@ with st.sidebar:
     )
 
 _current_round_for_refresh = int(getattr(live_manager, "round_id", 0) or 0) if live_manager is not None else 0
-if auto_refresh_enabled:
-    # R288 completes a DAY, not the application. Keep polling at a lower
-    # frequency so that a browser left open can detect the NEXT DAY_SEQ/R0/R1.
-    # Previously auto refresh stopped forever at R288 until manual reload.
-    _refresh_interval = (int(refresh_seconds) if _current_round_for_refresh < 288
-                         else max(120, int(refresh_seconds)))
-    if _current_round_for_refresh >= 288:
-        st.sidebar.info(
-            f"R288 complete — checking for the next DaySeq every {_refresh_interval}s "
-            "while this browser tab remains open."
-        )
-    else:
-        st.sidebar.info(
-            f"Auto refresh ON: every {_refresh_interval}s. "
-            "Turn it OFF while reviewing the dashboard."
-        )
+if auto_refresh_enabled and _current_round_for_refresh < 288:
+    st.sidebar.info(
+        f"Auto refresh ON: every {int(refresh_seconds)}s. "
+        "Turn it OFF while reviewing the dashboard."
+    )
     components.html(
         f"""
         <script>
         setTimeout(function() {{
             window.parent.location.reload();
-        }}, {_refresh_interval * 1000});
+        }}, {int(refresh_seconds) * 1000});
         </script>
         """,
         height=0,
     )
+elif auto_refresh_enabled and _current_round_for_refresh >= 288:
+    st.sidebar.success("Day complete at R288 — auto refresh paused.")
