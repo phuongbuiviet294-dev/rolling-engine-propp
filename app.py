@@ -1,5 +1,3 @@
-# APP36 GROUP COLD V1 | ALL-DAYSEQ ACTIVE REPLAY | TODAY ALWAYS NO CACHE.
-# Operational caution: replayed historical BETs are NOT a ledger of actually placed wagers.
 # AUTO LIVE FILTER (D1+): after a settled retained LOSS, modal RED Color24
 # skips subsequent G3 BETs, with x2 reallocated to first retained BET.
 # This file does NOT place wagers via any external exchange/API.
@@ -8152,80 +8150,6 @@ def _color_after_loss24_live_apply(
     return live_rows, baseline_rows, detail, summary, True
 
 
-
-# GROUP-COLD COMBO V1 — no DaySeq threshold. In ACTIVE mode the SAME
-# deterministic gate is applied to completed HISTORY and today's fresh replay.
-# Do not switch policies mid-day if actual wagers have been placed; historical
-# simulation may change, but external wagers are never retroactively changed.
-APP36_GROUP_COLD_MODE = "ACTIVE"  # ACTIVE from D1 in simulated history and today; SHADOW available for audit.
-APP36_GROUP_COLD_POLICY_REV = "GROUP_COLD_ALL_DAYS_V1"
-
-
-def _app36_group_cold_candidate(pattern_rows: list[dict], numbers: list[int], prev_physical: float, day_seq: int):
-    """Causal candidate. Inputs at open R are only Number R1..R (no R+1).
-
-    Apply the three gates before the existing Color24-after-LOSS filter, then
-    recalculate all stakes with the existing engine function. The candidate
-    remains diagnostic in SHADOW mode; no cash wager is placed by this app.
-    """
-    nums = list(numbers or [])
-    grouped = [(int(n) - 1) // 3 + 1 for n in nums]
-    marked = []
-    filtered = []
-    for source_row in list(pattern_rows or []):
-        r = dict(source_row)
-        op = int(r.get("open_round", 0) or 0)
-        g = int(r.get("group", 0) or 0)
-        r["group_cold_gate"] = "KEEP"
-        r["group_cold_filtered"] = False
-        if str(r.get("play_action", "") or "").upper() == "BET":
-            if op < 1 or op > len(grouped):
-                raise RuntimeError(f"GROUP COLD: invalid source frontier for R{op}")
-            already_seen = grouped[:op]
-            rule = None
-            if g == 4 and len(already_seen) >= 24 and already_seen[-24:].count(4) <= 4:
-                rule = "G4_COLD_4_OF_24"
-            elif g == 2 and len(already_seen) >= 48 and already_seen[-48:].count(2) <= 8:
-                rule = "G2_COLD_8_OF_48"
-            elif g == 3 and already_seen[-1] == 3:
-                rule = "G3_PREVIOUS_GROUP_3"
-            if rule:
-                r["play_action"] = "SKIP"
-                r["play_allowed"] = False
-                r["play_unit_profit"] = 0.0
-                r["reason"] = (str(r.get("reason", "") or "") + "|GROUP_COLD_" + rule).strip("|")
-                r["group_cold_gate"] = rule
-                r["group_cold_filtered"] = True
-                filtered.append((op, g, rule, str(r.get("status", ""))))
-        marked.append(r)
-    candidate_rows, _base, _color_detail, _color_summary, _color_active = (
-        _color_after_loss24_live_apply(marked, nums, prev_physical, day_seq)
-    )
-    # Settlement and x2 are calculated by the original Color + stake engine,
-    # not by summing/adjusting profit on already-completed BETs.
-    pnl = round(sum(float(x.get("play_profit", 0.0) or 0.0)
-                    for x in candidate_rows if str(x.get("status", "")).upper() in {"WIN", "LOSS"}), 2)
-    candidate_by_round = {int(r.get("open_round", 0) or 0):r for r in candidate_rows}
-    return candidate_rows, candidate_by_round, {"profit":pnl,"filtered":filtered,
-        "filtered_count":len(filtered),
-        "filtered_wins":sum(x[3].upper()=="WIN" for x in filtered),
-        "filtered_losses":sum(x[3].upper()=="LOSS" for x in filtered),
-        "bet_count":sum(str(r.get("play_action","")).upper()=="BET" and str(r.get("status","")).upper() in {"WIN","LOSS"} for r in candidate_rows),
-        "x2_count":sum(str(r.get("play_action","")).upper()=="BET" and str(r.get("stake_label","")).lower()=="x2" and str(r.get("status","")).upper() in {"WIN","LOSS"} for r in candidate_rows)}
-
-
-def _app36_group_cold_mode() -> str:
-    mode = str(APP36_GROUP_COLD_MODE or "SHADOW").upper()
-    if mode not in ("SHADOW", "ACTIVE"):
-        raise RuntimeError("GROUP COLD POLICY MODE must be SHADOW or ACTIVE")
-    return mode
-
-
-def _app36_group_cold_active_day(seq: int) -> bool:
-    # DaySeq does NOT control whether policy is active. The same policy must
-    # govern historical replay and the current Round to avoid a cutover gap.
-    return _app36_group_cold_mode() == "ACTIVE"
-
 def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force_replay: bool = False):
     """Build independent STOP-OFF history from raw D1..D(N-1), causally.
 
@@ -8266,7 +8190,7 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
     history_sig = make_history_signature(days)
     cache_key = (
         _COMPLETED_HISTORY_MEMO_SCHEMA, "V10_STOP_OFF",
-        _completed_history_code_identity(), _app36_group_cold_mode(), APP36_GROUP_COLD_POLICY_REV, int(current_seq), history_sig,
+        _completed_history_code_identity(), int(current_seq), history_sig,
     )
     if not _force_replay:
         history_hit = _completed_history_memo_read("_app36_verified_v10_history", cache_key)
@@ -8282,7 +8206,7 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
         # is intentionally excluded from hashing because it was just validated
         # above and its content is represented by the SHA-256 history checksum.
         result = _completed_history_v10_server_replay(
-            int(current_seq), history_sig, (_completed_history_code_identity(), _app36_group_cold_mode(), APP36_GROUP_COLD_POLICY_REV),
+            int(current_seq), history_sig, _completed_history_code_identity(),
             _history_df=history_df,
         )
         _completed_history_memo_write("_app36_verified_v10_history", cache_key, result)
@@ -8348,15 +8272,9 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in execution_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        baseline_color_rows, _baseline_balanced_rows, _al_details, _al_summary, _color_live_active = (
+        balanced_rows, _baseline_balanced_rows, _al_details, _al_summary, _color_live_active = (
             _color_after_loss24_live_apply(execution_rows, nums, physical_prev, seq)
         )
-        combo_rows, _combo_by_round, combo_stats = _app36_group_cold_candidate(
-            execution_rows, nums, physical_prev, seq
-        )
-        balanced_rows = combo_rows if _app36_group_cold_active_day(seq) else baseline_color_rows
-        baseline_color_profit = round(sum(float(x.get("play_profit", 0.0) or 0.0)
-            for x in baseline_color_rows if str(x.get("status", "")).upper() in {"WIN", "LOSS"}), 2)
         balanced_stake_profit = round(
             sum(float(r.get("play_profit", 0.0) or 0.0) for r in balanced_rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
@@ -8391,14 +8309,6 @@ def _history_live_build_prior(history_df: pd.DataFrame, current_seq: int, _force
             "history_live_physical_profit": physical_profit,
             "history_live_pattern_play_profit": pattern_play_profit,
             "history_live_balanced_stake_profit": balanced_stake_profit,
-            "group_cold_policy_mode": ("ACTIVE" if _app36_group_cold_active_day(seq) else "SHADOW"),
-            "group_cold_baseline_pnl": baseline_color_profit,
-            "group_cold_shadow_pnl": float(combo_stats["profit"]),
-            "group_cold_shadow_delta": round(float(combo_stats["profit"]) - baseline_color_profit, 2),
-            "group_cold_shadow_filtered": int(combo_stats["filtered_count"]),
-            "group_cold_shadow_filtered_win": int(combo_stats["filtered_wins"]),
-            "group_cold_shadow_filtered_loss": int(combo_stats["filtered_losses"]),
-            "group_cold_shadow_x2": int(combo_stats["x2_count"]),
             "afterloss24_live_active": bool(_color_live_active),
             "history_live_x2_bet_count": int(x2_bet_count),
             "history_live_x2_wins": int(x2_wins),
@@ -8510,17 +8420,11 @@ def _render_v10_historical_report(prior: list[dict]) -> None:
             _hist_neg_streak = 0
 
     st.info(
-        "HISTORY SIMULATION: Color24 is applied from D1, and Group Cold is applied "
-        "from D1 when ACTIVE. SAFE P/L is recomputed under the selected policy. "
-        "This does NOT rewrite or confirm bets actually placed in earlier days."
+        "COLOR AFTER-LOSS24 ACTIVE FROM D1: completed-day SAFE P/L is RE-SIMULATED "
+        "with the Color filter for comparison. This does NOT rewrite or confirm "
+        "bets that were actually placed in earlier days."
     )
     st.markdown("### 📊 V10 HISTORICAL BET P/L SUMMARY")
-    _gc_hist_base = round(sum(float(d.get("group_cold_baseline_pnl", 0.0) or 0.0) for d in _all_hist), 2)
-    _gc_hist_candidate = round(sum(float(d.get("group_cold_shadow_pnl", 0.0) or 0.0) for d in _all_hist), 2)
-    _gc_hist_removed = sum(int(d.get("group_cold_shadow_filtered", 0) or 0) for d in _all_hist)
-    st.caption(f"GROUP COLD V1 {_app36_group_cold_mode()} | BASELINE + COLOR24={_gc_hist_base:+.1f} | "
-               f"CANDIDATE={_gc_hist_candidate:+.1f} | DELTA={_gc_hist_candidate-_gc_hist_base:+.1f} | "
-               f"candidate filtered {_gc_hist_removed} BET(s). Backtest only, not actual placed wagers.")
     _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(6)
     _h1.metric("UNIT HISTORY P/L", f"{_hist_total:+.1f}")
     _h2.metric("SAFE STAKE P/L", f"{_hist_balanced_total:+.1f}")
@@ -8561,11 +8465,6 @@ def _render_v10_historical_report(prior: list[dict]) -> None:
             "Color24 G3 Shadow P/L": round(float(_d.get("color24_g3_shadow_pnl", 0.0) or 0.0), 2),
             "Color24 G3 Delta": round(float(_d.get("color24_g3_shadow_delta", 0.0) or 0.0), 2),
             "Color24 G3 Filtered": int(_d.get("color24_g3_shadow_filtered", 0) or 0),
-            "Group Cold Policy": str(_d.get("group_cold_policy_mode", "SHADOW")),
-            "Group Cold Baseline P/L": round(float(_d.get("group_cold_baseline_pnl", 0.0) or 0.0), 2),
-            "Group Cold Combo P/L": round(float(_d.get("group_cold_shadow_pnl", 0.0) or 0.0), 2),
-            "Group Cold Delta": round(float(_d.get("group_cold_shadow_delta", 0.0) or 0.0), 2),
-            "Group Cold Filtered": int(_d.get("group_cold_shadow_filtered", 0) or 0),
             "AfterLoss24 Active": "REPLAY COLOR" if _d.get("afterloss24_live_active", False) else "SHADOW",
             "Baseline Safe P/L (No Color)": round(
                 float(_d.get("afterloss24_shadow_pnl", 0.0) or 0.0)
@@ -8815,14 +8714,9 @@ def render_history_live_authoritative(manager) -> None:
             sum(float(r.get("play_unit_profit", 0.0) or 0.0) for r in rows
                 if str(r.get("status", "") or "").upper() in {"WIN", "LOSS"}), 2
         )
-        pattern_rows_for_combo = rows
-        baseline_color_rows, _baseline_color_rows, afterloss_rows, afterloss_sum, color_live_active = (
-            _color_after_loss24_live_apply(pattern_rows_for_combo, numbers, prev_physical, seq)
+        rows, _baseline_color_rows, afterloss_rows, afterloss_sum, color_live_active = (
+            _color_after_loss24_live_apply(rows, numbers, prev_physical, seq)
         )
-        combo_today_rows, combo_today_by_round, combo_today_stats = _app36_group_cold_candidate(
-            pattern_rows_for_combo, numbers, prev_physical, seq
-        )
-        rows = combo_today_rows if _app36_group_cold_active_day(seq) else baseline_color_rows
         # The regular Color24 G3 control remains an independent diagnostic of
         # the unmodified baseline, NOT a second filter on today's live rows.
         color24_rows, color24_sum = _color24_g3_shadow(_baseline_color_rows, numbers, prev_physical)
@@ -8858,7 +8752,6 @@ def render_history_live_authoritative(manager) -> None:
                 "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2_COLOR_AFTERLOSS24_D1"
                 if color_live_active else "V10_12_9_HL_112211_111_CONFIRM_FIRST_BET_X2"
             ),
-            "group_cold_mode": ("ACTIVE" if _app36_group_cold_active_day(seq) else "SHADOW"),
             "day_seq": seq,
             "day_date": day_date,
             "round": current_round,
@@ -8955,7 +8848,6 @@ def render_history_live_authoritative(manager) -> None:
         raw_regressed = bool(getattr(manager.ctx, "live_raw_snapshot_regressed", False))
         raw_revised_same_frontier = bool(getattr(manager.ctx, "live_raw_snapshot_revised_same_frontier", False))
         raw_revoked = bool(getattr(manager.ctx, "live_raw_snapshot_revoked", False))
-        raw_prior_prefix_revised = bool(getattr(manager.ctx, "live_raw_prior_prefix_revised", False))
         raw_prev_round_count = int(getattr(manager.ctx, "live_raw_previous_round_count", 0) or 0)
         # Operational safety only: no LIVE action if the durable source witness
         # could not be stored. Does not alter replay/profit or bet selection.
@@ -8970,7 +8862,7 @@ def render_history_live_authoritative(manager) -> None:
         prebet_block_reason = ""
         if (
             raw_marker_saved and not raw_regressed and not raw_revised_same_frontier and not raw_revoked
-            and not raw_prior_prefix_revised and not raw_warmup and not raw_stale
+            and not raw_warmup and not raw_stale
             and pending is not None and current_round < MAX_ROUNDS_PER_DAY
             and int(pending.get("open_round", -1) or -1) == current_round
             and str(pending.get("play_action", pending.get("bet_action", "SKIP")) or "SKIP").upper() == "BET"
@@ -8998,11 +8890,6 @@ def render_history_live_authoritative(manager) -> None:
             _ui_reason = "SUPERSEDED NUMBER SNAPSHOT: LIVE WAIT UNTIL ACTUAL CURRENT DATA"
         elif raw_revised_same_frontier:
             _ui_reason = f"RAW NUMBER CHANGED AT SAME FRONTIER R{current_round} — WAIT FOR NEXT ROUND"
-        elif raw_prior_prefix_revised:
-            _ui_reason = (
-                f"PREVIOUSLY ACCEPTED NUMBERS CHANGED WHILE ROUND ADVANCED "
-                f"R{raw_prev_round_count}→R{current_round} — WAIT / VERIFY SOURCE"
-            )
         elif raw_warmup:
             _ui_reason = "RESTART/FRESH-DEPLOY WARMUP — WAIT FOR ONE RAW ROUND CHANGE"
         elif raw_stale:
@@ -9097,22 +8984,6 @@ def render_history_live_authoritative(manager) -> None:
             "P/L remains a replay, not a ledger of actual wagers."
         )
 
-        st.markdown(f"### 🧪 GROUP COLD COMBO V1 — {'ACTIVE' if _app36_group_cold_active_day(seq) else 'SHADOW'} (ALL DAYSEQ, NO CUTOVER)")
-        _combo_frontier = combo_today_by_round.get(current_round, {})
-        _combo_action = str(_combo_frontier.get("play_action", "SKIP") or "SKIP").upper() if pending is not None else "WAIT"
-        _g1, _g2, _g3, _g4 = st.columns(4)
-        _g1.metric("COMBO CALCULATED", _combo_action)
-        _g2.metric("COMBO STAKE", str(_combo_frontier.get("stake_label", "—")) if _combo_action == "BET" else "—")
-        _g3.metric("COMBO TODAY P/L", f"{float(combo_today_stats['profit']):+.1f}")
-        _g4.metric("COMBO FILTERED", str(combo_today_stats['filtered_count']))
-        st.caption(
-            f"BASELINE COLOR24 P/L {sum(float(x.get('play_profit',0.0) or 0.0) for x in baseline_color_rows):+.1f} | "
-            f"CANDIDATE P/L {combo_today_stats['profit']:+.1f} | "
-            f"GATE {_combo_frontier.get('group_cold_gate','—')} | "
-            "In SHADOW mode this is DIAGNOSTIC ONLY. In ACTIVE mode this filter is used in replay and LIVE decision. "
-            "LIVE EXECUTION STATUS below still governs source/marker authorization. "
-            "ACTIVE mode has not been validated against production wagers."
-        )
         st.markdown("### 🔐 LIVE EXECUTION STATUS")
         _c1, _c2, _c3 = st.columns(3)
         _c1.metric("EXECUTION ACTION", _ui_action if _ui_action != "WAIT" else "WAIT / NO BET")
@@ -9142,7 +9013,7 @@ def render_history_live_authoritative(manager) -> None:
         elif current_round < LIVE_START_ROUND:
             _day_status = "WAIT / BEFORE LIVE START"
             _next_trade_status = f"WAIT UNTIL R{LIVE_START_ROUND}"
-        elif not raw_marker_saved or prebet_block_reason or raw_regressed or raw_revoked or raw_revised_same_frontier or raw_prior_prefix_revised or raw_warmup or raw_stale:
+        elif not raw_marker_saved or prebet_block_reason or raw_regressed or raw_revoked or raw_revised_same_frontier or raw_warmup or raw_stale:
             _day_status = "WAIT / SOURCE NOT READY"
             _next_trade_status = "WAIT / NO BET"
         elif _physical_lock_reached:
@@ -9309,11 +9180,6 @@ def render_history_live_authoritative(manager) -> None:
                 "Color24 G3 Shadow": _color_r.get("shadow_action", "—"),
                 "Color24 Shadow Stake": _color_r.get("shadow_stake", "—"),
                 "Color24 Shadow P/L": float(_color_r.get("shadow_play_pnl", 0.0)),
-                "Combo Policy": ("ACTIVE" if _app36_group_cold_active_day(seq) else "SHADOW"),
-                "Combo Decision": str(combo_today_by_round.get(_or, {}).get("play_action", "—")),
-                "Combo Gate": str(combo_today_by_round.get(_or, {}).get("group_cold_gate", "KEEP")),
-                "Combo Stake": str(combo_today_by_round.get(_or, {}).get("stake_label", "—")),
-                "Combo P/L": float(combo_today_by_round.get(_or, {}).get("play_profit", 0.0) or 0.0),
                 "AfterLoss24 Policy": "LIVE" if color_live_active else "SHADOW",
                 "AfterLoss24 Decision": _afterloss_r.get("shadow_action", "—"),
                 "AfterLoss24 Expected Stake": _afterloss_r.get("shadow_stake", "—"),
@@ -9363,14 +9229,7 @@ def render_history_live_authoritative(manager) -> None:
         if raw_revised_same_frontier:
             st.error(
                 f"RAW CORRECTION/MIXED SNAPSHOT AT R{current_round}: Number history changed without frontier advancing. "
-                "CURRENT ACTION: WAIT / DO NOT BET until the source is verified; last good marker was preserved."
-            )
-            return
-        if raw_prior_prefix_revised:
-            st.error(
-                f"PREVIOUS NUMBER PREFIX CHANGED WHILE ROUND ADVANCED: R{raw_prev_round_count}→R{current_round}. "
-                "TODAY was fully recalculated from R1, but LIVE execution is WAIT / NO BET; "
-                "last accepted marker was preserved. Verify/correct the source before any new wager."
+                "CURRENT ACTION: WAIT / DO NOT BET until the next round; last good marker was preserved."
             )
             return
         if raw_warmup:
@@ -10070,22 +9929,11 @@ class HistoryLiveSourceManager:
             and int(self.round_id) == prev_count
             and str(prev.get("raw_signature", "")) != raw_sig
         )
-        # CRITICAL: A new R245 is NOT a safe extension of accepted R244 if any
-        # old Number R1..R244 was edited. Old marker only stores the SHA of
-        # that accepted prefix; compare it with today's newly-read prefix.
-        # Recalculate TODAY normally, but never authorize a BET or overwrite
-        # the accepted marker on a silently revised historical prefix.
-        snapshot_revised_prior_prefix = bool(
-            prev_valid and int(seq) == prev_seq
-            and 0 < prev_count < int(self.round_id)
-            and str(prev.get("raw_signature", "")) !=
-                make_numbers_signature(self.numbers, length=prev_count)
-        )
         snapshot_revoked_source = bool(
             same_day and raw_sig in list(prev.get("revoked_signatures", []) or [])
         )
 
-        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revised_prior_prefix or snapshot_revoked_source:
+        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revoked_source:
             changed_at = float(prev.get("changed_at", now) or now)
             freshness_established = bool(prev.get("freshness_established", False))
         elif same_sig:
@@ -10124,7 +9972,7 @@ class HistoryLiveSourceManager:
             "freshness_established": bool(freshness_established),
             "revision_generation": int(prev.get("revision_generation", 0) or 0) if same_day else 0,
         }
-        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revised_prior_prefix or snapshot_revoked_source:
+        if snapshot_regressed or snapshot_revised_same_frontier or snapshot_revoked_source:
             # Keep the last accepted marker intact so a transient stale/regressed
             # or same-frontier corrected response cannot become the new baseline.
             marker_saved = True
@@ -10141,7 +9989,6 @@ class HistoryLiveSourceManager:
         self.ctx.live_raw_observation_warmup_required = bool(warmup_required)
         self.ctx.live_raw_snapshot_regressed = bool(snapshot_regressed)
         self.ctx.live_raw_snapshot_revised_same_frontier = bool(snapshot_revised_same_frontier)
-        self.ctx.live_raw_prior_prefix_revised = bool(snapshot_revised_prior_prefix)
         self.ctx.live_raw_snapshot_revoked = bool(snapshot_revoked_source)
         self.ctx.live_raw_revision_generation = int(marker["revision_generation"])
         self.ctx.live_raw_previous_round_count = int(prev_count)
